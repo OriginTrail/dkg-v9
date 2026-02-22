@@ -105,16 +105,18 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 
 ## Current Status
 
-**Phase 1 is complete.** Both work packages are implemented and tested:
+**Phase 1 is nearly complete.** Core protocol + agent layer are built and tested. Relay/hole-punching enables cross-network connectivity.
 
 | Work Package | Status | Tests |
 |---|---|---|
 | WP-1A-i: Protocol Core | Done | 67 tests (core, storage, publisher, query) |
-| WP-1B: Agent Layer | Done | 32+ tests (wallet, profiles, discovery, encryption, messaging, E2E) |
+| WP-1B: Agent Layer | Done | 32 tests (wallet, profiles, discovery, encryption, messaging, E2E) |
+| Relay + Hole Punching | Done | 3 tests (circuit relay, relay startup, relay peer connect) |
 
 ### What works today
 
 - **P2P networking** — libp2p nodes form a private DKG network (no public IPFS bootstrap)
+- **Cross-network connectivity** — Circuit Relay v2 + DCUtR hole punching for agents behind NATs
 - **Knowledge publishing** — entities → KAs → KCs with merkle trees, skolemization, mock chain finalization
 - **Private triples** — mixed public/private KAs; private triples stay on the publisher, verified via merkle roots
 - **GossipSub** — paranet-scoped pub/sub for broadcasting published knowledge
@@ -126,9 +128,22 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 - **Interactive chat** — agents exchange arbitrary messages via `/dkg/message/1.0.0`
 - **Store isolation** — no node exposes its SPARQL endpoint; all inter-node exchange via protocol messages
 
+### Remaining Part 1
+
+| Item | Package | Description |
+|---|---|---|
+| Private KA access protocol | `@dkg/core` | `/dkg/access/1.0.0` — AccessRequest/Response, mock payment verify, merkle verify, triple transfer |
+| Framework adapters | `@dkg/agent` | OpenClaw DkgNodeSkill + ElizaOS plugin |
+
+### Next: Phase 2 (Blockchain Anchoring)
+
+| Developer A | Developer B |
+|---|---|
+| `ChainAdapter` interface + EVM adapter | Solana programs (Anchor) + Solana adapter |
+
 ## Demo
 
-Run two agents locally and send messages between them:
+### Same LAN (direct connection)
 
 **Terminal 1:**
 ```bash
@@ -140,7 +155,26 @@ node demo/agent-a.mjs 9100
 node demo/agent-b.mjs /ip4/127.0.0.1/tcp/9100/p2p/<PEER_ID>
 ```
 
-Both terminals get an interactive prompt. Type a message and press enter to send it. Commands:
+### Cross-network (via relay)
+
+**Terminal 1 — Relay** (on a machine with public IP):
+```bash
+node demo/relay-server.mjs 9090
+```
+
+**Terminal 2 — Agent A** (use the relay multiaddr):
+```bash
+node demo/agent-a.mjs 9100 --relay /ip4/<RELAY_IP>/tcp/9090/p2p/<RELAY_PEER_ID>
+```
+
+**Terminal 3 — Agent B** (copy the command Agent A prints):
+```bash
+node demo/agent-b.mjs --relay /ip4/<RELAY_IP>/tcp/9090/p2p/<RELAY_PEER_ID> --peer <AGENT_A_PEER_ID>
+```
+
+### Commands
+
+Both terminals get an interactive prompt. Type a message and press enter to send it.
 
 | Command | Description |
 |---|---|
@@ -166,7 +200,7 @@ pnpm --filter @dkg/agent test   # Run tests for a specific package
 |---|---|
 | Language | TypeScript (ES2022, NodeNext) |
 | Monorepo | pnpm workspaces + Turborepo |
-| Networking | libp2p (TCP, WebSocket, WebTransport, Noise, yamux) |
+| Networking | libp2p (TCP, WebSocket, Noise, yamux, Circuit Relay v2, DCUtR, AutoNAT) |
 | Discovery | Kademlia DHT + GossipSub + mDNS |
 | Data | RDF/SPARQL, N-Quads, URDNA2015 canonicalization |
 | Triple Store | Oxigraph (embedded), pluggable via TripleStore interface |

@@ -9,6 +9,10 @@ import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
 import { identify } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
+import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
+import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
+import { dcutr } from '@libp2p/dcutr';
+import { autoNAT } from '@libp2p/autonat';
 import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import type { DKGNodeConfig } from './types.js';
 import { DHT_PROTOCOL } from './constants.js';
@@ -18,6 +22,9 @@ export interface DKGServices extends Record<string, unknown> {
   pubsub: GossipSub;
   identify: unknown;
   ping: Ping;
+  dcutr: unknown;
+  autoNAT: unknown;
+  relay?: unknown;
 }
 
 export class DKGNode {
@@ -43,28 +50,64 @@ export class DKGNode {
       peerDiscovery.push(mdns());
     }
 
+    const transports: any[] = [tcp(), webSockets(), circuitRelayTransport()];
+
+    const services: Record<string, any> = {
+      identify: identify(),
+      ping: ping(),
+      dht: kadDHT({ protocol: DHT_PROTOCOL }),
+      pubsub: gossipsub({
+        emitSelf: false,
+        allowPublishToZeroTopicPeers: true,
+      }),
+      dcutr: dcutr(),
+      autoNAT: autoNAT(),
+    };
+
+    if (this.config.enableRelayServer) {
+      services.relay = circuitRelayServer({
+        reservations: {
+          maxReservations: 256,
+          defaultDurationLimit: 5 * 60 * 1000,
+          defaultDataLimit: BigInt(1 << 24),
+        },
+      });
+    }
+
+    const listenAddrs = [
+      ...(this.config.listenAddresses ?? [
+        '/ip4/0.0.0.0/tcp/0',
+        '/ip4/0.0.0.0/tcp/0/ws',
+      ]),
+    ];
+
+    // When relay peers are configured, listen on circuit addresses to ensure
+    // the node requests a reservation and becomes reachable through relays.
+    if (this.config.relayPeers?.length) {
+      listenAddrs.push('/p2p-circuit');
+    }
+
     this.node = await createLibp2p<DKGServices>({
       privateKey,
-      addresses: {
-        listen: this.config.listenAddresses ?? [
-          '/ip4/0.0.0.0/tcp/0',
-          '/ip4/0.0.0.0/tcp/0/ws',
-        ],
-      },
-      transports: [tcp(), webSockets()],
+      addresses: { listen: listenAddrs },
+      transports: transports as any,
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       peerDiscovery,
-      services: {
-        identify: identify(),
-        ping: ping(),
-        dht: kadDHT({ protocol: DHT_PROTOCOL }),
-        pubsub: gossipsub({
-          emitSelf: false,
-          allowPublishToZeroTopicPeers: true,
-        }),
-      },
-    });
+      services,
+    } as any);
+
+    // Connect to relay peers after start
+    if (this.config.relayPeers?.length) {
+      const { multiaddr } = await import('@multiformats/multiaddr');
+      for (const addr of this.config.relayPeers) {
+        try {
+          await this.node.dial(multiaddr(addr));
+        } catch {
+          // Relay may be unreachable — will retry via DHT
+        }
+      }
+    }
   }
 
   async stop(): Promise<void> {

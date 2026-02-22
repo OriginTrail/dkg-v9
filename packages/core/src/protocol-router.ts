@@ -31,7 +31,7 @@ export class ProtocolRouter {
           // stream already closed
         }
       }
-    });
+    }, { runOnLimitedConnection: true });
   }
 
   unregister(protocolId: string): void {
@@ -47,7 +47,9 @@ export class ProtocolRouter {
     const libp2p = this.node.libp2p;
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(peerIdStr);
-    const stream = await libp2p.dialProtocol(peerId, protocolId);
+    const stream = await libp2p.dialProtocol(peerId, protocolId, {
+      runOnLimitedConnection: true,
+    });
 
     stream.send(data);
     await stream.close();

@@ -85,10 +85,80 @@ Human (TRAC holder)
 | Source | Mechanism | Who Pays | Who Earns |
 |---|---|---|---|
 | **DKG Hosting** | Protocol staking rewards | Protocol (TRAC fees) | Full node agents |
+| **Relay Infrastructure** | Connection receipt rewards | Protocol (hosting pool) | Relay operators |
 | **Skill Marketplace** | Per-invocation payment | Requesting agent | Skill provider agent |
 | **Knowledge Sales** | Per-KA or per-query payment | Consuming agent | Publishing agent |
 | **Query Serving** | Per-federated-query payment | Querying agent | Answering agent |
 | **Referrals** | Per-onboarded-agent bounty | Protocol treasury | Referring agent |
+
+### 3.1 Relay Infrastructure Rewards
+
+Relay nodes facilitate NAT traversal for agents behind firewalls (see Part 1 §5.6). Relays forward encrypted bytes — they cannot read message content (double-encrypted: libp2p Noise + XChaCha20-Poly1305). Operating relays costs bandwidth and compute; this section defines how relays are rewarded.
+
+#### Design Principle: No Separate Proof-of-Relay
+
+A standalone "proof of relay work" mechanism is vulnerable to Sybil attacks — a relay could fake traffic with sock puppet agents. Instead, relay rewards **piggyback on existing on-chain activity signals**:
+
+1. **An agent is "real" if it has on-chain history** — published KAs, invoked skills with payment, staked TRAC, participated in paranets, etc.
+2. **Relay rewards are proportional to real agents served** — only connections from on-chain-active agents count.
+3. **No new proof mechanism needed** — the chain already has all the signals.
+
+#### Connection Receipts
+
+When an agent connects through a relay, both parties sign a lightweight receipt:
+
+```
+ConnectionReceipt {
+  agentPeerId:  PeerId         // The agent using the relay
+  relayPeerId:  PeerId         // The relay operator
+  timestamp:    uint64         // Unix seconds
+  epoch:        uint32         // DKG epoch
+  agentSig:     bytes          // Agent's Ed25519 signature
+  relaySig:     bytes          // Relay's Ed25519 signature
+}
+```
+
+Agents periodically submit batches of receipts on-chain (e.g., once per epoch). The contract:
+1. Verifies both signatures.
+2. Looks up the agent's on-chain identity — rejects receipts from agents with no identity or no activity.
+3. Credits the relay proportionally: one "real agent served" = one reward unit.
+
+#### Anti-Sybil Measures
+
+| Attack | Mitigation |
+|---|---|
+| Relay creates fake agents | Fake agents have no on-chain history → receipts rejected |
+| Relay colludes with idle agents | Idle agents (no KA publications, no skill invocations, no stake) have zero reward weight |
+| Relay inflates connection count | De-duplicate by `(agentPeerId, epoch)` — one agent = one reward unit per epoch regardless of connection count |
+| Relay operator runs many relays | Each relay must stake TRAC; rewards capped per relay per epoch. Running many relays = proportionally more stake required |
+
+#### Reward Calculation
+
+```
+relayReward(epoch) = relayPool(epoch) × relayWeight / totalRelayWeight
+
+where:
+  relayWeight = Σ activityScore(agent) for each unique active agent in receipts
+  activityScore(agent) = f(publishCount, skillInvocations, stake, paranetMemberships)
+```
+
+The `activityScore` function ensures that relays serving actively contributing agents earn more than relays serving passive ones. The exact curve is a governance parameter.
+
+#### Relay Operator Requirements
+
+- Must stake TRAC (same staking mechanism as full nodes, purpose = `STAKE`)
+- Must run `circuitRelayServer()` with public IP reachable on at least one TCP port
+- May optionally run a full DKG node (earn both hosting and relay rewards)
+- Relay-only nodes (no knowledge storage) are valid — lower resource requirements, relay rewards only
+
+#### Who Runs Relays
+
+| Operator Type | Incentive |
+|---|---|
+| **OriginTrail Foundation** | Bootstrap relays (seed list shipped with SDK) |
+| **Full node operators** | Earn relay rewards on top of hosting rewards (marginal cost) |
+| **Dedicated relay operators** | Lower hardware requirements than full nodes; relay rewards only |
+| **Incentivized community** | Anyone with a public IP and TRAC stake |
 
 ---
 
@@ -259,6 +329,10 @@ interface ChainAdapter {
     openChannel(recipient, deposit): Promise<ChannelId>
     settle(channelId, balance, sig): Promise<TxResult>
 
+    // Relay
+    submitConnectionReceipts(receipts: ConnectionReceipt[]): Promise<TxResult>
+    claimRelayRewards(epoch: number): Promise<TxResult>
+
     // Events
     listenForEvents(filter): AsyncIterable<ChainEvent>
 }
@@ -280,6 +354,7 @@ interface ChainAdapter {
 | `dkg_knowledge` | KC/KA creation, merkle roots | PDA per KC, SPL Token-2022 for KA tokens |
 | `dkg_delegation` | Delegation with escrow | Token escrow PDAs, lock multiplier |
 | `dkg_channel` | Payment channels | State PDAs |
+| `dkg_relay` | Relay connection receipts + rewards | Receipt PDAs, epoch reward distribution |
 | `dkg_paranet` | Paranet management | PDA per paranet |
 
 ### Cross-Chain UAL
@@ -362,6 +437,11 @@ function timeout(bytes32 channelId) external;
 // AgentRegistry.sol
 function registerAgent(uint256 identityId, bytes32 profileKaHash) external;
 function updateProfile(uint256 identityId, bytes32 newProfileKaHash) external;
+
+// RelayRewards.sol
+function submitConnectionReceipts(ConnectionReceipt[] calldata receipts) external;
+function claimRelayRewards(uint32 epoch) external;
+function getRelayWeight(uint256 relayIdentityId, uint32 epoch) external view returns (uint256);
 ```
 
 ### New Parameters
@@ -552,7 +632,7 @@ This is optional — publishers accept the availability trade-off if they don't 
 
 | Phase | Deliverable | Weeks |
 |---|---|---|
-| 1 | EVM contracts: `AgentDelegation.sol`, `PaymentChannel.sol`, `AgentRegistry.sol`. Full Hardhat test suite. | 3 |
+| 1 | EVM contracts: `AgentDelegation.sol`, `PaymentChannel.sol`, `AgentRegistry.sol`, `RelayRewards.sol`. Full Hardhat test suite. | 3.5 |
 | 2 | EVM: modify `KnowledgeCollection.sol` (reservation, update re-enable). Paranet creation contract. Integration tests with Part 1 publisher. | 2 |
 | 3 | Paranet lifecycle: on-chain createParanet, joinParanet, leaveParanet. Named graph initialization on event. Paranet policies (replication mode, entity exclusivity, access default). | 2 |
 | 4 | `/dkg/sync/1.0.0`: SyncRequest/SyncResponse protocol, batch streaming, merkle verification on sync, resume from block. | 2 |
@@ -571,6 +651,7 @@ This is optional — publishers accept the availability trade-off if they don't 
 | 1 | `@dkg/access`: Macaroon minting/verification/attenuation. Caveat engine. | 2 |
 | 2 | x402 integration: payment flow, receipt verification, Macaroon issuance on payment. | 2 |
 | 3 | Payment channel client in `@dkg/agent`: auto-open, voucher signing, periodic settle. | 2 |
+| 3.5 | Relay receipt client: agents sign connection receipts with relays, batch submission on-chain per epoch. Relay reward claim flow. | 1 |
 | 4 | Access policy in `KAManifestEntry` protobuf. Publisher-declared pricing flows through to meta graph. | 1 |
 | 5 | Access dispute resolution: conditional payment via channels, merkle proof verification, dispute flow. | 1.5 |
 | 6 | Skill marketplace end-to-end flow: discover → negotiate → pay → invoke → settle. | 2 |
@@ -588,6 +669,7 @@ This is optional — publishers accept the availability trade-off if they don't 
 | `ChainAdapter` (full: incl. delegation, channels, paranet) | Dev A | Dev B |
 | `AccessEngine` (Macaroons) | Dev B | Dev A (query access gating) |
 | `PaymentChannelClient` | Dev B defines | Dev A integrates in chain adapter |
+| `ConnectionReceipt` schema | Joint | Dev A (contracts), Dev B (agent signing + submission) |
 | `SyncProtocol` | Dev A | Dev B (sync on paranet join) |
 | Solidity: `IAgentDelegation`, `IPaymentChannel`, `IParanet` | Dev A | Dev B (calls from agent) |
 

@@ -27,6 +27,10 @@ export interface DKGNodeConfig {
   privateKey?: Uint8Array;
   /** Data directory for persistent state. */
   dataDir?: string;
+  /** Multiaddrs of relay nodes to connect to for NAT traversal. */
+  relayPeers?: string[];
+  /** Enable circuit relay server on this node (for nodes with public IPs). */
+  enableRelayServer?: boolean;
 }
 
 export interface StreamHandler {

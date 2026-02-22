@@ -356,6 +356,7 @@ Updates are full replacements — the old triples are removed from the active da
 |---|---|---|
 | TCP + Noise + yamux | Server-to-server | Primary for full nodes |
 | WebSocket + Noise | Browser-to-server | Light nodes connect to full nodes |
+| Circuit Relay v2 | NAT traversal | Agents behind NATs connect through public relay nodes |
 | WebTransport (HTTP/3) | Browser-to-server | Progressive enhancement — lower latency, connection migration |
 | WebRTC | Browser-to-browser | Optional, progressive enhancement |
 
@@ -391,6 +392,37 @@ DHT and GossipSub are complementary: DHT for point lookups against the full netw
 | `/dkg/access/1.0.0` | AccessRequest, AccessResponse | Private KA triple transfer |
 
 All messages: **Protocol Buffers** over libp2p streams.
+
+### 5.6 NAT Traversal: Relay + Hole Punching
+
+Most agents run behind NATs (home networks, corporate firewalls, Mac minis). Three libp2p components enable cross-network connectivity:
+
+| Component | Purpose |
+|---|---|
+| **Circuit Relay v2** (`circuitRelayTransport`) | Lets agents connect *through* a relay when direct connection fails. The relay forwards encrypted bytes — it cannot read content. |
+| **DCUtR** (`dcutr`) | Attempts NAT hole punching to upgrade relay connections to direct P2P. Succeeds in most NAT configurations. |
+| **AutoNAT** (`autoNAT`) | Lets agents discover whether they're publicly reachable (determines if relay is needed). |
+
+**Architecture**:
+
+```
+Agent A (behind NAT)  ←→  Relay (public IP)  ←→  Agent B (behind NAT)
+                                ↕
+                        DCUtR hole punch
+                                ↕
+Agent A  ←———————— direct P2P ————————→  Agent B
+```
+
+**Node configuration**:
+
+- `relayPeers?: string[]` — multiaddrs of relay nodes to connect to. When set, the node requests a circuit reservation on each relay and becomes reachable through the relay's circuit address.
+- `enableRelayServer?: boolean` — this node serves as a relay for others (for nodes with public IPs).
+
+**Privacy**: relays are "dumb encrypted pipes." Traffic is double-encrypted (libp2p Noise for transport + XChaCha20-Poly1305 for DKG message content). Relays see encrypted bytes, connection metadata (PeerIDs, timestamps), and bandwidth — never message content.
+
+**Relay discovery**: seed relay multiaddrs are shipped with the SDK (hardcoded bootstrap list). Additional relays are discoverable via DHT. In Part 2, relay operators register on-chain and earn rewards (see Part 2 §3.1).
+
+**Protocol streams on limited connections**: all DKG protocol handlers (`/dkg/publish/1.0.0`, `/dkg/message/1.0.0`, etc.) are registered with `runOnLimitedConnection: true`, allowing them to operate over relay-mediated (bandwidth-limited) connections.
 
 ### Network Interface Boundary
 
@@ -821,40 +853,43 @@ Both developers work in parallel. No blockchain dependency. The full agent marke
 
 **Scope**: `@dkg/core`, `@dkg/storage`, `@dkg/publisher` (mock-chain), `@dkg/query`
 
-| # | Deliverable |
-|---|---|
-| 1 | `@dkg/core`: libp2p node (TCP+Noise+yamux+WebSocket+WebTransport), peer discovery (DHT+mDNS), GossipSub (paranet topics), protocol router, event bus, crypto (Ed25519, ECDSA, merkle trees, URDNA2015) |
-| 2 | `@dkg/storage`: In-memory + Oxigraph adapters, TripleStore interface, named graph manager (data graph + meta graph per paranet), private KA content store (publisher-only triples, flagged in meta graph) |
-| 3 | `@dkg/publisher` (mock-chain mode): entity-based auto-partitioning, triple canonicalization, merkle tree computation (public + private KA roots), PublishRequest/Ack P2P flow, private KA manifest with pre-computed roots, metadata triple generation. UAL reservation = local counter. Finalization = auto-confirm. |
-| 4 | `@dkg/query`: Local-only SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), result formats. No remote query exposure — all queries run against the node's own store (see §11). |
-| 5 | `/dkg/access/1.0.0`: Private KA access protocol — AccessRequest/Response handler, payment proof verification (mock), merkle verification on recipient side, triple transfer |
+| # | Deliverable | Status |
+|---|---|---|
+| 1 | `@dkg/core`: libp2p node (TCP+Noise+yamux+WebSocket), peer discovery (DHT+mDNS), GossipSub (paranet topics), protocol router, event bus, crypto (Ed25519, ECDSA, merkle trees, URDNA2015) | **DONE** |
+| 2 | `@dkg/storage`: In-memory + Oxigraph adapters, TripleStore interface, named graph manager (data graph + meta graph per paranet), private KA content store (publisher-only triples, flagged in meta graph) | **DONE** |
+| 3 | `@dkg/publisher` (mock-chain mode): entity-based auto-partitioning, triple canonicalization, merkle tree computation (public + private KA roots), PublishRequest/Ack P2P flow, private KA manifest with pre-computed roots, metadata triple generation. UAL reservation = local counter. Finalization = auto-confirm. | **DONE** |
+| 4 | `@dkg/query`: Local-only SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), result formats. No remote query exposure — all queries run against the node's own store (see §11). | **DONE** |
+| 5 | `/dkg/access/1.0.0`: Private KA access protocol — AccessRequest/Response handler, payment proof verification (mock), merkle verification on recipient side, triple transfer | TODO |
+| 6 | Circuit Relay + Hole Punching: `circuitRelayTransport`, `dcutr`, `autoNAT`, relay server, cross-network agent connectivity (see §5.6) | **DONE** |
 
 #### WP-1B: Agent Layer — Developer B
 
 **Scope**: `@dkg/agent`, skill ontology, messaging, framework adapters
 
-| # | Deliverable |
-|---|---|
-| 1 | Agent identity: Ed25519 keygen, BIP-32 wallet derivation, AgentWallet implementation |
-| 2 | Skill ontology: `dkgskill:` RDF ontology (Turtle), SHACL shapes for profiles/offerings |
-| 3 | Profile publishing: publish/update agent profile as KA in Agent Registry (uses Publisher interface, mocked initially) |
-| 4 | Discovery client: SPARQL query builder for skill search (uses Query interface, mocked initially) |
-| 5 | Messaging: `/dkg/message/1.0.0` handler, X25519 encryption, SkillRequest/Response, conversation management |
-| 6 | Framework adapters: OpenClaw DkgNodeSkill + ElizaOS plugin (basic) |
+| # | Deliverable | Status |
+|---|---|---|
+| 1 | Agent identity: Ed25519 keygen, BIP-32 wallet derivation, AgentWallet implementation | **DONE** |
+| 2 | Skill ontology: `dkgskill:` RDF ontology (Turtle), SHACL shapes for profiles/offerings | **DONE** |
+| 3 | Profile publishing: publish/update agent profile as KA in Agent Registry (uses Publisher interface, mocked initially) | **DONE** |
+| 4 | Discovery client: SPARQL query builder for skill search (uses Query interface, mocked initially) | **DONE** |
+| 5 | Messaging: `/dkg/message/1.0.0` handler, X25519 encryption, SkillRequest/Response, conversation management, interactive chat | **DONE** |
+| 6 | Framework adapters: OpenClaw DkgNodeSkill + ElizaOS plugin (basic) | TODO |
 
 #### Phase 1 Integration Milestone
 
 Two agents (one OpenClaw, one ElizaOS) running on separate machines, **no blockchain**:
-- Both join the P2P network via libp2p
-- Both publish profiles to Agent Registry paranet (mock-chain auto-confirm)
-- Agent A discovers Agent B via SPARQL skill search
-- Agent A sends encrypted SkillRequest to Agent B
-- Agent B responds with SkillResponse
-- Published knowledge is queryable by both agents
-- KAs resolvable by UAL (rootEntity lookup)
-- Agent A publishes a KC with mixed public/private KAs — public triples visible on all nodes, private triples only on Agent A's node
-- Agent B sees private KA exists in meta graph, sends AccessRequest with mock payment → receives triples → verifies merkle root
-- GossipSub broadcasts propagate new KC events across subscribed nodes
+- Both join the P2P network via libp2p — **DONE**
+- Both connect across the internet via circuit relay + hole punching — **DONE**
+- Both publish profiles to Agent Registry paranet (mock-chain auto-confirm) — **DONE**
+- Agent A discovers Agent B via SPARQL skill search — **DONE**
+- Agent A sends encrypted SkillRequest to Agent B — **DONE**
+- Agent B responds with SkillResponse — **DONE**
+- Agents exchange encrypted chat messages in real-time — **DONE**
+- Published knowledge is queryable by both agents — **DONE**
+- KAs resolvable by UAL (rootEntity lookup) — **DONE**
+- Agent A publishes a KC with mixed public/private KAs — public triples visible on all nodes, private triples only on Agent A's node — TODO
+- Agent B sees private KA exists in meta graph, sends AccessRequest with mock payment → receives triples → verifies merkle root — TODO
+- GossipSub broadcasts propagate new KC events across subscribed nodes — **DONE**
 
 ---
 

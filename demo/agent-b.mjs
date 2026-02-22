@@ -3,23 +3,40 @@
  *
  * Run from repo root:
  *   node demo/agent-b.mjs <agent-a-multiaddr>
+ *   node demo/agent-b.mjs --relay /ip4/<RELAY_IP>/tcp/9090/p2p/<RELAY_ID> --peer <AGENT_A_PEER_ID>
  *
- * After connecting to Agent A, type messages to send them.
+ * When using --relay + --peer, Agent B dials Agent A through the relay circuit.
+ * Agent A prints the exact command to run.
+ *
  * Commands:
  *   /peers           — list connected peers
  *   /agents          — list discovered agents
  *   /skills          — list discovered skill offerings
  *   /invoke <text>   — invoke Agent A's ImageAnalysis skill with <text>
  *   /quit            — stop the agent
- *   anything else    — send as a chat message to Agent A
+ *   anything else    — send as a chat message to all connected peers
  */
 
 import { DKGAgent } from '@dkg/agent';
 import { createInterface } from 'node:readline';
 
-const AGENT_A_ADDR = process.argv[2];
-if (!AGENT_A_ADDR) {
+const args = process.argv.slice(2);
+const relayIdx = args.indexOf('--relay');
+const relayPeers = [];
+if (relayIdx !== -1 && args[relayIdx + 1]) {
+  relayPeers.push(args[relayIdx + 1]);
+  args.splice(relayIdx, 2);
+}
+const peerIdx = args.indexOf('--peer');
+let targetPeerId = null;
+if (peerIdx !== -1 && args[peerIdx + 1]) {
+  targetPeerId = args[peerIdx + 1];
+  args.splice(peerIdx, 2);
+}
+const AGENT_A_ADDR = args[0]; // optional when using relay
+if (!AGENT_A_ADDR && !relayPeers.length) {
   console.error('Usage: node demo/agent-b.mjs <agent-a-multiaddr>');
+  console.error('   or: node demo/agent-b.mjs --relay <relay-multiaddr> --peer <agent-a-peer-id>');
   process.exit(1);
 }
 
@@ -33,6 +50,7 @@ async function main() {
     framework: 'ElizaOS',
     description: 'AI agent providing text analysis capabilities',
     listenPort: 0,
+    relayPeers: relayPeers.length ? relayPeers : undefined,
     skills: [
       {
         skillType: 'TextAnalysis',
@@ -68,12 +86,38 @@ async function main() {
   // Subscribe to paranets
   agent.subscribeToParanet('agent-skills');
 
-  // Connect to Agent A
-  console.log(`Connecting to ${AGENT_A_ADDR.slice(0, 40)}...`);
-  await agent.connectTo(AGENT_A_ADDR);
-  const agentAPeerId = AGENT_A_ADDR.split('/p2p/')[1];
-  if (agentAPeerId) connectedPeers.add(agentAPeerId);
-  console.log('Connected!\n');
+  let agentAPeerId = null;
+
+  if (AGENT_A_ADDR) {
+    // Direct connection to Agent A
+    console.log(`Connecting to ${AGENT_A_ADDR.slice(0, 50)}...`);
+    await agent.connectTo(AGENT_A_ADDR);
+    agentAPeerId = AGENT_A_ADDR.split('/p2p/').pop();
+    if (agentAPeerId) connectedPeers.add(agentAPeerId);
+    console.log('Connected!\n');
+  } else if (relayPeers.length) {
+    console.log('Connected to relay.');
+    await sleep(1000);
+
+    if (targetPeerId) {
+      // Dial Agent A through the relay circuit
+      const circuitAddr = `${relayPeers[0]}/p2p-circuit/p2p/${targetPeerId}`;
+      console.log(`Dialing ${short(targetPeerId)} via relay circuit...`);
+      try {
+        await agent.connectTo(circuitAddr);
+        agentAPeerId = targetPeerId;
+        connectedPeers.add(targetPeerId);
+        console.log('Connected through relay!\n');
+      } catch (err) {
+        console.log(`Failed to reach peer via relay: ${err.message}`);
+        console.log('Will wait for DHT discovery...\n');
+      }
+    } else {
+      console.log('No --peer specified. Waiting for peers to connect...');
+      console.log('Tip: use --peer <AGENT_A_PEER_ID> to dial through the relay.\n');
+      await sleep(2000);
+    }
+  }
 
   // Track peers
   agent.node.libp2p.addEventListener('peer:connect', (evt) => {

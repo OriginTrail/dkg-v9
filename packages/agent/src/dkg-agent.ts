@@ -22,6 +22,8 @@ export interface DKGAgentConfig {
   description?: string;
   listenPort?: number;
   bootstrapPeers?: string[];
+  /** Multiaddrs of relay nodes for NAT traversal. */
+  relayPeers?: string[];
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;
@@ -90,7 +92,8 @@ export class DKGAgent {
     const nodeConfig: DKGNodeConfig = {
       listenAddresses: [`/ip4/0.0.0.0/tcp/${port}`],
       bootstrapPeers: config.bootstrapPeers,
-      enableMdns: !config.bootstrapPeers?.length,
+      relayPeers: config.relayPeers,
+      enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
     };
 

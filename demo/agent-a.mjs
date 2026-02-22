@@ -2,7 +2,12 @@
  * DKG V9 Agent Demo — Agent A (ImageBot + Interactive Chat)
  *
  * Run from repo root:
- *   node demo/agent-a.mjs [port]
+ *   node demo/agent-a.mjs [port] [--relay <multiaddr>]
+ *
+ * Examples:
+ *   node demo/agent-a.mjs 9100
+ *   node demo/agent-a.mjs 9100 --relay /ip4/1.2.3.4/tcp/9090/p2p/16Uiu2HAm...
+ *   node demo/agent-a.mjs --relay /ip4/1.2.3.4/tcp/9090/p2p/16Uiu2HAm...
  *
  * After Agent B connects, type messages in this terminal to send them.
  * Commands:
@@ -10,13 +15,20 @@
  *   /agents          — list discovered agents
  *   /skills          — list discovered skill offerings
  *   /quit            — stop the agent
- *   anything else    — send as a chat message to the most recently connected peer
+ *   anything else    — send as a chat message to all connected peers
  */
 
 import { DKGAgent } from '@dkg/agent';
 import { createInterface } from 'node:readline';
 
-const PORT = parseInt(process.argv[2] || '9100', 10);
+const args = process.argv.slice(2);
+const relayIdx = args.indexOf('--relay');
+const relayPeers = [];
+if (relayIdx !== -1 && args[relayIdx + 1]) {
+  relayPeers.push(args[relayIdx + 1]);
+  args.splice(relayIdx, 2);
+}
+const PORT = parseInt(args[0] || '9100', 10);
 
 async function main() {
   console.log('=== DKG Agent A — ImageBot ===\n');
@@ -26,6 +38,7 @@ async function main() {
     framework: 'OpenClaw',
     description: 'AI agent providing image analysis capabilities',
     listenPort: PORT,
+    relayPeers: relayPeers.length ? relayPeers : undefined,
     skills: [
       {
         skillType: 'ImageAnalysis',
@@ -80,8 +93,24 @@ async function main() {
     prompt();
   });
 
-  console.log('--- Waiting for peers. Connect with: ---');
-  console.log(`node demo/agent-b.mjs ${addrs.find(a => a.includes('/tcp/'))}\n`);
+  if (relayPeers.length) {
+    console.log(`Relay: ${relayPeers[0]}`);
+    await new Promise(r => setTimeout(r, 2000));
+    const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+    if (circuitAddrs.length) {
+      console.log('Circuit addresses:');
+      for (const a of circuitAddrs) console.log(`  ${a}`);
+    }
+  }
+
+  console.log('\n--- Waiting for peers ---');
+  if (relayPeers.length) {
+    console.log('Your friend can connect with:');
+    console.log(`  node demo/agent-b.mjs --relay ${relayPeers[0]} --peer ${agent.peerId}\n`);
+  } else {
+    console.log('Direct connect (same LAN):');
+    console.log(`  node demo/agent-b.mjs ${addrs.find(a => a.includes('/tcp/'))}\n`);
+  }
 
   // Interactive REPL
   const rl = createInterface({ input: process.stdin, output: process.stdout });

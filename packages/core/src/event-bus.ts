@@ -1,0 +1,65 @@
+import type { EventBus } from './types.js';
+
+export const DKGEvent = {
+  KC_PUBLISHED: 'kc:published',
+  KC_CONFIRMED: 'kc:confirmed',
+  KC_DELETED: 'kc:deleted',
+  KA_UPDATED: 'ka:updated',
+  PEER_CONNECTED: 'peer:connected',
+  PEER_DISCONNECTED: 'peer:disconnected',
+  GOSSIP_MESSAGE: 'gossip:message',
+  PUBLISH_REQUEST: 'publish:request',
+  PUBLISH_ACK: 'publish:ack',
+  ACCESS_REQUEST: 'access:request',
+  ACCESS_RESPONSE: 'access:response',
+} as const;
+
+export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];
+
+export class TypedEventBus implements EventBus {
+  private listeners = new Map<string, Set<(data: unknown) => void>>();
+
+  emit(event: string, data: unknown): void {
+    const handlers = this.listeners.get(event);
+    if (!handlers) return;
+    for (const handler of handlers) {
+      try {
+        handler(data);
+      } catch {
+        // don't let one handler crash the bus
+      }
+    }
+  }
+
+  on(event: string, handler: (data: unknown) => void): void {
+    let handlers = this.listeners.get(event);
+    if (!handlers) {
+      handlers = new Set();
+      this.listeners.set(event, handlers);
+    }
+    handlers.add(handler);
+  }
+
+  off(event: string, handler: (data: unknown) => void): void {
+    const handlers = this.listeners.get(event);
+    if (!handlers) return;
+    handlers.delete(handler);
+    if (handlers.size === 0) this.listeners.delete(event);
+  }
+
+  once(event: string, handler: (data: unknown) => void): void {
+    const wrapper = (data: unknown) => {
+      this.off(event, wrapper);
+      handler(data);
+    };
+    this.on(event, wrapper);
+  }
+
+  removeAllListeners(event?: string): void {
+    if (event) {
+      this.listeners.delete(event);
+    } else {
+      this.listeners.clear();
+    }
+  }
+}

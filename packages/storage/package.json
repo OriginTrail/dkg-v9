@@ -11,7 +11,10 @@
   },
   "dependencies": {
     "@dkg/core": "workspace:*",
-    "oxigraph": "^0.5",
-    "n3": "^2"
+    "n3": "^2",
+    "oxigraph": "^0.5"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

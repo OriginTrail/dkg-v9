@@ -10,10 +10,15 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@dkg/core": "workspace:*",
-    "@dkg/storage": "workspace:*",
     "@dkg/chain": "workspace:*",
+    "@dkg/core": "workspace:*",
+    "@dkg/query": "workspace:*",
+    "@dkg/storage": "workspace:*",
+    "@multiformats/multiaddr": "^13.0.1",
     "n3": "^2",
     "rdf-canonize": "^5"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

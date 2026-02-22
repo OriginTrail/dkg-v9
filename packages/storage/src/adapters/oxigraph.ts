@@ -1,0 +1,219 @@
+import oxigraph from 'oxigraph';
+import type {
+  TripleStore,
+  Quad as DKGQuad,
+  QueryResult,
+  SelectResult,
+  ConstructResult,
+  AskResult,
+} from '../triple-store.js';
+import { registerTripleStoreAdapter } from '../triple-store.js';
+
+type OxStore = InstanceType<typeof oxigraph.Store>;
+type OxTerm = oxigraph.Term;
+type OxQuad = oxigraph.Quad;
+
+export class OxigraphStore implements TripleStore {
+  private store: OxStore;
+
+  constructor() {
+    this.store = new oxigraph.Store();
+  }
+
+  async insert(quads: DKGQuad[]): Promise<void> {
+    if (quads.length === 0) return;
+    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    this.store.load(nquads, { format: 'application/n-quads' });
+  }
+
+  async delete(quads: DKGQuad[]): Promise<void> {
+    for (const q of quads) {
+      const oxQuad = toOxQuad(q);
+      if (oxQuad) this.store.delete(oxQuad);
+    }
+  }
+
+  async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
+    const matches = this.store.match(
+      pattern.subject ? oxigraph.namedNode(pattern.subject) : null,
+      pattern.predicate ? oxigraph.namedNode(pattern.predicate) : null,
+      pattern.object ? parseTerm(pattern.object) : null,
+      pattern.graph ? oxigraph.namedNode(pattern.graph) : null,
+    );
+    for (const q of matches) {
+      this.store.delete(q);
+    }
+    return matches.length;
+  }
+
+  async query(sparql: string): Promise<QueryResult> {
+    const result = this.store.query(sparql);
+
+    if (typeof result === 'boolean') {
+      return { type: 'boolean', value: result } satisfies AskResult;
+    }
+
+    if (typeof result === 'string') {
+      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+    }
+
+    if (!Array.isArray(result) || result.length === 0) {
+      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+    }
+
+    const first = result[0];
+    if (first instanceof Map) {
+      const bindings = (result as Map<string, OxTerm>[]).map((row) => {
+        const obj: Record<string, string> = {};
+        for (const [key, term] of row.entries()) {
+          obj[key] = termToString(term);
+        }
+        return obj;
+      });
+      return { type: 'bindings', bindings } satisfies SelectResult;
+    }
+
+
+    const quads = (result as OxQuad[]).map(fromOxQuad);
+    return { type: 'quads', quads } satisfies ConstructResult;
+  }
+
+  async hasGraph(graphUri: string): Promise<boolean> {
+    const matches = this.store.match(
+      null,
+      null,
+      null,
+      oxigraph.namedNode(graphUri),
+    );
+    return matches.length > 0;
+  }
+
+  async createGraph(_graphUri: string): Promise<void> {
+    // Oxigraph creates graphs implicitly on insert — no-op.
+  }
+
+  async dropGraph(graphUri: string): Promise<void> {
+    this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+  }
+
+  async listGraphs(): Promise<string[]> {
+    const result = this.store.query(
+      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+    );
+    if (typeof result === 'boolean' || typeof result === 'string') return [];
+    if (!Array.isArray(result)) return [];
+    return (result as Map<string, OxTerm>[])
+      .filter((row): row is Map<string, OxTerm> => row instanceof Map)
+      .map((row) => {
+        const g = row.get('g');
+        return g ? g.value : '';
+      })
+      .filter(Boolean);
+  }
+
+  async deleteBySubjectPrefix(
+    graphUri: string,
+    prefix: string,
+  ): Promise<number> {
+    const before = this.store.size;
+    this.store.update(
+      `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
+    );
+    return before - this.store.size;
+  }
+
+  async countQuads(graphUri?: string): Promise<number> {
+    if (graphUri) {
+      return this.store.match(
+        null,
+        null,
+        null,
+        oxigraph.namedNode(graphUri),
+      ).length;
+    }
+    return this.store.size;
+  }
+
+  async close(): Promise<void> {
+    // In-memory store — no cleanup needed.
+  }
+}
+
+function quadToNQuad(q: DKGQuad): string {
+  const s = formatTerm(q.subject);
+  const p = `<${q.predicate}>`;
+  const o = formatTerm(q.object);
+  const g = q.graph ? ` <${q.graph}>` : '';
+  return `${s} ${p} ${o}${g} .`;
+}
+
+function formatTerm(term: string): string {
+  if (term.startsWith('"')) return term;
+  if (term.startsWith('_:')) return term;
+  if (term.startsWith('<')) return term;
+  return `<${term}>`;
+}
+
+function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {
+  if (term.startsWith('"')) {
+    const match = term.match(/^"(.*)"(?:@(\S+)|\^\^<(.+)>)?$/s);
+    if (match) {
+      if (match[2]) return oxigraph.literal(match[1], match[2]);
+      if (match[3]) return oxigraph.literal(match[1], oxigraph.namedNode(match[3]));
+      return oxigraph.literal(match[1]);
+    }
+    return oxigraph.literal(term.slice(1, -1));
+  }
+  if (term.startsWith('_:')) return oxigraph.blankNode(term.slice(2));
+  return oxigraph.namedNode(term);
+}
+
+function toOxQuad(q: DKGQuad): oxigraph.Quad | null {
+  try {
+    const subject = parseTerm(q.subject) as oxigraph.NamedNode | oxigraph.BlankNode;
+    const predicate = oxigraph.namedNode(q.predicate);
+    const object = parseTerm(q.object);
+    const graph = q.graph
+      ? oxigraph.namedNode(q.graph)
+      : oxigraph.defaultGraph();
+    return oxigraph.quad(subject, predicate, object, graph);
+  } catch {
+    return null;
+  }
+}
+
+function fromOxQuad(oxq: OxQuad): DKGQuad {
+  return {
+    subject: termToString(oxq.subject),
+    predicate: oxq.predicate.value,
+    object: termToString(oxq.object),
+    graph:
+      oxq.graph.termType === 'DefaultGraph' ? '' : oxq.graph.value,
+  };
+}
+
+function termToString(t: OxTerm): string {
+  if (t.termType === 'Literal') {
+    const lit = t as oxigraph.Literal;
+    if (lit.language) return `"${lit.value}"@${lit.language}`;
+    if (
+      lit.datatype &&
+      lit.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string'
+    ) {
+      return `"${lit.value}"^^<${lit.datatype.value}>`;
+    }
+    return `"${lit.value}"`;
+  }
+  if (t.termType === 'BlankNode') return `_:${t.value}`;
+  return t.value;
+}
+
+function escapeUri(uri: string): string {
+  return uri.replace(/[<>"{}|\\^`]/g, '');
+}
+
+function escapeString(s: string): string {
+  return s.replace(/[\\"]/g, '\\$&');
+}
+
+registerTripleStoreAdapter('oxigraph', async () => new OxigraphStore());

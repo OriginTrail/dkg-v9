@@ -10,19 +10,30 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@libp2p/tcp": "^11",
-    "@libp2p/noise": "^1",
-    "@libp2p/yamux": "^8",
-    "@libp2p/websockets": "^10",
     "@libp2p/bootstrap": "^12",
-    "@libp2p/kad-dht": "^16",
+    "@libp2p/crypto": "^5.1.13",
     "@libp2p/gossipsub": "^15",
-    "@libp2p/mdns": "^12",
     "@libp2p/identify": "^4",
-    "libp2p": "^3",
+    "@libp2p/interface": "^3.1.0",
+    "@libp2p/kad-dht": "^16",
+    "@libp2p/mdns": "^12",
+    "@libp2p/noise": "^1",
+    "@libp2p/peer-id": "^6.0.4",
+    "@libp2p/ping": "^3.0.10",
+    "@libp2p/tcp": "^11",
+    "@libp2p/websockets": "^10",
+    "@libp2p/yamux": "^8",
+    "@multiformats/multiaddr": "^13.0.1",
     "@noble/ed25519": "^3",
     "@noble/hashes": "^2",
+    "it-length-prefixed": "^10.0.1",
+    "it-pipe": "^3.0.1",
+    "libp2p": "^3",
     "protobufjs": "^8",
+    "rdf-canonize": "^5.0.0",
     "uint8arrays": "^5"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
   }
 }

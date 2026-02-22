@@ -12,5 +12,8 @@
   "dependencies": {
     "@dkg/core": "workspace:*",
     "@dkg/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

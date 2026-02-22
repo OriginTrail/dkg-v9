@@ -1,0 +1,69 @@
+import protobuf from 'protobufjs';
+
+const { Type, Field } = protobuf;
+
+export const KAManifestEntrySchema = new Type('KAManifestEntry')
+  .add(new Field('tokenId', 1, 'uint64'))
+  .add(new Field('rootEntity', 2, 'string'))
+  .add(new Field('privateMerkleRoot', 3, 'bytes'))
+  .add(new Field('privateTripleCount', 4, 'uint32'));
+
+export const PublishRequestSchema = new Type('PublishRequest')
+  .add(new Field('ual', 1, 'string'))
+  .add(new Field('nquads', 2, 'bytes'))
+  .add(new Field('paranetId', 3, 'string'))
+  .add(new Field('kas', 4, 'KAManifestEntry', 'repeated'))
+  .add(new Field('publisherIdentity', 5, 'bytes'))
+  .add(KAManifestEntrySchema);
+
+export const PublishAckSchema = new Type('PublishAck')
+  .add(new Field('merkleRoot', 1, 'bytes'))
+  .add(new Field('identityId', 2, 'uint64'))
+  .add(new Field('signatureR', 3, 'bytes'))
+  .add(new Field('signatureVs', 4, 'bytes'))
+  .add(new Field('accepted', 5, 'bool'))
+  .add(new Field('rejectionReason', 6, 'string'));
+
+export interface KAManifestEntryMsg {
+  tokenId: number | Long;
+  rootEntity: string;
+  privateMerkleRoot: Uint8Array;
+  privateTripleCount: number;
+}
+
+export interface PublishRequestMsg {
+  ual: string;
+  nquads: Uint8Array;
+  paranetId: string;
+  kas: KAManifestEntryMsg[];
+  publisherIdentity: Uint8Array;
+}
+
+export interface PublishAckMsg {
+  merkleRoot: Uint8Array;
+  identityId: number | Long;
+  signatureR: Uint8Array;
+  signatureVs: Uint8Array;
+  accepted: boolean;
+  rejectionReason: string;
+}
+
+type Long = { low: number; high: number; unsigned: boolean };
+
+export function encodePublishRequest(msg: PublishRequestMsg): Uint8Array {
+  return PublishRequestSchema.encode(
+    PublishRequestSchema.create(msg),
+  ).finish();
+}
+
+export function decodePublishRequest(buf: Uint8Array): PublishRequestMsg {
+  return PublishRequestSchema.decode(buf) as unknown as PublishRequestMsg;
+}
+
+export function encodePublishAck(msg: PublishAckMsg): Uint8Array {
+  return PublishAckSchema.encode(PublishAckSchema.create(msg)).finish();
+}
+
+export function decodePublishAck(buf: Uint8Array): PublishAckMsg {
+  return PublishAckSchema.decode(buf) as unknown as PublishAckMsg;
+}

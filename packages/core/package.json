@@ -1,0 +1,28 @@
+{
+  "name": "@dkg/core",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@libp2p/tcp": "^11",
+    "@libp2p/noise": "^1",
+    "@libp2p/yamux": "^8",
+    "@libp2p/websockets": "^10",
+    "@libp2p/bootstrap": "^12",
+    "@libp2p/kad-dht": "^16",
+    "@libp2p/gossipsub": "^15",
+    "@libp2p/mdns": "^12",
+    "@libp2p/identify": "^4",
+    "libp2p": "^3",
+    "@noble/ed25519": "^3",
+    "@noble/hashes": "^2",
+    "protobufjs": "^8",
+    "uint8arrays": "^5"
+  }
+}

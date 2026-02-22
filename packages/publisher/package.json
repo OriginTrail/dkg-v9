@@ -1,0 +1,19 @@
+{
+  "name": "@dkg/publisher",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/core": "workspace:*",
+    "@dkg/storage": "workspace:*",
+    "@dkg/chain": "workspace:*",
+    "n3": "^2",
+    "rdf-canonize": "^5"
+  }
+}

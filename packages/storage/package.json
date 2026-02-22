@@ -1,0 +1,17 @@
+{
+  "name": "@dkg/storage",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/core": "workspace:*",
+    "oxigraph": "^0.5",
+    "n3": "^2"
+  }
+}

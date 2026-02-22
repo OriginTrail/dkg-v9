@@ -1,0 +1,20 @@
+{
+  "name": "@dkg/agent",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/core": "workspace:*",
+    "@dkg/publisher": "workspace:*",
+    "@dkg/query": "workspace:*",
+    "@noble/ed25519": "^3",
+    "@noble/hashes": "^2",
+    "@noble/curves": "^2"
+  }
+}

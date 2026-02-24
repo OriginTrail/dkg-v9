@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { appendFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { execSync } from 'node:child_process';
+import { join } from 'node:path';
 import { DKGAgent } from '@dkg/agent';
 import { computeNetworkId } from '@dkg/core';
 import {
@@ -12,6 +14,7 @@ import {
   logPath,
   ensureDkgDir,
   type DkgConfig,
+  type AutoUpdateConfig,
 } from './config.js';
 
 interface ChatEntry {
@@ -75,10 +78,29 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     }
   }
 
+  // Subscribe to configured paranets
+  if (config.paranets?.length) {
+    for (const p of config.paranets) {
+      agent.subscribeToParanet(p);
+      log(`Subscribed to paranet: ${p}`);
+    }
+  }
+
   // Periodically re-publish profile so new peers discover us
   const profileInterval = setInterval(async () => {
     try { await agent.publishProfile(); } catch {}
   }, 30_000);
+
+  // Auto-update
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
+  if (config.autoUpdate?.enabled) {
+    const au = config.autoUpdate;
+    log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
+    updateInterval = setInterval(
+      () => checkForUpdate(au, log),
+      au.checkIntervalMinutes * 60_000,
+    );
+  }
 
   // --- HTTP API ---
 
@@ -105,6 +127,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   async function shutdown() {
     log('Shutting down...');
     clearInterval(profileInterval);
+    if (updateInterval) clearInterval(updateInterval);
     server.close();
     await agent.stop();
     await removePid();
@@ -201,6 +224,64 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
+  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...] }
+  if (req.method === 'POST' && path === '/api/publish') {
+    const body = await readBody(req);
+    const { paranetId, quads, privateQuads } = JSON.parse(body);
+    if (!paranetId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
+    }
+    const result = await agent.publish(paranetId, quads, privateQuads);
+    return jsonResponse(res, 200, {
+      kcId: String(result.kcId),
+      kas: result.kaManifest.map(ka => ({
+        tokenId: String(ka.tokenId),
+        rootEntity: ka.rootEntity,
+      })),
+    });
+  }
+
+  // POST /api/query  { sparql: "...", paranetId?: "..." }
+  if (req.method === 'POST' && path === '/api/query') {
+    const body = await readBody(req);
+    const { sparql, paranetId } = JSON.parse(body);
+    if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    const result = await agent.query(sparql, paranetId);
+    return jsonResponse(res, 200, { result });
+  }
+
+  // POST /api/subscribe  { paranetId: "..." }
+  if (req.method === 'POST' && path === '/api/subscribe') {
+    const body = await readBody(req);
+    const { paranetId } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    agent.subscribeToParanet(paranetId);
+    return jsonResponse(res, 200, { subscribed: paranetId });
+  }
+
+  // POST /api/paranet/create  { id, name, description? }
+  if (req.method === 'POST' && path === '/api/paranet/create') {
+    const body = await readBody(req);
+    const { id, name, description } = JSON.parse(body);
+    if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+    await agent.createParanet({ id, name, description });
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:paranet:${id}` });
+  }
+
+  // GET /api/paranet/list
+  if (req.method === 'GET' && path === '/api/paranet/list') {
+    const paranets = await agent.listParanets();
+    return jsonResponse(res, 200, { paranets });
+  }
+
+  // GET /api/paranet/exists?id=<paranetId>
+  if (req.method === 'GET' && path === '/api/paranet/exists') {
+    const id = url.searchParams.get('id');
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id" query param' });
+    const exists = await agent.paranetExists(id);
+    return jsonResponse(res, 200, { id, exists });
+  }
+
   // POST /api/shutdown
   if (req.method === 'POST' && path === '/api/shutdown') {
     jsonResponse(res, 200, { ok: true });
@@ -252,4 +333,76 @@ function shortId(peerId: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+async function checkForUpdate(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<void> {
+  try {
+    const commitFile = join(dkgDir(), '.current-commit');
+
+    // Get current running commit
+    let currentCommit = '';
+    try {
+      currentCommit = (await readFile(commitFile, 'utf-8')).trim();
+    } catch {
+      // First run — record current commit
+      try {
+        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: process.cwd() }).trim();
+        await writeFile(commitFile, currentCommit);
+      } catch {
+        return;
+      }
+    }
+
+    // Check latest commit on remote
+    const res = await fetch(
+      `https://api.github.com/repos/${au.repo}/commits/${au.branch}`,
+      { headers: { Accept: 'application/vnd.github.v3+json' } },
+    );
+    if (!res.ok) {
+      log(`Auto-update: GitHub API returned ${res.status}`);
+      return;
+    }
+    const data = await res.json() as { sha: string };
+    const latestCommit = data.sha;
+
+    if (latestCommit === currentCommit) return;
+
+    log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
+
+    // Pull and rebuild
+    const cwd = process.cwd();
+    try {
+      execSync(`git fetch origin ${au.branch} && git reset --hard origin/${au.branch}`, {
+        cwd, encoding: 'utf-8', stdio: 'pipe',
+      });
+      execSync('pnpm install --frozen-lockfile', {
+        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
+      });
+      execSync('pnpm build', {
+        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
+      });
+    } catch (err: any) {
+      log(`Auto-update: build failed, rolling back to ${currentCommit.slice(0, 8)}`);
+      try {
+        execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
+        execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+        execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+      } catch {
+        log('Auto-update: rollback also failed — manual intervention needed');
+      }
+      return;
+    }
+
+    // Record the new commit
+    await writeFile(commitFile, latestCommit);
+    log(`Auto-update: build succeeded. Restarting daemon...`);
+
+    // Signal the process to restart (pm2 or wrapper script will restart it)
+    process.kill(process.pid, 'SIGTERM');
+  } catch (err: any) {
+    log(`Auto-update: error — ${err.message}`);
+  }
 }

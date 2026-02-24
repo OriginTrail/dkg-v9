@@ -3,12 +3,21 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 
+export interface AutoUpdateConfig {
+  enabled: boolean;
+  repo: string;
+  branch: string;
+  checkIntervalMinutes: number;
+}
+
 export interface DkgConfig {
   name: string;
   relay?: string;
   apiPort: number;
   listenPort: number;
   nodeRole: 'core' | 'edge';
+  paranets?: string[];
+  autoUpdate?: AutoUpdateConfig;
 }
 
 const DEFAULT_CONFIG: DkgConfig = {
@@ -16,6 +25,7 @@ const DEFAULT_CONFIG: DkgConfig = {
   apiPort: 9200,
   listenPort: 0,
   nodeRole: 'edge',
+  paranets: [],
 };
 
 export function dkgDir(): string {

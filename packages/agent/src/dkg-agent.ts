@@ -1,8 +1,8 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH,
-  paranetPublishTopic, encodePublishRequest, decodePublishRequest,
-  getGenesisQuads, computeNetworkId, SYSTEM_PARANETS,
+  paranetPublishTopic, paranetDataGraphUri, encodePublishRequest, decodePublishRequest,
+  getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   type DKGNodeConfig,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
@@ -269,6 +269,16 @@ export class DKGAgent {
   }
 
   async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
+    // System paranets bypass the existence check
+    const isSystem = paranetId === SYSTEM_PARANETS.AGENTS || paranetId === SYSTEM_PARANETS.ONTOLOGY;
+    if (!isSystem) {
+      const exists = await this.paranetExists(paranetId);
+      if (!exists) {
+        throw new Error(
+          `Paranet "${paranetId}" does not exist. Create it first with createParanet().`,
+        );
+      }
+    }
     const result = await this.publisher.publish({ paranetId, quads, privateQuads });
     await this.broadcastPublish(paranetId, result);
     return result;
@@ -295,6 +305,155 @@ export class DKGAgent {
       } catch {
         // Silently handle malformed broadcasts
       }
+    });
+  }
+
+  /**
+   * Create a paranet by publishing its definition triples into the system
+   * ontology paranet. This reserves the named graph and makes the paranet
+   * discoverable by all nodes.
+   */
+  async createParanet(opts: {
+    id: string;
+    name: string;
+    description?: string;
+    replicationPolicy?: string;
+  }): Promise<void> {
+    const gm = new GraphManager(this.store);
+    const paranetUri = paranetDataGraphUri(opts.id);
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const now = new Date().toISOString();
+
+    const exists = await this.paranetExists(opts.id);
+    if (exists) {
+      throw new Error(`Paranet "${opts.id}" already exists`);
+    }
+
+    const quads: Quad[] = [
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
+    ];
+
+    if (opts.description) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
+        object: `"${opts.description}"`,
+        graph: ontologyGraph,
+      });
+    }
+
+    // Provenance activity
+    const activityUri = `did:dkg:activity:create-paranet:${opts.id}:${Date.now()}`;
+    quads.push(
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: ontologyGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: ontologyGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: ontologyGraph },
+    );
+
+    // Insert the definition triples
+    await this.store.insert(quads);
+
+    // Create the actual named graphs for the paranet
+    await gm.ensureParanet(opts.id);
+
+    // Auto-subscribe to the new paranet's GossipSub topic
+    this.subscribeToParanet(opts.id);
+
+    // Broadcast via the ontology paranet so other nodes learn about it
+    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+    const nquads = quads.map(q => {
+      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
+    }).join('\n');
+
+    const msg = encodePublishRequest({
+      ual: `did:dkg:paranet:${opts.id}`,
+      nquads: new TextEncoder().encode(nquads),
+      paranetId: SYSTEM_PARANETS.ONTOLOGY,
+      kas: [],
+      publisherIdentity: this.wallet.keypair.publicKey,
+    });
+
+    try {
+      await this.gossip.publish(ontologyTopic, msg);
+    } catch {
+      // No peers subscribed — ok for now
+    }
+  }
+
+  /**
+   * Check whether a paranet is registered (definition triples exist
+   * in the ontology paranet).
+   */
+  async paranetExists(paranetId: string): Promise<boolean> {
+    const paranetUri = paranetDataGraphUri(paranetId);
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const result = await this.store.query(
+      `ASK { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> } }`,
+    );
+    if (result.type === 'boolean') return result.value;
+    return false;
+  }
+
+  /**
+   * List all registered paranets with their metadata.
+   */
+  async listParanets(): Promise<Array<{
+    id: string;
+    uri: string;
+    name: string;
+    description?: string;
+    creator?: string;
+    createdAt?: string;
+    isSystem: boolean;
+  }>> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
+    const result = await this.store.query(`
+      SELECT ?paranet ?name ?desc ?creator ?created ?isSystem WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+          }
+        } UNION {
+          GRAPH <${agentsGraph}> {
+            ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+            OPTIONAL { ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+          }
+        }
+      }
+    `);
+
+    if (result.type !== 'bindings') return [];
+
+    const prefix = 'did:dkg:paranet:';
+    return result.bindings.map((row: Record<string, string>) => {
+      const uri = row['paranet'] ?? '';
+      const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
+      return {
+        id,
+        uri,
+        name: stripLiteral(row['name'] ?? id),
+        description: row['desc'] ? stripLiteral(row['desc']) : undefined,
+        creator: row['creator'],
+        createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
+        isSystem: !!row['isSystem'],
+      };
     });
   }
 
@@ -436,5 +595,12 @@ function splitNQuadLine(line: string): string[] {
 
 function strip(s: string): string {
   if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
+  return s;
+}
+
+function stripLiteral(s: string): string {
+  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
+  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
+  if (match) return match[1];
   return s;
 }

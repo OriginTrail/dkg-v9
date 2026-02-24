@@ -65,8 +65,52 @@ export class ApiClient {
     return this.get(`/api/messages${qs ? '?' + qs : ''}`);
   }
 
+  async publish(paranetId: string, quads: Array<{
+    subject: string; predicate: string; object: string; graph: string;
+  }>, privateQuads?: Array<{
+    subject: string; predicate: string; object: string; graph: string;
+  }>): Promise<{
+    kcId: string;
+    kas: Array<{ tokenId: string; rootEntity: string }>;
+  }> {
+    return this.post('/api/publish', { paranetId, quads, privateQuads });
+  }
+
+  async query(sparql: string, paranetId?: string): Promise<{ result: any }> {
+    return this.post('/api/query', { sparql, paranetId });
+  }
+
+  async subscribe(paranetId: string): Promise<{ subscribed: string }> {
+    return this.post('/api/subscribe', { paranetId });
+  }
+
   async connect(multiaddr: string): Promise<{ connected: boolean }> {
     return this.post('/api/connect', { multiaddr });
+  }
+
+  async createParanet(id: string, name: string, description?: string): Promise<{
+    created: string;
+    uri: string;
+  }> {
+    return this.post('/api/paranet/create', { id, name, description });
+  }
+
+  async listParanets(): Promise<{
+    paranets: Array<{
+      id: string;
+      uri: string;
+      name: string;
+      description?: string;
+      creator?: string;
+      createdAt?: string;
+      isSystem: boolean;
+    }>;
+  }> {
+    return this.get('/api/paranet/list');
+  }
+
+  async paranetExists(id: string): Promise<{ id: string; exists: boolean }> {
+    return this.get(`/api/paranet/exists?id=${encodeURIComponent(id)}`);
   }
 
   async shutdown(): Promise<void> {

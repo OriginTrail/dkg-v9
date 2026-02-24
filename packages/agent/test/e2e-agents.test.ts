@@ -127,6 +127,12 @@ describe('Two-Agent E2E', () => {
     agents.push(agentA);
     await agentA.start();
 
+    await agentA.createParanet({
+      id: 'test-paranet',
+      name: 'Test Paranet',
+      description: 'E2E test paranet',
+    });
+
     const result = await agentA.publish('test-paranet', [
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/name', object: '"TestEntity"', graph: '' },
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/type', object: '"Thing"', graph: '' },

@@ -40,18 +40,42 @@ program
     const relay = nodeRole === 'edge'
       ? await ask('Relay multiaddr?', existing.relay)
       : await ask('Relay multiaddr? (optional for core)', existing.relay);
+    const paranetsStr = await ask(
+      'Paranets to subscribe? (comma-separated, e.g. agent-skills,climate)',
+      existing.paranets?.join(','),
+    );
+    const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port?', String(existing.apiPort)), 10);
+    const enableAutoUpdate = (await ask('Enable auto-update from GitHub? (y/n)', 'n')).toLowerCase() === 'y';
+
+    let autoUpdate = existing.autoUpdate;
+    if (enableAutoUpdate) {
+      const repo = await ask('GitHub repo (owner/name)?', existing.autoUpdate?.repo);
+      const branch = await ask('Branch?', existing.autoUpdate?.branch ?? 'main');
+      const interval = parseInt(await ask('Check interval (minutes)?', String(existing.autoUpdate?.checkIntervalMinutes ?? 5)), 10);
+      autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
+    }
 
     rl.close();
 
-    const config = { ...existing, name: name || 'dkg-node', relay: relay || undefined, apiPort, nodeRole };
+    const config = {
+      ...existing,
+      name: name || 'dkg-node',
+      relay: relay || undefined,
+      apiPort,
+      nodeRole,
+      paranets,
+      autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
+    };
     await saveConfig(config);
 
     console.log(`\nConfig saved to ${configPath()}`);
-    console.log(`  name:     ${config.name}`);
-    console.log(`  role:     ${config.nodeRole}`);
-    console.log(`  relay:    ${config.relay ?? '(none)'}`);
-    console.log(`  apiPort:  ${config.apiPort}`);
+    console.log(`  name:       ${config.name}`);
+    console.log(`  role:       ${config.nodeRole}`);
+    console.log(`  relay:      ${config.relay ?? '(none)'}`);
+    console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
+    console.log(`  apiPort:    ${config.apiPort}`);
+    console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
     console.log(`\nRun "dkg start" to start the node.`);
   });
 
@@ -276,6 +300,231 @@ program
     }
   });
 
+// ─── dkg publish <paranet> ───────────────────────────────────────────
+
+program
+  .command('publish <paranet>')
+  .description('Publish triples to a paranet from an RDF file or inline')
+  .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
+  .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
+  .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
+  .option('-s, --subject <uri>', 'Subject URI for simple publish')
+  .option('-p, --predicate <uri>', 'Predicate URI for simple publish')
+  .option('-o, --object <value>', 'Object value for simple publish')
+  .action(async (paranet: string, opts) => {
+    try {
+      const client = await ApiClient.connect();
+      const rdfParser = await import('./rdf-parser.js');
+      const defaultGraph = `did:dkg:paranet:${paranet}`;
+
+      let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+
+      if (opts.file) {
+        const { readFile } = await import('node:fs/promises');
+        const raw = await readFile(opts.file, 'utf-8');
+        const format = opts.format ?? rdfParser.detectFormat(opts.file);
+        quads = await rdfParser.parseRdf(raw, format, defaultGraph);
+        console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
+      } else if (opts.triples) {
+        const parsed = JSON.parse(opts.triples);
+        quads = parsed.map((q: any) => ({ ...q, graph: q.graph || defaultGraph }));
+      } else if (opts.subject && opts.predicate && opts.object) {
+        quads = [{
+          subject: opts.subject,
+          predicate: opts.predicate,
+          object: opts.object.startsWith('"') || opts.object.startsWith('http') || opts.object.startsWith('did:')
+            ? opts.object
+            : `"${opts.object}"`,
+          graph: defaultGraph,
+        }];
+      } else {
+        console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
+        process.exit(1);
+      }
+
+      const result = await client.publish(paranet, quads);
+      console.log(`Published to "${paranet}":`);
+      console.log(`  KC ID: ${result.kcId}`);
+      for (const ka of result.kas) {
+        console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg query <paranet> <sparql> ───────────────────────────────────
+
+program
+  .command('query [paranet]')
+  .description('Run a SPARQL query against a paranet (or all)')
+  .option('-q, --sparql <query>', 'SPARQL query string')
+  .option('-f, --file <path>', 'File containing SPARQL query')
+  .action(async (paranet: string | undefined, opts) => {
+    try {
+      const client = await ApiClient.connect();
+
+      let sparql = opts.sparql;
+      if (!sparql && opts.file) {
+        const { readFile } = await import('node:fs/promises');
+        sparql = await readFile(opts.file, 'utf-8');
+      }
+      if (!sparql) {
+        console.error('Provide --sparql or --file');
+        process.exit(1);
+      }
+
+      const { result } = await client.query(sparql, paranet);
+
+      if (result?.type === 'bindings' && result.bindings) {
+        if (result.bindings.length === 0) {
+          console.log('No results.');
+          return;
+        }
+        const keys = Object.keys(result.bindings[0]);
+        const widths = keys.map(k => Math.max(k.length, ...result.bindings.map(
+          (row: any) => stripQuotes(String(row[k] ?? '')).length,
+        )));
+
+        const header = keys.map((k, i) => k.padEnd(widths[i])).join('  ');
+        console.log(header);
+        console.log(widths.map((w: number) => '─'.repeat(w)).join('  '));
+        for (const row of result.bindings) {
+          const line = keys.map((k, i) => stripQuotes(String(row[k] ?? '')).padEnd(widths[i])).join('  ');
+          console.log(line);
+        }
+        console.log(`\n${result.bindings.length} row(s)`);
+      } else {
+        console.log(JSON.stringify(result, null, 2));
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg subscribe <paranet> ────────────────────────────────────────
+
+program
+  .command('subscribe <paranet>')
+  .description('Subscribe to a paranet\'s GossipSub topic')
+  .option('--save', 'Also save to config so it auto-subscribes on restart')
+  .action(async (paranet: string, opts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.subscribe(paranet);
+      console.log(`Subscribed to paranet: ${paranet}`);
+
+      if (opts.save) {
+        const config = await loadConfig();
+        const paranets = new Set(config.paranets ?? []);
+        paranets.add(paranet);
+        config.paranets = [...paranets];
+        await saveConfig(config);
+        console.log('Saved to config (will auto-subscribe on restart).');
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg paranet ────────────────────────────────────────────────────
+
+const paranetCmd = program
+  .command('paranet')
+  .description('Manage paranets (knowledge graph partitions)');
+
+paranetCmd
+  .command('create <id>')
+  .description('Create a new paranet (publishes definition to the system ontology)')
+  .option('-n, --name <name>', 'Human-readable name (defaults to id)')
+  .option('-d, --description <desc>', 'Description of the paranet')
+  .option('--subscribe', 'Also subscribe to the paranet after creation', true)
+  .option('--save', 'Persist subscription to config')
+  .action(async (id: string, opts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.createParanet(id, opts.name ?? id, opts.description);
+      console.log(`Paranet created:`);
+      console.log(`  ID:   ${result.created}`);
+      console.log(`  URI:  ${result.uri}`);
+      console.log(`  Auto-subscribed to GossipSub topic.`);
+
+      if (opts.save) {
+        const config = await loadConfig();
+        const paranets = new Set(config.paranets ?? []);
+        paranets.add(id);
+        config.paranets = [...paranets];
+        await saveConfig(config);
+        console.log('  Saved to config (will auto-subscribe on restart).');
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+paranetCmd
+  .command('list')
+  .description('List all known paranets')
+  .action(async () => {
+    try {
+      const client = await ApiClient.connect();
+      const { paranets } = await client.listParanets();
+
+      if (paranets.length === 0) {
+        console.log('No paranets registered yet.');
+        return;
+      }
+
+      const idW = Math.max(4, ...paranets.map(p => p.id.length));
+      const nameW = Math.max(4, ...paranets.map(p => p.name.length));
+
+      const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
+      console.log(header);
+      console.log('  ' + '─'.repeat(header.length - 2));
+
+      for (const p of paranets) {
+        const type = p.isSystem ? 'system' : 'user';
+        const creator = p.creator
+          ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
+          : '—';
+        console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
+      }
+      console.log(`\n  ${paranets.length} paranet(s)`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+paranetCmd
+  .command('info <id>')
+  .description('Show details of a specific paranet')
+  .action(async (id: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const { paranets } = await client.listParanets();
+      const p = paranets.find(x => x.id === id);
+      if (!p) {
+        console.error(`Paranet "${id}" not found.`);
+        process.exit(1);
+      }
+      console.log(`  ID:          ${p.id}`);
+      console.log(`  URI:         ${p.uri}`);
+      console.log(`  Name:        ${p.name}`);
+      console.log(`  Description: ${p.description ?? '—'}`);
+      console.log(`  Type:        ${p.isSystem ? 'system' : 'user'}`);
+      console.log(`  Creator:     ${p.creator ?? '—'}`);
+      console.log(`  Created:     ${p.createdAt ?? '—'}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg logs ────────────────────────────────────────────────────────
 
 program
@@ -324,6 +573,13 @@ function formatUptime(ms: number): string {
   if (hrs < 24) return `${hrs}h ${mins % 60}m`;
   const days = Math.floor(hrs / 24);
   return `${days}d ${hrs % 24}h`;
+}
+
+function stripQuotes(s: string): string {
+  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
+  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
+  if (match) return match[1];
+  return s;
 }
 
 function sleep(ms: number): Promise<void> {

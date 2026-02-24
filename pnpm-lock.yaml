@@ -143,6 +143,13 @@ importers:
       commander:
         specifier: ^13
         version: 13.1.0
+      n3:
+        specifier: ^2.0.1
+        version: 2.0.1
+    devDependencies:
+      '@types/n3':
+        specifier: ^1.26.1
+        version: 1.26.1
 
   packages/core:
     dependencies:

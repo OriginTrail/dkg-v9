@@ -33,7 +33,14 @@ if (peerIdx !== -1 && args[peerIdx + 1]) {
   targetPeerId = args[peerIdx + 1];
   args.splice(peerIdx, 2);
 }
+const dataDirIdx = args.indexOf('--data-dir');
+let dataDir = null;
+if (dataDirIdx !== -1 && args[dataDirIdx + 1]) {
+  dataDir = args[dataDirIdx + 1];
+  args.splice(dataDirIdx, 2);
+}
 const AGENT_A_ADDR = args[0]; // optional when using relay
+if (!dataDir) dataDir = `.dkg/agent-b`;
 if (!AGENT_A_ADDR && !relayPeers.length) {
   console.error('Usage: node demo/agent-b.mjs <agent-a-multiaddr>');
   console.error('   or: node demo/agent-b.mjs --relay <relay-multiaddr> --peer <agent-a-peer-id>');
@@ -67,6 +74,7 @@ async function main() {
     framework: 'ElizaOS',
     description: 'AI agent providing text analysis capabilities',
     listenPort: 0,
+    dataDir,
     relayPeers: relayPeers.length ? relayPeers : undefined,
     skills: [
       {

@@ -1,0 +1,82 @@
+{
+  "name": "@dkg/graph-viz",
+  "version": "0.0.1",
+  "description": "RDF Knowledge Graph Visualizer — force-directed graph rendering with hexagonal nodes, declarative view configs, RDF-native data loading, and SPARQL-driven views",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs"
+    },
+    "./parsers": {
+      "types": "./dist/parsers/index.d.ts",
+      "import": "./dist/parsers/index.js",
+      "require": "./dist/parsers/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "vite --open /demo/index.html",
+    "demo:build": "vite build"
+  },
+  "dependencies": {
+    "force-graph": "^1.51.0",
+    "n3": "^1.22.3",
+    "oxigraph": "^0.5.4"
+  },
+  "optionalDependencies": {
+    "jsonld": "^8.3.3"
+  },
+  "peerDependencies": {
+    "3d-force-graph": ">=1.70.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "three": ">=0.150.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "react-dom": { "optional": true },
+    "3d-force-graph": { "optional": true },
+    "three": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/n3": "^1.26.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "3d-force-graph": "^1.79.1",
+    "three": "^0.182.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vite": "^7.3.1",
+    "vitest": "^3.2.4"
+  },
+  "keywords": [
+    "rdf",
+    "knowledge-graph",
+    "visualization",
+    "graph-viz",
+    "dkg",
+    "force-graph",
+    "sparql",
+    "n-triples"
+  ],
+  "license": "MIT"
+}

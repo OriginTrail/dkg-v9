@@ -1,0 +1,18 @@
+{
+  "id": "dkg-node",
+  "name": "DKG Node — Decentralized Knowledge Graph",
+  "version": "0.0.1",
+  "description": "Turns your OpenClaw agent into a DKG V9 node. Enables publishing knowledge, querying the graph, discovering other agents, and invoking remote skills over a decentralized P2P network.",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "dataDir": { "type": "string", "default": ".dkg/openclaw", "description": "Persistent state directory (keys, triple store)" },
+      "listenPort": { "type": "number", "description": "TCP port (0 = random)" },
+      "relayPeers": { "type": "array", "items": { "type": "string" }, "description": "Relay multiaddrs for NAT traversal" },
+      "bootstrapPeers": { "type": "array", "items": { "type": "string" }, "description": "DKG bootstrap multiaddrs" },
+      "name": { "type": "string", "description": "Agent display name" },
+      "description": { "type": "string", "description": "Agent description" }
+    }
+  },
+  "skills": ["skills"]
+}

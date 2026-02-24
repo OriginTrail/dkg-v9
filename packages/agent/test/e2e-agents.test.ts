@@ -1,13 +1,19 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
+import { DKGNode } from '@dkg/core';
 
 const agents: DKGAgent[] = [];
+const nodes: DKGNode[] = [];
 
 afterEach(async () => {
   for (const a of agents) {
     try { await a.stop(); } catch {}
   }
   agents.length = 0;
+  for (const n of nodes) {
+    try { await n.stop(); } catch {}
+  }
+  nodes.length = 0;
 });
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -136,4 +142,63 @@ describe('Two-Agent E2E', () => {
     expect(qr.bindings.length).toBe(1);
     expect(qr.bindings[0]['name']).toContain('TestEntity');
   }, 10000);
+});
+
+describe('Relay E2E', () => {
+  it('agents exchange encrypted chat through a circuit relay', async () => {
+    // 1. Start a relay node (simulates a public VPS running the relay server)
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableRelayServer: true,
+      enableMdns: false,
+    });
+    nodes.push(relay);
+    await relay.start();
+
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
+    expect(relayAddr).toBeDefined();
+
+    // 2. Create two agents that only know the relay — not each other
+    const agentA = await DKGAgent.create({
+      name: 'RelayAgentA',
+      listenPort: 0,
+      skills: [],
+      relayPeers: [relayAddr],
+    });
+    agents.push(agentA);
+
+    const agentB = await DKGAgent.create({
+      name: 'RelayAgentB',
+      listenPort: 0,
+      skills: [],
+      relayPeers: [relayAddr],
+    });
+    agents.push(agentB);
+
+    const receivedOnA: string[] = [];
+    const receivedOnB: string[] = [];
+    agentA.onChat((text) => { receivedOnA.push(text); });
+    agentB.onChat((text) => { receivedOnB.push(text); });
+
+    await agentA.start();
+    await agentB.start();
+
+    // Wait for both agents to establish relay reservations
+    await sleep(2000);
+
+    // 3. B dials A through the relay circuit (not directly)
+    const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${agentA.peerId}`;
+    await agentB.connectTo(circuitAddr);
+    await sleep(1000);
+
+    // 4. B sends encrypted chat to A via relay
+    const r1 = await agentB.sendChat(agentA.peerId, 'hello through relay');
+    expect(r1.delivered).toBe(true);
+    expect(receivedOnA).toContain('hello through relay');
+
+    // 5. A sends encrypted chat back to B via relay
+    const r2 = await agentA.sendChat(agentB.peerId, 'relay reply from A');
+    expect(r2.delivered).toBe(true);
+    expect(receivedOnB).toContain('relay reply from A');
+  }, 20000);
 });

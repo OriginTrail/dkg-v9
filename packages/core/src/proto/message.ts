@@ -9,7 +9,8 @@ export const AgentMessageSchema = new Type('AgentMessage')
   .add(new Field('recipientPeerId', 4, 'string'))
   .add(new Field('encryptedPayload', 5, 'bytes'))
   .add(new Field('nonce', 6, 'bytes'))
-  .add(new Field('senderSignature', 7, 'bytes'));
+  .add(new Field('senderSignature', 7, 'bytes'))
+  .add(new Field('senderPublicKey', 8, 'bytes'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -21,6 +22,7 @@ export interface AgentMessageMsg {
   encryptedPayload: Uint8Array;
   nonce: Uint8Array;
   senderSignature: Uint8Array;
+  senderPublicKey: Uint8Array;
 }
 
 export function encodeAgentMessage(msg: AgentMessageMsg): Uint8Array {

@@ -873,7 +873,8 @@ Both developers work in parallel. No blockchain dependency. The full agent marke
 | 3 | Profile publishing: publish/update agent profile as KA in Agent Registry (uses Publisher interface, mocked initially) | **DONE** |
 | 4 | Discovery client: SPARQL query builder for skill search (uses Query interface, mocked initially) | **DONE** |
 | 5 | Messaging: `/dkg/message/1.0.0` handler, X25519 encryption, SkillRequest/Response, conversation management, interactive chat | **DONE** |
-| 6 | Framework adapters: OpenClaw DkgNodeSkill + ElizaOS plugin (basic) | TODO |
+| 6 | Framework adapters: OpenClaw DkgNodeSkill + ElizaOS plugin (basic) | **DONE** |
+| 7 | Persistent identity: keys saved to disk, same PeerId across restarts | **DONE** |
 
 #### Phase 1 Integration Milestone
 

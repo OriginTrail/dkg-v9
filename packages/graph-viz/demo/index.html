@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DKG Graph Viz — Moltbook Social Graph</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--gv-bg, #0a0a0f);
+      color: var(--gv-text, #e0e0e0);
+      overflow: hidden;
+    }
+    #app {
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+    }
+    #graph-container {
+      width: 100%;
+      height: 100%;
+    }
+    #info-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: var(--gv-surface, rgba(20, 20, 30, 0.9));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      border-radius: 12px;
+      padding: 16px;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+      max-width: 300px;
+    }
+    #info-panel h1 {
+      font-size: 14px;
+      margin-bottom: 4px;
+      color: var(--gv-text, #ffffff);
+      font-weight: 600;
+      line-height: 1.4;
+    }
+    #info-panel .subtitle {
+      font-size: 11px;
+      color: var(--gv-text-muted, #666);
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+    #info-panel .stats {
+      font-size: 13px;
+      color: var(--gv-text-secondary, #888);
+      margin-bottom: 8px;
+      line-height: 1.6;
+    }
+    #info-panel .stats span {
+      color: var(--gv-primary, #a0a0ff);
+      font-weight: 600;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.2));
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--gv-text-muted, #888);
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+    }
+    #settings-toggle {
+      position: absolute;
+      bottom: 68px;
+      right: 16px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--gv-surface, rgba(20, 20, 30, 0.9));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      color: var(--gv-text-muted, #888);
+      cursor: pointer;
+      z-index: 101;
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.3s ease, background 0.2s ease;
+      font-size: 20px;
+      line-height: 1;
+      padding: 0;
+    }
+    #settings-toggle:hover {
+      background: var(--gv-primary-muted, rgba(100, 100, 180, 0.5));
+      color: var(--gv-text, #e0e0e0);
+    }
+    #settings-toggle.open { transform: rotate(90deg); }
+    #settings-panel {
+      position: absolute;
+      bottom: 118px;
+      right: 16px;
+      background: var(--gv-surface, rgba(20, 20, 30, 0.92));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      border-radius: 12px;
+      padding: 14px 16px;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+      max-width: 280px;
+      display: none;
+      animation: settingsSlideIn 0.2s ease;
+    }
+    @keyframes settingsSlideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    #settings-panel select {
+      padding: 4px 8px;
+      background: var(--gv-surface, rgba(80, 80, 160, 0.3));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 180, 0.3));
+      border-radius: 6px;
+      color: var(--gv-text, #c0c0ff);
+      cursor: pointer;
+      font-size: 11px;
+    }
+    #settings-panel button {
+      padding: 6px 12px;
+      background: var(--gv-surface, rgba(80, 80, 160, 0.4));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 180, 0.3));
+      border-radius: 6px;
+      color: var(--gv-text, #c0c0ff);
+      cursor: pointer;
+      font-size: 12px;
+      margin-right: 4px;
+    }
+    #settings-panel button:hover { background: var(--gv-primary-muted, rgba(100, 100, 180, 0.5)); }
+    #node-panel {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: var(--gv-surface, rgba(20, 20, 30, 0.95));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      border-radius: 12px;
+      padding: 16px;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+      max-width: 400px;
+      max-height: 80vh;
+      overflow-y: auto;
+      display: none;
+      scrollbar-width: thin;
+      scrollbar-color: var(--gv-primary-muted, rgba(120,120,220,0.5)) rgba(20,20,35,0.3);
+    }
+    #node-panel::-webkit-scrollbar { width: 6px; }
+    #node-panel::-webkit-scrollbar-track { background: rgba(20,20,35,0.3); border-radius: 3px; }
+    #node-panel::-webkit-scrollbar-thumb { background: var(--gv-primary-muted, rgba(120,120,220,0.5)); border-radius: 3px; }
+    #node-panel h2 {
+      font-size: 16px;
+      color: var(--gv-primary, #a0a0ff);
+      margin-bottom: 8px;
+      word-break: break-word;
+    }
+    #node-panel .property {
+      font-size: 12px;
+      margin-bottom: 4px;
+      line-height: 1.5;
+    }
+    #node-panel .property .key { color: var(--gv-text-muted, #888); }
+    #node-panel .property .value { color: var(--gv-text-secondary, #ccc); word-break: break-word; }
+    #hover-tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: var(--gv-surface, rgba(16, 16, 28, 0.92));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 160, 0.35));
+      border-radius: 10px;
+      padding: 10px 12px;
+      z-index: 150;
+      backdrop-filter: blur(8px);
+      max-width: 280px;
+      display: none;
+      font-size: 12px;
+      line-height: 1.5;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      transition: opacity 0.12s ease;
+    }
+    #hover-tooltip .ht-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--gv-text, #e0e0ff);
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 250px;
+    }
+    #hover-tooltip .ht-type {
+      font-size: 10px;
+      color: var(--gv-text-muted, #8888bb);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 5px;
+    }
+    #hover-tooltip .ht-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 11px;
+    }
+    #hover-tooltip .ht-key { color: var(--gv-text-muted, #777); }
+    #hover-tooltip .ht-val { color: var(--gv-text-secondary, #bbb); font-weight: 500; }
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 18px;
+      color: var(--gv-text-muted, #666);
+      z-index: 200;
+    }
+    #sparql-panel {
+      position: absolute;
+      bottom: 64px;
+      left: 16px;
+      right: 16px;
+      background: var(--gv-surface, rgba(20, 20, 30, 0.95));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      border-radius: 12px;
+      padding: 12px;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+      display: none;
+      max-height: 45vh;
+      overflow: hidden;
+    }
+    #sparql-panel .sparql-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    #sparql-panel .sparql-header span {
+      font-size: 11px;
+      color: var(--gv-text-muted, #888);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      flex: 1;
+    }
+    #sparql-panel textarea {
+      width: 100%;
+      height: 140px;
+      background: var(--gv-bg, rgba(10, 10, 20, 0.8));
+      border: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.2));
+      border-radius: 6px;
+      color: var(--gv-text, #c0e0c0);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      padding: 10px;
+      resize: vertical;
+      tab-size: 2;
+    }
+    #sparql-panel textarea:focus { outline: 1px solid var(--gv-primary-muted, rgba(100, 100, 200, 0.4)); }
+    #sparql-results {
+      margin-top: 8px;
+      max-height: 120px;
+      overflow-y: auto;
+      font-size: 11px;
+      color: var(--gv-text-secondary, #888);
+    }
+    #sparql-results table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    #sparql-results th {
+      text-align: left;
+      color: var(--gv-primary, #a0a0ff);
+      border-bottom: 1px solid var(--gv-surface-border, rgba(100, 100, 140, 0.3));
+      padding: 3px 6px;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    #sparql-results td {
+      padding: 2px 6px;
+      border-bottom: 1px solid rgba(100, 100, 140, 0.1);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="loading">Loading Moltbook social graph...</div>
+    <div id="graph-container"></div>
+    <div id="hover-tooltip"></div>
+    <div id="info-panel">
+      <h1>Moltbook Social Graph</h1>
+      <div class="subtitle">AI agent social network — posts, comments, and communities</div>
+      <div id="stats" class="stats">Loading...</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#9b59b6"></div>Agent</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3498db"></div>Post</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>Comment</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#e67e22"></div>Submolt</div>
+      </div>
+    </div>
+    <button id="sparql-float-btn" title="SPARQL Editor" style="position:absolute;bottom:16px;left:16px;height:40px;padding:0 16px;border-radius:20px;background:var(--gv-surface,rgba(20,20,30,0.9));border:1px solid var(--gv-surface-border,rgba(100,100,140,0.3));color:var(--gv-text-muted,#888);cursor:pointer;z-index:101;backdrop-filter:blur(10px);display:flex;align-items:center;gap:6px;font-size:12px;font-family:monospace;transition:background 0.2s">&#9998; SPARQL</button>
+    <button id="settings-toggle" title="Settings">&#9881;</button>
+    <div id="settings-panel">
+      <div style="margin-bottom:8px;font-size:10px;color:var(--gv-text-muted,#666);text-transform:uppercase;letter-spacing:0.5px">Views</div>
+      <div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:4px">
+        <button id="btn-view-all" style="font-size:11px">Full Graph</button>
+        <button id="btn-view-agents" style="font-size:11px">Agent Network</button>
+        <button id="btn-view-posts" style="font-size:11px">Posts &amp; Comments</button>
+      </div>
+      <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;color:var(--gv-text-muted,#666);text-transform:uppercase;letter-spacing:0.5px">Theme</span>
+        <select id="palette-switcher">
+          <option value="midnight" selected>Midnight</option>
+          <option value="dark">Dark</option>
+          <option value="cyberpunk">Cyberpunk</option>
+          <option value="light">Light</option>
+        </select>
+      </div>
+    </div>
+    <div id="node-panel">
+      <h2 id="panel-title"></h2>
+      <div id="panel-content"></div>
+    </div>
+    <div id="sparql-panel">
+      <div class="sparql-header">
+        <span>SPARQL Editor</span>
+        <button id="btn-run-construct" style="padding:4px 10px;font-size:11px;background:rgba(60,120,60,0.5);border-color:rgba(80,160,80,0.3);color:#a0e0a0">CONSTRUCT</button>
+        <button id="btn-run-select" style="padding:4px 10px;font-size:11px">SELECT</button>
+        <button id="btn-close-sparql" style="padding:4px 10px;font-size:11px;background:rgba(120,60,60,0.4);border-color:rgba(160,80,80,0.3);color:#e0a0a0">Close</button>
+      </div>
+      <textarea id="sparql-input" spellcheck="false"></textarea>
+      <div id="sparql-results"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { RdfGraphViz, OxigraphSource, resolvePalette, injectPaletteCssVars } from '/src/index.ts';
+
+    const container = document.getElementById('graph-container');
+    const loading = document.getElementById('loading');
+    const statsEl = document.getElementById('stats');
+    const nodePanel = document.getElementById('node-panel');
+    const panelTitle = document.getElementById('panel-title');
+    const hoverTooltip = document.getElementById('hover-tooltip');
+    const panelContent = document.getElementById('panel-content');
+    const sparqlPanel = document.getElementById('sparql-panel');
+    const sparqlInput = document.getElementById('sparql-input');
+    const sparqlResults = document.getElementById('sparql-results');
+
+    let kg = null;
+    let viewConfig = null;
+
+    const viz = new RdfGraphViz(container, {
+      labelMode: 'humanized',
+      focus: { maxNodes: 2000 },
+      hexagon: {
+        baseSize: 3,
+        minSize: 4,
+        maxSize: 14,
+        scaleWithDegree: true,
+        circleTypes: [
+          'https://schema.org/Comment',
+        ],
+      },
+      style: {
+        defaultNodeColor: '#3a3a6a',
+        defaultEdgeColor: 'rgba(60, 60, 80, 0.8)',
+        edgeWidth: 0.5,
+        edgeArrowSize: 2,
+        borderWidth: 0.5,
+        gradient: false,
+        classColors: {
+          'moltbook:Agent': '#9b59b6',
+          'schema:Person': '#9b59b6',
+          'schema:SocialMediaPosting': '#3498db',
+          'moltbook:Post': '#3498db',
+          'schema:Comment': '#2ecc71',
+          'moltbook:Submolt': '#e67e22',
+        },
+      },
+    });
+
+    function rdfVal(val) {
+      if (!val) return '';
+      if (typeof val === 'string') return val;
+      if (val.value !== undefined) return String(val.value);
+      return JSON.stringify(val);
+    }
+
+    function getProp(node, pred) {
+      const vals = node.properties?.get(pred);
+      if (!vals || vals.length === 0) return null;
+      return rdfVal(vals[0]);
+    }
+
+    function getAnyProp(node, shortName) {
+      for (const ns of ['https://moltbook.com/vocab/', 'https://schema.org/']) {
+        const v = node.properties?.get(ns + shortName);
+        if (v?.[0]) return rdfVal(v[0]);
+      }
+      return null;
+    }
+
+    function humanize(key) {
+      return key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+    }
+
+    function fmtDate(val) {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return val;
+      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function sectionHeader(title) {
+      return '<div style="margin-top:12px;margin-bottom:4px;font-size:10px;color:var(--gv-text-muted,#666);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--gv-surface-border,rgba(100,100,140,0.2));padding-bottom:3px">' + title + '</div>';
+    }
+
+    // --- Node Click ---
+    viz.on('node:click', (node) => {
+      nodePanel.style.display = 'block';
+      const label = node.label || node.id;
+      panelTitle.textContent = label.length > 80 ? label.substring(0, 80) + '...' : label;
+
+      let html = '';
+      const isWebUri = node.id.startsWith('http://') || node.id.startsWith('https://');
+      if (isWebUri) {
+        html += '<div class="property"><span class="key">URI: </span><a href="' + node.id + '" target="_blank" rel="noopener" style="font-size:11px;color:var(--gv-info,#7090d0);text-decoration:underline;word-break:break-all">' + node.id + '</a></div>';
+      }
+
+      if (node.types && node.types.length > 0) {
+        const shortTypes = node.types.map(t => t.split('/').pop().split('#').pop());
+        html += '<div class="property"><span class="key">Type: </span><span class="value" style="color:var(--gv-primary,#a0a0ff)">' + shortTypes.join(', ') + '</span></div>';
+      }
+
+      html += '<div class="property"><span class="key">Connections: </span><span class="value">' + (node.degree || 0) + '</span></div>';
+
+      const isAgent = node.types?.some(t => t.includes('Agent') || t.includes('Person'));
+      const isPost = node.types?.some(t => t.includes('SocialMediaPosting') || t.includes('Post'));
+      const isComment = node.types?.some(t => t.includes('Comment'));
+      const isSubmolt = node.types?.some(t => t.includes('Submolt'));
+
+      if (isAgent) {
+        const karma = getAnyProp(node, 'karma');
+        const posts = getAnyProp(node, 'postCount');
+        const comments = getAnyProp(node, 'commentCount');
+        const model = getAnyProp(node, 'model');
+        const desc = getProp(node, 'https://schema.org/description');
+
+        if (desc) {
+          html += '<div style="margin:8px 0;padding:8px;background:rgba(155,89,182,0.1);border:1px solid rgba(155,89,182,0.2);border-radius:8px;font-size:12px;color:var(--gv-text-secondary,#bbb);line-height:1.5">' + desc + '</div>';
+        }
+
+        html += '<div style="margin:8px 0;padding:8px 10px;background:var(--gv-surface,rgba(40,40,60,0.6));border-radius:8px;display:flex;gap:14px;flex-wrap:wrap">';
+        if (karma) html += '<div style="text-align:center;min-width:55px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Karma</div><div style="font-size:20px;font-weight:600;color:#9b59b6">' + parseInt(karma).toLocaleString() + '</div></div>';
+        if (posts) html += '<div style="text-align:center;min-width:55px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Posts</div><div style="font-size:20px;font-weight:600;color:#3498db">' + parseInt(posts).toLocaleString() + '</div></div>';
+        if (comments) html += '<div style="text-align:center;min-width:55px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Comments</div><div style="font-size:20px;font-weight:600;color:#2ecc71">' + parseInt(comments).toLocaleString() + '</div></div>';
+        html += '</div>';
+        if (model) html += '<div class="property"><span class="key">Model: </span><span class="value" style="color:var(--gv-info,#7090d0);font-family:monospace">' + model + '</span></div>';
+      }
+
+      if (isPost) {
+        const headline = getProp(node, 'https://schema.org/headline');
+        const text = getProp(node, 'https://schema.org/text');
+        const upvotes = getAnyProp(node, 'upvotes');
+        const downvotes = getAnyProp(node, 'downvotes');
+        const commentCt = getAnyProp(node, 'commentCount');
+        const category = getAnyProp(node, 'category');
+
+        if (headline) html += '<div style="margin:8px 0;font-size:14px;font-weight:600;color:var(--gv-text,#e0e0ff)">' + headline + '</div>';
+        if (text) html += '<div style="margin:8px 0;padding:8px;background:rgba(52,152,219,0.1);border:1px solid rgba(52,152,219,0.2);border-radius:8px;font-size:12px;color:var(--gv-text-secondary,#bbb);line-height:1.5">' + (text.length > 400 ? text.substring(0, 400) + '...' : text) + '</div>';
+
+        html += '<div style="margin:8px 0;padding:8px 10px;background:var(--gv-surface,rgba(40,40,60,0.6));border-radius:8px;display:flex;gap:14px;flex-wrap:wrap">';
+        if (upvotes) html += '<div style="text-align:center;min-width:50px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Upvotes</div><div style="font-size:18px;font-weight:600;color:#2ecc71">' + parseInt(upvotes).toLocaleString() + '</div></div>';
+        if (downvotes) html += '<div style="text-align:center;min-width:50px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Downvotes</div><div style="font-size:18px;font-weight:600;color:#e74c3c">' + parseInt(downvotes).toLocaleString() + '</div></div>';
+        if (commentCt) html += '<div style="text-align:center;min-width:50px"><div style="font-size:10px;color:var(--gv-text-muted,#888);text-transform:uppercase;letter-spacing:0.5px">Comments</div><div style="font-size:18px;font-weight:600;color:var(--gv-primary,#a0a0ff)">' + parseInt(commentCt).toLocaleString() + '</div></div>';
+        html += '</div>';
+        if (category) html += '<div class="property"><span class="key">Category: </span><span class="value" style="color:#e67e22">' + category + '</span></div>';
+      }
+
+      if (isComment) {
+        const text = getProp(node, 'https://schema.org/text');
+        const upvotes = getAnyProp(node, 'upvotes');
+        if (text) html += '<div style="margin:8px 0;padding:8px;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.2);border-radius:8px;font-size:12px;color:var(--gv-text-secondary,#bbb);line-height:1.5">' + text + '</div>';
+        if (upvotes) html += '<div class="property"><span class="key">Upvotes: </span><span class="value" style="color:#2ecc71;font-weight:600">' + parseInt(upvotes).toLocaleString() + '</span></div>';
+      }
+
+      if (isSubmolt) {
+        const desc = getProp(node, 'https://schema.org/description');
+        const members = getAnyProp(node, 'memberCount');
+        if (desc) html += '<div style="margin:8px 0;padding:8px;background:rgba(230,126,34,0.1);border:1px solid rgba(230,126,34,0.2);border-radius:8px;font-size:12px;color:var(--gv-text-secondary,#bbb);line-height:1.5">' + desc + '</div>';
+        if (members) html += '<div class="property"><span class="key">Members: </span><span class="value" style="color:#e67e22;font-weight:600">' + parseInt(members).toLocaleString() + '</span></div>';
+      }
+
+      const dateCreated = getProp(node, 'https://schema.org/dateCreated');
+      if (dateCreated) html += '<div class="property"><span class="key">Created: </span><span class="value">' + fmtDate(dateCreated) + '</span></div>';
+
+      panelContent.innerHTML = html;
+    });
+
+    viz.on('background:click', () => { nodePanel.style.display = 'none'; });
+
+    // --- Hover Tooltip ---
+    let mouseX = 0, mouseY = 0;
+    container.addEventListener('mousemove', (e) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+      if (hoverTooltip.style.display === 'block') positionTooltip();
+    });
+
+    function positionTooltip() {
+      const pad = 16;
+      const ttW = hoverTooltip.offsetWidth;
+      const ttH = hoverTooltip.offsetHeight;
+      let x = mouseX + pad;
+      let y = mouseY - ttH / 2;
+      if (x + ttW > window.innerWidth - 8) x = mouseX - ttW - pad;
+      if (y < 8) y = 8;
+      if (y + ttH > window.innerHeight - 8) y = window.innerHeight - ttH - 8;
+      hoverTooltip.style.left = x + 'px';
+      hoverTooltip.style.top = y + 'px';
+    }
+
+    viz.on('node:hover', (node) => {
+      if (!node) return;
+      const name = getProp(node, 'https://schema.org/name') || getProp(node, 'https://schema.org/headline') || node.label || node.id.split('/').pop();
+      const type = (node.types || []).map(t => t.split('/').pop().split('#').pop()).filter(Boolean)[0] || 'Entity';
+
+      let html = '<div class="ht-label">' + (name.length > 70 ? name.substring(0, 70) + '...' : name) + '</div>';
+      html += '<div class="ht-type">' + type + '</div>';
+
+      const upvotes = getAnyProp(node, 'upvotes');
+      const karma = getAnyProp(node, 'karma');
+      const category = getAnyProp(node, 'category');
+      const model = getAnyProp(node, 'model');
+
+      if (upvotes) html += '<div class="ht-row"><span class="ht-key">Upvotes</span><span class="ht-val">' + parseInt(upvotes).toLocaleString() + '</span></div>';
+      if (karma) html += '<div class="ht-row"><span class="ht-key">Karma</span><span class="ht-val">' + parseInt(karma).toLocaleString() + '</span></div>';
+      if (category) html += '<div class="ht-row"><span class="ht-key">Category</span><span class="ht-val">' + category + '</span></div>';
+      if (model) html += '<div class="ht-row"><span class="ht-key">Model</span><span class="ht-val">' + model + '</span></div>';
+      html += '<div class="ht-row"><span class="ht-key">Connections</span><span class="ht-val">' + (node.degree || 0) + '</span></div>';
+
+      hoverTooltip.innerHTML = html;
+      hoverTooltip.style.display = 'block';
+      positionTooltip();
+    });
+
+    viz.on('node:unhover', () => { hoverTooltip.style.display = 'none'; });
+
+    // --- Settings ---
+    document.getElementById('settings-toggle').addEventListener('click', () => {
+      const panel = document.getElementById('settings-panel');
+      const btn = document.getElementById('settings-toggle');
+      const isOpen = panel.style.display === 'block';
+      panel.style.display = isOpen ? 'none' : 'block';
+      btn.classList.toggle('open', !isOpen);
+    });
+
+    // --- SPARQL Editor ---
+    document.getElementById('sparql-float-btn').addEventListener('click', () => {
+      sparqlPanel.style.display = sparqlPanel.style.display === 'none' ? 'block' : 'none';
+    });
+    document.getElementById('btn-close-sparql').addEventListener('click', () => {
+      sparqlPanel.style.display = 'none';
+    });
+
+    document.getElementById('btn-run-construct').addEventListener('click', async () => {
+      if (!kg) return;
+      const query = sparqlInput.value.trim();
+      if (!query) return;
+      sparqlResults.innerHTML = '<span style="color:#a0a0ff">Running CONSTRUCT...</span>';
+      try {
+        viz.model.clear();
+        await viz.loadFromSource(kg, query);
+        if (viewConfig) viz.applyView(viewConfig);
+        viz.refresh();
+        const count = viz.model.nodes.size;
+        sparqlResults.innerHTML = '<span style="color:#5a8a5a">Loaded ' + count + ' nodes</span>';
+        statsEl.innerHTML = 'Nodes: <span>' + count + '</span>';
+      } catch (e) {
+        sparqlResults.innerHTML = '<span style="color:#d44">Error: ' + e.message + '</span>';
+      }
+    });
+
+    document.getElementById('btn-run-select').addEventListener('click', async () => {
+      if (!kg) return;
+      const query = sparqlInput.value.trim();
+      if (!query) return;
+      sparqlResults.innerHTML = '<span style="color:#a0a0ff">Running SELECT...</span>';
+      try {
+        const result = await kg.select(query);
+        if (result.bindings.length === 0) {
+          sparqlResults.innerHTML = '<span style="color:#888">No results</span>';
+          return;
+        }
+        let html = '<table><tr>';
+        for (const v of result.variables) html += '<th>' + v + '</th>';
+        html += '</tr>';
+        for (const row of result.bindings.slice(0, 200)) {
+          html += '<tr>';
+          for (const v of result.variables) {
+            const val = row[v] ?? '';
+            const short = val.length > 60 ? val.substring(0, 60) + '...' : val;
+            html += '<td title="' + val.replace(/"/g, '&quot;') + '">' + short + '</td>';
+          }
+          html += '</tr>';
+        }
+        html += '</table>';
+        if (result.bindings.length > 200) html += '<div style="margin-top:4px;color:#888">Showing 200 of ' + result.bindings.length + ' results</div>';
+        sparqlResults.innerHTML = html;
+      } catch (e) {
+        sparqlResults.innerHTML = '<span style="color:#d44">Error: ' + e.message + '</span>';
+      }
+    });
+
+    // --- SPARQL View Presets ---
+    const QUERIES = {
+      all: {
+        name: 'Full Graph',
+        sparql: 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+      },
+      agents: {
+        name: 'Agent Network',
+        sparql: `CONSTRUCT {
+  ?agent ?ap ?ao .
+  ?agent ?rel ?other .
+  ?agent <https://moltbook.com/vocab/memberOf> ?submolt .
+  ?submolt ?sp ?so .
+}
+WHERE {
+  ?agent a <https://moltbook.com/vocab/Agent> ; ?ap ?ao .
+  OPTIONAL { ?agent ?rel ?other . ?other a <https://moltbook.com/vocab/Agent> . FILTER(?rel != <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>) }
+  OPTIONAL { ?agent <https://moltbook.com/vocab/memberOf> ?submolt . ?submolt ?sp ?so . }
+}`,
+      },
+      posts: {
+        name: 'Posts & Comments',
+        sparql: `CONSTRUCT {
+  ?post ?pp ?po .
+  ?comment ?cp ?co .
+  ?comment <https://moltbook.com/vocab/parentPost> ?post .
+  ?comment <https://moltbook.com/vocab/replyTo> ?parent .
+  ?post <https://schema.org/author> ?author .
+  ?comment <https://schema.org/author> ?cauthor .
+  ?author <https://schema.org/name> ?aname .
+  ?cauthor <https://schema.org/name> ?cname .
+}
+WHERE {
+  ?post a <https://schema.org/SocialMediaPosting> ; ?pp ?po .
+  OPTIONAL {
+    ?comment a <https://schema.org/Comment> ; ?cp ?co ;
+             <https://moltbook.com/vocab/parentPost> ?post .
+    OPTIONAL { ?comment <https://moltbook.com/vocab/replyTo> ?parent . }
+    OPTIONAL { ?comment <https://schema.org/author> ?cauthor . ?cauthor <https://schema.org/name> ?cname . }
+  }
+  OPTIONAL { ?post <https://schema.org/author> ?author . ?author <https://schema.org/name> ?aname . }
+}`,
+      },
+    };
+
+    async function switchView(queryKey) {
+      if (!kg) return;
+      const preset = QUERIES[queryKey];
+      if (!preset) return;
+
+      loading.textContent = 'Loading ' + preset.name + '...';
+      loading.style.display = 'block';
+      sparqlInput.value = preset.sparql;
+
+      try {
+        viz.model.clear();
+        await viz.loadFromSource(kg, preset.sparql);
+        if (viewConfig) viz.applyView(viewConfig);
+        loading.style.display = 'none';
+        statsEl.innerHTML = 'Nodes: <span>' + viz.model.nodes.size + '</span>';
+      } catch (e) {
+        loading.textContent = 'Error: ' + e.message;
+        console.error(e);
+      }
+    }
+
+    document.getElementById('btn-view-all').addEventListener('click', () => switchView('all'));
+    document.getElementById('btn-view-agents').addEventListener('click', () => switchView('agents'));
+    document.getElementById('btn-view-posts').addEventListener('click', () => switchView('posts'));
+
+    // --- Palette ---
+    document.getElementById('palette-switcher').addEventListener('change', (e) => {
+      if (!viewConfig) return;
+      viewConfig.palette = e.target.value;
+      viz.applyView(viewConfig);
+      const palette = resolvePalette(viewConfig.palette, viewConfig.paletteOverrides);
+      injectPaletteCssVars(document.documentElement, palette);
+    });
+
+    // --- Main Load ---
+    async function init() {
+      try {
+        loading.textContent = 'Loading view config...';
+        viewConfig = await fetch('/demo/views/moltbook-social.json').then(r => r.json());
+
+        loading.textContent = 'Initializing SPARQL engine...';
+        kg = new OxigraphSource();
+        await kg.init();
+
+        loading.textContent = 'Loading Moltbook graph data...';
+        const ntData = await fetch('/demo/data/moltbook.nt').then(r => r.text());
+        await kg.loadNTriples(ntData);
+        const totalTriples = await kg.tripleCount();
+
+        loading.textContent = 'Building graph (' + totalTriples + ' triples)...';
+        sparqlInput.value = viewConfig.defaultSparql;
+        await viz.loadFromSource(kg, viewConfig.defaultSparql);
+        viz.applyView(viewConfig);
+
+        if (typeof resolvePalette === 'function') {
+          const palette = resolvePalette(viewConfig.palette, viewConfig.paletteOverrides);
+          injectPaletteCssVars(document.documentElement, palette);
+        }
+
+        loading.style.display = 'none';
+        statsEl.innerHTML = 'Nodes: <span>' + viz.model.nodes.size + '</span> · Triples: <span>' + totalTriples + '</span>';
+        console.log('Moltbook graph loaded (' + totalTriples + ' triples, ' + viz.model.nodes.size + ' nodes)');
+      } catch (e) {
+        loading.textContent = 'Error: ' + e.message;
+        console.error(e);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

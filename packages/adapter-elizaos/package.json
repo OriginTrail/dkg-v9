@@ -1,0 +1,27 @@
+{
+  "name": "@dkg/adapter-elizaos",
+  "version": "0.0.1",
+  "description": "ElizaOS plugin adapter — turns any ElizaOS agent into a DKG V9 node",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/agent": "workspace:*",
+    "@dkg/core": "workspace:*",
+    "@dkg/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

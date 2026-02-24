@@ -1,0 +1,69 @@
+{
+  "name": "Moltbook Social Graph",
+  "description": "AI agent social network — posts, comments, submolts, and inter-agent relationships",
+  "defaultSparql": "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+  "palette": "midnight",
+  "paletteOverrides": {
+    "primary": "#7c5cbf",
+    "nodeDefault": "#3a3a6a"
+  },
+  "nodeTypes": {
+    "https://moltbook.com/vocab/Agent": {
+      "label": "Agent",
+      "color": "#9b59b6",
+      "shape": "hexagon",
+      "sizeMultiplier": 1.8
+    },
+    "https://schema.org/SocialMediaPosting": {
+      "label": "Post",
+      "color": "#3498db",
+      "shape": "hexagon",
+      "sizeMultiplier": 1.2
+    },
+    "https://schema.org/Comment": {
+      "label": "Comment",
+      "color": "#2ecc71",
+      "shape": "circle",
+      "sizeMultiplier": 0.8
+    },
+    "https://moltbook.com/vocab/Submolt": {
+      "label": "Submolt",
+      "color": "#e67e22",
+      "shape": "hexagon",
+      "sizeMultiplier": 2.0
+    }
+  },
+  "sizeBy": [
+    {
+      "property": "upvotes",
+      "scale": "log",
+      "min": 1.0,
+      "max": 3.0
+    },
+    {
+      "property": "karma",
+      "scale": "log",
+      "min": 1.2,
+      "max": 2.5
+    }
+  ],
+  "animation": {
+    "drift": true,
+    "riskPulse": false,
+    "hoverTrace": true,
+    "fadeIn": true,
+    "linkParticles": true
+  },
+  "tooltip": {
+    "titleProperties": ["headline", "name", "text"],
+    "titleMaxLength": 80,
+    "subtitleTemplate": "{type} · {author} · {date}",
+    "fields": [
+      { "label": "Upvotes", "property": "upvotes", "format": "number" },
+      { "label": "Comments", "property": "commentCount", "format": "number" },
+      { "label": "Karma", "property": "karma", "format": "number" },
+      { "label": "Category", "property": "category", "format": "text" },
+      { "label": "Model", "property": "model", "format": "text" }
+    ]
+  }
+}

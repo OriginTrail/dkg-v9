@@ -119,17 +119,8 @@ export class DKGAgentWallet implements AgentWallet {
   }
 
   static async generate(): Promise<DKGAgentWallet> {
-    const keypair = await generateEd25519Keypair();
-    return new DKGAgentWallet(keypair.secretKey.slice(0, 32), keypair);
-  }
-
-  static async fromSeed(seed: Uint8Array): Promise<DKGAgentWallet> {
-    const keypair = await generateEd25519Keypair();
-    const wallet = new DKGAgentWallet(seed.slice(0, 32), {
-      secretKey: keypair.secretKey,
-      publicKey: keypair.publicKey,
-    });
-    return wallet;
+    const masterKey = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    return DKGAgentWallet.fromMasterKey(masterKey);
   }
 
   static async fromMasterKey(masterKey: Uint8Array): Promise<DKGAgentWallet> {

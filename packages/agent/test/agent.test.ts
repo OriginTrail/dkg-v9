@@ -78,6 +78,15 @@ describe('AgentWallet', () => {
         Buffer.from(wallet.masterKey).toString('hex'),
       );
 
+      expect(loaded.peerId()).toBe(wallet.peerId());
+
+      expect(Buffer.from(loaded.keypair.secretKey).toString('hex')).toBe(
+        Buffer.from(wallet.keypair.secretKey).toString('hex'),
+      );
+      expect(Buffer.from(loaded.keypair.publicKey).toString('hex')).toBe(
+        Buffer.from(wallet.keypair.publicKey).toString('hex'),
+      );
+
       const evmOrig = wallet.deriveEvmWallet();
       const evmLoaded = loaded.deriveEvmWallet();
       expect(evmLoaded.address).toBe(evmOrig.address);
@@ -93,8 +102,26 @@ describe('AgentWallet', () => {
   it('fromMasterKey produces same derived wallets', async () => {
     const wallet = await DKGAgentWallet.generate();
     const restored = await DKGAgentWallet.fromMasterKey(wallet.masterKey);
+    expect(restored.peerId()).toBe(wallet.peerId());
     expect(restored.deriveEvmWallet().address).toBe(wallet.deriveEvmWallet().address);
     expect(restored.deriveSolanaWallet().address).toBe(wallet.deriveSolanaWallet().address);
+  });
+
+  it('DKGAgent.create() persists identity across restarts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-persist-'));
+    try {
+      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir });
+      const peerId1 = agent1.wallet.keypair.publicKey;
+
+      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir });
+      const peerId2 = agent2.wallet.keypair.publicKey;
+
+      expect(Buffer.from(peerId2).toString('hex')).toBe(
+        Buffer.from(peerId1).toString('hex'),
+      );
+    } finally {
+      await rm(dir, { recursive: true });
+    }
   });
 
   it('different wallets produce different addresses', async () => {
@@ -383,6 +410,35 @@ describe('Encryption', () => {
     expect(decrypted[0]).toBe(42);
     expect(decrypted[99_999]).toBe(42);
   });
+});
+
+describe('PeerId key extraction', () => {
+  it('extracts Ed25519 public key from libp2p PeerId', async () => {
+    const agent = await DKGAgent.create({
+      name: 'KeyTest',
+      listenPort: 0,
+      skills: [],
+    });
+    await agent.start();
+
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    const peerId = peerIdFromString(agent.peerId);
+    const digest = peerId.toMultihash().digest;
+
+    // Ed25519 PeerId protobuf: [08 01 12 20 <32 bytes of Ed25519 public key>]
+    expect(digest[0]).toBe(0x08);
+    expect(digest[1]).toBe(0x01);
+    expect(digest[2]).toBe(0x12);
+    expect(digest[3]).toBe(0x20);
+
+    const extractedKey = digest.slice(4, 36);
+    expect(extractedKey.length).toBe(32);
+    expect(Buffer.from(extractedKey).toString('hex')).toBe(
+      Buffer.from(agent.wallet.keypair.publicKey).toString('hex'),
+    );
+
+    await agent.stop();
+  }, 10000);
 });
 
 describe('DKGAgent (integration)', () => {

@@ -15,8 +15,9 @@
     "@dkg/publisher": "workspace:*",
     "@dkg/query": "workspace:*",
     "@dkg/storage": "workspace:*",
-    "@noble/ciphers": "^2.1.1",
+    "@libp2p/peer-id": "^6.0.4",
     "@multiformats/multiaddr": "*",
+    "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2",
     "@noble/ed25519": "^3",
     "@noble/hashes": "^2"

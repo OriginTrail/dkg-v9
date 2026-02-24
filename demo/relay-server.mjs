@@ -16,8 +16,13 @@
  */
 
 import { DKGNode } from '@dkg/core';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const PORT = parseInt(process.argv[2] || '9090', 10);
+const DATA_DIR = process.argv.includes('--data-dir')
+  ? process.argv[process.argv.indexOf('--data-dir') + 1]
+  : './data/relay';
 
 function ts() {
   const d = new Date();
@@ -35,8 +40,25 @@ function short(peerId) {
   return peerId;
 }
 
+async function loadOrCreateKey(dir) {
+  const keyPath = join(dir, 'relay-key.bin');
+  try {
+    const data = await readFile(keyPath);
+    log(`Identity loaded from ${keyPath}`);
+    return new Uint8Array(data);
+  } catch {
+    const key = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    await mkdir(dir, { recursive: true });
+    await writeFile(keyPath, key, { mode: 0o600 });
+    log(`New identity generated, saved to ${keyPath}`);
+    return key;
+  }
+}
+
 async function main() {
   log('=== DKG Relay Server ===');
+
+  const privateKey = await loadOrCreateKey(DATA_DIR);
 
   const node = new DKGNode({
     listenAddresses: [
@@ -45,6 +67,7 @@ async function main() {
     ],
     enableMdns: false,
     enableRelayServer: true,
+    privateKey,
   });
 
   await node.start();

@@ -4,15 +4,17 @@ A decentralized knowledge marketplace run by AI agents. Any agent — built with
 
 ## Architecture
 
-Six packages in a pnpm monorepo, built with Turborepo:
+Eight packages in a pnpm monorepo, built with Turborepo:
 
 ```
-@dkg/core          P2P networking (libp2p), protocol messages, crypto
-@dkg/storage       Triple store adapters (Oxigraph, in-memory)
-@dkg/chain         Blockchain abstraction (EVM + Solana via ChainAdapter interface)
-@dkg/publisher     Publishing protocol, merkle trees, skolemization, on-chain finalization
-@dkg/query         SPARQL engine, paranet-scoped queries, KA resolution
-@dkg/agent         Agent identity, skill profiles, messaging, framework adapters
+@dkg/core              P2P networking (libp2p), protocol messages, crypto
+@dkg/storage           Triple store adapters (Oxigraph, in-memory)
+@dkg/chain             Blockchain abstraction (EVM + Solana via ChainAdapter interface)
+@dkg/publisher         Publishing protocol, merkle trees, skolemization, on-chain finalization
+@dkg/query             SPARQL engine, paranet-scoped queries, KA resolution
+@dkg/agent             Agent identity, skill profiles, messaging, persistent keys
+@dkg/adapter-openclaw  OpenClaw plugin — registers DKG tools + lifecycle hooks
+@dkg/adapter-elizaos   ElizaOS plugin — DKG actions, providers, and node service
 ```
 
 Dependency graph:
@@ -105,13 +107,15 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 
 ## Current Status
 
-**Phase 1 is nearly complete.** Core protocol + agent layer are built and tested. Relay/hole-punching enables cross-network connectivity.
+**Phase 1 is nearly complete.** Core protocol + agent layer are built and tested. Framework adapters, persistent identity, and relay/hole-punching are done.
 
 | Work Package | Status | Tests |
 |---|---|---|
 | WP-1A-i: Protocol Core | Done | 67 tests (core, storage, publisher, query) |
-| WP-1B: Agent Layer | Done | 32 tests (wallet, profiles, discovery, encryption, messaging, E2E) |
+| WP-1B: Agent Layer | Done | 33 tests (wallet, profiles, discovery, encryption, messaging, persistence, E2E) |
 | Relay + Hole Punching | Done | 3 tests (circuit relay, relay startup, relay peer connect) |
+| Framework Adapters | Done | OpenClaw plugin (`@dkg/adapter-openclaw`) + ElizaOS plugin (`@dkg/adapter-elizaos`) |
+| Persistent Identity | Done | Keys saved to disk, same PeerId across restarts |
 
 ### What works today
 
@@ -121,19 +125,21 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 - **Private triples** — mixed public/private KAs; private triples stay on the publisher, verified via merkle roots
 - **GossipSub** — paranet-scoped pub/sub for broadcasting published knowledge
 - **Agent identity** — Ed25519 master key with BIP-32/SLIP-10 derivation for EVM and Solana
+- **Persistent identity** — keys saved to disk, same PeerId survives node restarts
 - **Skill ontology** — `dkgskill:` RDF vocabulary with SHACL validation shapes
 - **Profile publishing** — agents publish RDF profiles as Knowledge Assets in the Agent Registry paranet
 - **Agent discovery** — SPARQL-based skill search (local-only, per Store Isolation principle)
 - **Encrypted messaging** — X25519 key exchange, XChaCha20-Poly1305 encryption, replay protection
 - **Interactive chat** — agents exchange arbitrary messages via `/dkg/message/1.0.0`
 - **Store isolation** — no node exposes its SPARQL endpoint; all inter-node exchange via protocol messages
+- **Framework adapters** — OpenClaw plugin (tools + lifecycle hooks + SKILL.md) and ElizaOS plugin (actions + provider + service)
 
 ### Remaining Part 1
 
 | Item | Package | Description |
 |---|---|---|
-| Private KA access protocol | `@dkg/core` | `/dkg/access/1.0.0` — AccessRequest/Response, mock payment verify, merkle verify, triple transfer |
-| Framework adapters | `@dkg/agent` | OpenClaw DkgNodeSkill + ElizaOS plugin |
+| Private KA access protocol | `@dkg/publisher` | `/dkg/access/1.0.0` — AccessRequest/Response, mock payment verify, merkle verify, triple transfer |
+| Triple sync protocol | `@dkg/core` | `/dkg/sync/1.0.0` — state vector exchange, delta-based replication between peers |
 
 ### Next: Phase 2 (Blockchain Anchoring)
 

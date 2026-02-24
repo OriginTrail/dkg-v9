@@ -82,7 +82,17 @@ export class DKGAgent {
   }
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
-    const wallet = await DKGAgentWallet.generate();
+    let wallet: DKGAgentWallet;
+    if (config.dataDir) {
+      try {
+        wallet = await DKGAgentWallet.load(config.dataDir);
+      } catch {
+        wallet = await DKGAgentWallet.generate();
+        await wallet.save(config.dataDir);
+      }
+    } else {
+      wallet = await DKGAgentWallet.generate();
+    }
     const store = config.store ?? new OxigraphStore();
     const chain = new MockChainAdapter();
     const eventBus = new TypedEventBus();
@@ -233,10 +243,7 @@ export class DKGAgent {
   ): Promise<SkillResponse> {
     if (!this.messageHandler) throw new Error('Agent not started');
 
-    // For now, use a zero shared secret (encryption negotiation is Part 2)
-    const recipientX25519Public = new Uint8Array(32);
-
-    return this.messageHandler.sendSkillRequest(recipientPeerId, recipientX25519Public, {
+    return this.messageHandler.sendSkillRequest(recipientPeerId, {
       skillUri,
       inputData,
       callback: 'inline',

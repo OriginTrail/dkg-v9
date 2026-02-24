@@ -15,6 +15,7 @@ import { dcutr } from '@libp2p/dcutr';
 import { autoNAT } from '@libp2p/autonat';
 import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString } from '@libp2p/peer-id';
+import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { DKGNodeConfig } from './types.js';
 import { DHT_PROTOCOL } from './constants.js';
 
@@ -39,9 +40,18 @@ export class DKGNode {
   async start(): Promise<void> {
     if (this.node) return;
 
-    const privateKey = this.config.privateKey
-      ? privateKeyFromRaw(this.config.privateKey)
-      : await generateKeyPair('Ed25519');
+    let privateKey;
+    if (this.config.privateKey) {
+      // privateKeyFromRaw needs 64 bytes for Ed25519: seed(32) + publicKey(32)
+      const seed = this.config.privateKey;
+      const pub = await ed25519GetPublicKey(seed);
+      const raw64 = new Uint8Array(64);
+      raw64.set(seed, 0);
+      raw64.set(pub, 32);
+      privateKey = privateKeyFromRaw(raw64);
+    } else {
+      privateKey = await generateKeyPair('Ed25519');
+    }
 
     const peerDiscovery = [];
     if (this.config.bootstrapPeers && this.config.bootstrapPeers.length > 0) {

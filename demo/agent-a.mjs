@@ -28,7 +28,14 @@ if (relayIdx !== -1 && args[relayIdx + 1]) {
   relayPeers.push(args[relayIdx + 1]);
   args.splice(relayIdx, 2);
 }
+const dataDirIdx = args.indexOf('--data-dir');
+let dataDir = null;
+if (dataDirIdx !== -1 && args[dataDirIdx + 1]) {
+  dataDir = args[dataDirIdx + 1];
+  args.splice(dataDirIdx, 2);
+}
 const PORT = parseInt(args[0] || '9100', 10);
+if (!dataDir) dataDir = `.dkg/agent-a`;
 
 function ts() {
   const d = new Date();
@@ -49,6 +56,7 @@ async function main() {
     framework: 'OpenClaw',
     description: 'AI agent providing image analysis capabilities',
     listenPort: PORT,
+    dataDir,
     relayPeers: relayPeers.length ? relayPeers : undefined,
     skills: [
       {

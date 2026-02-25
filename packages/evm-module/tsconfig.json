@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "typeRoots": ["./custom_types"],
+    "strict": true,
+    "esModuleInterop": true,
+    "moduleResolution": "node",
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "dist",
+    "resolveJsonModule": true
+  },
+  "include": ["./scripts", "./tasks", "./deploy", "./test", "./typechain", "./utils"],
+  "files": ["hardhat.node.config.ts", "_from_repo.hardhat.config.ts", "./index.ts"]
+}

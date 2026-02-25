@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@dkg/core": "workspace:*",
-    "ethers": "^6",
-    "@solana/web3.js": "^1"
+    "@dkg/evm-module": "workspace:*",
+    "ethers": "^6"
   }
 }

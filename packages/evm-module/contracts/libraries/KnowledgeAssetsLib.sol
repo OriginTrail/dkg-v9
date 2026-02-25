@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+
+pragma solidity ^0.8.20;
+
+library KnowledgeAssetsLib {
+    struct PublisherRange {
+        uint64 startId;
+        uint64 endId;
+    }
+
+    struct KnowledgeBatch {
+        uint72 publisherIdentityId;
+        address publisherAddress;
+        bytes32 merkleRoot;
+        uint64 publicByteSize;
+        uint32 knowledgeAssetsCount;
+        uint64 startKAId;
+        uint64 endKAId;
+        uint40 startEpoch;
+        uint40 endEpoch;
+        uint96 tokenAmount;
+        bool isPermanent;
+        uint256 createdAt;
+    }
+
+    error PublisherRangeExhausted(uint72 identityId, uint64 needed, uint64 available);
+    error KAIdNotInPublisherRange(uint72 identityId, uint64 kaId);
+    error KAIdAlreadyUsed(uint72 identityId, uint64 kaId);
+    error BatchNotFound(uint256 batchId);
+    error NotBatchPublisher(uint256 batchId, address caller);
+    error BatchExpired(uint256 batchId, uint256 currentEpoch, uint40 endEpoch);
+    error InvalidTokenAmount(uint96 expected, uint96 provided);
+    error InvalidKARange(uint64 startKAId, uint64 endKAId);
+    error InvalidSignature(uint72 identityId, bytes32 messageHash, bytes32 r, bytes32 vs);
+    error SignerIsNotNodeOperator(uint72 identityId, address signer);
+    error SignaturesSignersMismatch(uint256 rAmount, uint256 vsAmount, uint256 identityIdsAmount);
+    error MinSignaturesRequirementNotMet(uint256 required, uint256 received);
+}

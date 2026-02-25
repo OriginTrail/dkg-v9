@@ -1,0 +1,160 @@
+{
+  "development": {
+    "ParametersStorage": {
+      "maximumStake": "5000000000000000000000000",
+      "minimumStake": "50000000000000000000000",
+      "stakeWithdrawalDelay": "60",
+      "nodeAskUpdateDelay": "60",
+      "operatorFeeUpdateDelay": "60",
+      "opWalletsLimitOnProfileCreation": "50",
+      "shardingTableSizeLimit": "500",
+      "askUpperBoundFactor": "1467000000000000000",
+      "askLowerBoundFactor": "533000000000000000",
+      "v81ReleaseEpoch": "1"
+    },
+    "Chronos": {
+      "epochLength": "3600"
+    },
+    "KnowledgeCollectionStorage": {
+      "knowledgeCollectionSize": "1000000",
+      "uriBase": "did:dkg"
+    },
+    "RandomSamplingStorage": {
+      "hardhat": {
+        "proofingPeriodDurationInBlocks": "100",
+        "W1": "0",
+        "W2": "2"
+      },
+      "localhost": {
+        "proofingPeriodDurationInBlocks": "100",
+        "W1": "0",
+        "W2": "2"
+      }
+    }
+  },
+  "devnet": {
+    "overrides": {},
+    "ParametersStorage": {
+      "maximumStake": "5000000000000000000000000",
+      "minimumStake": "50000000000000000000000",
+      "stakeWithdrawalDelay": "60",
+      "nodeAskUpdateDelay": "60",
+      "operatorFeeUpdateDelay": "60",
+      "opWalletsLimitOnProfileCreation": "50",
+      "shardingTableSizeLimit": "500",
+      "askUpperBoundFactor": "1467000000000000000",
+      "askLowerBoundFactor": "533000000000000000",
+      "v81ReleaseEpoch": "1"
+    },
+    "Chronos": {
+      "epochLength": "3600"
+    },
+    "KnowledgeCollectionStorage": {
+      "knowledgeCollectionSize": "1000000",
+      "uriBase": "did:dkg"
+    },
+    "RandomSamplingStorage": {
+      "base_sepolia_dev": {
+        "proofingPeriodDurationInBlocks": "900",
+        "W1": "0",
+        "W2": "2"
+      },
+      "base_sepolia_stable_dev_staging": {
+        "proofingPeriodDurationInBlocks": "900",
+        "W1": "0",
+        "W2": "2"
+      },
+      "base_sepolia_stable_dev_prod": {
+        "proofingPeriodDurationInBlocks": "900",
+        "W1": "0",
+        "W2": "2"
+      }
+    }
+  },
+  "testnet": {
+    "overrides": {},
+    "ParametersStorage": {
+      "maximumStake": "10000000000000000000000000",
+      "minimumStake": "50000000000000000000000",
+      "stakeWithdrawalDelay": "60",
+      "nodeAskUpdateDelay": "60",
+      "operatorFeeUpdateDelay": "60",
+      "opWalletsLimitOnProfileCreation": "50",
+      "shardingTableSizeLimit": "500",
+      "askUpperBoundFactor": "1467000000000000000",
+      "askLowerBoundFactor": "533000000000000000",
+      "v81ReleaseEpoch": "162"
+    },
+    "Chronos": {
+      "startTime": "1736812800",
+      "epochLength": "86400"
+    },
+    "KnowledgeCollectionStorage": {
+      "knowledgeCollectionSize": "1000000",
+      "uriBase": "did:dkg"
+    },
+    "RandomSamplingStorage": {
+      "neuroweb_testnet": {
+        "proofingPeriodDurationInBlocks": "257",
+        "W1": "0",
+        "W2": "2"
+      },
+      "gnosis_chiado_test": {
+        "proofingPeriodDurationInBlocks": "360",
+        "W1": "0",
+        "W2": "2"
+      },
+      "base_sepolia_test": {
+        "proofingPeriodDurationInBlocks": "900",
+        "W1": "0",
+        "W2": "2"
+      }
+    }
+  },
+  "mainnet": {
+    "overrides": {
+      "neuroweb_mainnet": {
+        "ParametersStorage": {
+          "stakeWithdrawalDelay": "300"
+        }
+      }
+    },
+    "ParametersStorage": {
+      "maximumStake": "10000000000000000000000000",
+      "minimumStake": "50000000000000000000000",
+      "stakeWithdrawalDelay": "2419200",
+      "nodeAskUpdateDelay": "86400",
+      "operatorFeeUpdateDelay": "2419200",
+      "opWalletsLimitOnProfileCreation": "50",
+      "shardingTableSizeLimit": "500",
+      "askUpperBoundFactor": "1467000000000000000",
+      "askLowerBoundFactor": "533000000000000000",
+      "v81ReleaseEpoch": "6"
+    },
+    "Chronos": {
+      "startTime": "1736812800",
+      "epochLength": "2592000"
+    },
+    "KnowledgeCollectionStorage": {
+      "knowledgeCollectionSize": "1000000",
+      "uriBase": "did:dkg"
+    },
+    "RandomSamplingStorage": {
+      "neuroweb_mainnet": {
+        "proofingPeriodDurationInBlocks": "300",
+        "W1": "0",
+        "W2": "2"
+      },
+      "gnosis_mainnet": {
+        "proofingPeriodDurationInBlocks": "360",
+        "W1": "0",
+        "W2": "2"
+      },
+      "base_mainnet": {
+        "proofingPeriodDurationInBlocks": "900",
+        "W1": "0",
+        "W2": "2"
+      }
+    }
+  }
+}

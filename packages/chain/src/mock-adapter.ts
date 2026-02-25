@@ -2,6 +2,10 @@ import type {
   ChainAdapter,
   IdentityProof,
   ReservedRange,
+  BatchMintParams,
+  BatchMintResult,
+  UpdateKAParams,
+  ExtendStorageParams,
   CreateKCParams,
   UpdateKCParams,
   TxResult,
@@ -12,16 +16,18 @@ import type {
 
 /**
  * In-memory mock chain adapter for off-chain development.
- * Simulates on-chain operations with deterministic results.
+ * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
  */
 export class MockChainAdapter implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
 
   private nextIdentityId = 1n;
-  private nextKcId = 1n;
+  private nextBatchId = 1n;
   private nextBlock = 1;
   private identities = new Map<string, bigint>();
+  private publisherNextId = new Map<bigint, bigint>(); // publisherId -> next KA ID
+  private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private collections = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private paranets = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
@@ -41,18 +47,80 @@ export class MockChainAdapter implements ChainAdapter {
     return id;
   }
 
-  async reserveKnowledgeCollectionIds(count: number): Promise<ReservedRange> {
-    const start = this.nextKcId;
-    this.nextKcId += BigInt(count);
+  // --- V9 UAL-based methods ---
+
+  async reserveUALRange(publisherIdentityId: bigint, count: number): Promise<ReservedRange> {
+    let nextId = this.publisherNextId.get(publisherIdentityId) ?? 1n;
+    const startId = nextId;
+    const endId = nextId + BigInt(count) - 1n;
+    this.publisherNextId.set(publisherIdentityId, endId + 1n);
+
+    this.pushEvent('UALRangeReserved', {
+      publisherIdentityId: publisherIdentityId.toString(),
+      startId: startId.toString(),
+      endId: endId.toString(),
+    });
+
+    return { startId, endId };
+  }
+
+  async batchMintKnowledgeAssets(params: BatchMintParams): Promise<BatchMintResult> {
+    const batchId = this.nextBatchId++;
+    const kaCount = Number(params.endKAId - params.startKAId) + 1;
+
+    this.batches.set(batchId, {
+      merkleRoot: params.merkleRoot,
+      kaCount,
+    });
+
+    this.pushEvent('KnowledgeBatchCreated', {
+      batchId: batchId.toString(),
+      publisherIdentityId: params.publisherIdentityId.toString(),
+      merkleRoot: toHex(params.merkleRoot),
+      startKAId: params.startKAId.toString(),
+      endKAId: params.endKAId.toString(),
+      kaCount,
+    });
+
     return {
-      startId: start,
-      endId: start + BigInt(count) - 1n,
-      expiresAtEpoch: Math.floor(Date.now() / 1000) + 3600,
+      ...this.txResult(true),
+      batchId,
     };
   }
 
+  async updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult> {
+    const existing = this.batches.get(params.batchId);
+    if (!existing) {
+      return this.txResult(false);
+    }
+
+    existing.merkleRoot = params.newMerkleRoot;
+    this.pushEvent('KnowledgeBatchUpdated', {
+      batchId: params.batchId.toString(),
+      newMerkleRoot: toHex(params.newMerkleRoot),
+    });
+
+    return this.txResult(true);
+  }
+
+  async extendStorage(params: ExtendStorageParams): Promise<TxResult> {
+    const existing = this.batches.get(params.batchId);
+    if (!existing) {
+      return this.txResult(false);
+    }
+
+    this.pushEvent('StorageExtended', {
+      batchId: params.batchId.toString(),
+      additionalEpochs: params.additionalEpochs,
+    });
+
+    return this.txResult(true);
+  }
+
+  // --- V8 backward compatibility ---
+
   async createKnowledgeCollection(params: CreateKCParams): Promise<TxResult> {
-    const kcId = this.nextKcId++;
+    const kcId = this.nextBatchId++;
     this.collections.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
@@ -82,6 +150,8 @@ export class MockChainAdapter implements ChainAdapter {
     return this.txResult(true);
   }
 
+  // --- Events ---
+
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     const from = filter.fromBlock ?? 0;
     for (const evt of this.events) {
@@ -94,6 +164,8 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
+  // --- Paranets ---
+
   async createParanet(params: CreateParanetParams): Promise<TxResult> {
     this.paranets.set(params.paranetId, params.metadata);
     this.pushEvent('ParanetCreated', { paranetId: params.paranetId });
@@ -103,6 +175,12 @@ export class MockChainAdapter implements ChainAdapter {
   async submitToParanet(kcId: string, paranetId: string): Promise<TxResult> {
     this.pushEvent('KCSubmittedToParanet', { kcId, paranetId });
     return this.txResult(true);
+  }
+
+  // --- Test helpers ---
+
+  getBatch(batchId: bigint) {
+    return this.batches.get(batchId);
   }
 
   getCollection(kcId: bigint) {

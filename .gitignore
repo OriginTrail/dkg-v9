@@ -6,3 +6,8 @@ coverage/
 .env
 .env.*
 .dkg/
+
+# Hardhat build output
+packages/evm-module/artifacts/
+packages/evm-module/cache/
+packages/evm-module/typechain/

@@ -105,6 +105,8 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
+  getIdentityId(): Promise<bigint>;
+  ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint>;
 
   // V9 UAL reservation (publisher address is derived from signer)
   reserveUALRange(count: number): Promise<ReservedRange>;

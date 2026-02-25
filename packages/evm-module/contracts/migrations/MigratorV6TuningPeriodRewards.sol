@@ -175,7 +175,9 @@ contract MigratorV6TuningPeriodRewards is INamed, IVersioned, ContractStatus {
                     return true;
                 }
             } // solhint-disable-next-line no-empty-blocks
-        } catch {}
+        } catch {
+            // Not a multisig or call reverted; treat as not owner.
+        }
 
         return false;
     }

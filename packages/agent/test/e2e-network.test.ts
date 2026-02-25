@@ -25,9 +25,17 @@ describe('Network E2E (3 nodes + relay)', () => {
 
   afterAll(async () => {
     for (const n of [nodeA, nodeB, nodeC]) {
-      try { await n?.stop(); } catch {}
+      try {
+        await n?.stop();
+      } catch (err) {
+        console.warn('Teardown: node.stop() failed', err);
+      }
     }
-    try { await relay?.stop(); } catch {}
+    try {
+      await relay?.stop();
+    } catch (err) {
+      console.warn('Teardown: relay.stop() failed', err);
+    }
   });
 
   // ── Step 1: Bootstrap ─────────────────────────────────────────────

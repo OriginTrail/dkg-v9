@@ -215,7 +215,7 @@ To join the DKG V9 Testnet, the relay address is pre-configured in `network/test
 const agent = await DKGAgent.create({
   name: 'MyNode',
   dataDir: '.dkg/my-node',
-  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
 });
 ```
 

@@ -2,8 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
-import { ethers } from 'ethers';
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent, loadOpWallets } from '@dkg/agent';
 import { computeNetworkId } from '@dkg/core';
 import {
   loadConfig,
@@ -35,26 +34,55 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   const startedAt = Date.now();
   const messages: ChatEntry[] = [];
 
+  const logFile = logPath();
+
+  // Tee all stdout/stderr (including structured Logger output) into the log file
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((chunk: any, ...args: any[]) => {
+    appendFile(logFile, typeof chunk === 'string' ? chunk : chunk.toString()).catch(() => {});
+    return origStdoutWrite(chunk, ...args);
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: any, ...args: any[]) => {
+    appendFile(logFile, typeof chunk === 'string' ? chunk : chunk.toString()).catch(() => {});
+    return origStderrWrite(chunk, ...args);
+  }) as typeof process.stderr.write;
+
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
-    if (foreground) process.stdout.write(line + '\n');
-    appendFile(logPath(), line + '\n').catch(() => {});
+    if (foreground) origStdoutWrite(line + '\n');
+    appendFile(logFile, line + '\n').catch(() => {});
   }
 
   const role = config.nodeRole ?? 'edge';
+
+  const banner = String.raw`
+__/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\\\\\\\\\____        
+ _\/\\\////////\\\__\/\\\_____/\\\//____/\\\//////////__\/\\\_______\/\\\____/\\\///////\\\__       
+  _\/\\\______\//\\\_\/\\\__/\\\//______/\\\_____________\//\\\______/\\\____/\\\______\//\\\_      
+   _\/\\\_______\/\\\_\/\\\\\\//\\\_____\/\\\____/\\\\\\\__\//\\\____/\\\____\//\\\_____/\\\\\_     
+    _\/\\\_______\/\\\_\/\\\//_\//\\\____\/\\\___\/////\\\___\//\\\__/\\\______\///\\\\\\\\/\\\_    
+     _\/\\\_______\/\\\_\/\\\____\//\\\___\/\\\_______\/\\\____\//\\\/\\\_________\////////\/\\\_   
+      _\/\\\_______/\\\__\/\\\_____\//\\\__\/\\\_______\/\\\_____\//\\\\\________/\\________/\\\__  
+       _\/\\\\\\\\\\\\/___\/\\\______\//\\\_\//\\\\\\\\\\\\/_______\//\\\________\//\\\\\\\\\\\/___ 
+        _\////////////_____\///________\///___\////////////__________\///__________\///////////_____
+`;
+  origStdoutWrite(banner + '\n');
+  appendFile(logFile, banner + '\n').catch(() => {});
+
   log(`Starting DKG ${role} node "${config.name}"...`);
 
   const network = await loadNetworkConfig();
 
-  // Build chain config from CLI config, network config, or environment
-  const chainConfig = config.chain ?? (network?.chain ? {
-    ...network.chain,
-    privateKey: process.env.DKG_PRIVATE_KEY ?? '',
-  } : undefined);
-
-  if (!chainConfig?.privateKey) {
-    log('WARNING: No EVM private key configured. Set DKG_PRIVATE_KEY env var or add chain.privateKey to config.');
+  // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
+  const opWallets = await loadOpWallets(dkgDir());
+  log(`Operational wallets (${opWallets.wallets.length}):`);
+  for (const w of opWallets.wallets) {
+    log(`  ${w.address}`);
   }
+
+  // Build chain config from CLI config or network config
+  const chainBase = config.chain ?? network?.chain;
 
   const agent = await DKGAgent.create({
     name: config.name,
@@ -63,11 +91,11 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     dataDir: dkgDir(),
     relayPeers: config.relay ? [config.relay] : undefined,
     nodeRole: role,
-    chainConfig: chainConfig && chainConfig.privateKey ? {
-      rpcUrl: chainConfig.rpcUrl,
-      hubAddress: chainConfig.hubAddress,
-      privateKey: chainConfig.privateKey,
-      chainId: chainConfig.chainId,
+    chainConfig: chainBase ? {
+      rpcUrl: chainBase.rpcUrl,
+      hubAddress: chainBase.hubAddress,
+      operationalKeys: opWallets.wallets.map((w) => w.privateKey),
+      chainId: chainBase.chainId,
     } : undefined,
   });
 
@@ -106,18 +134,27 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     }
   }
 
-  // Subscribe to configured paranets
-  if (config.paranets?.length) {
-    for (const p of config.paranets) {
-      agent.subscribeToParanet(p);
-      log(`Subscribed to paranet: ${p}`);
+  // Subscribe to configured paranets + network defaults
+  const paranetsToSubscribe = new Set([
+    ...(config.paranets ?? []),
+    ...(network?.defaultParanets ?? []),
+  ]);
+  for (const p of paranetsToSubscribe) {
+    const exists = await agent.paranetExists(p);
+    if (!exists) {
+      try {
+        await agent.createParanet({ id: p, name: p, description: `Default testnet paranet "${p}"` });
+        log(`Created paranet: ${p}`);
+      } catch {
+        log(`Paranet "${p}" not yet available (will receive via gossip)`);
+      }
     }
+    agent.subscribeToParanet(p);
+    log(`Subscribed to paranet: ${p}`);
   }
 
-  // Periodically re-publish profile so new peers discover us
-  const profileInterval = setInterval(async () => {
-    try { await agent.publishProfile(); } catch {}
-  }, 30_000);
+  // Profile is published once at startup (above). No periodic re-publish —
+  // peers discover us via the initial gossip broadcast + relay.
 
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
@@ -134,7 +171,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   const server = createServer(async (req, res) => {
     try {
-      await handleRequest(req, res, agent, config, startedAt, messages);
+      await handleRequest(req, res, agent, config, startedAt, messages, opWallets, network);
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
     }
@@ -154,7 +191,6 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   // Graceful shutdown
   async function shutdown() {
     log('Shutting down...');
-    clearInterval(profileInterval);
     if (updateInterval) clearInterval(updateInterval);
     server.close();
     await agent.stop();
@@ -175,6 +211,8 @@ async function handleRequest(
   config: DkgConfig,
   startedAt: number,
   messages: ChatEntry[],
+  opWallets: import('@dkg/agent').OpWalletsConfig,
+  network: Awaited<ReturnType<typeof loadNetworkConfig>>,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -310,16 +348,11 @@ async function handleRequest(
     return jsonResponse(res, 200, { id, exists });
   }
 
-  // GET /api/wallet
-  if (req.method === 'GET' && path === '/api/wallet') {
-    const privateKey = config.chain?.privateKey ?? process.env.DKG_PRIVATE_KEY;
-    if (!privateKey) {
-      return jsonResponse(res, 400, { error: 'No EVM private key configured' });
-    }
-    const wallet = new ethers.Wallet(privateKey);
+  // GET /api/wallets
+  if (req.method === 'GET' && (path === '/api/wallet' || path === '/api/wallets')) {
     return jsonResponse(res, 200, {
-      address: wallet.address,
-      chainId: config.chain?.chainId,
+      wallets: opWallets.wallets.map((w) => w.address),
+      chainId: (config.chain ?? network?.chain)?.chainId,
     });
   }
 
@@ -376,6 +409,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+/** Normalize repo to "owner/name" (strip URL prefix or .git suffix). */
+function normalizeRepo(repo: string): string {
+  const t = repo.trim().replace(/\.git$/i, '');
+  const m = t.match(/github\.com[/:](\S+\/\S+?)(?:\/|$)/);
+  if (m) return m[1];
+  return t;
+}
+
 async function checkForUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
@@ -397,13 +438,23 @@ async function checkForUpdate(
       }
     }
 
-    // Check latest commit on remote
-    const res = await fetch(
-      `https://api.github.com/repos/${au.repo}/commits/${au.branch}`,
-      { headers: { Accept: 'application/vnd.github.v3+json' } },
-    );
+    const repo = normalizeRepo(au.repo);
+    const branch = au.branch.trim() || 'main';
+    const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+    const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
+    const token = process.env.GITHUB_TOKEN;
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const res = await fetch(url, { headers });
     if (!res.ok) {
-      log(`Auto-update: GitHub API returned ${res.status}`);
+      if (res.status === 404) {
+        log(
+          `Auto-update: GitHub returned 404 for ${repo} branch "${branch}". ` +
+            'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/branch in config.',
+        );
+      } else {
+        log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
+      }
       return;
     }
     const data = await res.json() as { sha: string };
@@ -416,7 +467,7 @@ async function checkForUpdate(
     // Pull and rebuild
     const cwd = process.cwd();
     try {
-      execSync(`git fetch origin ${au.branch} && git reset --hard origin/${au.branch}`, {
+      execSync(`git fetch origin ${branch} && git reset --hard origin/${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
       execSync('pnpm install --frozen-lockfile', {

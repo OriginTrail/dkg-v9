@@ -24,7 +24,10 @@ function loadAbi(contractName: string): ethers.InterfaceAbi {
 
 export interface EVMAdapterConfig {
   rpcUrl: string;
+  /** Primary operational wallet key (used for identity registration, staking, etc.) */
   privateKey: string;
+  /** Additional operational wallet keys for parallel transaction submission. */
+  additionalKeys?: string[];
   hubAddress: string;
   chainId?: string;
 }
@@ -52,7 +55,11 @@ export class EVMChainAdapter implements ChainAdapter {
   readonly chainId: string;
 
   private readonly provider: JsonRpcProvider;
+  /** Primary signer — used for identity/profile/staking operations. */
   private readonly signer: Wallet;
+  /** All operational signers (includes primary). Used round-robin for publish TXs. */
+  private readonly signerPool: Wallet[];
+  private signerIndex = 0;
   private readonly hubAddress: string;
   private contracts: ContractCache;
   private initialized = false;
@@ -60,12 +67,28 @@ export class EVMChainAdapter implements ChainAdapter {
   constructor(config: EVMAdapterConfig) {
     this.provider = new JsonRpcProvider(config.rpcUrl);
     this.signer = new Wallet(config.privateKey, this.provider);
+    this.signerPool = [this.signer];
+    for (const key of config.additionalKeys ?? []) {
+      this.signerPool.push(new Wallet(key, this.provider));
+    }
     this.hubAddress = config.hubAddress;
     this.chainId = config.chainId ?? 'evm:31337';
 
     this.contracts = {
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
     };
+  }
+
+  /** Pick the next signer from the pool (round-robin). */
+  private nextSigner(): Wallet {
+    const s = this.signerPool[this.signerIndex % this.signerPool.length];
+    this.signerIndex++;
+    return s;
+  }
+
+  /** All operational wallet addresses (for display / funding). */
+  getSignerAddresses(): string[] {
+    return this.signerPool.map((s) => s.address);
   }
 
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
@@ -134,6 +157,74 @@ export class EVMChainAdapter implements ChainAdapter {
   // =====================================================================
   // Identity
   // =====================================================================
+
+  async getIdentityId(): Promise<bigint> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    const id: bigint = await identityStorage.getIdentityId(this.signer.address);
+    return id;
+  }
+
+  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+    await this.init();
+
+    let identityId = await this.getIdentityId();
+
+    // Step 1: Create profile if none exists
+    if (identityId === 0n) {
+      const nodeName = options?.nodeName ?? `node-${Date.now()}`;
+      const adminWallet = ethers.Wallet.createRandom();
+      const nodeId = ethers.hexlify(ethers.randomBytes(32));
+
+      const tx = await this.contracts.profile!.createProfile(
+        adminWallet.address,
+        [],
+        nodeName,
+        nodeId,
+        0,
+      );
+      const receipt = await tx.wait();
+
+      for (const log of receipt.logs) {
+        try {
+          const parsed = this.contracts.identity!.interface.parseLog({
+            topics: [...log.topics],
+            data: log.data,
+          });
+          if (parsed?.name === 'IdentityCreated') {
+            identityId = BigInt(parsed.args.identityId);
+            break;
+          }
+        } catch { /* not this contract */ }
+      }
+
+      if (identityId === 0n) {
+        throw new Error('Profile created but no IdentityCreated event found');
+      }
+    }
+
+    // Step 2: Stake if token is available (separate try/catch so profile isn't lost)
+    const stakeAmount = options?.stakeAmount ?? ethers.parseEther('50000');
+    if (stakeAmount > 0n && this.contracts.token) {
+      try {
+        const stakingAddr = await this.contracts.staking!.getAddress();
+        const approveTx = await this.contracts.token.approve(stakingAddr, stakeAmount);
+        await approveTx.wait();
+        // Wait an extra block for state propagation on public RPCs
+        await new Promise(r => setTimeout(r, 2000));
+
+        const stakeTx = await this.contracts.staking!.stake(identityId, stakeAmount);
+        await stakeTx.wait();
+      } catch (err) {
+        console.warn(
+          `[ensureProfile] Staking failed for identity ${identityId} (profile exists, stake manually): ` +
+          (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    return identityId;
+  }
 
   async registerIdentity(proof: IdentityProof): Promise<bigint> {
     await this.init();
@@ -271,11 +362,13 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     this.requireV9();
 
-    const ka = this.contracts.knowledgeAssets!;
-    const kaAddress = await ka.getAddress();
+    const txSigner = this.nextSigner();
+    const ka = this.contracts.knowledgeAssets!.connect(txSigner) as Contract;
+    const kaAddress = await this.contracts.knowledgeAssets!.getAddress();
 
     if (this.contracts.token && params.tokenAmount > 0n) {
-      const approveTx = await this.contracts.token.approve(kaAddress, params.tokenAmount);
+      const token = this.contracts.token.connect(txSigner) as Contract;
+      const approveTx = await token.approve(kaAddress, params.tokenAmount);
       await approveTx.wait();
     }
 
@@ -303,7 +396,7 @@ export class EVMChainAdapter implements ChainAdapter {
     let batchId = 0n;
     let startKAId = 0n;
     let endKAId = 0n;
-    let publisherAddress = this.signer.address;
+    let publisherAddress = txSigner.address;
 
     for (const log of receipt.logs) {
       try {

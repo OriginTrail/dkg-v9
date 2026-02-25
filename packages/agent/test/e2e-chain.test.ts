@@ -140,7 +140,11 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   afterAll(async () => {
     for (const agent of agents) {
-      try { await agent.stop(); } catch {}
+      try {
+        await agent.stop();
+      } catch (err) {
+        console.warn('Teardown: agent.stop() failed', err);
+      }
     }
     if (hardhatProcess) {
       hardhatProcess.kill('SIGTERM');

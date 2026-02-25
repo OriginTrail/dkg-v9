@@ -218,7 +218,7 @@ pnpm dkg logs                    # View daemon logs
 
 | Guide | For |
 |---|---|
-| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | CLI-based setup on Mac Minis or any machine |
+| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | Quick start (clone, init, start), messaging, and publishing — share with friends |
 | [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw agents with the DKG plugin |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS agents with the DKG plugin |
 | [Custom Project](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |

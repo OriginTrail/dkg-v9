@@ -179,8 +179,11 @@ contract Hub is INamed, IVersioned, Ownable {
 
             address oldContractAddress = contractSet.get(contractName).addr;
             if (_isContract(oldContractAddress)) {
-                // solhint-disable-next-line no-empty-blocks
-                try IContractStatus(oldContractAddress).setStatus(false) {} catch {}
+                try IContractStatus(oldContractAddress).setStatus(false) {
+                    // success
+                } catch {
+                    // Best-effort: contract may not implement IContractStatus; ignore.
+                }
             }
 
             emit ContractChanged(contractName, newContractAddress);
@@ -191,8 +194,11 @@ contract Hub is INamed, IVersioned, Ownable {
         }
 
         if (_isContract(newContractAddress)) {
-            // solhint-disable-next-line no-empty-blocks
-            try IContractStatus(newContractAddress).setStatus(true) {} catch {}
+            try IContractStatus(newContractAddress).setStatus(true) {
+                // success
+            } catch {
+                // Best-effort: contract may not implement IContractStatus; ignore.
+            }
         }
 
         emit NewContract(contractName, newContractAddress);
@@ -278,8 +284,10 @@ contract Hub is INamed, IVersioned, Ownable {
                 if (msg.sender == multiSigOwners[i]) {
                     return true;
                 }
-            } // solhint-disable-next-line no-empty-blocks
-        } catch {}
+            }
+        } catch {
+            // Not a multisig or call reverted; treat as not owner.
+        }
 
         return false;
     }

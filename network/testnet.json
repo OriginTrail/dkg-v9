@@ -3,9 +3,9 @@
   "networkId": "6f63f485c6cce67e677f7844ec835024c6d97f13fe8cacaf0ceedfd3ad658510",
   "genesisVersion": 1,
   "relays": [
-    "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK"
+    "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
   ],
-  "defaultParanets": [],
+  "defaultParanets": ["testing"],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,

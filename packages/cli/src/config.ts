@@ -39,8 +39,6 @@ export interface ChainConfig {
   rpcUrl: string;
   /** Hub contract address */
   hubAddress: string;
-  /** EVM private key (hex with 0x prefix) */
-  privateKey: string;
   /** Chain identifier (e.g., 'base:84532') */
   chainId?: string;
 }
@@ -149,7 +147,12 @@ export async function writePid(pid: number): Promise<void> {
 
 export async function removePid(): Promise<void> {
   const { unlink } = await import('node:fs/promises');
-  try { await unlink(pidPath()); } catch {}
+  try {
+    await unlink(pidPath());
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code !== 'ENOENT') throw err;
+  }
 }
 
 export async function readApiPort(): Promise<number | null> {
@@ -167,7 +170,12 @@ export async function writeApiPort(port: number): Promise<void> {
 
 export async function removeApiPort(): Promise<void> {
   const { unlink } = await import('node:fs/promises');
-  try { await unlink(apiPortPath()); } catch {}
+  try {
+    await unlink(apiPortPath());
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code !== 'ENOENT') throw err;
+  }
 }
 
 export function isProcessRunning(pid: number): boolean {

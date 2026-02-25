@@ -36,10 +36,16 @@ library UnorderedNamedContractDynamicSet {
     function update(UnorderedNamedContractDynamicSet.Set storage self, string calldata name, address addr) internal {
         if (addr == address(0)) revert ZeroAddress();
         if (!exists(self, name)) revert ContractDoesNotExist(name);
+
+        address currentAddr = self.contractList[self.stringIndexPointers[name]].addr;
+        if (currentAddr == addr) {
+            // Idempotent: same address already registered for this name (e.g. re-run deploy in tests).
+            return;
+        }
         if (self.contractList.length > 0 && (self.addressIndexPointers[addr] != 0 || self.contractList[0].addr == addr))
             revert AddressAlreadyInSet(addr);
 
-        delete self.addressIndexPointers[self.contractList[self.stringIndexPointers[name]].addr];
+        delete self.addressIndexPointers[currentAddr];
         self.addressIndexPointers[addr] = self.stringIndexPointers[name];
         self.contractList[self.stringIndexPointers[name]].addr = addr;
     }

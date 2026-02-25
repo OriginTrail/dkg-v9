@@ -214,4 +214,15 @@ describe('@unit Hub contract', function () {
       Hub.getContractAddress('TestContract2'),
     ).to.be.revertedWithCustomError(Hub, 'ContractDoesNotExist');
   });
+
+  it('When hub owner is a contract without getOwners(), setContractAddress by non-owner reverts (catch path for getOwners failure)', async () => {
+    // Deploy a second Hub and set it as owner. Hub has no getOwners(), so the modifier's
+    // _isMultiSigOwner(owner) will call owner.getOwners(), which reverts; we catch and return false.
+    const Hub2 = await (await hre.ethers.getContractFactory('Hub')).deploy();
+    await Hub.transferOwnership(await Hub2.getAddress());
+    const hubAsNonOwner = Hub.connect(accounts[1]);
+    await expect(
+      hubAsNonOwner.setContractAddress('TestContract', accounts[1].address),
+    ).to.be.reverted;
+  });
 });

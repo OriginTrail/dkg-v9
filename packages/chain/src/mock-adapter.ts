@@ -45,6 +45,19 @@ export class MockChainAdapter implements ChainAdapter {
     this.signerAddress = signerAddress;
   }
 
+  async getIdentityId(): Promise<bigint> {
+    const existing = this.identities.get(this.signerAddress);
+    return existing ?? 0n;
+  }
+
+  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+    const existing = await this.getIdentityId();
+    if (existing > 0n) return existing;
+    const id = this.nextIdentityId++;
+    this.identities.set(this.signerAddress, id);
+    return id;
+  }
+
   async registerIdentity(proof: IdentityProof): Promise<bigint> {
     const key = toHex(proof.publicKey);
     const existing = this.identities.get(key);
@@ -276,7 +289,7 @@ export class MockChainAdapter implements ChainAdapter {
     return this.collections.get(kcId);
   }
 
-  getIdentityId(publicKey: Uint8Array): bigint | undefined {
+  getIdentityIdByKey(publicKey: Uint8Array): bigint | undefined {
     return this.identities.get(toHex(publicKey));
   }
 

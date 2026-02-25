@@ -7,7 +7,11 @@ describe('Circuit Relay', () => {
 
   afterEach(async () => {
     for (const n of nodes) {
-      try { await n.stop(); } catch {}
+      try {
+        await n.stop();
+      } catch (err) {
+        console.warn('Teardown: node.stop() failed', err);
+      }
     }
     nodes.length = 0;
   });

@@ -30,36 +30,6 @@ describe('AgentWallet', () => {
     expect(wallet.peerId()).toBeDefined();
   });
 
-  it('derives deterministic EVM wallet', async () => {
-    const wallet = await DKGAgentWallet.generate();
-    const evm1 = wallet.deriveEvmWallet();
-    const evm2 = wallet.deriveEvmWallet();
-    expect(evm1.address).toBe(evm2.address);
-    expect(evm1.address).toMatch(/^0x[0-9a-f]{40}$/);
-  });
-
-  it('derives deterministic Solana wallet', async () => {
-    const wallet = await DKGAgentWallet.generate();
-    const sol1 = wallet.deriveSolanaWallet();
-    const sol2 = wallet.deriveSolanaWallet();
-    expect(sol1.address).toBe(sol2.address);
-    expect(sol1.address).toHaveLength(64);
-  });
-
-  it('EVM wallet can sign data', async () => {
-    const wallet = await DKGAgentWallet.generate();
-    const evm = wallet.deriveEvmWallet();
-    const sig = evm.sign(new TextEncoder().encode('hello'));
-    expect(sig.length).toBeGreaterThan(0);
-  });
-
-  it('Solana wallet can sign data', async () => {
-    const wallet = await DKGAgentWallet.generate();
-    const sol = wallet.deriveSolanaWallet();
-    const sig = sol.sign(new TextEncoder().encode('hello'));
-    expect(sig).toHaveLength(64);
-  });
-
   it('signs with Ed25519 master key', async () => {
     const wallet = await DKGAgentWallet.generate();
     const sig = await wallet.sign(new TextEncoder().encode('test'));
@@ -88,25 +58,21 @@ describe('AgentWallet', () => {
       expect(Buffer.from(loaded.keypair.publicKey).toString('hex')).toBe(
         Buffer.from(wallet.keypair.publicKey).toString('hex'),
       );
-
-      const evmOrig = wallet.deriveEvmWallet();
-      const evmLoaded = loaded.deriveEvmWallet();
-      expect(evmLoaded.address).toBe(evmOrig.address);
-
-      const solOrig = wallet.deriveSolanaWallet();
-      const solLoaded = loaded.deriveSolanaWallet();
-      expect(solLoaded.address).toBe(solOrig.address);
     } finally {
       await rm(dir, { recursive: true });
     }
   });
 
-  it('fromMasterKey produces same derived wallets', async () => {
+  it('fromMasterKey produces same peerId and keypair', async () => {
     const wallet = await DKGAgentWallet.generate();
     const restored = await DKGAgentWallet.fromMasterKey(wallet.masterKey);
     expect(restored.peerId()).toBe(wallet.peerId());
-    expect(restored.deriveEvmWallet().address).toBe(wallet.deriveEvmWallet().address);
-    expect(restored.deriveSolanaWallet().address).toBe(wallet.deriveSolanaWallet().address);
+    expect(Buffer.from(restored.keypair.secretKey).toString('hex')).toBe(
+      Buffer.from(wallet.keypair.secretKey).toString('hex'),
+    );
+    expect(Buffer.from(restored.keypair.publicKey).toString('hex')).toBe(
+      Buffer.from(wallet.keypair.publicKey).toString('hex'),
+    );
   });
 
   it('DKGAgent.create() persists identity across restarts', async () => {
@@ -126,11 +92,10 @@ describe('AgentWallet', () => {
     }
   });
 
-  it('different wallets produce different addresses', async () => {
+  it('different wallets produce different peerIds', async () => {
     const a = await DKGAgentWallet.generate();
     const b = await DKGAgentWallet.generate();
-    expect(a.deriveEvmWallet().address).not.toBe(b.deriveEvmWallet().address);
-    expect(a.deriveSolanaWallet().address).not.toBe(b.deriveSolanaWallet().address);
+    expect(a.peerId()).not.toBe(b.peerId());
   });
 });
 

@@ -138,7 +138,7 @@ To join the DKG V9 Testnet, the relay address is pre-configured in the repo. You
 const dkg = new DkgNodePlugin({
   name: 'MyAgent',
   dataDir: '.dkg/my-agent',
-  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
 });
 ```
 

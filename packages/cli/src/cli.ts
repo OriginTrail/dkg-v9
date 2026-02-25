@@ -89,16 +89,17 @@ program
     console.log('\nBlockchain Configuration:');
     const rpcUrl = await ask('RPC URL?', defaultRpcUrl);
     const hubAddress = await ask('Hub contract address?', defaultHubAddress);
-    const evmPrivateKey = await ask('EVM private key? (0x...)', existing.chain?.privateKey);
     const chainIdStr = await ask('Chain ID?', defaultChainId);
 
     const chainSection: any = rpcUrl && hubAddress ? {
       type: 'evm' as const,
       rpcUrl,
       hubAddress,
-      privateKey: evmPrivateKey || undefined,
       chainId: chainIdStr || undefined,
     } : undefined;
+
+    console.log('\nOperational wallets are stored in ~/.dkg/wallets.json');
+    console.log('They are auto-generated on first start. You can edit the file to add your own keys.');
 
     rl.close();
 
@@ -318,7 +319,9 @@ program
             if (m.direction === 'in') printMessage(m, status.name, nameMap);
             lastTs = Math.max(lastTs, m.ts);
           }
-        } catch {}
+        } catch (err) {
+          console.warn('Chat poll error:', err instanceof Error ? err.message : err);
+        }
       }, 1000);
 
       const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -598,64 +601,64 @@ program
 
 program
   .command('wallet')
-  .description('Show the node\'s EVM wallet address and balances')
+  .description('Show operational wallet addresses and balances')
   .action(async () => {
     try {
       const config = await loadConfig();
       const network = await loadNetworkConfig();
+      const { loadOpWallets } = await import('@dkg/agent');
+      const opWallets = await loadOpWallets(dkgDir());
 
-      const privateKey = config.chain?.privateKey ?? process.env.DKG_PRIVATE_KEY;
-      if (!privateKey) {
-        console.error('No EVM private key configured.');
-        console.error('Run "dkg init" and set the EVM private key, or set DKG_PRIVATE_KEY env var.');
+      if (!opWallets.wallets.length) {
+        console.error('No operational wallets found. Run "dkg start" to auto-generate them.');
         process.exit(1);
       }
 
-      const wallet = new ethers.Wallet(privateKey);
-      console.log(`  Address:     ${wallet.address}`);
-
       const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
+      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+      const chainId = config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)';
+
+      let provider: ethers.JsonRpcProvider | null = null;
+      let token: ethers.Contract | null = null;
+      let tokenSymbol = 'TRAC';
+
       if (rpcUrl) {
         try {
-          const provider = new ethers.JsonRpcProvider(rpcUrl);
-          const balance = await provider.getBalance(wallet.address);
-          console.log(`  ETH Balance: ${ethers.formatEther(balance)} ETH`);
-
-          const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+          provider = new ethers.JsonRpcProvider(rpcUrl);
           if (hubAddress) {
-            try {
-              const hub = new ethers.Contract(
-                hubAddress,
-                ['function getContractAddress(string) view returns (address)'],
-                provider,
-              );
-              const tokenAddress = await hub.getContractAddress('Token');
-              if (tokenAddress !== ethers.ZeroAddress) {
-                const token = new ethers.Contract(
-                  tokenAddress,
-                  ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'],
-                  provider,
-                );
-                const tracBalance = await token.balanceOf(wallet.address);
-                const symbol = await token.symbol().catch(() => 'TRAC');
-                console.log(`  ${symbol} Balance: ${ethers.formatEther(tracBalance)} ${symbol}`);
-              }
-            } catch {
-              console.log('  TRAC Balance: (unable to query)');
+            const hub = new ethers.Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+            const tokenAddr = await hub.getContractAddress('Token');
+            if (tokenAddr !== ethers.ZeroAddress) {
+              token = new ethers.Contract(tokenAddr, ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'], provider);
+              tokenSymbol = await token.symbol().catch(() => 'TRAC');
             }
           }
-
-          console.log(`  RPC:         ${rpcUrl}`);
-          console.log(`  Chain ID:    ${config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)'}`);
-        } catch (err: any) {
-          console.log(`  RPC:         ${rpcUrl} (unreachable: ${err.message})`);
+        } catch {
+          provider = null;
         }
-      } else {
-        console.log('  RPC:         (not configured)');
       }
 
-      console.log('');
-      console.log('Fund this address with ETH (for gas) and TRAC (for publishing).');
+      console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
+      for (let i = 0; i < opWallets.wallets.length; i++) {
+        const addr = opWallets.wallets[i].address;
+        const label = i === 0 ? '(primary)' : `(pool #${i + 1})`;
+        console.log(`  ${label} ${addr}`);
+        if (provider) {
+          try {
+            const ethBal = await provider.getBalance(addr);
+            const tracBal = token ? await token.balanceOf(addr) : 0n;
+            console.log(`           ETH: ${ethers.formatEther(ethBal)}  ${tokenSymbol}: ${ethers.formatEther(tracBal)}`);
+          } catch {
+            console.log('           (unable to query balances)');
+          }
+        }
+      }
+
+      console.log(`\n  Chain: ${chainId}`);
+      if (rpcUrl) console.log(`  RPC:   ${rpcUrl}`);
+      console.log(`  File:  ~/.dkg/wallets.json`);
+      console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
+      console.log('The primary wallet is used for identity registration. All wallets are used for publishing.\n');
     } catch (err: any) {
       console.error(err.message);
       process.exit(1);

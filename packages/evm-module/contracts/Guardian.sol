@@ -48,7 +48,9 @@ contract Guardian is HubDependent {
             if (owners.length == 0) {
                 revert CustodianHasNoOwners(custodian);
             }
-        } catch {}
+        } catch {
+            // getOwners reverted (e.g. not ICustodian); hasOwnersFunction stays false.
+        }
         if (!hasOwnersFunction) {
             revert CustodianWithoutOwnersFunction(custodian);
         }

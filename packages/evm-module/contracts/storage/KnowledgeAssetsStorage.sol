@@ -3,21 +3,28 @@
 pragma solidity ^0.8.20;
 
 import {Guardian} from "../Guardian.sol";
+import {ERC1155Delta} from "../tokens/ERC1155Delta.sol";
+import {IERC1155DeltaQueryable} from "../interfaces/IERC1155DeltaQueryable.sol";
 import {KnowledgeAssetsLib} from "../libraries/KnowledgeAssetsLib.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
+import {LibBitmap} from "solady/src/utils/LibBitmap.sol";
 
 /**
  * @title KnowledgeAssetsStorage
  * @notice V9 storage contract for Knowledge Assets with address-based publisher namespaces.
+ * Mints one ERC1155 token per Knowledge Asset (like V8 KnowledgeCollectionStorage).
  *
  * UAL format: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  *
  * Any address can reserve ID ranges and batch-mint KAs — no on-chain identity required.
- * This replaces V8's KnowledgeCollectionStorage for new V9 publishes.
  * The legacy KnowledgeCollectionStorage remains read-only for V8 data.
  */
-contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
+contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, ERC1155Delta, Guardian {
+    using LibBitmap for LibBitmap.Bitmap;
+
+    /// @notice Max KAs per batch; token IDs are (batchId - 1) * V9_KA_MAX_PER_BATCH + offset
+    uint256 public constant V9_KA_MAX_PER_BATCH = 1e12;
     event UALRangeReserved(
         address indexed publisher,
         uint64 startId,
@@ -78,7 +85,10 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
     uint96 private _totalTokenAmount;
     uint256 private _totalKnowledgeAssets;
 
-    constructor(address hubAddress) Guardian(hubAddress) {}
+    event KnowledgeAssetsMinted(uint256 indexed batchId, address indexed to, uint256 startTokenId, uint256 endTokenId);
+    event URIUpdate(string newURI);
+
+    constructor(address hubAddress, string memory uri) ERC1155Delta(uri) Guardian(hubAddress) {}
 
     function name() public pure virtual returns (string memory) {
         return _NAME;
@@ -187,6 +197,31 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
             tokenAmount,
             isPermanent
         );
+
+        _mintKnowledgeAssetsTokens(publisherAddress, batchId, startKAId, endKAId);
+    }
+
+    function _mintKnowledgeAssetsTokens(
+        address publisher,
+        uint256 batchId,
+        uint64 startKAId,
+        uint64 endKAId
+    ) internal {
+        uint32 kaCount = uint32(endKAId - startKAId + 1);
+        uint256 startTokenId = (batchId - 1) * V9_KA_MAX_PER_BATCH + _startTokenId();
+        _setCurrentIndex(startTokenId);
+        _mint(publisher, kaCount);
+        emit KnowledgeAssetsMinted(batchId, publisher, startTokenId, startTokenId + kaCount - 1);
+    }
+
+    function _setCurrentIndex(uint256 index) internal virtual {
+        _currentIndex = index;
+    }
+
+    function _latestTokenId() internal view returns (uint256) {
+        if (_batchCounter == 0) return 0;
+        KnowledgeAssetsLib.KnowledgeBatch storage b = knowledgeBatches[_batchCounter];
+        return ((_batchCounter - 1) * V9_KA_MAX_PER_BATCH + _startTokenId() + b.knowledgeAssetsCount) - 1;
     }
 
     function updateKnowledgeBatch(
@@ -302,5 +337,59 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
 
     function getBatchForKAId(address publisher, uint64 kaId) external view returns (uint256) {
         return kaIdToBatch[publisher][kaId];
+    }
+
+    function getBatchIdForTokenId(uint256 tokenId) external view returns (uint256) {
+        if (tokenId < _startTokenId()) return 0;
+        return ((tokenId - _startTokenId()) / V9_KA_MAX_PER_BATCH) + 1;
+    }
+
+    function isPartOfBatch(uint256 batchId, uint256 tokenId) external view returns (bool) {
+        KnowledgeAssetsLib.KnowledgeBatch storage b = knowledgeBatches[batchId];
+        if (b.publisherAddress == address(0)) return false;
+        uint256 startTokenId = (batchId - 1) * V9_KA_MAX_PER_BATCH + _startTokenId();
+        return tokenId >= startTokenId && tokenId < startTokenId + b.knowledgeAssetsCount;
+    }
+
+    function getKnowledgeAssetsRange(uint256 batchId) external view returns (uint256 startTokenId, uint256 endTokenId) {
+        KnowledgeAssetsLib.KnowledgeBatch storage b = knowledgeBatches[batchId];
+        startTokenId = (batchId - 1) * V9_KA_MAX_PER_BATCH + _startTokenId();
+        endTokenId = startTokenId + b.knowledgeAssetsCount - 1;
+    }
+
+    function balanceOf(address owner) external view virtual override returns (uint256) {
+        uint256 latest = _latestTokenId();
+        if (latest == 0) return 0;
+        return balanceOf(owner, _startTokenId(), latest + 1);
+    }
+
+    function balanceOf(address owner, uint256 start, uint256 stop) public view virtual override returns (uint256) {
+        return _owned[owner].popCount(start, stop - start);
+    }
+
+    function tokensOfOwnerIn(address owner, uint256 start, uint256 stop) public view returns (uint256[] memory) {
+        unchecked {
+            if (start >= stop) revert InvalidQueryRange();
+            if (start < _startTokenId()) start = _startTokenId();
+            uint256 stopLimit = _latestTokenId() + 1;
+            if (stop > stopLimit) stop = stopLimit;
+            uint256 tokenIdsLength = start < stop ? balanceOf(owner, start, stop) : 0;
+            uint256[] memory tokenIds = new uint256[](tokenIdsLength);
+            LibBitmap.Bitmap storage bmap = _owned[owner];
+            for (uint256 i = start, tokenIdsIdx = 0; tokenIdsIdx != tokenIdsLength; ++i) {
+                if (bmap.get(i)) tokenIds[tokenIdsIdx++] = i;
+            }
+            return tokenIds;
+        }
+    }
+
+    function tokensOfOwner(address owner) external view virtual override returns (uint256[] memory) {
+        if (_totalKnowledgeAssets == 0) return new uint256[](0);
+        return tokensOfOwnerIn(owner, _startTokenId(), _latestTokenId() + 1);
+    }
+
+    function setURI(string memory baseURI) external onlyHub {
+        _setURI(baseURI);
+        emit URIUpdate(baseURI);
     }
 }

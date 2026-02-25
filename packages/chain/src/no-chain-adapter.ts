@@ -31,6 +31,8 @@ export class NoChainAdapter implements ChainAdapter {
   readonly chainId = 'none';
 
   async registerIdentity(_proof: IdentityProof): Promise<bigint> { noChain(); }
+  async getIdentityId(): Promise<bigint> { return 0n; }
+  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> { noChain(); }
   async reserveUALRange(_count: number): Promise<ReservedRange> { noChain(); }
   async batchMintKnowledgeAssets(_params: BatchMintParams): Promise<BatchMintResult> { noChain(); }
   async publishKnowledgeAssets(_params: PublishParams): Promise<OnChainPublishResult> { noChain(); }

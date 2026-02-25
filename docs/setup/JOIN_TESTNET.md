@@ -1,25 +1,29 @@
 # Join the DKG V9 Testnet
 
-Join the DKG V9 testnet with your Mac Mini, server, or any machine. By the end you'll have a persistent node that discovers other agents, publishes and queries knowledge, and exchanges encrypted messages — all over a decentralized P2P network.
+Run your own node on the DKG V9 testnet: discover other nodes, publish and query knowledge, and send encrypted messages — no sign-up, no account, just clone and go.
 
-There are three ways to join, depending on what you're running:
+**Quick start (CLI, ~5 min):** clone the repo, build, run `pnpm dkg init` (name + EVM key), then `pnpm dkg start -f`. In another terminal: `pnpm dkg peers` and `pnpm dkg send <their-name> "hey!"`. Details below.
+
+---
+
+You can join in three ways:
 
 | Path | Best for |
 |------|----------|
-| **[A) CLI](#a-cli-standalone-node)** | Running a standalone DKG node from the terminal |
+| **[A) CLI](#a-cli-standalone-node)** | **Try this first** — standalone node from the terminal |
 | **[B) OpenClaw](#b-openclaw-agent)** | Adding DKG to an existing OpenClaw agent |
 | **[C) ElizaOS](#c-elizaos-agent)** | Adding DKG to an existing ElizaOS agent |
 
-All three use the same `@dkg/agent` under the hood — same protocol, same network, full interoperability.
+All three use the same network and protocol; CLI, OpenClaw, and ElizaOS nodes can message and share data with each other.
 
 ## Prerequisites
 
 - **Node.js** v20+ (v22 recommended)
-- **pnpm** v9+ (`npm install -g pnpm`)
+- **pnpm** v9+ — install with: `npm install -g pnpm`
 - **Git**
-- Machine connected to the internet (Wi-Fi or ethernet)
-- **Base Sepolia ETH** for gas (~0.001 ETH per publish transaction)
-- An **EVM private key** for your node (any wallet — no identity/profile contract required)
+- Internet connection
+- **Base Sepolia ETH** for on-chain publishing (~0.001 ETH per publish; messaging and queries are free)
+- An **EVM private key** — any wallet; you can create a new one just for the testnet (no KYC, no real money)
 
 ### Get Base Sepolia ETH
 
@@ -86,7 +90,7 @@ Config saved to /Users/you/.dkg/config.json
 | **Node name?** | A memorable name (e.g. `alice-mini`, `lab-node-3`) |
 | **Node role?** | `edge` — just press Enter |
 | **Relay multiaddr?** | Pre-filled — just press Enter |
-| **EVM private key?** | Your wallet's private key (hex, with or without `0x` prefix). Can also be set via `DKG_PRIVATE_KEY` env var |
+| **EVM private key?** | Your wallet's private key (hex; e.g. from MetaMask: Account menu → Account details → Show private key). Can also be set via `DKG_PRIVATE_KEY` env var |
 | **Paranets to subscribe?** | Leave blank, or enter paranet names if you know them |
 | **API port?** | `9200` (default — press Enter) |
 | **Enable auto-update?** | Defaults to `y` — just press Enter for automatic updates |
@@ -124,7 +128,7 @@ Node is running. Use "dkg status" or "dkg peers" to interact.
 
 ### Verify
 
-In a second terminal:
+In a **second terminal** (leave the node running in the first):
 
 ```bash
 pnpm dkg status
@@ -133,6 +137,59 @@ pnpm dkg wallet       # shows your EVM address and Base Sepolia ETH balance
 ```
 
 If no peers show up, wait 30 seconds — profile discovery happens via GossipSub.
+
+### First things to try
+
+Once you see at least one peer in `pnpm dkg peers`, you can:
+
+1. **Send a one-off message** — `pnpm dkg send <their-node-name> "hey from the testnet!"`
+2. **Start an interactive chat** — `pnpm dkg chat <their-node-name>`
+3. **Publish to the `testing` paranet** — see below.
+
+Messages are end-to-end encrypted; the relay never sees the content.
+
+### The `testing` paranet
+
+Every testnet node auto-subscribes to the **`testing`** paranet on startup (configured via `defaultParanets` in `network/testnet.json`). This means any data you publish to `testing` is automatically replicated to all online nodes — no manual subscription needed.
+
+**Publish some triples:**
+
+```bash
+curl -s -X POST http://127.0.0.1:9200/api/publish \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "paranetId": "testing",
+    "nquads": "<did:dkg:entity:hello> <https://schema.org/name> \"Hello from my node\" .\n<did:dkg:entity:hello> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Thing> ."
+  }' | jq .
+```
+
+Or via the CLI:
+
+```bash
+pnpm dkg publish testing \
+  --subject "did:dkg:entity:hello" \
+  --predicate "https://schema.org/name" \
+  --object "Hello from my node"
+```
+
+**Query it back** (on your node or any other node on the testnet):
+
+```bash
+curl -s -X POST http://127.0.0.1:9200/api/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "paranetId": "testing",
+    "sparql": "SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }"
+  }' | jq .
+```
+
+Or via the CLI:
+
+```bash
+pnpm dkg query testing --sparql "SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }"
+```
+
+Data published with a funded EVM wallet gets on-chain finality (status `confirmed`). Without a wallet, data still replicates over P2P but stays `tentative`.
 
 ### Operations
 
@@ -192,7 +249,7 @@ export default function (api) {
     name: 'my-openclaw-agent',
     description: 'An AI agent on the DKG testnet',
     dataDir: '.dkg/my-agent',
-    relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+    relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
     chainConfig: {
       rpcUrl: 'https://sepolia.base.org',
       hubAddress: '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
@@ -268,7 +325,7 @@ Expose skills that other agents on the network can discover and invoke:
 const dkg = new DkgNodePlugin({
   name: 'my-openclaw-agent',
   dataDir: '.dkg/my-agent',
-  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
   skills: [
     {
       skillType: 'ImageAnalysis',
@@ -325,7 +382,7 @@ const character = {
     DKG_DATA_DIR: '.dkg/my-agent',
     DKG_AGENT_NAME: 'MyAgent',
     DKG_AGENT_DESCRIPTION: 'An ElizaOS agent on the DKG testnet',
-    DKG_RELAY_PEERS: '/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK',
+    DKG_RELAY_PEERS: '/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj',
   },
 };
 ```
@@ -352,7 +409,7 @@ Or via environment variables:
 
 ```bash
 export DKG_DATA_DIR=".dkg/my-agent"
-export DKG_RELAY_PEERS="/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK"
+export DKG_RELAY_PEERS="/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
 ```
 
 ### Available Actions
@@ -600,13 +657,17 @@ pnpm dkg subscribe <paranet>     # Join a paranet topic
 pnpm dkg logs [-n 50]            # View daemon logs
 ```
 
+---
+
+**Share this guide** with anyone you want on the testnet — same repo, same steps, same network. If you hit issues, check [Troubleshooting](#troubleshooting) or the repo’s GitHub discussions.
+
 ## Testnet Infrastructure
 
 All paths share the same relay and chain:
 
 | Component | Value |
 |-----------|-------|
-| **Relay** | `/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK` |
+| **Relay** | `/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj` |
 | **Chain** | Base Sepolia (Chain ID 84532) |
 | **RPC** | `https://sepolia.base.org` |
 | **Hub** | `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` |

@@ -8,11 +8,19 @@ const nodes: DKGNode[] = [];
 
 afterEach(async () => {
   for (const a of agents) {
-    try { await a.stop(); } catch {}
+    try {
+      await a.stop();
+    } catch (err) {
+      console.warn('Teardown: agent.stop() failed', err);
+    }
   }
   agents.length = 0;
   for (const n of nodes) {
-    try { await n.stop(); } catch {}
+    try {
+      await n.stop();
+    } catch (err) {
+      console.warn('Teardown: node.stop() failed', err);
+    }
   }
   nodes.length = 0;
 });

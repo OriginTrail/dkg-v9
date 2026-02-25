@@ -123,6 +123,16 @@ export class DKGNode {
       },
     } as any);
 
+    // Log peer connection/disconnection events
+    this.node.addEventListener('peer:connect', (evt) => {
+      const remotePeer = evt.detail.toString();
+      console.log(`[${new Date().toISOString()}] Peer connected: ${remotePeer}`);
+    });
+    this.node.addEventListener('peer:disconnect', (evt) => {
+      const remotePeer = evt.detail.toString();
+      console.log(`[${new Date().toISOString()}] Peer disconnected: ${remotePeer}`);
+    });
+
     // Connect to relay peers and tag them as keep-alive so libp2p's
     // connection manager maintains the connection and auto-redials.
     if (this.config.relayPeers?.length) {

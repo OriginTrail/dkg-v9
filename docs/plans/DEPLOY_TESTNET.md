@@ -139,7 +139,7 @@ pm2 save && pm2 startup
 
 ## Phase 3: First Node Smoke Test (15 min)
 
-Before inviting others, test the full flow yourself with a single node.
+Before inviting others, test the full flow yourself with a single node. The `testing` paranet is auto-created and auto-subscribed on startup (via `defaultParanets` in `testnet.json`).
 
 ### Steps
 
@@ -156,18 +156,18 @@ pnpm dkg wallet
 
 # 3. Start
 pnpm dkg start -f
+# The node auto-creates and subscribes to the "testing" paranet
 
 # 4. Check relay connection
 pnpm dkg status
 # Should show "Circuit reservation granted"
 
-# 5. Create a paranet and publish
-pnpm dkg paranet create smoke-test --name "Smoke Test"
-pnpm dkg publish smoke-test --subject "did:dkg:test:hello" \
+# 5. Publish to the testing paranet (auto-created on startup)
+pnpm dkg publish testing --subject "did:dkg:test:hello" \
   --predicate "https://schema.org/name" --object "Hello World"
 
 # 6. Verify on-chain finality
-pnpm dkg query smoke-test --sparql "SELECT ?s ?name WHERE { ?s <https://schema.org/name> ?name }"
+pnpm dkg query testing --sparql "SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }"
 # Should return: did:dkg:test:hello → "Hello World"
 
 # 7. Check wallet for gas spent
@@ -290,7 +290,7 @@ All tests should pass. The publisher test suite includes:
 
 ## Phase 7: Documentation & Announce (10 min)
 
-- [ ] Verify `docs/setup/JOIN_TESTNET.md` is up to date (already updated)
+- [ ] Verify `docs/setup/JOIN_TESTNET.md` is up to date (includes quick start, first things to try, share-with-friends note)
 - [ ] Verify `network/testnet.json` has correct relay and chain config
 - [ ] Update `docs/setup/DEPLOY_BASE_SEPOLIA.md` with actual deployed V9 contract addresses
 - [ ] Push all changes to `main`

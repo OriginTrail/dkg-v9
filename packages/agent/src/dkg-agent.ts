@@ -38,11 +38,16 @@ export interface DKGAgentConfig {
   nodeRole?: 'core' | 'edge';
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
-  /** EVM chain configuration. If omitted, publishing won't have on-chain finality. */
+  /**
+   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
+   * `operationalKeys` are the private keys for operational wallets.
+   * The first key is the primary signer (identity, staking); all are used
+   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
+   */
   chainConfig?: {
     rpcUrl: string;
     hubAddress: string;
-    privateKey: string;
+    operationalKeys: string[];
     chainId?: string;
   };
 }
@@ -114,12 +119,14 @@ export class DKGAgent {
     const store = config.store ?? new OxigraphStore();
 
     let chain: ChainAdapter;
+    const opKeys = config.chainConfig?.operationalKeys;
     if (config.chainAdapter) {
       chain = config.chainAdapter;
-    } else if (config.chainConfig) {
+    } else if (config.chainConfig && opKeys?.length) {
       chain = new EVMChainAdapter({
         rpcUrl: config.chainConfig.rpcUrl,
-        privateKey: config.chainConfig.privateKey,
+        privateKey: opKeys[0],
+        additionalKeys: opKeys.slice(1),
         hubAddress: config.chainConfig.hubAddress,
         chainId: config.chainConfig.chainId,
       });
@@ -150,7 +157,7 @@ export class DKGAgent {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: config.chainConfig?.privateKey,
+      publisherPrivateKey: opKeys?.[0],
     });
     const queryEngine = new DKGQueryEngine(store);
 
@@ -177,6 +184,38 @@ export class DKGAgent {
 
     const publishHandler = new PublishHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
+
+    // Auto-detect or register on-chain identity
+    if (this.chain.chainId !== 'none') {
+      let identityId = 0n;
+      try {
+        identityId = await this.chain.getIdentityId();
+        if (identityId === 0n) {
+          this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
+          identityId = await this.chain.ensureProfile({
+            nodeName: this.config.name,
+          });
+          this.log.info(ctx, `On-chain profile created, identityId=${identityId}`);
+        } else {
+          this.log.info(ctx, `On-chain identity found: identityId=${identityId}`);
+        }
+      } catch (err) {
+        this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
+        // Profile may have been created before the error — re-check
+        try {
+          identityId = await this.chain.getIdentityId();
+          if (identityId > 0n) {
+            this.log.info(ctx, `Recovered identityId=${identityId} after partial failure`);
+          }
+        } catch { /* ignore */ }
+      }
+      if (identityId > 0n) {
+        this.publisher.setIdentityId(identityId);
+        this.log.info(ctx, `Publisher using identityId=${identityId}`);
+      } else {
+        this.log.warn(ctx, `No valid on-chain identity — on-chain publishes will be skipped`);
+      }
+    }
 
     // Start chain event poller for trustless confirmation of tentative publishes.
     // Only when a real chain adapter is configured (not NoChainAdapter).

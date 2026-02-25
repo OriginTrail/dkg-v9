@@ -16,7 +16,11 @@ const agents: DKGAgent[] = [];
 
 afterEach(async () => {
   for (const a of agents) {
-    try { await a.stop(); } catch {}
+    try {
+      await a.stop();
+    } catch (err) {
+      console.warn('Teardown: agent.stop() failed', err);
+    }
   }
   agents.length = 0;
 });

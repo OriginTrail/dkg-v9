@@ -156,8 +156,10 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
                 if (msg.sender == multiSigOwners[i]) {
                     return true;
                 }
-            } // solhint-disable-next-line no-empty-blocks
-        } catch {}
+            }
+        } catch {
+            // Not a multisig or call reverted; treat as not owner.
+        }
 
         return false;
     }

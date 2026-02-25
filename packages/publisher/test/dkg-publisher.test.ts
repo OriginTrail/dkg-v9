@@ -4,11 +4,14 @@ import { MockChainAdapter } from '@dkg/chain';
 import { TypedEventBus, generateEd25519Keypair } from '@dkg/core';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import type { Quad } from '@dkg/storage';
+import { ethers } from 'ethers';
 
 const PARANET = 'agent-registry';
 const GRAPH = `did:dkg:paranet:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const ENTITY2 = 'did:dkg:agent:QmTextBot';
+const TEST_WALLET = ethers.Wallet.createRandom();
+const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -22,10 +25,17 @@ describe('DKGPublisher', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    chain = new MockChainAdapter();
+    chain = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
     eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
-    publisher = new DKGPublisher({ store, chain, eventBus, keypair });
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
   });
 
   it('publishes a single KA', async () => {
@@ -40,12 +50,11 @@ describe('DKGPublisher', () => {
     expect(result.merkleRoot).toHaveLength(32);
     expect(result.kaManifest).toHaveLength(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
+    expect(result.status).toBe('confirmed');
 
-    // Verify data was stored
     const count = await store.countQuads(GRAPH);
     expect(count).toBe(2);
 
-    // Verify metadata was stored
     const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
     const metaCount = await store.countQuads(metaGraph);
     expect(metaCount).toBeGreaterThan(0);
@@ -64,6 +73,7 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest.map((m) => m.rootEntity).sort()).toEqual(
       [ENTITY, ENTITY2].sort(),
     );
+    expect(result.status).toBe('confirmed');
   });
 
   it('publishes with blank nodes (auto-skolemized)', async () => {
@@ -77,8 +87,8 @@ describe('DKGPublisher', () => {
     });
 
     expect(result.kaManifest).toHaveLength(1);
+    expect(result.status).toBe('confirmed');
 
-    // Verify skolemized triples were stored
     const queryResult = await store.query(
       `SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`,
     );
@@ -101,6 +111,7 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest[0].privateTripleCount).toBe(1);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot!).toHaveLength(32);
+    expect(result.status).toBe('confirmed');
   });
 
   it('rejects duplicate entity (exclusivity)', async () => {
@@ -129,8 +140,8 @@ describe('DKGPublisher', () => {
     });
 
     expect(updated.merkleRoot).not.toEqual(initial.merkleRoot);
+    expect(updated.status).toBe('confirmed');
 
-    // Verify old triples were replaced
     const result = await store.query(
       `SELECT ?name WHERE { GRAPH <${GRAPH}> { <${ENTITY}> <http://schema.org/name> ?name } }`,
     );
@@ -152,5 +163,75 @@ describe('DKGPublisher', () => {
     });
 
     expect(emitted).toBe(true);
+  });
+
+  it('publishes with confirmed status and onChainResult', async () => {
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.batchId).toBeTypeOf('bigint');
+    expect(result.onChainResult!.txHash).toBeTypeOf('string');
+    expect(result.onChainResult!.blockNumber).toBeTypeOf('number');
+    expect(result.onChainResult!.blockTimestamp).toBeTypeOf('number');
+    expect(result.onChainResult!.publisherAddress).toBeTypeOf('string');
+    expect(result.onChainResult!.startKAId).toBeDefined();
+    expect(result.onChainResult!.endKAId).toBeDefined();
+  });
+
+  it('generates address-based UAL format', async () => {
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+    });
+
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaResult = await store.query(
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeCollection> } }`,
+    );
+
+    expect(metaResult.type).toBe('bindings');
+    if (metaResult.type === 'bindings') {
+      expect(metaResult.bindings).toHaveLength(1);
+      const ual = metaResult.bindings[0]['ual'];
+      // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{startKAId}
+      expect(ual).toMatch(/^did:dkg:mock:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
+      expect(ual).toContain(result.onChainResult!.publisherAddress);
+    }
+  });
+
+  it('derives publisherAddress from private key', async () => {
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+    });
+
+    expect(result.onChainResult!.publisherAddress.toLowerCase()).toBe(
+      TEST_PUBLISHER_ADDRESS.toLowerCase(),
+    );
+  });
+
+  it('stores only confirmed status in meta graph on successful publish', async () => {
+    await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+    });
+
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const statusResult = await store.query(
+      `SELECT ?status WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
+    );
+
+    expect(statusResult.type).toBe('bindings');
+    if (statusResult.type === 'bindings') {
+      const statuses = statusResult.bindings.map((b) => b['status']);
+      // Clean model: either tentative or confirmed, never both. On success we have only confirmed.
+      expect(statuses).toHaveLength(1);
+      expect(statuses.some((s) => s.includes('confirmed'))).toBe(true);
+      expect(statuses.some((s) => s.includes('tentative'))).toBe(false);
+    }
   });
 });

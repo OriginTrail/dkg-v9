@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './constants.js';
 export * from './event-bus.js';
+export { Logger, createOperationContext, type OperationContext, type OperationName } from './logger.js';
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export { DKGNode } from './node.js';

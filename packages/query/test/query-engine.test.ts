@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@dkg/storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
+import { validateReadOnlySparql } from '../src/sparql-guard.js';
 
 const PARANET = 'agent-registry';
 const GRAPH = `did:dkg:paranet:${PARANET}`;
@@ -94,5 +95,99 @@ describe('DKGQueryEngine', () => {
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
     );
     expect(result.bindings.length).toBe(2);
+  });
+
+  it('rejects INSERT queries', async () => {
+    await expect(
+      engine.query('INSERT DATA { <s> <p> <o> }'),
+    ).rejects.toThrow('SPARQL rejected');
+  });
+
+  it('rejects DELETE queries', async () => {
+    await expect(
+      engine.query('DELETE WHERE { ?s ?p ?o }'),
+    ).rejects.toThrow('SPARQL rejected');
+  });
+
+  it('rejects DROP queries', async () => {
+    await expect(
+      engine.query('DROP GRAPH <http://example.org>'),
+    ).rejects.toThrow('SPARQL rejected');
+  });
+});
+
+describe('validateReadOnlySparql', () => {
+  it('allows SELECT', () => {
+    expect(validateReadOnlySparql('SELECT ?s WHERE { ?s ?p ?o }').safe).toBe(true);
+  });
+
+  it('allows CONSTRUCT', () => {
+    expect(validateReadOnlySparql('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }').safe).toBe(true);
+  });
+
+  it('allows ASK', () => {
+    expect(validateReadOnlySparql('ASK { ?s ?p ?o }').safe).toBe(true);
+  });
+
+  it('allows DESCRIBE', () => {
+    expect(validateReadOnlySparql('DESCRIBE <http://example.org/x>').safe).toBe(true);
+  });
+
+  it('rejects INSERT DATA', () => {
+    const result = validateReadOnlySparql('INSERT DATA { <s> <p> <o> }');
+    expect(result.safe).toBe(false);
+    expect(result.reason).toContain('SELECT, CONSTRUCT, ASK, or DESCRIBE');
+  });
+
+  it('rejects DELETE WHERE', () => {
+    const result = validateReadOnlySparql('DELETE WHERE { ?s ?p ?o }');
+    expect(result.safe).toBe(false);
+  });
+
+  it('rejects CLEAR GRAPH', () => {
+    const result = validateReadOnlySparql('CLEAR GRAPH <http://example.org>');
+    expect(result.safe).toBe(false);
+  });
+
+  it('rejects DROP GRAPH', () => {
+    const result = validateReadOnlySparql('DROP GRAPH <http://example.org>');
+    expect(result.safe).toBe(false);
+  });
+
+  it('rejects LOAD', () => {
+    const result = validateReadOnlySparql('LOAD <http://example.org/data>');
+    expect(result.safe).toBe(false);
+  });
+
+  it('allows comments containing mutating keywords', () => {
+    const result = validateReadOnlySparql(
+      '# This query does not INSERT anything\nSELECT ?s WHERE { ?s ?p ?o }',
+    );
+    expect(result.safe).toBe(true);
+  });
+
+  it('allows PREFIX declarations before SELECT', () => {
+    const result = validateReadOnlySparql(`
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?name WHERE { ?s <http://schema.org/name> ?name }
+    `);
+    expect(result.safe).toBe(true);
+  });
+
+  it('allows multiple PREFIX declarations', () => {
+    const result = validateReadOnlySparql(`
+      PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      PREFIX schema: <http://schema.org/>
+      SELECT ?s WHERE { ?s rdf:type schema:Person }
+    `);
+    expect(result.safe).toBe(true);
+  });
+
+  it('allows BASE declaration before SELECT', () => {
+    const result = validateReadOnlySparql(`
+      BASE <http://example.org/>
+      SELECT ?s WHERE { ?s ?p ?o }
+    `);
+    expect(result.safe).toBe(true);
   });
 });

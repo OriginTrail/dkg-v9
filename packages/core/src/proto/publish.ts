@@ -14,6 +14,12 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('paranetId', 3, 'string'))
   .add(new Field('kas', 4, 'KAManifestEntry', 'repeated'))
   .add(new Field('publisherIdentity', 5, 'bytes'))
+  .add(new Field('publisherAddress', 6, 'string'))
+  .add(new Field('startKAId', 7, 'uint64'))
+  .add(new Field('endKAId', 8, 'uint64'))
+  .add(new Field('chainId', 9, 'string'))
+  .add(new Field('publisherSignatureR', 10, 'bytes'))
+  .add(new Field('publisherSignatureVs', 11, 'bytes'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -37,6 +43,12 @@ export interface PublishRequestMsg {
   paranetId: string;
   kas: KAManifestEntryMsg[];
   publisherIdentity: Uint8Array;
+  publisherAddress: string;
+  startKAId: number | Long;
+  endKAId: number | Long;
+  chainId: string;
+  publisherSignatureR: Uint8Array;
+  publisherSignatureVs: Uint8Array;
 }
 
 export interface PublishAckMsg {

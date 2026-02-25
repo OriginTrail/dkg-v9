@@ -3,11 +3,12 @@ import {
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH,
   paranetPublishTopic, paranetDataGraphUri, encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  type DKGNodeConfig,
+  Logger, createOperationContext,
+  type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { DKGPublisher, PublishHandler, AccessHandler, AccessClient, type PublishResult } from '@dkg/publisher';
+import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
+import { DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient, type PublishResult } from '@dkg/publisher';
 import { DKGQueryEngine } from '@dkg/query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
@@ -35,6 +36,15 @@ export interface DKGAgentConfig {
   store?: TripleStore;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
+  chainAdapter?: ChainAdapter;
+  /** EVM chain configuration. If omitted, publishing won't have on-chain finality. */
+  chainConfig?: {
+    rpcUrl: string;
+    hubAddress: string;
+    privateKey: string;
+    chainId?: string;
+  };
 }
 
 /**
@@ -59,8 +69,11 @@ export class DKGAgent {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   readonly eventBus: TypedEventBus;
+  private readonly chain: ChainAdapter;
+  private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
+  private chainPoller: ChainEventPoller | null = null;
   private readonly config: DKGAgentConfig;
   private started = false;
 
@@ -72,6 +85,7 @@ export class DKGAgent {
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
+    chain: ChainAdapter,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -80,6 +94,7 @@ export class DKGAgent {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.eventBus = eventBus;
+    this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
     this.profileManager = new ProfileManager(publisher);
   }
@@ -97,7 +112,21 @@ export class DKGAgent {
       wallet = await DKGAgentWallet.generate();
     }
     const store = config.store ?? new OxigraphStore();
-    const chain = new MockChainAdapter();
+
+    let chain: ChainAdapter;
+    if (config.chainAdapter) {
+      chain = config.chainAdapter;
+    } else if (config.chainConfig) {
+      chain = new EVMChainAdapter({
+        rpcUrl: config.chainConfig.rpcUrl,
+        privateKey: config.chainConfig.privateKey,
+        hubAddress: config.chainConfig.hubAddress,
+        chainId: config.chainConfig.chainId,
+      });
+    } else {
+      chain = new NoChainAdapter();
+    }
+
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
@@ -116,19 +145,28 @@ export class DKGAgent {
     };
 
     const node = new DKGNode(nodeConfig);
-    const publisher = new DKGPublisher({ store, chain, eventBus, keypair });
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: config.chainConfig?.privateKey,
+    });
     const queryEngine = new DKGQueryEngine(store);
 
     return new DKGAgent(
-      config, wallet, node, store, publisher, queryEngine, eventBus,
+      config, wallet, node, store, publisher, queryEngine, eventBus, chain,
     );
   }
 
   async start(): Promise<void> {
     if (this.started) return;
+    const ctx = createOperationContext('connect');
+    this.log.info(ctx, `Starting DKG node`);
 
     await this.node.start();
     this.started = true;
+    this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
     this.router = new ProtocolRouter(this.node);
     this.gossip = new GossipSubManager(this.node, this.eventBus);
@@ -139,6 +177,17 @@ export class DKGAgent {
 
     const publishHandler = new PublishHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
+
+    // Start chain event poller for trustless confirmation of tentative publishes.
+    // Only when a real chain adapter is configured (not NoChainAdapter).
+    if (this.chain.chainId !== 'none') {
+      this.chainPoller = new ChainEventPoller({
+        chain: this.chain,
+        publishHandler,
+      });
+      this.chainPoller.start();
+      this.log.info(ctx, `Chain event poller started`);
+    }
 
     // Set up messaging
     const x25519Priv = ed25519ToX25519Private(this.wallet.keypair.secretKey);
@@ -201,10 +250,10 @@ export class DKGAgent {
       })),
     };
 
+    const profileCtx = createOperationContext('publish');
+    this.log.info(profileCtx, `Publishing agent profile`);
     const result = await this.profileManager.publishProfile(profileConfig);
-
-    // Broadcast profile via GossipSub
-    await this.broadcastPublish(AGENT_REGISTRY_PARANET, result);
+    await this.broadcastPublish(AGENT_REGISTRY_PARANET, result, profileCtx);
 
     return result;
   }
@@ -255,7 +304,9 @@ export class DKGAgent {
   }
 
   async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
-    // System paranets bypass the existence check
+    const ctx = createOperationContext('publish');
+    this.log.info(ctx, `Starting publish to paranet "${paranetId}" with ${quads.length} triples`);
+
     const isSystem = paranetId === SYSTEM_PARANETS.AGENTS || paranetId === SYSTEM_PARANETS.ONTOLOGY;
     if (!isSystem) {
       const exists = await this.paranetExists(paranetId);
@@ -265,13 +316,27 @@ export class DKGAgent {
         );
       }
     }
-    const result = await this.publisher.publish({ paranetId, quads, privateQuads });
-    await this.broadcastPublish(paranetId, result);
+    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx });
+    this.log.info(ctx, `Local publish complete, broadcasting to peers`);
+    await this.broadcastPublish(paranetId, result, ctx);
+    this.log.info(ctx, `Publish complete — status=${result.status} kcId=${result.kcId}`);
+    return result;
+  }
+
+  async update(kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
+    const ctx = createOperationContext('publish');
+    this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
+    const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx });
+    this.log.info(ctx, `Update complete — status=${result.status}`);
     return result;
   }
 
   async query(sparql: string, paranetId?: string) {
-    return this.queryEngine.query(sparql, { paranetId });
+    const ctx = createOperationContext('query');
+    this.log.info(ctx, `Query on paranet="${paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
+    const result = await this.queryEngine.query(sparql, { paranetId });
+    this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
+    return result;
   }
 
   subscribeToParanet(paranetId: string): void {
@@ -364,6 +429,12 @@ export class DKGAgent {
       paranetId: SYSTEM_PARANETS.ONTOLOGY,
       kas: [],
       publisherIdentity: this.wallet.keypair.publicKey,
+      publisherAddress: '',
+      startKAId: 0,
+      endKAId: 0,
+      chainId: '',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
     });
 
     try {
@@ -457,6 +528,10 @@ export class DKGAgent {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    if (this.chainPoller) {
+      this.chainPoller.stop();
+      this.chainPoller = null;
+    }
     await this.node.stop();
     this.started = false;
   }
@@ -489,20 +564,26 @@ export class DKGAgent {
     await store.insert(quads);
   }
 
-  private async broadcastPublish(paranetId: string, result: PublishResult): Promise<void> {
+  private async broadcastPublish(paranetId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
     const quadsResult = await this.queryEngine.query(
       `SELECT ?s ?p ?o WHERE { ?s ?p ?o }`,
       { paranetId },
     );
 
-    const nquads = quadsResult.bindings.map(row => {
+    // Send N-Triples (not N-Quads) — paranetId is in the envelope
+    const ntriples = quadsResult.bindings.map(row => {
       const obj = row['o'].startsWith('"') ? row['o'] : `<${row['o']}>`;
-      return `<${row['s']}> <${row['p']}> ${obj} <did:dkg:paranet:${paranetId}> .`;
+      return `<${row['s']}> <${row['p']}> ${obj} .`;
     }).join('\n');
 
+    const onChain = result.onChainResult;
+    const chainId = this.chain.chainId;
+    const ual = onChain
+      ? `did:dkg:${chainId}/${onChain.publisherAddress}/${onChain.startKAId}`
+      : `did:dkg:${chainId}/${result.kcId}`;
     const msg = encodePublishRequest({
-      ual: `did:dkg:mock:31337/${result.kcId}`,
-      nquads: new TextEncoder().encode(nquads),
+      ual,
+      nquads: new TextEncoder().encode(ntriples),
       paranetId,
       kas: result.kaManifest.map(ka => ({
         tokenId: Number(ka.tokenId),
@@ -511,13 +592,20 @@ export class DKGAgent {
         privateTripleCount: ka.privateTripleCount ?? 0,
       })),
       publisherIdentity: this.wallet.keypair.publicKey,
+      publisherAddress: onChain?.publisherAddress ?? '',
+      startKAId: Number(onChain?.startKAId ?? 0),
+      endKAId: Number(onChain?.endKAId ?? 0),
+      chainId,
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
     });
 
     const topic = paranetPublishTopic(paranetId);
+    this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
       await this.gossip.publish(topic, msg);
     } catch {
-      // No peers subscribed yet — that's ok
+      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }
   }
 }

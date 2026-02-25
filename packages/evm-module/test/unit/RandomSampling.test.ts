@@ -434,17 +434,20 @@ describe('@unit RandomSampling', () => {
         await updateAndGetActiveProofPeriod();
       expect(onePeriodBlock).to.equal(initialBlock + duration);
 
-      // Test when 2 full periods have passed
-      await mineBlocks(Number(duration));
+      // Test when 2 full periods have passed (mine one less so the update tx runs
+      // exactly at the period boundary; otherwise the tx mines an extra block and we advance one period)
+      await mineBlocks(Number(duration) - 1);
       const { activeProofPeriodStartBlock: twoPeriodBlock } =
         await updateAndGetActiveProofPeriod();
       expect(twoPeriodBlock).to.equal(initialBlock + duration * 2n);
 
-      // Test when n full periods have passed (using n=5 as example)
+      // Test when n full periods have passed (using n=5 as example).
+      // Mine (duration - 1) per iteration so the final update tx runs exactly at the period boundary.
       const n = 5;
       for (let i = 0; i < n - 2; i++) {
-        await mineBlocks(Number(duration));
+        await mineBlocks(Number(duration) - 1);
       }
+      await mineBlocks(2); // compensate so we land at initialBlock + n*duration when update runs
       const { activeProofPeriodStartBlock: nPeriodBlock } =
         await updateAndGetActiveProofPeriod();
       expect(nPeriodBlock).to.equal(initialBlock + duration * BigInt(n));

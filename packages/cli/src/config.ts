@@ -24,6 +24,25 @@ export interface NetworkConfig {
     branch: string;
     checkIntervalMinutes: number;
   };
+  chain?: {
+    type: 'evm';
+    rpcUrl: string;
+    hubAddress: string;
+    chainId: string;
+  };
+}
+
+export interface ChainConfig {
+  /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
+  type: 'evm' | 'mock';
+  /** JSON-RPC endpoint URL */
+  rpcUrl: string;
+  /** Hub contract address */
+  hubAddress: string;
+  /** EVM private key (hex with 0x prefix) */
+  privateKey: string;
+  /** Chain identifier (e.g., 'base:84532') */
+  chainId?: string;
 }
 
 export interface DkgConfig {
@@ -34,6 +53,7 @@ export interface DkgConfig {
   nodeRole: 'core' | 'edge';
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
+  chain?: ChainConfig;
 }
 
 const DEFAULT_CONFIG: DkgConfig = {

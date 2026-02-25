@@ -9,7 +9,6 @@ library KnowledgeAssetsLib {
     }
 
     struct KnowledgeBatch {
-        uint72 publisherIdentityId;
         address publisherAddress;
         bytes32 merkleRoot;
         uint64 publicByteSize;
@@ -23,9 +22,9 @@ library KnowledgeAssetsLib {
         uint256 createdAt;
     }
 
-    error PublisherRangeExhausted(uint72 identityId, uint64 needed, uint64 available);
-    error KAIdNotInPublisherRange(uint72 identityId, uint64 kaId);
-    error KAIdAlreadyUsed(uint72 identityId, uint64 kaId);
+    error PublisherRangeExhausted(address publisher, uint64 needed, uint64 available);
+    error KAIdNotInPublisherRange(address publisher, uint64 kaId);
+    error KAIdAlreadyUsed(address publisher, uint64 kaId);
     error BatchNotFound(uint256 batchId);
     error NotBatchPublisher(uint256 batchId, address caller);
     error BatchExpired(uint256 batchId, uint256 currentEpoch, uint40 endEpoch);
@@ -35,4 +34,6 @@ library KnowledgeAssetsLib {
     error SignerIsNotNodeOperator(uint72 identityId, address signer);
     error SignaturesSignersMismatch(uint256 rAmount, uint256 vsAmount, uint256 identityIdsAmount);
     error MinSignaturesRequirementNotMet(uint256 required, uint256 received);
+    error NotNamespaceOwner(address namespace, address caller);
+    error NamespaceAlreadyExists(address target);
 }

@@ -1,0 +1,43 @@
+import type {
+  ChainAdapter,
+  IdentityProof,
+  ReservedRange,
+  BatchMintParams,
+  BatchMintResult,
+  PublishParams,
+  OnChainPublishResult,
+  UpdateKAParams,
+  ExtendStorageParams,
+  TxResult,
+  ChainEvent,
+  EventFilter,
+  CreateParanetParams,
+} from './chain-adapter.js';
+
+function noChain(): never {
+  throw new Error(
+    'No blockchain configured. To use on-chain operations, provide chainConfig ' +
+    '(rpcUrl, hubAddress, privateKey) when creating the agent, or set DKG_PRIVATE_KEY.',
+  );
+}
+
+/**
+ * Stub chain adapter that throws on every operation.
+ * Used when no blockchain is configured — the node can still do P2P and queries.
+ * This is NOT a mock; it doesn't simulate any behavior.
+ */
+export class NoChainAdapter implements ChainAdapter {
+  readonly chainType = 'evm' as const;
+  readonly chainId = 'none';
+
+  async registerIdentity(_proof: IdentityProof): Promise<bigint> { noChain(); }
+  async reserveUALRange(_count: number): Promise<ReservedRange> { noChain(); }
+  async batchMintKnowledgeAssets(_params: BatchMintParams): Promise<BatchMintResult> { noChain(); }
+  async publishKnowledgeAssets(_params: PublishParams): Promise<OnChainPublishResult> { noChain(); }
+  async updateKnowledgeAssets(_params: UpdateKAParams): Promise<TxResult> { noChain(); }
+  async extendStorage(_params: ExtendStorageParams): Promise<TxResult> { noChain(); }
+  async transferNamespace(_newOwner: string): Promise<TxResult> { noChain(); }
+  async *listenForEvents(_filter: EventFilter): AsyncIterable<ChainEvent> { noChain(); }
+  async createParanet(_params: CreateParanetParams): Promise<TxResult> { noChain(); }
+  async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> { noChain(); }
+}

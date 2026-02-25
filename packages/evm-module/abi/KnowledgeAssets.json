@@ -103,9 +103,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint64",
@@ -146,6 +146,22 @@
       }
     ],
     "name": "NotBatchPublisher",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "namespace",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotNamespaceOwner",
     "type": "error"
   },
   {
@@ -521,10 +537,89 @@
   {
     "inputs": [
       {
+        "internalType": "uint32",
+        "name": "kaCount",
+        "type": "uint32"
+      },
+      {
         "internalType": "uint72",
-        "name": "identityId",
+        "name": "publisherNodeIdentityId",
         "type": "uint72"
       },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint64",
+        "name": "publicByteSize",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epochs",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "address",
+        "name": "paymaster",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "publisherNodeR",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "publisherNodeVS",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "r",
+        "type": "bytes32[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "vs",
+        "type": "bytes32[]"
+      }
+    ],
+    "name": "publishKnowledgeAssets",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "batchId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "startKAId",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "endKAId",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
       {
         "internalType": "uint32",
         "name": "count",
@@ -597,6 +692,19 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newOwner",
+        "type": "address"
+      }
+    ],
+    "name": "transferNamespace",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

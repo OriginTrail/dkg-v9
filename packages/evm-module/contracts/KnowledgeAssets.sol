@@ -26,17 +26,16 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
 /**
  * @title KnowledgeAssets
- * @notice V9 logic contract for publishing Knowledge Assets with pre-minted UALs.
+ * @notice V9 logic contract for publishing Knowledge Assets with address-based namespaces.
  *
- * Replaces V8's KnowledgeCollection.sol in the Hub. Uses the new
- * KnowledgeAssetsStorage (clean V9 storage) instead of the legacy
- * KnowledgeCollectionStorage.
+ * Any EVM address can reserve UAL ranges and publish — no on-chain identity required.
+ * Core node identities are only needed for signature verification (storage agreement).
  *
- * UAL format: did:dkg:{chainId}/{publisherIdentityId}/{localKAId}
+ * UAL format: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  */
 contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "KnowledgeAssets";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "2.0.0";
 
     AskStorage public askStorage;
     EpochStorage public epochStorage;
@@ -83,35 +82,89 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
-    // UAL Range Reservation
+    // UAL Range Reservation (permissionless, address-based)
     // ========================================================================
 
     /**
-     * @notice Reserve a block of KA IDs for a publisher. Gas cost only, no TRAC.
-     * @param identityId The publisher's on-chain identity ID
+     * @notice Reserve a block of KA IDs for msg.sender. Gas cost only, no TRAC.
      * @param count Number of IDs to reserve
      * @return startId First reserved ID
      * @return endId Last reserved ID (inclusive)
      */
     function reserveUALRange(
-        uint72 identityId,
         uint32 count
     ) external returns (uint64 startId, uint64 endId) {
-        _requireOperationalKey(identityId, msg.sender);
-        return knowledgeAssetsStorage.reserveUALRange(identityId, count);
+        return knowledgeAssetsStorage.reserveUALRange(msg.sender, count);
     }
 
     // ========================================================================
-    // Batch Minting
+    // Single-Transaction Publish (convenience: auto-reserve + mint)
     // ========================================================================
 
     /**
-     * @notice Batch-mint Knowledge Assets from a publisher's reserved range.
+     * @notice Publish Knowledge Assets in a single transaction.
+     * Auto-reserves a UAL range for msg.sender and mints the batch.
      *
-     * @param publisherNodeIdentityId Publisher's identity on the node that stores data
+     * @param kaCount Number of KAs to publish
+     * @param publisherNodeIdentityId Core node identity that stores this data
+     * @param merkleRoot KC-level merkle root covering all KAs
+     * @param publicByteSize Size of public triples in bytes
+     * @param epochs Storage duration in epochs (1 epoch = 30 days)
+     * @param tokenAmount TRAC payment for storage
+     * @param paymaster Optional paymaster address (zero = direct TRAC transfer)
+     * @param publisherNodeR Publisher node signature R
+     * @param publisherNodeVS Publisher node signature VS
+     * @param identityIds Receiving node identity IDs
+     * @param r Receiving node signature R values
+     * @param vs Receiving node signature VS values
+     * @return batchId The on-chain batch ID
+     * @return startKAId First KA ID in the auto-reserved range
+     * @return endKAId Last KA ID in the auto-reserved range
+     */
+    function publishKnowledgeAssets(
+        uint32 kaCount,
+        uint72 publisherNodeIdentityId,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint40 epochs,
+        uint96 tokenAmount,
+        address paymaster,
+        bytes32 publisherNodeR,
+        bytes32 publisherNodeVS,
+        uint72[] calldata identityIds,
+        bytes32[] calldata r,
+        bytes32[] calldata vs
+    ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
+        (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
+
+        batchId = _mintBatch(
+            publisherNodeIdentityId,
+            merkleRoot,
+            startKAId,
+            endKAId,
+            publicByteSize,
+            epochs,
+            tokenAmount,
+            paymaster,
+            publisherNodeR,
+            publisherNodeVS,
+            identityIds,
+            r,
+            vs
+        );
+    }
+
+    // ========================================================================
+    // Batch Minting (for pre-minted UALs)
+    // ========================================================================
+
+    /**
+     * @notice Batch-mint Knowledge Assets from msg.sender's reserved range.
+     *
+     * @param publisherNodeIdentityId Core node identity that stores this data
      * @param merkleRoot KC-level merkle root covering all KAs in this batch
-     * @param startKAId First KA ID (from publisher's reserved range)
-     * @param endKAId Last KA ID inclusive (from publisher's reserved range)
+     * @param startKAId First KA ID (from msg.sender's reserved range)
+     * @param endKAId Last KA ID inclusive
      * @param publicByteSize Size of public triples in bytes
      * @param epochs Storage duration in epochs (1 epoch = 30 days)
      * @param tokenAmount TRAC payment for storage
@@ -142,67 +195,21 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             revert KnowledgeAssetsLib.InvalidKARange(startKAId, endKAId);
         }
 
-        // Verify publisher signature: signs H(identityId || merkleRoot)
-        _verifySignature(
+        return _mintBatch(
             publisherNodeIdentityId,
-            ECDSA.toEthSignedMessageHash(
-                keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))
-            ),
+            merkleRoot,
+            startKAId,
+            endKAId,
+            publicByteSize,
+            epochs,
+            tokenAmount,
+            paymaster,
             publisherNodeR,
-            publisherNodeVS
-        );
-
-        // Verify receiving node signatures: sign H(merkleRoot)
-        _verifySignatures(
+            publisherNodeVS,
             identityIds,
-            ECDSA.toEthSignedMessageHash(merkleRoot),
             r,
             vs
         );
-
-        KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
-
-        // Validate KA IDs are in the publisher's reserved range and not already used
-        for (uint64 id = startKAId; id <= endKAId; id++) {
-            if (kas.isKAIdUsed(publisherNodeIdentityId, id)) {
-                revert KnowledgeAssetsLib.KAIdAlreadyUsed(publisherNodeIdentityId, id);
-            }
-        }
-
-        uint32 kaCount = uint32(endKAId - startKAId + 1);
-        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
-
-        // Validate token amount covers storage cost
-        // cost = stakeWeightedAverageAsk × publicByteSize × epochs / 1024
-        _validateTokenAmount(publicByteSize, epochs, tokenAmount);
-
-        // Create the batch in storage
-        batchId = kas.createKnowledgeBatch(
-            publisherNodeIdentityId,
-            msg.sender,
-            merkleRoot,
-            publicByteSize,
-            kaCount,
-            startKAId,
-            endKAId,
-            currentEpoch,
-            currentEpoch + epochs,
-            tokenAmount,
-            false // not permanent
-        );
-
-        // Distribute tokens across epochs
-        _distributeTokens(tokenAmount, epochs, currentEpoch);
-
-        // Record knowledge value for the publisher node
-        epochStorage.addEpochProducedKnowledgeValue(
-            publisherNodeIdentityId,
-            currentEpoch,
-            tokenAmount
-        );
-
-        // Transfer TRAC payment
-        _addTokens(tokenAmount, paymaster);
     }
 
     // ========================================================================
@@ -211,7 +218,7 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Update the merkle root and byte size of an existing batch.
-     * Only callable by the original publisher.
+     * Only callable by the original publisher (msg.sender == batch.publisherAddress).
      *
      * Pricing: 10% of original cost if new size <= original, else full rate on excess.
      */
@@ -235,19 +242,16 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             revert KnowledgeAssetsLib.BatchExpired(batchId, currentEpoch, batch.endEpoch);
         }
 
-        // Calculate update cost
         uint96 updateCost;
         uint256 stakeWeightedAverageAsk = askStorage.getStakeWeightedAverageAsk();
         uint256 remainingEpochs = batch.endEpoch - uint40(currentEpoch);
 
         if (newPublicByteSize <= batch.publicByteSize) {
-            // Same or smaller: 10% fee on original cost
             uint96 originalCost = uint96(
                 (stakeWeightedAverageAsk * batch.publicByteSize * (batch.endEpoch - batch.startEpoch)) / 1024
             );
             updateCost = originalCost / 10;
         } else {
-            // Larger: 10% base + full rate on excess bytes for remaining epochs
             uint96 originalCost = uint96(
                 (stakeWeightedAverageAsk * batch.publicByteSize * (batch.endEpoch - batch.startEpoch)) / 1024
             );
@@ -260,7 +264,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
 
         kas.updateKnowledgeBatch(batchId, newMerkleRoot, newPublicByteSize, updateCost);
 
-        // Distribute additional tokens across remaining epochs
         if (updateCost > 0 && remainingEpochs > 0) {
             epochStorage.addTokensToEpochRange(
                 1,
@@ -277,9 +280,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     // Storage Extension
     // ========================================================================
 
-    /**
-     * @notice Extend the storage duration of a batch.
-     */
     function extendStorage(
         uint256 batchId,
         uint40 additionalEpochs,
@@ -313,19 +313,92 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
-    // Internal Helpers (forked from V8 KnowledgeCollection.sol)
+    // Namespace Transfer
     // ========================================================================
 
-    function _requireOperationalKey(uint72 identityId, address caller) internal view {
-        if (
-            !identityStorage.keyHasPurpose(
-                identityId,
-                keccak256(abi.encodePacked(caller)),
-                IdentityLib.OPERATIONAL_KEY
-            )
-        ) {
-            revert KnowledgeAssetsLib.SignerIsNotNodeOperator(identityId, caller);
+    /**
+     * @notice Transfer msg.sender's entire UAL namespace to a new address.
+     * All reserved ranges, batch ownership, and future IDs move to the new owner.
+     */
+    function transferNamespace(address newOwner) external {
+        if (newOwner == address(0) || newOwner == msg.sender) {
+            revert KnowledgeAssetsLib.NotNamespaceOwner(newOwner, msg.sender);
         }
+        knowledgeAssetsStorage.transferNamespace(msg.sender, newOwner);
+    }
+
+    // ========================================================================
+    // Internal Helpers
+    // ========================================================================
+
+    function _mintBatch(
+        uint72 publisherNodeIdentityId,
+        bytes32 merkleRoot,
+        uint64 startKAId,
+        uint64 endKAId,
+        uint64 publicByteSize,
+        uint40 epochs,
+        uint96 tokenAmount,
+        address paymaster,
+        bytes32 publisherNodeR,
+        bytes32 publisherNodeVS,
+        uint72[] calldata identityIds,
+        bytes32[] calldata r,
+        bytes32[] calldata vs
+    ) internal returns (uint256 batchId) {
+        // Verify core node signatures
+        _verifySignature(
+            publisherNodeIdentityId,
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))
+            ),
+            publisherNodeR,
+            publisherNodeVS
+        );
+
+        _verifySignatures(
+            identityIds,
+            ECDSA.toEthSignedMessageHash(merkleRoot),
+            r,
+            vs
+        );
+
+        KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
+
+        // Validate KA IDs are not already used (keyed by msg.sender address)
+        for (uint64 id = startKAId; id <= endKAId; id++) {
+            if (kas.isKAIdUsed(msg.sender, id)) {
+                revert KnowledgeAssetsLib.KAIdAlreadyUsed(msg.sender, id);
+            }
+        }
+
+        uint32 kaCount = uint32(endKAId - startKAId + 1);
+        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
+
+        _validateTokenAmount(publicByteSize, epochs, tokenAmount);
+
+        batchId = kas.createKnowledgeBatch(
+            msg.sender,
+            merkleRoot,
+            publicByteSize,
+            kaCount,
+            startKAId,
+            endKAId,
+            currentEpoch,
+            currentEpoch + epochs,
+            tokenAmount,
+            false
+        );
+
+        _distributeTokens(tokenAmount, epochs, currentEpoch);
+
+        epochStorage.addEpochProducedKnowledgeValue(
+            publisherNodeIdentityId,
+            currentEpoch,
+            tokenAmount
+        );
+
+        _addTokens(tokenAmount, paymaster);
     }
 
     function _verifySignatures(

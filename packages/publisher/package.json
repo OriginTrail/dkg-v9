@@ -15,6 +15,7 @@
     "@dkg/query": "workspace:*",
     "@dkg/storage": "workspace:*",
     "@multiformats/multiaddr": "^13.0.1",
+    "ethers": "^6.16.0",
     "n3": "^2",
     "rdf-canonize": "^5"
   },

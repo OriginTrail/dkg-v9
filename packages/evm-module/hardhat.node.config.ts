@@ -58,6 +58,13 @@ const config: HardhatUserConfig = {
       accounts: accounts('BASE_SEPOLIA_TEST'),
       saveDeployments: false,
     },
+    base_sepolia_v9: {
+      environment: 'development',
+      chainId: 84532,
+      url: rpc('BASE_SEPOLIA_V9') || 'https://sepolia.base.org',
+      accounts: accounts('BASE_SEPOLIA_V9'),
+      saveDeployments: false,
+    },
   },
   solidity: {
     compilers: [

@@ -1,21 +1,29 @@
 import type { Quad, TripleStore } from '@dkg/storage';
-import type { ChainAdapter } from '@dkg/chain';
-import type { EventBus } from '@dkg/core';
-import { DKGEvent, ed25519Sign, type Ed25519Keypair } from '@dkg/core';
+import type { ChainAdapter, OnChainPublishResult } from '@dkg/chain';
+import type { EventBus, OperationContext } from '@dkg/core';
+import { DKGEvent, ed25519Sign, Logger, createOperationContext, sha256, MerkleTree, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computePublicRoot, computePrivateRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computeTripleHash, computePublicRoot, computePrivateRoot, computeKARoot, computeKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
-import { generateKCMetadata, type KAMetadata } from './metadata.js';
+import {
+  generateTentativeMetadata,
+  generateConfirmedFullMetadata,
+  type KAMetadata,
+} from './metadata.js';
+import { ethers } from 'ethers';
 
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
   eventBus: EventBus;
   keypair: Ed25519Keypair;
-  publisherIdentityId?: bigint;
+  publisherNodeIdentityId?: bigint;
+  publisherAddress?: string;
+  /** EVM private key for signing publish requests (hex string with 0x prefix) */
+  publisherPrivateKey?: string;
 }
 
 export class DKGPublisher implements Publisher {
@@ -26,50 +34,62 @@ export class DKGPublisher implements Publisher {
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
-  private publisherIdentityId: bigint;
+  private readonly publisherNodeIdentityId: bigint;
+  private readonly publisherAddress: string;
+  private readonly publisherWallet?: ethers.Wallet;
+  private readonly log = new Logger('DKGPublisher');
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
     this.chain = config.chain;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
-    this.publisherIdentityId = config.publisherIdentityId ?? 1n;
+    this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 1n;
+
+    if (config.publisherPrivateKey) {
+      this.publisherWallet = new ethers.Wallet(config.publisherPrivateKey);
+      this.publisherAddress = this.publisherWallet.address;
+    } else {
+      this.publisherAddress = config.publisherAddress ?? '0x' + '0'.repeat(40);
+    }
+
     this.graphManager = new GraphManager(config.store);
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [] } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false } = options;
+    const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+
+    this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private (entityProofs=${entityProofs})`);
     await this.graphManager.ensureParanet(paranetId);
 
     const kaMap = autoPartition(quads);
 
-    const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
     const kaMetadata: KAMetadata[] = [];
 
+    // Step 1: Compute privateMerkleRoot over ALL private triples
+    let privateMerkleRoot: Uint8Array | undefined;
+    if (privateQuads.length > 0) {
+      privateMerkleRoot = computePrivateRoot(privateQuads);
+    }
+
+    // Step 2: Build manifest entries (needed regardless of merkle mode)
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
       const entityPrivateQuads = privateQuads.filter(
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
 
-      const pubRoot = computePublicRoot(publicQuads);
-      const privRoot =
-        entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
-          : undefined;
-
-      const kaRoot = computeKARoot(pubRoot, privRoot);
-      kaRoots.push(kaRoot);
-
-      const entry: KAManifestEntry = {
+      manifestEntries.push({
         tokenId: tokenCounter,
         rootEntity,
-        privateMerkleRoot: privRoot,
+        privateMerkleRoot: entityPrivateQuads.length > 0
+          ? computePrivateRoot(entityPrivateQuads)
+          : undefined,
         privateTripleCount: entityPrivateQuads.length,
-      };
-      manifestEntries.push(entry);
+      });
 
       kaMetadata.push({
         rootEntity,
@@ -77,7 +97,9 @@ export class DKGPublisher implements Publisher {
         tokenId: tokenCounter,
         publicTripleCount: publicQuads.length,
         privateTripleCount: entityPrivateQuads.length,
-        privateMerkleRoot: privRoot,
+        privateMerkleRoot: entityPrivateQuads.length > 0
+          ? computePrivateRoot(entityPrivateQuads)
+          : undefined,
       });
 
       tokenCounter++;
@@ -90,45 +112,54 @@ export class DKGPublisher implements Publisher {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
     }
 
-    const kcMerkleRoot = computeKCRoot(kaRoots);
-    const signature = await ed25519Sign(kcMerkleRoot, this.keypair.secretKey);
+    // Step 3: Compute kcMerkleRoot using the two-level scheme
+    let kcMerkleRoot: Uint8Array;
+    const allPublicHashes = allSkolemizedQuads.map(computeTripleHash);
 
-    // Reserve UAL range and batch-mint via V9 flow
-    const kaCount = manifestEntries.length;
-    const range = await this.chain.reserveUALRange(this.publisherIdentityId, kaCount);
-
-    const mintResult = await this.chain.batchMintKnowledgeAssets({
-      publisherIdentityId: this.publisherIdentityId,
-      merkleRoot: kcMerkleRoot,
-      startKAId: range.startId,
-      endKAId: range.endId,
-      publicByteSize: BigInt(allSkolemizedQuads.length * 100), // estimate
-      epochs: 1,
-      tokenAmount: 0n, // mock adapter doesn't validate
-      publisherSignature: {
-        r: signature.slice(0, 32),
-        vs: signature.slice(32),
-      },
-      receiverSignatures: [
-        {
-          identityId: this.publisherIdentityId,
-          r: signature.slice(0, 32),
-          vs: signature.slice(32),
-        },
-      ],
-    });
-
-    if (!mintResult.success) {
-      throw new Error('Chain transaction failed');
+    if (privateMerkleRoot) {
+      // Anchor privateMerkleRoot as a synthetic public triple hash
+      const syntheticTripleHash = computeTripleHash({
+        subject: `urn:dkg:kc`,
+        predicate: 'http://dkg.io/ontology/privateContentRoot',
+        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
+        graph: '',
+      });
+      allPublicHashes.push(syntheticTripleHash);
     }
 
-    const batchId = mintResult.batchId;
-    // V9 UAL: did:dkg:{chainId}/{publisherIdentityId}/{firstKAId}
-    const ual = `did:dkg:${this.chain.chainId}/${this.publisherIdentityId}/${range.startId}`;
+    if (entityProofs) {
+      // Per-entity kaRoots → Merkle tree
+      const kaRoots: Uint8Array[] = [];
+      for (const [rootEntity, publicQuads] of kaMap) {
+        const pubRoot = computePublicRoot(publicQuads);
+        kaRoots.push(pubRoot ?? new Uint8Array(32));
+      }
+      kcMerkleRoot = computeKCRoot(kaRoots);
+      this.log.info(ctx, `Computed kcMerkleRoot (entityProofs) for ${kaRoots.length} KAs`);
+    } else {
+      // Flat hash over all public triples + synthetic anchor
+      const tree = new MerkleTree(allPublicHashes);
+      kcMerkleRoot = tree.root;
+      this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
+    }
+    const signature = await ed25519Sign(kcMerkleRoot, this.keypair.secretKey);
 
-    // Store skolemized public quads
+    const kaCount = manifestEntries.length;
+
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
+
+    // Store synthetic triple anchoring privateMerkleRoot in the data graph
+    if (privateMerkleRoot) {
+      normalizedQuads.push({
+        subject: 'urn:dkg:kc',
+        predicate: 'http://dkg.io/ontology/privateContentRoot',
+        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
+        graph: dataGraph,
+      });
+    }
+
+    this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
 
     // Store private quads
@@ -141,23 +172,6 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // Generate and store metadata
-    for (const km of kaMetadata) {
-      km.kcUal = ual;
-    }
-    const metadataQuads = generateKCMetadata(
-      {
-        ual,
-        paranetId,
-        merkleRoot: kcMerkleRoot,
-        kaCount: manifestEntries.length,
-        publisherPeerId: '',
-        timestamp: new Date(),
-      },
-      kaMetadata,
-    );
-    await this.store.insert(metadataQuads);
-
     // Track owned entities
     if (!this.ownedEntities.has(paranetId)) {
       this.ownedEntities.set(paranetId, new Set());
@@ -166,10 +180,88 @@ export class DKGPublisher implements Publisher {
       this.ownedEntities.get(paranetId)!.add(e.rootEntity);
     }
 
+    let onChainResult: OnChainPublishResult | undefined;
+    let status: 'tentative' | 'confirmed' = 'tentative';
+    let ual: string;
+
+    this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs)`);
+    try {
+      onChainResult = await this.chain.publishKnowledgeAssets({
+        kaCount,
+        publisherNodeIdentityId: this.publisherNodeIdentityId,
+        merkleRoot: kcMerkleRoot,
+        publicByteSize: BigInt(allSkolemizedQuads.length * 100),
+        epochs: 1,
+        tokenAmount: 0n,
+        publisherSignature: {
+          r: signature.slice(0, 32),
+          vs: signature.slice(32),
+        },
+        receiverSignatures: [
+          {
+            identityId: this.publisherNodeIdentityId,
+            r: signature.slice(0, 32),
+            vs: signature.slice(32),
+          },
+        ],
+      });
+
+      // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
+      ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
+
+      // Confirmed only: full KC/KA metadata + status "confirmed" + chain provenance (no tentative triple)
+      for (const km of kaMetadata) {
+        km.kcUal = ual;
+      }
+      const confirmedQuads = generateConfirmedFullMetadata(
+        {
+          ual,
+          paranetId,
+          merkleRoot: kcMerkleRoot,
+          kaCount,
+          publisherPeerId: '',
+          timestamp: new Date(),
+        },
+        kaMetadata,
+        {
+          txHash: onChainResult.txHash,
+          blockNumber: onChainResult.blockNumber,
+          blockTimestamp: onChainResult.blockTimestamp,
+          publisherAddress: onChainResult.publisherAddress,
+          batchId: onChainResult.batchId,
+          chainId: this.chain.chainId,
+        },
+      );
+      await this.store.insert(confirmedQuads);
+      status = 'confirmed';
+      this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
+    } catch (err) {
+      this.log.warn(ctx, `On-chain tx failed, storing as tentative: ${err instanceof Error ? err.message : String(err)}`);
+      ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/0`;
+
+      for (const km of kaMetadata) {
+        km.kcUal = ual;
+      }
+      const tentativeQuads = generateTentativeMetadata(
+        {
+          ual,
+          paranetId,
+          merkleRoot: kcMerkleRoot,
+          kaCount,
+          publisherPeerId: '',
+          timestamp: new Date(),
+        },
+        kaMetadata,
+      );
+      await this.store.insert(tentativeQuads);
+    }
+
     const result: PublishResult = {
-      kcId: batchId,
+      kcId: onChainResult?.batchId ?? 0n,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
+      status,
+      onChainResult,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -177,7 +269,9 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [] } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx } = options;
+    const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
 
     const kaMap = autoPartition(quads);
@@ -214,7 +308,6 @@ export class DKGPublisher implements Publisher {
 
     const kcMerkleRoot = computeKCRoot(kaRoots);
 
-    // V9 update: submit new merkle root for existing batch
     const allSkolemizedQuads = [...kaMap.values()].flat();
     await this.chain.updateKnowledgeAssets({
       batchId: kcId,
@@ -226,6 +319,7 @@ export class DKGPublisher implements Publisher {
       kcId,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
+      status: 'confirmed',
     };
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);

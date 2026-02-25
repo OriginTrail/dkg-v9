@@ -98,14 +98,14 @@ A Knowledge Asset is the atomic unit of knowledge in the DKG. It's an entity and
 Each KA has a globally unique identifier called a **UAL** (Uniform Asset Locator). V9 uses publisher-namespaced UALs:
 
 ```
-did:dkg:base:84532/7/42
-        │     │    │  └─ Local KA ID (from publisher's reserved range)
-        │     │    └──── Publisher identity ID (on-chain)
-        │     └───────── Chain ID
-        └─────────────── DKG method
+did:dkg:base:84532/0xA1B2...C3D4/42
+        │     │         │        └─ Local KA ID (from publisher's reserved range)
+        │     │         └────────── Publisher address (msg.sender)
+        │     └──────────────────── Chain ID
+        └────────────────────────── DKG method
 ```
 
-Because UALs are namespaced per publisher, IDs never collide across publishers. Publisher 7's KA 42 is completely independent of Publisher 12's KA 42.
+Because UALs are namespaced per publisher **address**, IDs never collide across publishers. Publisher `0xA1B2`'s KA 42 is completely independent of Publisher `0xC3D4`'s KA 42.
 
 KAs can contain both **public triples** (visible to everyone on the network) and **private triples** (stored only on the publisher's node, but their existence is provable via merkle proofs).
 
@@ -166,14 +166,12 @@ In DKG V8, knowledge assets get their IDs from an on-chain counter that incremen
 V9 introduces **publisher-namespaced UAL ranges**. Instead of getting IDs one at a time, a publisher reserves a block of IDs up front:
 
 ```
-Publisher A reserves range [1..1000]
-Publisher B reserves range [1..500]
+Publisher A (0xA1B2...) reserves range [1..1000]
+Publisher B (0xC3D4...) reserves range [1..500]
 
-Publisher A's UALs:  did:dkg:base:84532/{Publisher A's ID}/1
-                     did:dkg:base:84532/{Publisher A's ID}/2
-                     ...
-Publisher B's UALs:  did:dkg:base:84532/{Publisher B's ID}/1
-                     ...
+Publisher A's UALs:  did:dkg:base:84532/0xA1B2.../1
+                     did:dkg:base:84532/0xA1B2.../2
+Publisher B's UALs:  did:dkg:base:84532/0xC3D4.../1
 ```
 
 Each publisher has their own namespace. IDs never collide across publishers.
@@ -185,12 +183,14 @@ Each publisher has their own namespace. IDs never collide across publishers.
 
 Because ranges are namespaced per publisher key, they don't interfere with each other — Publisher A's ID 42 is completely independent of Publisher B's ID 42. The gas cost of the `reserveUALRange` transaction is sufficient to prevent squatting (no additional TRAC fee). Unused ranges **do not expire** — once reserved, those IDs belong to the publisher permanently.
 
+> **Address-based publishing (V9.1)**: Any EVM address can reserve UAL ranges and publish — no on-chain identity or node profile is required. This enables edge nodes and lightweight agents to publish directly using their wallet address. Core node identities are only needed for signature verification (storage agreement). The `reserveUALRange` function takes only a `count` parameter; `msg.sender` is the namespace key.
+
 ### Publishing Flow
 
 ```
 1. Reserve     Publisher calls reserveUALRange(count) on-chain
-               → Gets back startId..endId in their namespace
-               → Gas cost only (no TRAC fee — namespacing prevents squatting)
+               → msg.sender's address is the namespace key
+               → Gets back startId..endId
 
 2. Prepare     Off-chain: assign KA IDs from reserved range,
                compute merkle tree (public + private roots per KA)
@@ -206,6 +206,21 @@ Because ranges are namespaced per publisher key, they don't interfere with each 
                → Triples become CONFIRMED and queryable by all
 ```
 
+### Single-Transaction Publish
+
+For convenience, V9 also offers `publishKnowledgeAssets` — a single-transaction function that auto-reserves a UAL range and mints the batch in one call. This simplifies the flow for publishers who don't need pre-minted UALs:
+
+```
+1. Prepare     Off-chain: compute merkle tree, collect node signatures
+2. Publish     Call publishKnowledgeAssets(kaCount, ...) on-chain
+               → Auto-reserves range, mints batch, returns (batchId, startKAId, endKAId)
+3. Confirm     Nodes observe on-chain event, verify merkle root
+```
+
+### Namespace Transfer
+
+A publisher can transfer their entire UAL namespace to a new address via `transferNamespace(newOwner)`. All reserved ranges, batch ownership, and future ID allocation move to the new owner. The old address loses all publishing rights. This enables key rotation and organizational handoffs without losing published knowledge.
+
 ### Tentative Data
 
 Between steps 3 and 5, the data is in a **tentative** state:
@@ -213,6 +228,8 @@ Between steps 3 and 5, the data is in a **tentative** state:
 - **Publisher's own node** can query tentative data immediately — the publisher trusts their own data and benefits from instant access while waiting for chain finalization.
 - **Other nodes** store the data but do **not** serve it in query results until the on-chain finalization event arrives. This prevents unverified (or potentially fraudulent) data from polluting query results across the network.
 - **10-minute timeout**: If no on-chain finalization event is observed within 10 minutes of receiving the broadcast, nodes discard the tentative data. This prevents nodes from accumulating unfinalized garbage data from misbehaving publishers.
+
+> **Two-phase metadata**: When publishing, nodes generate metadata in two phases. **Phase 1 (tentative)** metadata is created at P2P broadcast time and includes `dkg:status "tentative"`, publisher peer ID, local timestamp, paranet, merkle root, and KA count. **Phase 2 (confirmed)** metadata is added after on-chain finalization and includes `dkg:status "confirmed"`, transaction hash, block number, authoritative chain timestamp, publisher address, batch ID, and chain ID. This provides a complete audit trail from initial broadcast to on-chain settlement.
 
 ### Knowledge Updates
 
@@ -684,7 +701,7 @@ This means we can add new features (like conviction multipliers) by deploying ne
 ```
 Logic Contracts (upgradeable)     Storage Contracts (persistent)
 ─────────────────────────────     ────────────────────────────
-KnowledgeAssets.sol          →    KnowledgeAssetsStorage.sol  (NEW — clean V9 storage)
+KnowledgeAssets.sol          →    KnowledgeAssetsStorage.sol  (V9 — address-based publishing)
 Staking.sol                  →    StakingStorage.sol
                                   DelegatorsInfo.sol
 Paranet.sol                  →    ParanetsRegistry.sol
@@ -718,12 +735,13 @@ interface ChainAdapter {
   chainType: 'evm' | 'solana';
   chainId: string;
 
-  // Publishing
-  reserveUALRange(publisherId: bigint, count: number): Promise<ReservedRange>;
+  // Publishing (address-based, no identity required)
+  reserveUALRange(count: number): Promise<ReservedRange>;
+  publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult>;
   batchMintKnowledgeAssets(params: MintParams): Promise<TxResult>;
-  batchMintKnowledgeAssetsPermanent(params: PermanentMintParams): Promise<TxResult>;
-  updateKnowledgeAssets(kcId: bigint, newMerkleRoot: Uint8Array, newSize: bigint): Promise<TxResult>;
-  extendStorage(kcId: bigint, additionalEpochs: number): Promise<TxResult>;
+  updateKnowledgeAssets(params: UpdateParams): Promise<TxResult>;
+  extendStorage(params: ExtendParams): Promise<TxResult>;
+  transferNamespace(newOwner: string): Promise<TxResult>;
 
   // Staking
   stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;

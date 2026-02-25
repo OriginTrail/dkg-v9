@@ -9,24 +9,24 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 /**
  * @title KnowledgeAssetsStorage
- * @notice V9 storage contract for Knowledge Assets with publisher-namespaced UALs.
+ * @notice V9 storage contract for Knowledge Assets with address-based publisher namespaces.
  *
- * UAL format: did:dkg:{chainId}/{publisherIdentityId}/{localKAId}
+ * UAL format: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  *
- * Publishers reserve ID ranges, then batch-mint KAs from those ranges.
+ * Any address can reserve ID ranges and batch-mint KAs — no on-chain identity required.
  * This replaces V8's KnowledgeCollectionStorage for new V9 publishes.
  * The legacy KnowledgeCollectionStorage remains read-only for V8 data.
  */
 contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
     event UALRangeReserved(
-        uint72 indexed publisherIdentityId,
+        address indexed publisher,
         uint64 startId,
         uint64 endId
     );
 
     event KnowledgeBatchCreated(
         uint256 indexed batchId,
-        uint72 indexed publisherIdentityId,
+        address indexed publisher,
         bytes32 merkleRoot,
         uint64 publicByteSize,
         uint32 knowledgeAssetsCount,
@@ -52,26 +52,26 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         uint96 additionalTokens
     );
 
+    event NamespaceTransferred(
+        address indexed from,
+        address indexed to
+    );
+
     string private constant _NAME = "KnowledgeAssetsStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "2.0.0";
 
-    // --- Publisher Namespace State ---
+    // --- Publisher Namespace State (keyed by address) ---
 
-    // publisherIdentityId => reserved ranges (append-only)
-    mapping(uint72 => KnowledgeAssetsLib.PublisherRange[]) public publisherRanges;
-
-    // publisherIdentityId => next available local KA ID
-    mapping(uint72 => uint64) public publisherNextId;
+    mapping(address => KnowledgeAssetsLib.PublisherRange[]) public publisherRanges;
+    mapping(address => uint64) public publisherNextId;
 
     // --- Knowledge Batch State ---
 
     uint256 private _batchCounter;
-
-    // batchId => batch metadata
     mapping(uint256 => KnowledgeAssetsLib.KnowledgeBatch) public knowledgeBatches;
 
-    // publisherIdentityId => localKAId => batchId (0 = unused)
-    mapping(uint72 => mapping(uint64 => uint256)) public kaIdToBatch;
+    // publisher address => localKAId => batchId (0 = unused)
+    mapping(address => mapping(uint64 => uint256)) public kaIdToBatch;
 
     // --- Aggregate Counters ---
 
@@ -90,41 +90,31 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
 
     // --- Publisher Namespace ---
 
-    /**
-     * @notice Reserve a block of KA IDs for a publisher. Gas cost only, no TRAC fee.
-     * @param publisherIdentityId The on-chain identity of the publisher
-     * @param count How many IDs to reserve
-     * @return startId First ID in the reserved range
-     * @return endId Last ID in the reserved range (inclusive)
-     */
     function reserveUALRange(
-        uint72 publisherIdentityId,
+        address publisher,
         uint32 count
     ) external onlyContracts returns (uint64 startId, uint64 endId) {
-        uint64 nextId = publisherNextId[publisherIdentityId];
+        uint64 nextId = publisherNextId[publisher];
         if (nextId == 0) {
-            nextId = 1; // IDs start at 1
+            nextId = 1;
         }
 
         startId = nextId;
         endId = nextId + uint64(count) - 1;
 
-        publisherRanges[publisherIdentityId].push(
+        publisherRanges[publisher].push(
             KnowledgeAssetsLib.PublisherRange(startId, endId)
         );
-        publisherNextId[publisherIdentityId] = endId + 1;
+        publisherNextId[publisher] = endId + 1;
 
-        emit UALRangeReserved(publisherIdentityId, startId, endId);
+        emit UALRangeReserved(publisher, startId, endId);
     }
 
-    /**
-     * @notice Check if a KA ID is within any reserved range for a publisher.
-     */
     function isIdInReservedRange(
-        uint72 publisherIdentityId,
+        address publisher,
         uint64 kaId
     ) external view returns (bool) {
-        KnowledgeAssetsLib.PublisherRange[] storage ranges = publisherRanges[publisherIdentityId];
+        KnowledgeAssetsLib.PublisherRange[] storage ranges = publisherRanges[publisher];
         for (uint256 i; i < ranges.length; i++) {
             if (kaId >= ranges[i].startId && kaId <= ranges[i].endId) {
                 return true;
@@ -133,32 +123,21 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         return false;
     }
 
-    /**
-     * @notice Get the number of reserved ranges for a publisher.
-     */
-    function getPublisherRangesCount(uint72 publisherIdentityId) external view returns (uint256) {
-        return publisherRanges[publisherIdentityId].length;
+    function getPublisherRangesCount(address publisher) external view returns (uint256) {
+        return publisherRanges[publisher].length;
     }
 
-    /**
-     * @notice Get a specific reserved range by index.
-     */
     function getPublisherRange(
-        uint72 publisherIdentityId,
+        address publisher,
         uint256 index
     ) external view returns (uint64 startId, uint64 endId) {
-        KnowledgeAssetsLib.PublisherRange storage r = publisherRanges[publisherIdentityId][index];
+        KnowledgeAssetsLib.PublisherRange storage r = publisherRanges[publisher][index];
         return (r.startId, r.endId);
     }
 
     // --- Knowledge Batch CRUD ---
 
-    /**
-     * @notice Create a new knowledge batch (called by the KnowledgeAssets logic contract).
-     * @return batchId The ID of the newly created batch
-     */
     function createKnowledgeBatch(
-        uint72 publisherIdentityId,
         address publisherAddress,
         bytes32 merkleRoot,
         uint64 publicByteSize,
@@ -173,7 +152,6 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         batchId = ++_batchCounter;
 
         knowledgeBatches[batchId] = KnowledgeAssetsLib.KnowledgeBatch({
-            publisherIdentityId: publisherIdentityId,
             publisherAddress: publisherAddress,
             merkleRoot: merkleRoot,
             publicByteSize: publicByteSize,
@@ -187,9 +165,8 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
             createdAt: block.timestamp
         });
 
-        // Mark all KA IDs in the batch as used
         for (uint64 id = startKAId; id <= endKAId; id++) {
-            kaIdToBatch[publisherIdentityId][id] = batchId;
+            kaIdToBatch[publisherAddress][id] = batchId;
         }
 
         unchecked {
@@ -199,7 +176,7 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
 
         emit KnowledgeBatchCreated(
             batchId,
-            publisherIdentityId,
+            publisherAddress,
             merkleRoot,
             publicByteSize,
             knowledgeAssetsCount,
@@ -212,9 +189,6 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         );
     }
 
-    /**
-     * @notice Update the merkle root and byte size of an existing batch.
-     */
     function updateKnowledgeBatch(
         uint256 batchId,
         bytes32 newMerkleRoot,
@@ -234,9 +208,6 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         emit KnowledgeBatchUpdated(batchId, newMerkleRoot, newPublicByteSize, updateCost);
     }
 
-    /**
-     * @notice Extend the storage duration of a batch.
-     */
     function extendBatchStorage(
         uint256 batchId,
         uint40 additionalEpochs,
@@ -254,6 +225,46 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         emit StorageExtended(batchId, additionalEpochs, batch.endEpoch, additionalTokens);
     }
 
+    // --- Namespace Transfer ---
+
+    /**
+     * @notice Transfer an entire publisher namespace (ranges, nextId, batch ownership)
+     * from one address to another. Only callable by Hub-registered contracts.
+     */
+    function transferNamespace(address from, address to) external onlyContracts {
+        if (publisherNextId[to] != 0 || publisherRanges[to].length != 0) {
+            revert KnowledgeAssetsLib.NamespaceAlreadyExists(to);
+        }
+
+        // Transfer reserved ranges
+        KnowledgeAssetsLib.PublisherRange[] storage fromRanges = publisherRanges[from];
+        for (uint256 i; i < fromRanges.length; i++) {
+            publisherRanges[to].push(fromRanges[i]);
+        }
+        delete publisherRanges[from];
+
+        // Transfer nextId counter
+        publisherNextId[to] = publisherNextId[from];
+        delete publisherNextId[from];
+
+        // Transfer kaIdToBatch mappings — iterate over all ranges and remap
+        KnowledgeAssetsLib.PublisherRange[] storage toRanges = publisherRanges[to];
+        for (uint256 i; i < toRanges.length; i++) {
+            for (uint64 id = toRanges[i].startId; id <= toRanges[i].endId; id++) {
+                uint256 bid = kaIdToBatch[from][id];
+                if (bid != 0) {
+                    kaIdToBatch[to][id] = bid;
+                    delete kaIdToBatch[from][id];
+
+                    // Update batch publisher address
+                    knowledgeBatches[bid].publisherAddress = to;
+                }
+            }
+        }
+
+        emit NamespaceTransferred(from, to);
+    }
+
     // --- Getters ---
 
     function getBatch(uint256 batchId) external view returns (KnowledgeAssetsLib.KnowledgeBatch memory) {
@@ -264,9 +275,8 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         return knowledgeBatches[batchId].merkleRoot;
     }
 
-    function getBatchPublisher(uint256 batchId) external view returns (uint72, address) {
-        KnowledgeAssetsLib.KnowledgeBatch storage b = knowledgeBatches[batchId];
-        return (b.publisherIdentityId, b.publisherAddress);
+    function getBatchPublisher(uint256 batchId) external view returns (address) {
+        return knowledgeBatches[batchId].publisherAddress;
     }
 
     function getBatchEpochs(uint256 batchId) external view returns (uint40 startEpoch, uint40 endEpoch) {
@@ -286,11 +296,11 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, Guardian {
         return _totalKnowledgeAssets;
     }
 
-    function isKAIdUsed(uint72 publisherIdentityId, uint64 kaId) external view returns (bool) {
-        return kaIdToBatch[publisherIdentityId][kaId] != 0;
+    function isKAIdUsed(address publisher, uint64 kaId) external view returns (bool) {
+        return kaIdToBatch[publisher][kaId] != 0;
     }
 
-    function getBatchForKAId(uint72 publisherIdentityId, uint64 kaId) external view returns (uint256) {
-        return kaIdToBatch[publisherIdentityId][kaId];
+    function getBatchForKAId(address publisher, uint64 kaId) external view returns (uint256) {
+        return kaIdToBatch[publisher][kaId];
     }
 }

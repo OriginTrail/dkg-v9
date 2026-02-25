@@ -18,6 +18,16 @@ All three use the same `@dkg/agent` under the hood — same protocol, same netwo
 - **pnpm** v9+ (`npm install -g pnpm`)
 - **Git**
 - Machine connected to the internet (Wi-Fi or ethernet)
+- **Base Sepolia ETH** for gas (~0.001 ETH per publish transaction)
+- An **EVM private key** for your node (any wallet — no identity/profile contract required)
+
+### Get Base Sepolia ETH
+
+Base Sepolia is a testnet — ETH is free:
+1. [Alchemy faucet](https://www.alchemy.com/faucets/base-sepolia)
+2. [Coinbase faucet](https://portal.cdp.coinbase.com/products/faucet)
+
+You'll need a small amount of ETH to pay gas for on-chain transactions (publishing, updating knowledge). P2P operations (queries, messaging, discovery) are free.
 
 ## 1. Clone and Build
 
@@ -49,7 +59,7 @@ The CLI runs a background daemon that manages the DKG node. All commands run fro
 pnpm dkg init
 ```
 
-The testnet relay address is pre-filled from `network/testnet.json`. Just give your node a name and hit Enter through the rest:
+The testnet relay and chain config are pre-filled from `network/testnet.json`. Just give your node a name, provide your EVM private key, and hit Enter through the rest:
 
 ```
 DKG Node Setup — DKG V9 Testnet
@@ -57,6 +67,7 @@ DKG Node Setup — DKG V9 Testnet
 Node name?: alice-mini
 Node role? (edge / core) (edge):
 Relay multiaddr? (/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5m...):
+EVM private key? (for on-chain publishing):
 Paranets to subscribe? (comma-separated):
 API port? (9200):
 Enable auto-update from GitHub? (y/n) (y):
@@ -65,6 +76,8 @@ Config saved to /Users/you/.dkg/config.json
   name:       alice-mini
   role:       edge
   relay:      /ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5m...
+  chain:      Base Sepolia (evm:84532)
+  wallet:     0xA1B2...C3D4
   network:    DKG V9 Testnet
 ```
 
@@ -73,11 +86,16 @@ Config saved to /Users/you/.dkg/config.json
 | **Node name?** | A memorable name (e.g. `alice-mini`, `lab-node-3`) |
 | **Node role?** | `edge` — just press Enter |
 | **Relay multiaddr?** | Pre-filled — just press Enter |
+| **EVM private key?** | Your wallet's private key (hex, with or without `0x` prefix). Can also be set via `DKG_PRIVATE_KEY` env var |
 | **Paranets to subscribe?** | Leave blank, or enter paranet names if you know them |
 | **API port?** | `9200` (default — press Enter) |
 | **Enable auto-update?** | Defaults to `y` — just press Enter for automatic updates |
 
 Config is saved to `~/.dkg/config.json`. Edit it directly or re-run `pnpm dkg init`.
+
+> **Security**: Your private key is stored in `~/.dkg/config.json`. This file should be readable only by your user. Never share it or commit it to git.
+
+> **Without a private key**: The node still works for P2P networking, querying, and receiving replicated data. On-chain operations (publishing with finality, updates) require a funded wallet.
 
 ### Start
 
@@ -111,6 +129,7 @@ In a second terminal:
 ```bash
 pnpm dkg status
 pnpm dkg peers
+pnpm dkg wallet       # shows your EVM address and Base Sepolia ETH balance
 ```
 
 If no peers show up, wait 30 seconds — profile discovery happens via GossipSub.
@@ -118,6 +137,9 @@ If no peers show up, wait 30 seconds — profile discovery happens via GossipSub
 ### Operations
 
 ```bash
+# Wallet
+pnpm dkg wallet                  # show EVM address and Base Sepolia ETH balance
+
 # Messaging
 pnpm dkg send alice-mini "hey from the testnet!"
 pnpm dkg chat alice-mini
@@ -130,6 +152,9 @@ pnpm dkg subscribe memes --save
 # Publishing (supports .ttl, .nt, .nq, .trig, .jsonld, .json)
 pnpm dkg publish memes --file ./my-data.ttl
 pnpm dkg publish memes --subject "did:dkg:entity:thing" --predicate "https://schema.org/name" --object "A Thing"
+
+# Updating (replace KC contents with new triples, recomputes merkle root on-chain)
+pnpm dkg update <kc-id> --file ./updated-data.ttl --paranet memes
 
 # Querying
 pnpm dkg query --sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20"
@@ -168,6 +193,11 @@ export default function (api) {
     description: 'An AI agent on the DKG testnet',
     dataDir: '.dkg/my-agent',
     relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+    chainConfig: {
+      rpcUrl: 'https://sepolia.base.org',
+      hubAddress: '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
+      privateKey: process.env.DKG_PRIVATE_KEY!,
+    },
   });
 
   dkg.register(api);
@@ -314,6 +344,9 @@ All settings via environment variables or character settings:
 | `DKG_LISTEN_PORT` | Random | TCP port for P2P connections |
 | `DKG_RELAY_PEERS` | — | Comma-separated relay multiaddrs |
 | `DKG_BOOTSTRAP_PEERS` | — | Comma-separated bootstrap peer multiaddrs |
+| `DKG_PRIVATE_KEY` | — | EVM private key for on-chain publishing |
+| `DKG_RPC_URL` | `https://sepolia.base.org` | Base Sepolia RPC endpoint |
+| `DKG_HUB_ADDRESS` | `0xC056e67D...F6` | Hub contract address |
 
 Or via environment variables:
 
@@ -393,7 +426,16 @@ await agent.publish('memes', [
 > <did:dkg:entity:pepe-42> <https://schema.org/name> "Rare Pepe #42" .
 > ```
 
-All nodes subscribed to the `memes` paranet receive these triples automatically via GossipSub. Supported file formats: `.ttl`, `.nt`, `.nq`, `.trig`, `.jsonld`, `.json`.
+All nodes subscribed to the `memes` paranet receive these triples automatically via GossipSub. The publish flow:
+
+1. **Local store** — triples are stored in your node's triple store immediately
+2. **P2P broadcast** — triples (as N-Triples) are sent to subscribed peers via GossipSub; peers store them as **tentative**
+3. **On-chain finalization** — a blockchain transaction records the merkle root on Base Sepolia; peers confirm the data and promote it to **confirmed**
+4. **Chain event polling** — receiver nodes independently poll the chain for `KnowledgeBatchCreated` events as a trustless confirmation layer
+
+If your node has no private key configured, publishing still works locally and over P2P, but without on-chain finality (data stays tentative on other nodes and expires after 10 minutes).
+
+Supported file formats: `.ttl`, `.nt`, `.nq`, `.trig`, `.jsonld`, `.json`.
 
 ## Common: Querying
 
@@ -412,7 +454,7 @@ const results = await agent.query(
 );
 ```
 
-Queries run against your local Oxigraph store — fast, no network round-trips.
+Queries run against your local Oxigraph store — fast, no network round-trips. Only read-only SPARQL is allowed (SELECT, CONSTRUCT, ASK, DESCRIBE). Mutations must go through `publish` or `update`.
 
 ---
 
@@ -544,6 +586,7 @@ pnpm dkg init                    # Set up your node
 pnpm dkg start [-f]              # Start (foreground or daemon)
 pnpm dkg stop                    # Stop the daemon
 pnpm dkg status                  # Node info
+pnpm dkg wallet                  # Show EVM address and balances
 pnpm dkg peers                   # List network agents
 pnpm dkg send <name> <msg>       # Send a message
 pnpm dkg chat <name>             # Interactive chat
@@ -551,17 +594,22 @@ pnpm dkg paranet create <id>     # Create a paranet
 pnpm dkg paranet list            # List all paranets
 pnpm dkg paranet info <id>       # Paranet details
 pnpm dkg publish <paranet> -f x  # Publish RDF data
+pnpm dkg update <kc-id> -f x    # Update a knowledge collection
 pnpm dkg query [paranet] -q ...  # SPARQL query
 pnpm dkg subscribe <paranet>     # Join a paranet topic
 pnpm dkg logs [-n 50]            # View daemon logs
 ```
 
-## Testnet Relay
+## Testnet Infrastructure
 
-All paths use the same relay:
+All paths share the same relay and chain:
 
-```
-/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK
-```
+| Component | Value |
+|-----------|-------|
+| **Relay** | `/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK` |
+| **Chain** | Base Sepolia (Chain ID 84532) |
+| **RPC** | `https://sepolia.base.org` |
+| **Hub** | `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` |
+| **Explorer** | [sepolia.basescan.org](https://sepolia.basescan.org) |
 
-This is also stored in `network/testnet.json` in the repo.
+These are stored in `network/testnet.json` in the repo. The Hub contract resolves all DKG contract addresses (V8 and V9) automatically — your node only needs the Hub address.

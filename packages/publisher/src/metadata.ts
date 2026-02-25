@@ -29,6 +29,15 @@ export interface KAMetadata {
   privateMerkleRoot?: Uint8Array;
 }
 
+export interface OnChainProvenance {
+  txHash: string;
+  blockNumber: number;
+  blockTimestamp: number;
+  publisherAddress: string;
+  batchId: bigint;
+  chainId: string;
+}
+
 /**
  * Generate RDF metadata triples for a Knowledge Collection.
  * These go into the paranet's meta graph.
@@ -99,6 +108,82 @@ export function generateKCMetadata(
   }
 
   return quads;
+}
+
+/**
+ * Phase 1 metadata generated at P2P broadcast time.
+ * Same as generateKCMetadata but adds dkg:status "tentative".
+ */
+export function generateTentativeMetadata(
+  meta: KCMetadata,
+  kaEntries: KAMetadata[],
+): Quad[] {
+  const quads = generateKCMetadata(meta, kaEntries);
+  const metaGraph = `did:dkg:paranet:${meta.paranetId}/_meta`;
+  quads.push(
+    mq(meta.ual, `${DKG}status`, lit('tentative'), metaGraph),
+  );
+  return quads;
+}
+
+/**
+ * Returns the single quad that marks a KC as tentative in the meta graph.
+ * Used when promoting to confirmed: delete this quad before inserting confirmed metadata.
+ */
+export function getTentativeStatusQuad(ual: string, paranetId: string): Quad {
+  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  return mq(ual, `${DKG}status`, lit('tentative'), metaGraph);
+}
+
+/**
+ * Returns the single quad that marks a KC as confirmed (minimal, no chain provenance).
+ * Used by receivers when promoting tentative → confirmed after seeing the chain event.
+ */
+export function getConfirmedStatusQuad(ual: string, paranetId: string): Quad {
+  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  return mq(ual, `${DKG}status`, lit('confirmed'), metaGraph);
+}
+
+/**
+ * Status and on-chain provenance quads for a confirmed KC.
+ * Used together with KC/KA structure when promoting (receiver) or when storing confirmed-only (publisher).
+ */
+export function generateConfirmedMetadata(
+  ual: string,
+  paranetId: string,
+  provenance: OnChainProvenance,
+): Quad[] {
+  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  const quads: Quad[] = [
+    mq(ual, `${DKG}status`, lit('confirmed'), metaGraph),
+    mq(ual, `${DKG}transactionHash`, lit(provenance.txHash), metaGraph),
+    mq(ual, `${DKG}blockNumber`, intLit(provenance.blockNumber), metaGraph),
+    mq(
+      ual,
+      `${DKG}blockTimestamp`,
+      dateLit(new Date(provenance.blockTimestamp * 1000)),
+      metaGraph,
+    ),
+    mq(ual, `${DKG}publisherAddress`, lit(provenance.publisherAddress), metaGraph),
+    mq(ual, `${DKG}batchId`, intLit(Number(provenance.batchId)), metaGraph),
+    mq(ual, `${DKG}chainId`, lit(provenance.chainId), metaGraph),
+  ];
+  return quads;
+}
+
+/**
+ * Full KC/KA metadata with status "confirmed" and chain provenance (no tentative triple).
+ * Use on publisher when on-chain tx succeeds: insert this only, so the graph has either tentative or confirmed, never both.
+ */
+export function generateConfirmedFullMetadata(
+  meta: KCMetadata,
+  kaEntries: KAMetadata[],
+  provenance: OnChainProvenance,
+): Quad[] {
+  return [
+    ...generateKCMetadata(meta, kaEntries),
+    ...generateConfirmedMetadata(meta.ual, meta.paranetId, provenance),
+  ];
 }
 
 function mq(s: string, p: string, o: string, g: string): Quad {

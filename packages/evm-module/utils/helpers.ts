@@ -88,6 +88,9 @@ export class Helpers {
   setParametersEncodedData: HubLib.ForwardCallInputArgsStruct[];
   newHashFunctions: Array<string>;
   newScoreFunctions: Array<string>;
+  // Explicit nonce tracker for live networks where two tx managers (hardhat-deploy
+  // + ethers) would otherwise conflict by tracking nonces independently.
+  private _nonce: number | undefined = undefined;
 
   constructor(hre: HardhatRuntimeEnvironment) {
     this.hre = hre;
@@ -167,6 +170,7 @@ export class Helpers {
 
     let newContract;
     try {
+      const deployNonce = await this._nextNonce(deployer);
       newContract = await this.hre.deployments.deploy(nameInHub, {
         contract: newContractName,
         from: deployer,
@@ -175,6 +179,7 @@ export class Helpers {
           : additionalArgs,
         deterministicDeployment,
         log: true,
+        ...(deployNonce !== undefined ? { nonce: deployNonce } : {}),
       });
     } catch (error) {
       if (this.hre.network.config.environment !== 'development') {
@@ -192,15 +197,26 @@ export class Helpers {
     let tx;
     if (setContractInHub) {
       if (this.hre.network.config.environment === 'development') {
-        tx = await Hub.setContractAddress(nameInHub, newContract.address);
+        const regNonce = await this._nextNonce(deployer);
+        tx = await Hub.setContractAddress(
+          nameInHub,
+          newContract.address,
+          ...(regNonce !== undefined ? [{ nonce: regNonce }] : []),
+        );
         await tx.wait();
       } else {
         this.newContracts.push({ name: nameInHub, addr: newContract.address });
       }
     } else if (setAssetStorageInHub) {
       if (this.hre.network.config.environment === 'development') {
-        tx = await Hub.setAssetStorageAddress(nameInHub, newContract.address);
+        const regNonce = await this._nextNonce(deployer);
+        tx = await Hub.setAssetStorageAddress(
+          nameInHub,
+          newContract.address,
+          ...(regNonce !== undefined ? [{ nonce: regNonce }] : []),
+        );
         await tx.wait();
+
       } else {
         this.newAssetStorageContracts.push({
           name: nameInHub,
@@ -217,9 +233,11 @@ export class Helpers {
         const newContractInterface = new this.hre.ethers.Interface(
           this.getAbi(newContractName),
         );
+        const initNonce = await this._nextNonce(deployer);
         const initializeTx = await Hub.forwardCall(
           newContract.address,
           newContractInterface.encodeFunctionData('initialize'),
+          ...(initNonce !== undefined ? [{ nonce: initNonce }] : []),
         );
         await initializeTx.wait();
       }
@@ -234,9 +252,7 @@ export class Helpers {
       newContractName,
     );
 
-    if (this.hre.network.config.environment !== 'development') {
-      this.saveDeploymentsJson('deployments');
-    }
+    this.saveDeploymentsJson('deployments');
 
     return this.hre.ethers.getContractAt(
       this.getAbi(newContractName),
@@ -319,10 +335,12 @@ export class Helpers {
                   'Hub',
                   hubAddress,
                 );
-
+                const { deployer } = await this.hre.getNamedAccounts();
+                const paramNonce = await this._nextNonce(deployer);
                 const tx = await Hub.forwardCall(
                   targetContractAddress,
                   encodedFunctionData,
+                  ...(paramNonce !== undefined ? [{ nonce: paramNonce }] : []),
                 );
                 await tx.wait();
               } else {
@@ -396,7 +414,21 @@ export class Helpers {
         originalContractName ?? newContractName,
         newContractAddress,
       );
-      contractVersion = await VersionedContract.version();
+      // Retry with backoff — public RPC nodes (e.g. Base Sepolia) can lag
+      // slightly after a deployment tx is mined, returning 0x before state propagates.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          contractVersion = await VersionedContract.version();
+          break;
+        } catch (err) {
+          if (attempt < 4) {
+            console.log(`version() call failed (attempt ${attempt + 1}/5), retrying in 3s...`);
+            await this._delay(3000);
+          } else {
+            throw err;
+          }
+        }
+      }
     } else {
       contractVersion = null;
     }
@@ -458,6 +490,23 @@ export class Helpers {
 
   private _delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Returns the next nonce for the deployer on live (non-Hardhat/localhost) networks,
+  // using a single in-process counter so hardhat-deploy txs and ethers txs
+  // share the same sequence and never conflict.
+  private async _nextNonce(deployer: string): Promise<number | undefined> {
+    const isLive =
+      this.hre.network.name !== 'hardhat' &&
+      this.hre.network.name !== 'localhost';
+    if (!isLive) return undefined;
+    if (this._nonce === undefined) {
+      this._nonce = await this.hre.ethers.provider.getTransactionCount(
+        deployer,
+        'latest',
+      );
+    }
+    return this._nonce++;
   }
 
   private _executeGitCommandSync(command: string): string {

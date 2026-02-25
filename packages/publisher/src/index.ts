@@ -11,6 +11,7 @@ export {
 export { validatePublishRequest, type ValidationResult } from './validation.js';
 export { generateKCMetadata, type KCMetadata, type KAMetadata } from './metadata.js';
 export { DKGPublisher, type DKGPublisherConfig } from './dkg-publisher.js';
-export { PublishHandler } from './publish-handler.js';
+export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
+export { ChainEventPoller, type ChainEventPollerConfig } from './chain-event-poller.js';
 export { AccessHandler } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';

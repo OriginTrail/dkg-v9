@@ -60,6 +60,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "NamespaceAlreadyExists",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "TokenTransferFailed",
     "type": "error"
@@ -96,9 +107,9 @@
       },
       {
         "indexed": true,
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "indexed": false,
@@ -238,6 +249,25 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "address",
+        "name": "from",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      }
+    ],
+    "name": "NamespaceTransferred",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "uint256",
         "name": "batchId",
         "type": "uint256"
@@ -288,9 +318,9 @@
     "inputs": [
       {
         "indexed": true,
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "indexed": false,
@@ -310,11 +340,6 @@
   },
   {
     "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
-      },
       {
         "internalType": "address",
         "name": "publisherAddress",
@@ -413,11 +438,6 @@
       {
         "components": [
           {
-            "internalType": "uint72",
-            "name": "publisherIdentityId",
-            "type": "uint72"
-          },
-          {
             "internalType": "address",
             "name": "publisherAddress",
             "type": "address"
@@ -508,9 +528,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint64",
@@ -559,11 +579,6 @@
     "name": "getBatchPublisher",
     "outputs": [
       {
-        "internalType": "uint72",
-        "name": "",
-        "type": "uint72"
-      },
-      {
         "internalType": "address",
         "name": "",
         "type": "address"
@@ -588,9 +603,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint256",
@@ -617,9 +632,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       }
     ],
     "name": "getPublisherRangesCount",
@@ -682,9 +697,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint64",
@@ -706,9 +721,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint64",
@@ -730,9 +745,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
+        "internalType": "address",
         "name": "",
-        "type": "uint72"
+        "type": "address"
       },
       {
         "internalType": "uint64",
@@ -761,11 +776,6 @@
     ],
     "name": "knowledgeBatches",
     "outputs": [
-      {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
-      },
       {
         "internalType": "address",
         "name": "publisherAddress",
@@ -841,9 +851,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
+        "internalType": "address",
         "name": "",
-        "type": "uint72"
+        "type": "address"
       }
     ],
     "name": "publisherNextId",
@@ -860,9 +870,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
+        "internalType": "address",
         "name": "",
-        "type": "uint72"
+        "type": "address"
       },
       {
         "internalType": "uint256",
@@ -889,9 +899,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "publisherIdentityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
       },
       {
         "internalType": "uint32",
@@ -926,6 +936,24 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "from",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      }
+    ],
+    "name": "transferNamespace",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

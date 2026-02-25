@@ -12,5 +12,11 @@
     "repo": "OriginTrail/dkg-v9",
     "branch": "main",
     "checkIntervalMinutes": 5
+  },
+  "chain": {
+    "type": "evm",
+    "rpcUrl": "https://sepolia.base.org",
+    "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
+    "chainId": "base:84532"
   }
 }

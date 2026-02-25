@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
+import { ethers } from 'ethers';
 import { DKGAgent } from '@dkg/agent';
 import { computeNetworkId } from '@dkg/core';
 import {
@@ -43,6 +44,18 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   const role = config.nodeRole ?? 'edge';
   log(`Starting DKG ${role} node "${config.name}"...`);
 
+  const network = await loadNetworkConfig();
+
+  // Build chain config from CLI config, network config, or environment
+  const chainConfig = config.chain ?? (network?.chain ? {
+    ...network.chain,
+    privateKey: process.env.DKG_PRIVATE_KEY ?? '',
+  } : undefined);
+
+  if (!chainConfig?.privateKey) {
+    log('WARNING: No EVM private key configured. Set DKG_PRIVATE_KEY env var or add chain.privateKey to config.');
+  }
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: 'DKG',
@@ -50,13 +63,16 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     dataDir: dkgDir(),
     relayPeers: config.relay ? [config.relay] : undefined,
     nodeRole: role,
+    chainConfig: chainConfig && chainConfig.privateKey ? {
+      rpcUrl: chainConfig.rpcUrl,
+      hubAddress: chainConfig.hubAddress,
+      privateKey: chainConfig.privateKey,
+      chainId: chainConfig.chainId,
+    } : undefined,
   });
 
   const networkId = await computeNetworkId();
   log(`Network: ${networkId.slice(0, 16)}...`);
-
-  // Verify genesis matches network config
-  const network = await loadNetworkConfig();
   if (network?.networkId && network.networkId !== networkId) {
     log(`FATAL: genesis mismatch! Expected networkId ${network.networkId.slice(0, 16)}... but computed ${networkId.slice(0, 16)}...`);
     log(`This node's genesis does not match network/testnet.json. Rebuild or update the repo.`);
@@ -292,6 +308,19 @@ async function handleRequest(
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id" query param' });
     const exists = await agent.paranetExists(id);
     return jsonResponse(res, 200, { id, exists });
+  }
+
+  // GET /api/wallet
+  if (req.method === 'GET' && path === '/api/wallet') {
+    const privateKey = config.chain?.privateKey ?? process.env.DKG_PRIVATE_KEY;
+    if (!privateKey) {
+      return jsonResponse(res, 400, { error: 'No EVM private key configured' });
+    }
+    const wallet = new ethers.Wallet(privateKey);
+    return jsonResponse(res, 200, {
+      address: wallet.address,
+      chainId: config.chain?.chainId,
+    });
   }
 
   // POST /api/shutdown

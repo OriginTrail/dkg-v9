@@ -11,7 +11,7 @@
     "clean": "hardhat clean",
     "compile": "hardhat compile --config hardhat.node.config.ts",
     "build": "hardhat compile --config hardhat.node.config.ts",
-    "test": "hardhat test --network hardhat --config hardhat.node.config.ts",
+    "test": "node scripts/run-tests.js",
     "test:unit": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@unit'",
     "test:integration": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@integration'",
     "deploy:localhost": "hardhat deploy --network hardhat --config hardhat.node.config.ts",

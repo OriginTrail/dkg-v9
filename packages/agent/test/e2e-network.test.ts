@@ -12,6 +12,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@dkg/core';
+import { MockChainAdapter } from '@dkg/chain';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -41,6 +42,8 @@ describe('Network E2E (3 nodes + relay)', () => {
     relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
     expect(relayAddr).toBeDefined();
 
+    // Use a distinct chainId so we can assert broadcast UAL/chainId come from the adapter (not hardcoded)
+    const CUSTOM_CHAIN_ID = 'evm:84532';
     nodeA = await DKGAgent.create({
       name: 'NodeA',
       framework: 'OpenClaw',
@@ -51,6 +54,7 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
+      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
     });
 
     nodeB = await DKGAgent.create({
@@ -63,6 +67,7 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
+      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
     });
 
     nodeC = await DKGAgent.create({
@@ -71,6 +76,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       listenPort: 0,
       relayPeers: [relayAddr],
       skills: [],
+      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
     });
 
     await nodeA.start();
@@ -227,6 +233,17 @@ describe('Network E2E (3 nodes + relay)', () => {
       'memes',
     );
     expect(qrC.bindings.length).toBe(1);
+
+    // Assert broadcast PublishRequest used the chain adapter's chainId (not hardcoded mock:31337)
+    const metaGraph = 'did:dkg:paranet:memes/_meta';
+    const ualResult = await nodeB.store.query(
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
+    );
+    expect(ualResult.type).toBe('bindings');
+    if (ualResult.type === 'bindings' && ualResult.bindings.length > 0) {
+      const ual = String(ualResult.bindings[0]['ual'] ?? '');
+      expect(ual.startsWith(`did:dkg:${CUSTOM_CHAIN_ID}/`)).toBe(true);
+    }
   }, 15000);
 
   // ── Step 8: Multi-publisher replication ────────────────────────────

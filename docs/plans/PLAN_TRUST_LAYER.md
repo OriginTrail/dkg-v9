@@ -97,9 +97,57 @@ ProtocolTreasury.sol                         (self-contained, governed by Hub ow
    - Both `EVMChainAdapter` and `MockChainAdapter` implement full V9 interface
 4. ✅ **Update publisher**
    - V9 flow: `reserveUALRange → batchMintKnowledgeAssets`, namespaced UALs (`did:dkg:{chainId}/{pubId}/{kaId}`)
-5. ✅ **Integration tests** (9 passing)
+5. ✅ **Integration tests** (9 passing — test count updated in M2b)
    - V8+V9 co-deployment, UAL reservation, batch minting with real ECDSA signatures + TRAC payment, V8/V9 coexistence
    - 295 V8 tests + 28 publisher tests + 54 agent tests — zero regressions
+
+---
+
+## Milestone 2b: Publishing Stack Overhaul ✅ COMPLETED
+
+**Goal**: Overhaul the V9 publishing stack to support address-based publishing, single-transaction convenience, namespace transfer, real P2P signature collection, two-phase metadata with on-chain provenance, and proper tentative-to-confirmed lifecycle.
+
+### Changes
+
+1. **Address-based publishing**: Removed `publisherIdentityId` from all contracts. `msg.sender` is the sole publisher namespace key. Any EVM address can reserve UAL ranges and publish — no identity/profile required.
+   - `KnowledgeAssetsLib.sol`: Removed `publisherIdentityId` from `KnowledgeBatch` struct, updated errors to use `address`
+   - `KnowledgeAssetsStorage.sol`: All mappings/functions keyed by `address` instead of `uint72`
+   - `KnowledgeAssets.sol`: `reserveUALRange(count)` uses `msg.sender`, no identity param
+
+2. **Single-transaction publish**: New `publishKnowledgeAssets(kaCount, ...)` function auto-reserves UAL range and mints batch in one call. Returns `(batchId, startKAId, endKAId)`.
+
+3. **Namespace transfer**: New `transferNamespace(newOwner)` transfers all reserved ranges, batch ownership, and future IDs to a new address.
+
+4. **TypeScript adapters**: Updated `ChainAdapter`, `EVMChainAdapter`, and `MockChainAdapter` with new interfaces. Added `OnChainPublishResult` with txHash, blockNumber, blockTimestamp, publisherAddress.
+
+5. **Two-phase metadata**: 
+   - Phase 1 (tentative): Generated at P2P broadcast with `dkg:status "tentative"`
+   - Phase 2 (confirmed): Added after on-chain finalization with transaction hash, block number, publisher address, batch ID, chain ID
+
+6. **P2P signature flow**: `PublishHandler` now performs merkle verification, UAL consistency checks, and produces real ECDSA signatures. 10-minute tentative timeout for unconfirmed publishes.
+
+7. **Protobuf updates**: `PublishRequestMsg` includes `publisherAddress`, `startKAId`, `endKAId`, `chainId`.
+
+### UAL Format Change
+
+```
+V9 (M2):   did:dkg:{chainId}/{publisherIdentityId}/{localKAId}
+V9 (M2b):  did:dkg:{chainId}/{publisherAddress}/{localKAId}
+```
+
+### What Changed
+- `KnowledgeAssetsLib.sol`, `KnowledgeAssetsStorage.sol`, `KnowledgeAssets.sol` — address-based API
+- `chain-adapter.ts`, `evm-adapter.ts`, `mock-adapter.ts` — new interfaces
+- `metadata.ts` — two-phase metadata generation
+- `dkg-publisher.ts` — address-based UALs, OnChainPublishResult
+- `publisher.ts` — status + onChainResult in PublishResult
+- `publish.ts` — protobuf schema updates
+- `publish-handler.ts` — merkle verification, ECDSA signatures, tentative lifecycle
+
+### What Doesn't Change
+- V8 contracts untouched
+- Core node identity system unchanged (identities still used for signature verification)
+- Staking, paranets, FairSwap — all unchanged
 
 ---
 

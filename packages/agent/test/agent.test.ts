@@ -16,6 +16,7 @@ import { OxigraphStore } from '@dkg/storage';
 import { getGenesisQuads, computeNetworkId, SYSTEM_PARANETS } from '@dkg/core';
 import { DKGQueryEngine } from '@dkg/query';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { MockChainAdapter } from '@dkg/chain';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -111,10 +112,10 @@ describe('AgentWallet', () => {
   it('DKGAgent.create() persists identity across restarts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-persist-'));
     try {
-      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir });
+      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
       const peerId1 = agent1.wallet.keypair.publicKey;
 
-      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir });
+      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
       const peerId2 = agent2.wallet.keypair.publicKey;
 
       expect(Buffer.from(peerId2).toString('hex')).toBe(
@@ -419,6 +420,7 @@ describe('PeerId key extraction', () => {
       name: 'KeyTest',
       listenPort: 0,
       skills: [],
+      chainAdapter: new MockChainAdapter(),
     });
     await agent.start();
 
@@ -454,6 +456,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true, outputData: new Uint8Array([42]) }),
         },
       ],
+      chainAdapter: new MockChainAdapter(),
     });
 
     expect(agent.wallet).toBeDefined();
@@ -474,6 +477,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true }),
         },
       ],
+      chainAdapter: new MockChainAdapter(),
     });
 
     await agent.start();
@@ -520,6 +524,7 @@ describe('Genesis Knowledge', () => {
     const agent = await DKGAgent.create({
       name: 'GenesisTest',
       store,
+      chainAdapter: new MockChainAdapter(),
     });
 
     const result = await store.query(
@@ -540,8 +545,8 @@ describe('Genesis Knowledge', () => {
 
   it('genesis loading is idempotent', async () => {
     const store = new OxigraphStore();
-    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store });
-    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store });
+    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store, chainAdapter: new MockChainAdapter() });
+    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store, chainAdapter: new MockChainAdapter() });
 
     const result = await store.query(
       `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v }`,

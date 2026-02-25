@@ -12,6 +12,8 @@ import type {
   ChainEvent,
   EventFilter,
   CreateParanetParams,
+  PublishParams,
+  OnChainPublishResult,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -124,6 +126,11 @@ export class EVMChainAdapter implements ChainAdapter {
     }
   }
 
+  private async getBlockTimestamp(blockNumber: number): Promise<number> {
+    const block = await this.provider.getBlock(blockNumber);
+    return block?.timestamp ?? 0;
+  }
+
   // =====================================================================
   // Identity
   // =====================================================================
@@ -171,17 +178,13 @@ export class EVMChainAdapter implements ChainAdapter {
   // V9: UAL Reservation
   // =====================================================================
 
-  async reserveUALRange(publisherIdentityId: bigint, count: number): Promise<ReservedRange> {
+  async reserveUALRange(count: number): Promise<ReservedRange> {
     await this.init();
     this.requireV9();
 
-    const tx = await this.contracts.knowledgeAssets!.reserveUALRange(
-      publisherIdentityId,
-      count,
-    );
+    const tx = await this.contracts.knowledgeAssets!.reserveUALRange(count);
     const receipt = await tx.wait();
 
-    // Extract range from the UALRangeReserved event
     for (const log of receipt.logs) {
       try {
         const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
@@ -211,7 +214,6 @@ export class EVMChainAdapter implements ChainAdapter {
     const ka = this.contracts.knowledgeAssets!;
     const kaAddress = await ka.getAddress();
 
-    // Approve TRAC
     if (this.contracts.token && params.tokenAmount > 0n) {
       const approveTx = await this.contracts.token.approve(kaAddress, params.tokenAmount);
       await approveTx.wait();
@@ -222,7 +224,7 @@ export class EVMChainAdapter implements ChainAdapter {
     const vsValues = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
 
     const tx = await ka.batchMintKnowledgeAssets(
-      params.publisherIdentityId,
+      params.publisherNodeIdentityId,
       ethers.hexlify(params.merkleRoot),
       params.startKAId,
       params.endKAId,
@@ -239,7 +241,6 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const receipt = await tx.wait();
 
-    // Extract batch ID from the KnowledgeBatchCreated event
     let batchId = 0n;
     for (const log of receipt.logs) {
       try {
@@ -263,6 +264,78 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
+  // V9: Single-tx Publish (reserve + mint)
+  // =====================================================================
+
+  async publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult> {
+    await this.init();
+    this.requireV9();
+
+    const ka = this.contracts.knowledgeAssets!;
+    const kaAddress = await ka.getAddress();
+
+    if (this.contracts.token && params.tokenAmount > 0n) {
+      const approveTx = await this.contracts.token.approve(kaAddress, params.tokenAmount);
+      await approveTx.wait();
+    }
+
+    const identityIds = params.receiverSignatures.map((s) => s.identityId);
+    const rValues = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
+    const vsValues = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const tx = await ka.publishKnowledgeAssets(
+      params.kaCount,
+      params.publisherNodeIdentityId,
+      ethers.hexlify(params.merkleRoot),
+      params.publicByteSize,
+      params.epochs,
+      params.tokenAmount,
+      ethers.ZeroAddress, // paymaster
+      ethers.hexlify(params.publisherSignature.r),
+      ethers.hexlify(params.publisherSignature.vs),
+      identityIds,
+      rValues,
+      vsValues,
+    );
+
+    const receipt = await tx.wait();
+
+    let batchId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = this.signer.address;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+        }
+      } catch { /* not this contract */ }
+    }
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+    };
+  }
+
+  // =====================================================================
   // V9: Knowledge Updates
   // =====================================================================
 
@@ -271,14 +344,6 @@ export class EVMChainAdapter implements ChainAdapter {
     this.requireV9();
 
     const ka = this.contracts.knowledgeAssets!;
-
-    // Approve a generous TRAC amount for the update cost
-    if (this.contracts.token) {
-      const kaAddress = await ka.getAddress();
-      const approvalAmount = ethers.parseEther('10000');
-      const approveTx = await this.contracts.token.approve(kaAddress, approvalAmount);
-      await approveTx.wait();
-    }
 
     const tx = await ka.updateKnowledgeAssets(
       params.batchId,
@@ -328,13 +393,30 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
+  // V9: Namespace Transfer
+  // =====================================================================
+
+  async transferNamespace(newOwner: string): Promise<TxResult> {
+    await this.init();
+    this.requireV9();
+
+    const tx = await this.contracts.knowledgeAssets!.transferNamespace(newOwner);
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  // =====================================================================
   // Events
   // =====================================================================
 
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     await this.init();
 
-    // Listen on V9 storage if available, fall back to V8
     const storage = this.contracts.knowledgeAssetsStorage ?? this.contracts.knowledgeCollectionStorage!;
 
     for (const eventType of filter.eventTypes) {
@@ -350,7 +432,7 @@ export class EVMChainAdapter implements ChainAdapter {
               blockNumber: log.blockNumber,
               data: {
                 batchId: parsed.args.batchId.toString(),
-                publisherIdentityId: parsed.args.publisherIdentityId.toString(),
+                publisherAddress: parsed.args.publisher?.toString(),
                 merkleRoot: parsed.args.merkleRoot,
                 startKAId: parsed.args.startKAId.toString(),
                 endKAId: parsed.args.endKAId.toString(),
@@ -384,6 +466,27 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
     }
+  }
+
+  // =====================================================================
+  // V9: Publisher range verification (for PublishHandler)
+  // =====================================================================
+
+  async verifyPublisherOwnsRange(
+    publisherAddress: string,
+    startKAId: bigint,
+    endKAId: bigint,
+  ): Promise<boolean> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetsStorage) return false;
+
+    const storage = this.contracts.knowledgeAssetsStorage;
+    const count = await storage.getPublisherRangesCount(publisherAddress);
+    for (let i = 0; i < Number(count); i++) {
+      const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
+      if (startId <= startKAId && endId >= endKAId) return true;
+    }
+    return false;
   }
 
   // =====================================================================

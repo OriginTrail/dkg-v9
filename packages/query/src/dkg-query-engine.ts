@@ -2,6 +2,7 @@ import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@dkg/st
 import { GraphManager } from '@dkg/storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import { paranetDataGraphUri, paranetMetaGraphUri } from '@dkg/core';
+import { validateReadOnlySparql } from './sparql-guard.js';
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -19,10 +20,13 @@ export class DKGQueryEngine implements QueryEngine {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    const guard = validateReadOnlySparql(sparql);
+    if (!guard.safe) {
+      throw new Error(`SPARQL rejected: ${guard.reason}`);
+    }
+
     let effectiveSparql = sparql;
 
-    // If paranetId is provided and the query doesn't contain FROM clauses,
-    // wrap it to scope to the paranet's data graph
     if (options?.paranetId && !sparql.toLowerCase().includes('from ')) {
       const dataGraph = paranetDataGraphUri(options.paranetId);
       effectiveSparql = wrapWithGraph(sparql, dataGraph);

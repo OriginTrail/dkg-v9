@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
+import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
@@ -80,6 +81,25 @@ program
       autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
     }
 
+    // Chain configuration
+    const defaultRpcUrl = existing.chain?.rpcUrl ?? network?.chain?.rpcUrl;
+    const defaultHubAddress = existing.chain?.hubAddress ?? network?.chain?.hubAddress;
+    const defaultChainId = existing.chain?.chainId ?? network?.chain?.chainId;
+
+    console.log('\nBlockchain Configuration:');
+    const rpcUrl = await ask('RPC URL?', defaultRpcUrl);
+    const hubAddress = await ask('Hub contract address?', defaultHubAddress);
+    const evmPrivateKey = await ask('EVM private key? (0x...)', existing.chain?.privateKey);
+    const chainIdStr = await ask('Chain ID?', defaultChainId);
+
+    const chainSection: any = rpcUrl && hubAddress ? {
+      type: 'evm' as const,
+      rpcUrl,
+      hubAddress,
+      privateKey: evmPrivateKey || undefined,
+      chainId: chainIdStr || undefined,
+    } : undefined;
+
     rl.close();
 
     const config = {
@@ -90,6 +110,7 @@ program
       nodeRole,
       paranets,
       autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
+      chain: chainSection ?? existing.chain,
     };
     await saveConfig(config);
 
@@ -100,6 +121,7 @@ program
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
+    console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
@@ -568,6 +590,74 @@ program
       for (const line of tail) console.log(line);
     } catch {
       console.error(`No log file at ${logPath()}`);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg wallet ──────────────────────────────────────────────────────
+
+program
+  .command('wallet')
+  .description('Show the node\'s EVM wallet address and balances')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      const network = await loadNetworkConfig();
+
+      const privateKey = config.chain?.privateKey ?? process.env.DKG_PRIVATE_KEY;
+      if (!privateKey) {
+        console.error('No EVM private key configured.');
+        console.error('Run "dkg init" and set the EVM private key, or set DKG_PRIVATE_KEY env var.');
+        process.exit(1);
+      }
+
+      const wallet = new ethers.Wallet(privateKey);
+      console.log(`  Address:     ${wallet.address}`);
+
+      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
+      if (rpcUrl) {
+        try {
+          const provider = new ethers.JsonRpcProvider(rpcUrl);
+          const balance = await provider.getBalance(wallet.address);
+          console.log(`  ETH Balance: ${ethers.formatEther(balance)} ETH`);
+
+          const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+          if (hubAddress) {
+            try {
+              const hub = new ethers.Contract(
+                hubAddress,
+                ['function getContractAddress(string) view returns (address)'],
+                provider,
+              );
+              const tokenAddress = await hub.getContractAddress('Token');
+              if (tokenAddress !== ethers.ZeroAddress) {
+                const token = new ethers.Contract(
+                  tokenAddress,
+                  ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'],
+                  provider,
+                );
+                const tracBalance = await token.balanceOf(wallet.address);
+                const symbol = await token.symbol().catch(() => 'TRAC');
+                console.log(`  ${symbol} Balance: ${ethers.formatEther(tracBalance)} ${symbol}`);
+              }
+            } catch {
+              console.log('  TRAC Balance: (unable to query)');
+            }
+          }
+
+          console.log(`  RPC:         ${rpcUrl}`);
+          console.log(`  Chain ID:    ${config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)'}`);
+        } catch (err: any) {
+          console.log(`  RPC:         ${rpcUrl} (unreachable: ${err.message})`);
+        }
+      } else {
+        console.log('  RPC:         (not configured)');
+      }
+
+      console.log('');
+      console.log('Fund this address with ETH (for gas) and TRAC (for publishing).');
+    } catch (err: any) {
+      console.error(err.message);
       process.exit(1);
     }
   });

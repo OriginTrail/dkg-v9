@@ -309,32 +309,37 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       }
 
       if (value !== null && !isNaN(value)) {
-        // Only negative values are threats (negative sentiment = risk)
-        // Use the negative magnitude as the risk score
-        const riskMagnitude = value < 0 ? Math.abs(value) : 0;
-        if (invert) {
-          if (riskMagnitude <= hl.threshold && riskMagnitude > 0) {
-            node.riskScore = riskMagnitude;
-            scores.push({ id, score: riskMagnitude });
-          }
+        const threshold = hl.threshold;
+        let score: number;
+        let include = false;
+        if (value < 0) {
+          // Negative values: magnitude = risk (e.g. negative sentiment)
+          const riskMagnitude = Math.abs(value);
+          node.riskScore = riskMagnitude;
+          score = riskMagnitude;
+          include = invert ? (riskMagnitude <= threshold && riskMagnitude > 0) : (riskMagnitude >= threshold);
         } else {
-          // Normal: include values AT or ABOVE the threshold (high = risky)
-          if (riskMagnitude >= hl.threshold) {
-            node.riskScore = riskMagnitude;
-            scores.push({ id, score: riskMagnitude });
+          // Positive values: normal = high is risky, invert = low is risky
+          node.riskScore = value;
+          if (invert) {
+            include = value <= threshold;
+            score = include ? threshold - value : 0; // lower value → higher score (riskier)
+          } else {
+            include = value >= threshold;
+            score = value;
           }
+        }
+        if (include) {
+          scores.push({ id, score });
         }
       }
     }
 
     // Mark top N as high-risk with CONTINUOUS size scaling
     const topN = hl.topN ?? 100;
-    // Invert: sort ascending (lowest score = highest risk); Normal: sort descending
-    if (invert) {
-      scores.sort((a, b) => a.score - b.score);
-    } else {
-      scores.sort((a, b) => b.score - a.score);
-    }
+    // Both modes: sort descending so highest risk score is first and gets largest size.
+    // (Invert uses score = threshold - value, so low value → high score.)
+    scores.sort((a, b) => b.score - a.score);
     const topScores = scores.slice(0, topN);
 
     if (topScores.length > 0) {
@@ -352,7 +357,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         // Don't override focal entity's sizeMultiplier
         if (node.sizeMultiplier) continue;
 
-        // Log-scale normalization for power-law distributions
+        // Log-scale normalization: highest risk (first in topScores) gets normalized 1 → maxSize
         let normalized: number;
         const scoreRange = Math.abs(rawFirst - rawLast);
         if (scoreRange > 0) {
@@ -361,8 +366,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           const logRange = logMax - logMin;
           const logScore = Math.log1p(score);
           const logNorm = logRange > 0 ? (logScore - logMin) / logRange : 0.5;
-          // When inverted, low raw score = high risk = should get maxSize
-          normalized = invert ? (1 - logNorm) : logNorm;
+          normalized = logNorm;
         } else {
           normalized = 1.0;
         }

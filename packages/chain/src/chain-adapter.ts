@@ -9,7 +9,7 @@ export interface ReservedRange {
 }
 
 export interface BatchMintParams {
-  publisherIdentityId: bigint;
+  publisherNodeIdentityId: bigint;
   merkleRoot: Uint8Array;
   startKAId: bigint;
   endKAId: bigint;
@@ -22,6 +22,27 @@ export interface BatchMintParams {
 
 export interface BatchMintResult extends TxResult {
   batchId: bigint;
+}
+
+export interface PublishParams {
+  kaCount: number;
+  publisherNodeIdentityId: bigint;
+  merkleRoot: Uint8Array;
+  publicByteSize: bigint;
+  epochs: number;
+  tokenAmount: bigint;
+  publisherSignature: { r: Uint8Array; vs: Uint8Array };
+  receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
+export interface OnChainPublishResult {
+  batchId: bigint;
+  startKAId: bigint;
+  endKAId: bigint;
+  txHash: string;
+  blockNumber: number;
+  blockTimestamp: number;
+  publisherAddress: string;
 }
 
 export interface UpdateKAParams {
@@ -75,8 +96,8 @@ export interface UpdateKCParams {
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
- * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherIdentityId}/{localKAId}
- * Publishers reserve ID ranges, then batch-mint KAs from those ranges.
+ * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
+ * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
   chainType: 'evm' | 'solana';
@@ -85,17 +106,29 @@ export interface ChainAdapter {
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
 
-  // V9 UAL reservation
-  reserveUALRange(publisherIdentityId: bigint, count: number): Promise<ReservedRange>;
+  // V9 UAL reservation (publisher address is derived from signer)
+  reserveUALRange(count: number): Promise<ReservedRange>;
 
   // V9 batch minting
   batchMintKnowledgeAssets(params: BatchMintParams): Promise<BatchMintResult>;
+
+  // V9 single-tx publish (reserve + mint in one call)
+  publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult>;
 
   // V9 knowledge updates
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;
 
   // V9 storage extension
   extendStorage(params: ExtendStorageParams): Promise<TxResult>;
+
+  // V9 namespace transfer
+  transferNamespace(newOwner: string): Promise<TxResult>;
+
+  /**
+   * Verify that a publisher address owns the UAL range [startKAId, endKAId] on-chain.
+   * Used by receiving nodes to reject PublishRequests with spoofed publisher/range.
+   */
+  verifyPublisherOwnsRange?(publisherAddress: string, startKAId: bigint, endKAId: bigint): Promise<boolean>;
 
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;

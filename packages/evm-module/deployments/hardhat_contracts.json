@@ -1,0 +1,22 @@
+{
+    "contracts": {
+        "Hub": {
+            "evmAddress": "0x27A62bdF937074e9bEF571de29dffc7325148507",
+            "version": "1.0.0",
+            "gitBranch": "main",
+            "gitCommitHash": "b152808eb793a737c77ad74b4cb5c9e5617dd021",
+            "deploymentBlock": 5759,
+            "deploymentTimestamp": 1772038567499,
+            "deployed": true
+        },
+        "IdentityStorage": {
+            "evmAddress": "0x0cD643426F10d59B48c5Fa086CdD709a079D489d",
+            "version": "1.0.0",
+            "gitBranch": "main",
+            "gitCommitHash": "b152808eb793a737c77ad74b4cb5c9e5617dd021",
+            "deploymentBlock": 5756,
+            "deploymentTimestamp": 1772038568330,
+            "deployed": true
+        }
+    }
+}

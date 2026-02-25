@@ -23,6 +23,7 @@
     "@noble/hashes": "^2"
   },
   "devDependencies": {
+    "ethers": "^6",
     "vitest": "^4.0.18"
   }
 }

@@ -12,7 +12,11 @@ import type {
   ChainEvent,
   EventFilter,
   CreateParanetParams,
+  PublishParams,
+  OnChainPublishResult,
 } from './chain-adapter.js';
+
+export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
 /**
  * In-memory mock chain adapter for off-chain development.
@@ -21,19 +25,24 @@ import type {
 export class MockChainAdapter implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
+  readonly signerAddress: string;
 
   private nextIdentityId = 1n;
   private nextBatchId = 1n;
   private nextBlock = 1;
   private identities = new Map<string, bigint>();
-  private publisherNextId = new Map<bigint, bigint>(); // publisherId -> next KA ID
+  private namespaceNextId = new Map<string, bigint>();
+  private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private collections = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private paranets = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
+  /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
+  private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
 
-  constructor(chainId = 'mock:31337') {
+  constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
     this.chainId = chainId;
+    this.signerAddress = signerAddress;
   }
 
   async registerIdentity(proof: IdentityProof): Promise<bigint> {
@@ -49,14 +58,23 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- V9 UAL-based methods ---
 
-  async reserveUALRange(publisherIdentityId: bigint, count: number): Promise<ReservedRange> {
-    let nextId = this.publisherNextId.get(publisherIdentityId) ?? 1n;
+  async reserveUALRange(count: number): Promise<ReservedRange> {
+    const publisher = this.signerAddress;
+    let nextId = this.namespaceNextId.get(publisher) ?? 1n;
     const startId = nextId;
     const endId = nextId + BigInt(count) - 1n;
-    this.publisherNextId.set(publisherIdentityId, endId + 1n);
+    this.namespaceNextId.set(publisher, endId + 1n);
+
+    const ranges = this.reservedRangesByPublisher.get(publisher) ?? [];
+    ranges.push({ startId, endId });
+    this.reservedRangesByPublisher.set(publisher, ranges);
+
+    if (!this.namespaceOwner.has(publisher)) {
+      this.namespaceOwner.set(publisher, publisher);
+    }
 
     this.pushEvent('UALRangeReserved', {
-      publisherIdentityId: publisherIdentityId.toString(),
+      publisher,
       startId: startId.toString(),
       endId: endId.toString(),
     });
@@ -75,7 +93,8 @@ export class MockChainAdapter implements ChainAdapter {
 
     this.pushEvent('KnowledgeBatchCreated', {
       batchId: batchId.toString(),
-      publisherIdentityId: params.publisherIdentityId.toString(),
+      publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
+      publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
       startKAId: params.startKAId.toString(),
       endKAId: params.endKAId.toString(),
@@ -86,6 +105,76 @@ export class MockChainAdapter implements ChainAdapter {
       ...this.txResult(true),
       batchId,
     };
+  }
+
+  async publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult> {
+    const { startId, endId } = await this.reserveUALRange(params.kaCount);
+
+    const batchId = this.nextBatchId++;
+    this.batches.set(batchId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.kaCount,
+    });
+
+    const blockNumber = this.nextBlock++;
+    const blockTimestamp = Math.floor(Date.now() / 1000);
+
+    this.events.push({
+      type: 'KnowledgeBatchCreated',
+      blockNumber,
+      data: {
+        batchId: batchId.toString(),
+        publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
+        publisherAddress: this.signerAddress,
+        merkleRoot: toHex(params.merkleRoot),
+        startKAId: startId.toString(),
+        endKAId: endId.toString(),
+        kaCount: params.kaCount,
+      },
+    });
+
+    return {
+      batchId,
+      startKAId: startId,
+      endKAId: endId,
+      txHash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
+      blockNumber,
+      blockTimestamp,
+      publisherAddress: this.signerAddress,
+    };
+  }
+
+  async verifyPublisherOwnsRange(
+    publisherAddress: string,
+    startKAId: bigint,
+    endKAId: bigint,
+  ): Promise<boolean> {
+    const ranges = this.reservedRangesByPublisher.get(publisherAddress);
+    if (!ranges?.length) return false;
+    for (const r of ranges) {
+      if (r.startId <= startKAId && r.endId >= endKAId) return true;
+    }
+    return false;
+  }
+
+  async transferNamespace(newOwner: string): Promise<TxResult> {
+    const publisher = this.signerAddress;
+    const ranges = this.reservedRangesByPublisher.get(publisher);
+    if (ranges?.length) {
+      this.reservedRangesByPublisher.set(newOwner, [...ranges]);
+      this.reservedRangesByPublisher.delete(publisher);
+    }
+    const nextId = this.namespaceNextId.get(publisher);
+    if (nextId !== undefined) this.namespaceNextId.set(newOwner, nextId);
+    this.namespaceNextId.delete(publisher);
+    this.namespaceOwner.set(publisher, newOwner);
+
+    this.pushEvent('NamespaceTransferred', {
+      from: publisher,
+      to: newOwner,
+    });
+
+    return this.txResult(true);
   }
 
   async updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult> {
@@ -191,6 +280,10 @@ export class MockChainAdapter implements ChainAdapter {
     return this.identities.get(toHex(publicKey));
   }
 
+  getNamespaceOwner(address: string): string | undefined {
+    return this.namespaceOwner.get(address);
+  }
+
   private pushEvent(type: string, data: Record<string, unknown>): void {
     this.events.push({ type, blockNumber: this.nextBlock++, data });
   }
@@ -205,7 +298,7 @@ export class MockChainAdapter implements ChainAdapter {
 }
 
 function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
+  return '0x' + Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }

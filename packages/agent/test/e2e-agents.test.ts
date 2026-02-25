@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@dkg/core';
+import { MockChainAdapter } from '@dkg/chain';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];
@@ -29,6 +30,7 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
+      chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentA);
     await agentA.start();
@@ -42,6 +44,7 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
+      chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentB);
     await agentB.start();
@@ -75,12 +78,12 @@ describe('Two-Agent E2E', () => {
 
   it('agents exchange chat messages', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ChatA', listenPort: 0, skills: [],
+      name: 'ChatA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentA);
 
     const agentB = await DKGAgent.create({
-      name: 'ChatB', listenPort: 0, skills: [],
+      name: 'ChatB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentB);
 
@@ -110,7 +113,7 @@ describe('Two-Agent E2E', () => {
 
   it('chat to unknown peer fails gracefully', async () => {
     const agent = await DKGAgent.create({
-      name: 'LonelyBot', listenPort: 0, skills: [],
+      name: 'LonelyBot', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
     });
     agents.push(agent);
     await agent.start();
@@ -122,7 +125,7 @@ describe('Two-Agent E2E', () => {
 
   it('agents publish and query knowledge in a custom paranet', async () => {
     const agentA = await DKGAgent.create({
-      name: 'KnowledgeA', listenPort: 0, skills: [],
+      name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentA);
     await agentA.start();
@@ -170,6 +173,7 @@ describe('Relay E2E', () => {
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
+      chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentA);
 
@@ -178,6 +182,7 @@ describe('Relay E2E', () => {
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
+      chainAdapter: new MockChainAdapter(),
     });
     agents.push(agentB);
 

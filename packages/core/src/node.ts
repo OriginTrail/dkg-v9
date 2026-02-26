@@ -16,7 +16,7 @@ import { autoNAT } from '@libp2p/autonat';
 import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
-import type { DKGNodeConfig } from './types.js';
+import type { ConnectionTransport, DKGNodeConfig } from './types.js';
 import { DHT_PROTOCOL } from './constants.js';
 
 export interface DKGServices extends Record<string, unknown> {
@@ -32,6 +32,8 @@ export interface DKGServices extends Record<string, unknown> {
 export class DKGNode {
   private node: Libp2p<DKGServices> | null = null;
   private readonly config: DKGNodeConfig;
+  /** Peers currently connected only via relay (candidates for DCUtR upgrade). */
+  private readonly relayedPeers = new Set<string>();
 
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
@@ -128,15 +130,7 @@ export class DKGNode {
       },
     } as any);
 
-    // Log peer connection/disconnection events
-    this.node.addEventListener('peer:connect', (evt) => {
-      const remotePeer = evt.detail.toString();
-      console.log(`[${new Date().toISOString()}] Peer connected: ${remotePeer}`);
-    });
-    this.node.addEventListener('peer:disconnect', (evt) => {
-      const remotePeer = evt.detail.toString();
-      console.log(`[${new Date().toISOString()}] Peer disconnected: ${remotePeer}`);
-    });
+    this.setupConnectionObservability();
 
     // Connect to relay peers and tag them as keep-alive so libp2p's
     // connection manager maintains the connection and auto-redials.
@@ -165,8 +159,76 @@ export class DKGNode {
     }
   }
 
+  /**
+   * Wire up connection:open / connection:close listeners that track transport
+   * type (direct vs relayed) and detect DCUtR upgrades from relay to direct.
+   */
+  private setupConnectionObservability(): void {
+    const node = this.requireNode();
+    const ts = () => new Date().toISOString();
+    const short = (id: string) => id.slice(-8);
+
+    node.addEventListener('connection:open', (evt) => {
+      const conn = evt.detail;
+      const pid = conn.remotePeer.toString();
+      const addr = conn.remoteAddr?.toString() ?? 'unknown';
+      const transport: ConnectionTransport = addr.includes('/p2p-circuit') ? 'relayed' : 'direct';
+      const dir = conn.direction;
+
+      if (transport === 'relayed') {
+        this.relayedPeers.add(pid);
+        console.log(
+          `[${ts()}] Connection opened: ${short(pid)} transport=relayed ` +
+          `dir=${dir} addr=${addr}`,
+        );
+      } else {
+        const upgraded = this.relayedPeers.has(pid);
+        if (upgraded) {
+          this.relayedPeers.delete(pid);
+          console.log(
+            `[${ts()}] DCUtR upgrade: ${short(pid)} relayed -> direct ` +
+            `dir=${dir} addr=${addr}`,
+          );
+        } else {
+          console.log(
+            `[${ts()}] Connection opened: ${short(pid)} transport=direct ` +
+            `dir=${dir} addr=${addr}`,
+          );
+        }
+      }
+    });
+
+    node.addEventListener('connection:close', (evt) => {
+      const conn = evt.detail;
+      const pid = conn.remotePeer.toString();
+      const addr = conn.remoteAddr?.toString() ?? 'unknown';
+      const transport: ConnectionTransport = addr.includes('/p2p-circuit') ? 'relayed' : 'direct';
+      const durationMs = conn.timeline.close
+        ? conn.timeline.close - conn.timeline.open
+        : '?';
+
+      // If this was the last connection to the peer, clean up tracking state.
+      const remaining = node.getConnections(conn.remotePeer);
+      if (remaining.length === 0) {
+        this.relayedPeers.delete(pid);
+      }
+
+      console.log(
+        `[${ts()}] Connection closed: ${short(pid)} transport=${transport} ` +
+        `duration=${durationMs}ms addr=${addr}`,
+      );
+    });
+
+    node.addEventListener('peer:disconnect', (evt) => {
+      const pid = evt.detail.toString();
+      this.relayedPeers.delete(pid);
+      console.log(`[${ts()}] Peer disconnected: ${short(pid)}`);
+    });
+  }
+
   async stop(): Promise<void> {
     if (!this.node) return;
+    this.relayedPeers.clear();
     await this.node.stop();
     this.node = null;
   }

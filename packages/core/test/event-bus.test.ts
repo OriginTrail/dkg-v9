@@ -46,4 +46,32 @@ describe('TypedEventBus', () => {
     expect(h1).not.toHaveBeenCalled();
     expect(h2).toHaveBeenCalled();
   });
+
+  it('DKGEvent includes connection observability constants', () => {
+    expect(DKGEvent.CONNECTION_OPEN).toBe('connection:open');
+    expect(DKGEvent.CONNECTION_CLOSE).toBe('connection:close');
+    expect(DKGEvent.CONNECTION_UPGRADED).toBe('connection:upgraded');
+  });
+
+  it('emits connection events through the bus', () => {
+    const bus = new TypedEventBus();
+    const openHandler = vi.fn();
+    const closeHandler = vi.fn();
+    bus.on(DKGEvent.CONNECTION_OPEN, openHandler);
+    bus.on(DKGEvent.CONNECTION_CLOSE, closeHandler);
+
+    const info = {
+      peerId: '12D3KooWTest',
+      remoteAddr: '/ip4/127.0.0.1/tcp/4001',
+      transport: 'direct' as const,
+      direction: 'outbound' as const,
+      openedAt: Date.now(),
+    };
+
+    bus.emit(DKGEvent.CONNECTION_OPEN, info);
+    expect(openHandler).toHaveBeenCalledWith(info);
+
+    bus.emit(DKGEvent.CONNECTION_CLOSE, info);
+    expect(closeHandler).toHaveBeenCalledWith(info);
+  });
 });

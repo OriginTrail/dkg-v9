@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Command } from 'commander';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
@@ -13,11 +13,21 @@ import {
 import { ApiClient } from './api-client.js';
 import { runDaemon } from './daemon.js';
 
+function getCliVersion(): string {
+  try {
+    const path = new URL('../package.json', import.meta.url);
+    const pkg = JSON.parse(readFileSync(path, 'utf-8'));
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
 const program = new Command();
 program
   .name('dkg')
   .description('DKG V9 testnet node CLI')
-  .version('0.0.1');
+  .version(getCliVersion());
 
 // ─── dkg init ────────────────────────────────────────────────────────
 

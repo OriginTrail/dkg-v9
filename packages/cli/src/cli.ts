@@ -463,6 +463,112 @@ program
     }
   });
 
+// ─── dkg query-remote <peer> ───────────────────────────────────────
+
+program
+  .command('query-remote <peer>')
+  .description('Query a remote peer\'s knowledge store')
+  .option('-q, --sparql <query>', 'SPARQL query (requires --paranet)')
+  .option('--ual <ual>', 'Look up a knowledge asset by UAL')
+  .option('--entity <uri>', 'Get all triples for an entity URI (requires --paranet)')
+  .option('--type <rdfType>', 'Find entities by RDF type (requires --paranet)')
+  .option('-p, --paranet <id>', 'Target paranet')
+  .option('-l, --limit <n>', 'Max results', '100')
+  .option('--timeout <ms>', 'Query timeout in ms', '5000')
+  .action(async (peer: string, opts) => {
+    try {
+      const client = await ApiClient.connect();
+
+      let lookupType: string;
+      const request: Record<string, any> = {
+        paranetId: opts.paranet,
+        limit: parseInt(opts.limit, 10),
+        timeout: parseInt(opts.timeout, 10),
+      };
+
+      if (opts.ual) {
+        lookupType = 'ENTITY_BY_UAL';
+        request.ual = opts.ual;
+      } else if (opts.type) {
+        lookupType = 'ENTITIES_BY_TYPE';
+        request.rdfType = opts.type;
+        if (!opts.paranet) {
+          console.error('--paranet is required for --type queries');
+          process.exit(1);
+        }
+      } else if (opts.entity) {
+        lookupType = 'ENTITY_TRIPLES';
+        request.entityUri = opts.entity;
+        if (!opts.paranet) {
+          console.error('--paranet is required for --entity queries');
+          process.exit(1);
+        }
+      } else if (opts.sparql) {
+        lookupType = 'SPARQL_QUERY';
+        request.sparql = opts.sparql;
+        if (!opts.paranet) {
+          console.error('--paranet is required for --sparql queries');
+          process.exit(1);
+        }
+      } else {
+        console.error('Provide one of: --ual, --type, --entity, or --sparql');
+        process.exit(1);
+      }
+
+      const response = await client.queryRemote(peer, { lookupType, ...request });
+
+      if (response.status !== 'OK') {
+        console.error(`Query failed: ${response.status}`);
+        if (response.error) console.error(`  ${response.error}`);
+        process.exit(1);
+      }
+
+      // Display results based on lookup type
+      if (response.ntriples !== undefined) {
+        if (response.ntriples) {
+          console.log(response.ntriples);
+        } else {
+          console.log('No results.');
+        }
+      } else if (response.entityUris?.length) {
+        for (const uri of response.entityUris) {
+          console.log(uri);
+        }
+      } else if (response.bindings) {
+        try {
+          const bindings = JSON.parse(response.bindings);
+          if (bindings.length === 0) {
+            console.log('No results.');
+          } else {
+            const keys = Object.keys(bindings[0]);
+            const widths = keys.map(k => Math.max(k.length, ...bindings.map(
+              (row: any) => stripQuotes(String(row[k] ?? '')).length,
+            )));
+            const header = keys.map((k, i) => k.padEnd(widths[i])).join('  ');
+            console.log(header);
+            console.log(widths.map((w: number) => '─'.repeat(w)).join('  '));
+            for (const row of bindings) {
+              const line = keys.map((k, i) => stripQuotes(String(row[k] ?? '')).padEnd(widths[i])).join('  ');
+              console.log(line);
+            }
+            console.log(`\n${bindings.length} row(s)`);
+          }
+        } catch {
+          console.log(response.bindings);
+        }
+      } else {
+        console.log('No results.');
+      }
+
+      if (response.truncated) {
+        console.log(`\n(results truncated — ${response.resultCount} total)`);
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg subscribe <paranet> ────────────────────────────────────────
 
 program

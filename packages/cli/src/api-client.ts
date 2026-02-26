@@ -85,6 +85,29 @@ export class ApiClient {
     return this.post('/api/query', { sparql, paranetId });
   }
 
+  async queryRemote(peerId: string, request: {
+    lookupType: string;
+    paranetId?: string;
+    ual?: string;
+    entityUri?: string;
+    rdfType?: string;
+    sparql?: string;
+    limit?: number;
+    timeout?: number;
+  }): Promise<{
+    operationId: string;
+    status: string;
+    ntriples?: string;
+    bindings?: string;
+    entityUris?: string[];
+    truncated: boolean;
+    resultCount: number;
+    gasConsumed?: number;
+    error?: string;
+  }> {
+    return this.post('/api/query-remote', { peerId, ...request });
+  }
+
   async subscribe(paranetId: string): Promise<{ subscribed: string }> {
     return this.post('/api/subscribe', { paranetId });
   }

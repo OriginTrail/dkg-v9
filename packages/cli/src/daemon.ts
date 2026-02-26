@@ -352,6 +352,22 @@ async function handleRequest(
     return jsonResponse(res, 200, { result });
   }
 
+  // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }
+  if (req.method === 'POST' && path === '/api/query-remote') {
+    const body = await readBody(req);
+    const { peerId: rawPeerId, lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout } = JSON.parse(body);
+    if (!rawPeerId) return jsonResponse(res, 400, { error: 'Missing "peerId"' });
+    if (!lookupType) return jsonResponse(res, 400, { error: 'Missing "lookupType"' });
+
+    const peerId = await resolveNameToPeerId(agent, rawPeerId);
+    if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+
+    const response = await agent.queryRemote(peerId, {
+      lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout,
+    });
+    return jsonResponse(res, 200, response);
+  }
+
   // POST /api/subscribe  { paranetId: "..." }
   if (req.method === 'POST' && path === '/api/subscribe') {
     const body = await readBody(req);

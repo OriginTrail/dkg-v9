@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
   paranetPublishTopic, paranetDataGraphUri, paranetMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
@@ -14,7 +14,10 @@ import {
   computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
   type PublishResult,
 } from '@dkg/publisher';
-import { DKGQueryEngine } from '@dkg/query';
+import {
+  DKGQueryEngine, QueryHandler,
+  type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
+} from '@dkg/query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -59,6 +62,8 @@ export interface DKGAgentConfig {
     operationalKeys: string[];
     chainId?: string;
   };
+  /** Cross-agent query access configuration. */
+  queryAccess?: QueryAccessConfig;
 }
 
 /**
@@ -207,6 +212,13 @@ export class DKGAgent {
 
     const publishHandler = new PublishHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
+
+    // Register cross-agent query handler
+    const queryAccessConfig: QueryAccessConfig = this.config.queryAccess ?? {
+      defaultPolicy: 'public',
+    };
+    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
+    this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
 
     // Auto-detect or register on-chain identity
     if (this.chain.chainId !== 'none') {
@@ -532,6 +544,85 @@ export class DKGAgent {
     const result = await this.queryEngine.query(sparql, { paranetId });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
+  }
+
+  /**
+   * Send a cross-agent query to a remote peer via the /dkg/query/2.0.0 protocol.
+   */
+  async queryRemote(
+    peerId: string,
+    request: Omit<QueryRequest, 'operationId'>,
+  ): Promise<QueryResponse> {
+    const ctx = createOperationContext('query');
+    const operationId = crypto.randomUUID();
+    const fullRequest: QueryRequest = { ...request, operationId };
+
+    this.log.info(ctx, `Remote query to ${peerId.slice(-8)} type=${request.lookupType}`);
+
+    const payload = new TextEncoder().encode(JSON.stringify(fullRequest));
+    const responseBytes = await this.router.send(peerId, PROTOCOL_QUERY_REMOTE, payload);
+    const response = JSON.parse(new TextDecoder().decode(responseBytes)) as QueryResponse;
+
+    this.log.info(ctx, `Remote query response: status=${response.status} resultCount=${response.resultCount}`);
+    return response;
+  }
+
+  /**
+   * Look up a specific knowledge asset on a remote peer by UAL.
+   */
+  async lookupEntity(peerId: string, ual: string): Promise<QueryResponse> {
+    return this.queryRemote(peerId, { lookupType: 'ENTITY_BY_UAL', ual });
+  }
+
+  /**
+   * Find entities of a given RDF type on a remote peer's paranet.
+   */
+  async findEntitiesByType(
+    peerId: string,
+    paranetId: string,
+    rdfType: string,
+    limit?: number,
+  ): Promise<QueryResponse> {
+    return this.queryRemote(peerId, {
+      lookupType: 'ENTITIES_BY_TYPE',
+      paranetId,
+      rdfType,
+      limit,
+    });
+  }
+
+  /**
+   * Get all triples for a specific entity from a remote peer's paranet.
+   */
+  async getEntityTriples(
+    peerId: string,
+    paranetId: string,
+    entityUri: string,
+  ): Promise<QueryResponse> {
+    return this.queryRemote(peerId, {
+      lookupType: 'ENTITY_TRIPLES',
+      paranetId,
+      entityUri,
+    });
+  }
+
+  /**
+   * Run a SPARQL query on a remote peer (if they allow it).
+   */
+  async queryRemoteSparql(
+    peerId: string,
+    paranetId: string,
+    sparql: string,
+    limit?: number,
+    timeout?: number,
+  ): Promise<QueryResponse> {
+    return this.queryRemote(peerId, {
+      lookupType: 'SPARQL_QUERY',
+      paranetId,
+      sparql,
+      limit,
+      timeout,
+    });
   }
 
   subscribeToParanet(paranetId: string): void {

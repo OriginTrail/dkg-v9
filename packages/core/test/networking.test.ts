@@ -3,6 +3,7 @@ import { DKGNode } from '../src/node.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { TypedEventBus } from '../src/event-bus.js';
+import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
@@ -53,6 +54,33 @@ describe('DKGNode', () => {
 
     const peers = node1.libp2p.getPeers().map((p) => p.toString());
     expect(peers).toContain(node2.peerId);
+  }, 10000);
+
+  it('getConnections returns ConnectionInfo with direct transport for local peers', async () => {
+    const node1 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    const node2 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    await connectNodes(node1, node2);
+
+    const bus = new TypedEventBus();
+    const discovery = new PeerDiscoveryManager(node1, bus);
+    const conns = await discovery.getConnections();
+
+    expect(conns.length).toBeGreaterThan(0);
+    const toNode2 = conns.find(c => c.peerId === node2.peerId);
+    expect(toNode2).toBeDefined();
+    expect(toNode2!.transport).toBe('direct');
+    expect(toNode2!.remoteAddr).toMatch(/\/ip4\/127\.0\.0\.1/);
+    expect(toNode2!.direction).toMatch(/^(inbound|outbound)$/);
+    expect(toNode2!.openedAt).toBeGreaterThan(0);
   }, 10000);
 });
 

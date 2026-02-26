@@ -47,6 +47,16 @@ export interface DKGNodeConfig {
   nodeRole?: 'core' | 'edge';
 }
 
+export type ConnectionTransport = 'direct' | 'relayed';
+
+export interface ConnectionInfo {
+  peerId: string;
+  remoteAddr: string;
+  transport: ConnectionTransport;
+  direction: 'inbound' | 'outbound';
+  openedAt: number;
+}
+
 export interface StreamHandler {
   (data: Uint8Array, peerId: PeerId): Promise<Uint8Array>;
 }

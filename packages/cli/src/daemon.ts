@@ -220,7 +220,10 @@ async function handleRequest(
 
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {
-    const peers = agent.node.libp2p.getPeers();
+    const allConns = agent.node.libp2p.getConnections();
+    const directConns = allConns.filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit'));
+    const relayedConns = allConns.length - directConns.length;
+    const uniquePeers = new Set(allConns.map(c => c.remotePeer.toString()));
     const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
     const networkId = await computeNetworkId();
     return jsonResponse(res, 200, {
@@ -229,9 +232,33 @@ async function handleRequest(
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
       uptimeMs: Date.now() - startedAt,
-      connectedPeers: peers.length,
+      connectedPeers: uniquePeers.size,
+      connections: { total: allConns.length, direct: directConns.length, relayed: relayedConns },
       relayConnected: circuitAddrs.length > 0,
       multiaddrs: agent.multiaddrs,
+    });
+  }
+
+  // GET /api/connections — detailed per-connection info with transport type
+  if (req.method === 'GET' && path === '/api/connections') {
+    const allConns = agent.node.libp2p.getConnections();
+    const connections = allConns.map(c => {
+      const addr = c.remoteAddr?.toString() ?? 'unknown';
+      return {
+        peerId: c.remotePeer.toString(),
+        remoteAddr: addr,
+        transport: addr.includes('/p2p-circuit') ? 'relayed' : 'direct',
+        direction: c.direction,
+        openedAt: c.timeline?.open ?? null,
+        durationMs: c.timeline?.open ? Date.now() - c.timeline.open : null,
+      };
+    });
+    const direct = connections.filter(c => c.transport === 'direct').length;
+    return jsonResponse(res, 200, {
+      total: connections.length,
+      direct,
+      relayed: connections.length - direct,
+      connections,
     });
   }
 

@@ -1,4 +1,6 @@
 import oxigraph from 'oxigraph';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type {
   TripleStore,
   Quad as DKGQuad,
@@ -33,9 +35,8 @@ export class OxigraphStore implements TripleStore {
 
   private hydrateSync(filePath: string): void {
     try {
-      const fs = require('node:fs');
-      if (!fs.existsSync(filePath)) return;
-      const data = fs.readFileSync(filePath, 'utf-8') as string;
+      if (!existsSync(filePath)) return;
+      const data = readFileSync(filePath, 'utf-8') as string;
       if (data.trim()) {
         this.store.load(data, { format: 'application/n-quads' });
       }
@@ -47,11 +48,9 @@ export class OxigraphStore implements TripleStore {
   private flushToDisk(): void {
     if (!this.persistPath) return;
     try {
-      const fs = require('node:fs');
-      const path = require('node:path');
-      fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+      mkdirSync(dirname(this.persistPath), { recursive: true });
       const nquads = this.store.dump({ format: 'application/n-quads' });
-      fs.writeFileSync(this.persistPath, nquads, 'utf-8');
+      writeFileSync(this.persistPath, nquads, 'utf-8');
     } catch {
       // Best-effort persistence.
     }

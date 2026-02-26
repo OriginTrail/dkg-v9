@@ -95,12 +95,23 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   // Build chain config from CLI config or network config
   const chainBase = config.chain ?? network?.chain;
 
+  // Relay: prefer config.relay, fall back to network testnet.json relays so
+  // local nodes connect without having run init or set relay manually
+  const relayPeers = config.relay
+    ? [config.relay]
+    : (network?.relays?.length ? network.relays : undefined);
+  if (!relayPeers?.length) {
+    log('No relay configured. Set "relay" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
+  } else if (!config.relay && network?.relays?.length) {
+    log(`Using relay(s) from network config (${network.networkName})`);
+  }
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: 'DKG',
     listenPort: config.listenPort,
     dataDir: dkgDir(),
-    relayPeers: config.relay ? [config.relay] : undefined,
+    relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     chainConfig: chainBase ? {
@@ -133,8 +144,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
 
-  if (config.relay) {
-    log(`Relay: ${config.relay}`);
+  if (relayPeers?.length) {
+    log(`Relay: ${relayPeers[0]}${relayPeers.length > 1 ? ` (+${relayPeers.length - 1} more)` : ''}`);
     for (let i = 0; i < 10; i++) {
       await sleep(1000);
       const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));

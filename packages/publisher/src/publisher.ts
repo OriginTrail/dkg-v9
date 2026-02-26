@@ -30,6 +30,8 @@ export interface PublishResult {
   kaManifest: KAManifestEntry[];
   status: 'tentative' | 'confirmed';
   onChainResult?: OnChainPublishResult;
+  /** Public quads that were stored (used for broadcast — never includes private triples). */
+  publicQuads?: Quad[];
 }
 
 export interface Publisher {

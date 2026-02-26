@@ -27,3 +27,7 @@ export function paranetDataGraphUri(paranetId: string): string {
 export function paranetMetaGraphUri(paranetId: string): string {
   return `did:dkg:paranet:${paranetId}/_meta`;
 }
+
+export function paranetPrivateGraphUri(paranetId: string): string {
+  return `did:dkg:paranet:${paranetId}/_private`;
+}

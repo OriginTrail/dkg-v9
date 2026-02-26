@@ -1,9 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { stat } from 'node:fs/promises';
+import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@dkg/agent';
 import { computeNetworkId } from '@dkg/core';
+import {
+  DashboardDB,
+  MetricsCollector,
+  OperationTracker,
+  handleNodeUIRequest,
+  ChatAssistant,
+  type MetricsSource,
+} from '@dkg/node-ui';
 import {
   loadConfig,
   loadNetworkConfig,
@@ -168,10 +179,90 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     );
   }
 
+  // --- Dashboard DB + Metrics ---
+
+  const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  log('Dashboard DB initialized at ' + join(dkgDir(), 'node-ui.db'));
+
+  const metricsSource: MetricsSource = {
+    getPeerCount: () => agent.node.libp2p.getConnections().length,
+    getDirectPeerCount: () => agent.node.libp2p.getConnections().filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit')).length,
+    getRelayedPeerCount: () => agent.node.libp2p.getConnections().filter(c => c.remoteAddr?.toString().includes('/p2p-circuit')).length,
+    getMeshPeerCount: () => {
+      try { return (agent.gossip as any).gossipsub?.getMeshPeers?.()?.length ?? 0; } catch { return 0; }
+    },
+    getParanetCount: async () => (await agent.listParanets()).length,
+    getTotalTriples: async () => {
+      const r = await agent.query('SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }');
+      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+    },
+    getTotalKCs: async () => {
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <urn:dkg:KC> } }');
+      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+    },
+    getTotalKAs: async () => {
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <urn:dkg:KA> } }');
+      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+    },
+    getConfirmedKCs: async () => {
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "confirmed" } }');
+      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+    },
+    getTentativeKCs: async () => {
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "tentative" } }');
+      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+    },
+    getStoreBytes: async () => {
+      try {
+        const s = await stat(join(dkgDir(), 'store.nq'));
+        return s.size;
+      } catch { return 0; }
+    },
+    getRpcLatencyMs: async () => 0,
+    isRpcHealthy: async () => true,
+  };
+
+  const metricsCollector = new MetricsCollector(dashDb, metricsSource, dkgDir());
+  metricsCollector.start();
+  log('Metrics collector started (2min interval)');
+
+  const tracker = new OperationTracker(dashDb);
+
+  const chatAssistant = new ChatAssistant(dashDb, async (sparql: string) => agent.query(sparql), config.llm);
+  if (config.llm) log('Chat assistant ready (LLM enabled)');
+  else log('Chat assistant ready');
+
+  // Resolve the static UI directory (built by @dkg/node-ui)
+  let nodeUiStaticDir: string;
+  try {
+    const nodeUiPkg = import.meta.resolve('@dkg/node-ui');
+    const nodeUiDir = dirname(fileURLToPath(nodeUiPkg));
+    nodeUiStaticDir = join(nodeUiDir, '..', 'dist-ui');
+  } catch {
+    nodeUiStaticDir = join(process.cwd(), 'packages', 'node-ui', 'dist-ui');
+  }
+
   // --- HTTP API ---
 
   const server = createServer(async (req, res) => {
     try {
+      const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host}`);
+
+      // CORS preflight
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
+        return;
+      }
+
+      // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant);
+      if (handled) return;
+
       await handleRequest(req, res, agent, config, startedAt, messages, opWallets, network);
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
@@ -187,14 +278,17 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   await writePid(process.pid);
 
   log(`API listening on http://127.0.0.1:${boundPort}`);
+  log(`Node UI: http://127.0.0.1:${boundPort}/ui`);
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
 
   // Graceful shutdown
   async function shutdown() {
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
+    metricsCollector.stop();
     server.close();
     await agent.stop();
+    dashDb.close();
     await removePid();
     await removeApiPort();
     log('Stopped.');
@@ -392,6 +486,16 @@ async function handleRequest(
     return jsonResponse(res, 200, { paranets });
   }
 
+  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, paranets)
+  if (req.method === 'GET' && path === '/api/integrations') {
+    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listParanets()]);
+    const adapters = [
+      { id: 'elizaos', name: 'ElizaOS', enabled: true, description: 'Connect to ElizaOS agents' },
+      { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
+    ];
+    return jsonResponse(res, 200, { adapters, skills, paranets });
+  }
+
   // GET /api/paranet/exists?id=<paranetId>
   if (req.method === 'GET' && path === '/api/paranet/exists') {
     const id = url.searchParams.get('id');
@@ -400,12 +504,72 @@ async function handleRequest(
     return jsonResponse(res, 200, { id, exists });
   }
 
-  // GET /api/wallets
+  // GET /api/wallets (list addresses only)
   if (req.method === 'GET' && (path === '/api/wallet' || path === '/api/wallets')) {
     return jsonResponse(res, 200, {
       wallets: opWallets.wallets.map((w) => w.address),
       chainId: (config.chain ?? network?.chain)?.chainId,
     });
+  }
+
+  // GET /api/wallets/balances — ETH + TRAC per wallet, RPC health
+  if (req.method === 'GET' && path === '/api/wallets/balances') {
+    const chain = config.chain ?? network?.chain;
+    const rpcUrl = chain?.rpcUrl;
+    const hubAddress = chain?.hubAddress;
+    const chainId = chain?.chainId ?? null;
+    if (!rpcUrl || !hubAddress || !opWallets.wallets.length) {
+      return jsonResponse(res, 200, {
+        wallets: [],
+        balances: [],
+        chainId,
+        rpcUrl: rpcUrl ?? null,
+        error: !rpcUrl || !hubAddress ? 'Chain not configured' : 'No wallets',
+      });
+    }
+    try {
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const hub = new ethers.Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+      const tokenAddr = await hub.getContractAddress('Token').catch(() => null);
+      let token: ethers.Contract | null = null;
+      let tokenSymbol = 'TRAC';
+      if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {
+        token = new ethers.Contract(tokenAddr, ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'], provider);
+        tokenSymbol = await token.symbol().catch(() => 'TRAC');
+      }
+      const balances: Array<{ address: string; eth: string; trac: string; symbol: string }> = [];
+      for (const w of opWallets.wallets) {
+        const ethBal = await provider.getBalance(w.address);
+        const tracBal = token ? await token.balanceOf(w.address) : 0n;
+        balances.push({
+          address: w.address,
+          eth: ethers.formatEther(ethBal),
+          trac: ethers.formatEther(tracBal),
+          symbol: tokenSymbol,
+        });
+      }
+      return jsonResponse(res, 200, { wallets: opWallets.wallets.map((w) => w.address), balances, chainId, rpcUrl, symbol: tokenSymbol });
+    } catch (err: any) {
+      return jsonResponse(res, 200, { wallets: opWallets.wallets.map((w) => w.address), balances: [], chainId, rpcUrl, error: err.message });
+    }
+  }
+
+  // GET /api/chain/rpc-health
+  if (req.method === 'GET' && path === '/api/chain/rpc-health') {
+    const chain = config.chain ?? network?.chain;
+    const rpcUrl = chain?.rpcUrl;
+    if (!rpcUrl) {
+      return jsonResponse(res, 200, { ok: false, rpcUrl: null, latencyMs: null, blockNumber: null, error: 'Chain not configured' });
+    }
+    try {
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const start = Date.now();
+      const blockNumber = await provider.getBlockNumber();
+      const latencyMs = Date.now() - start;
+      return jsonResponse(res, 200, { ok: true, rpcUrl, latencyMs, blockNumber });
+    } catch (err: any) {
+      return jsonResponse(res, 200, { ok: false, rpcUrl, latencyMs: null, blockNumber: null, error: err.message });
+    }
   }
 
   // POST /api/shutdown

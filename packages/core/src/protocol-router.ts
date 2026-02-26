@@ -43,18 +43,46 @@ export class ProtocolRouter {
     peerIdStr: string,
     protocolId: string,
     data: Uint8Array,
+    timeoutMs = 10_000,
   ): Promise<Uint8Array> {
     const libp2p = this.node.libp2p;
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(peerIdStr);
-    const stream = await libp2p.dialProtocol(peerId, protocolId, {
-      runOnLimitedConnection: true,
-    });
+    const signal = AbortSignal.timeout(timeoutMs);
 
-    stream.send(data);
-    await stream.close();
+    // libp2p internally upgrades relay connections to direct during
+    // dialProtocol/newStream (peerStore.merge triggers the connection manager
+    // to dial the peer directly, closing the relay and any in-flight streams).
+    // We retry up to 3 times with back-off so the direct connection can
+    // stabilise before the next attempt.
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const stream = await libp2p.dialProtocol(peerId, protocolId, {
+          runOnLimitedConnection: true,
+          signal,
+        });
 
-    return readAll(stream);
+        if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
+          stream.abort(new Error('stream closed before send'));
+          throw new Error('stream returned in closed state');
+        }
+
+        stream.send(data);
+        await stream.close({ signal });
+
+        return await readAll(stream);
+      } catch (err: unknown) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : '';
+        const recoverable = msg.includes('closed') || msg.includes('reset')
+          || msg.includes('stream returned in closed state');
+        if (!recoverable || attempt >= 2) throw err;
+        const backoff = (attempt + 1) * 500;
+        await new Promise(r => setTimeout(r, backoff));
+      }
+    }
+    throw lastErr;
   }
 }
 

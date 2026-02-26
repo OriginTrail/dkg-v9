@@ -194,7 +194,9 @@ Results render in three modes:
 
 #### Graph Visualization
 
-Powered by `@dkg/graph-viz` (already in the monorepo):
+Powered by `@dkg/graph-viz` (already in the monorepo), **as the main Explorer view**:
+- The **Graph** tab loads the full knowledge graph via `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o } LIMIT N` (configurable limit: 1k–50k).
+- Interactive force-directed 2D layout; humanized labels; node click for details.
 - Interactive force-directed 2D layout (with optional 3D via `renderer-3d`)
 - Click a node → expand its triples (fetch neighbors on demand)
 - Color-coded by `rdf:type` or paranet
@@ -337,9 +339,10 @@ Embedded chatbot powered by the node's own DKG agent capabilities:
 - "Which peer sent me the most data?"
 
 The chatbot queries the metrics store (SQLite), the operations log,
-and the triple store using the same SPARQL engine the node already has.
-For natural language → SQL/SPARQL translation, it uses the neural query
-extension (see [SPEC_PART3_EXTENSIONS.md §1](../SPEC_PART3_EXTENSIONS.md)).
+and the triple store. **Optional LLM**: when `llm` is set in `~/.dkg/config.json`
+(OpenAI-compatible: `apiKey`, `model`, `baseURL`), unmatched questions are
+sent to the LLM; if the response contains a SPARQL code block it is executed
+and results are appended (NL→SPARQL).
 
 ---
 
@@ -732,25 +735,22 @@ Power users enable the OTel exporter to pipe into their existing stack.
 - Publish UI: simple form → `/api/publish`
 - Query history and saved queries (SQLite)
 
-### Phase 4: Wallet Management + Economics
-- Wallet balances panel (auto-refresh)
-- Add/remove operational keys
-- Fee collection UI
-- RPC health monitoring
-- Earnings charts, stake info
+### Phase 4: Wallet Management + Economics — **DONE**
+- Wallet balances panel (auto-refresh) — `GET /api/wallets/balances`, Wallet page
+- RPC health monitoring — `GET /api/chain/rpc-health`
+- Add/remove operational keys, fee collection, earnings charts, stake — future (config/manual for now)
 
-### Phase 5: Integrations Panel
-- Adapter list with enable/disable toggles
-- Per-adapter configuration forms
-- Skill browser and test harness
-- Paranet subscription management from UI
-- Webhook configuration
+### Phase 5: Integrations Panel — **DONE**
+- Adapter list (static: ElizaOS, OpenClaw) — `GET /api/integrations`
+- Skill browser (discovered skills from agents paranet)
+- Paranet subscription management from UI — subscribe input + `POST /api/subscribe`
+- Per-adapter config, webhook configuration — future (config file)
 
-### Phase 6: OTel Export + AI Assistant
-- Optional OTLP exporter for metrics + traces
-- `operationId` ↔ OTel trace ID correlation
-- Embedded chatbot querying SQLite + triple store
-- Natural language → SQL for metrics, → SPARQL for knowledge
+### Phase 6: OTel Export + AI Assistant — **PARTIAL**
+- Optional OTLP exporter — interface in `telemetry.ts` (no-op until OTel packages added)
+- `operationId` ↔ OTel trace ID — documented; `setOperationSpan(operationId, name)` stub
+- Embedded chatbot — **DONE** (rule-based + optional LLM; SQLite + SPARQL)
+- Natural language → SPARQL — **DONE** via optional LLM (config `llm` in `~/.dkg/config.json`)
 
 ---
 

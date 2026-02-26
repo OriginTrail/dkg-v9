@@ -25,7 +25,7 @@ export class PrivateContentStore {
   ): Promise<void> {
     if (quads.length === 0) return;
 
-    const graphUri = this.graphManager.dataGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(paranetId);
     const normalized = quads.map((q) => ({ ...q, graph: graphUri }));
     await this.store.insert(normalized);
 
@@ -41,7 +41,7 @@ export class PrivateContentStore {
     paranetId: string,
     rootEntity: string,
   ): Promise<Quad[]> {
-    const graphUri = this.graphManager.dataGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(paranetId);
     const sparql = `
       SELECT ?s ?p ?o WHERE {
         GRAPH <${graphUri}> {
@@ -86,7 +86,7 @@ export class PrivateContentStore {
     paranetId: string,
     rootEntity: string,
   ): Promise<void> {
-    const graphUri = this.graphManager.dataGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(paranetId);
     await this.store.deleteBySubjectPrefix(graphUri, rootEntity);
     const entities = this.privateEntities.get(paranetId);
     if (entities) entities.delete(rootEntity);

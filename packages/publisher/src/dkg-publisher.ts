@@ -323,6 +323,7 @@ export class DKGPublisher implements Publisher {
       kaManifest: manifestEntries,
       status,
       onChainResult,
+      publicQuads: allSkolemizedQuads,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -381,6 +382,7 @@ export class DKGPublisher implements Publisher {
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',
+      publicQuads: allSkolemizedQuads,
     };
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);

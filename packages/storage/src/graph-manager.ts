@@ -2,6 +2,7 @@ import type { TripleStore } from './triple-store.js';
 import {
   paranetDataGraphUri,
   paranetMetaGraphUri,
+  paranetPrivateGraphUri,
 } from '@dkg/core';
 
 export class GraphManager {
@@ -19,9 +20,14 @@ export class GraphManager {
     return paranetMetaGraphUri(paranetId);
   }
 
+  privateGraphUri(paranetId: string): string {
+    return paranetPrivateGraphUri(paranetId);
+  }
+
   async ensureParanet(paranetId: string): Promise<void> {
     await this.store.createGraph(this.dataGraphUri(paranetId));
     await this.store.createGraph(this.metaGraphUri(paranetId));
+    await this.store.createGraph(this.privateGraphUri(paranetId));
   }
 
   async listParanets(): Promise<string[]> {
@@ -33,7 +39,9 @@ export class GraphManager {
         const rest = g.slice(prefix.length);
         const id = rest.endsWith('/_meta')
           ? rest.slice(0, -6)
-          : rest;
+          : rest.endsWith('/_private')
+            ? rest.slice(0, -9)
+            : rest;
         paranets.add(id);
       }
     }
@@ -47,5 +55,6 @@ export class GraphManager {
   async dropParanet(paranetId: string): Promise<void> {
     await this.store.dropGraph(this.dataGraphUri(paranetId));
     await this.store.dropGraph(this.metaGraphUri(paranetId));
+    await this.store.dropGraph(this.privateGraphUri(paranetId));
   }
 }

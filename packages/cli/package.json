@@ -14,6 +14,7 @@
   "dependencies": {
     "@dkg/agent": "workspace:*",
     "@dkg/core": "workspace:*",
+    "@dkg/node-ui": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
     "n3": "^2.0.1"

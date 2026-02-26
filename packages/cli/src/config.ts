@@ -43,6 +43,16 @@ export interface ChainConfig {
   chainId?: string;
 }
 
+/** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
+export interface LlmConfig {
+  /** API key (e.g. OpenAI, Anthropic, or compatible provider). */
+  apiKey: string;
+  /** Model name (default: gpt-4o-mini). */
+  model?: string;
+  /** Base URL for the API (default: https://api.openai.com/v1). */
+  baseURL?: string;
+}
+
 export interface DkgConfig {
   name: string;
   relay?: string;
@@ -54,6 +64,8 @@ export interface DkgConfig {
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
   chain?: ChainConfig;
+  /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
+  llm?: LlmConfig;
 }
 
 const DEFAULT_CONFIG: DkgConfig = {

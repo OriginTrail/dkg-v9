@@ -195,12 +195,14 @@ UAL resolution and payment settlement.
 
 ## 5. Node UI & Observability
 
-### 5.0 DKG Node UI — **READY**
+### 5.0 DKG Node UI — **DONE**
 Unified web interface for operating a DKG node — monitoring, querying,
-exploring, and managing. Six phases: instrumentation + storage + API,
-dashboard home + observability UI, Knowledge Explorer (SPARQL editor +
-`@dkg/graph-viz`), wallet management + economics, integrations panel
-(adapters, skills, paranet subscriptions), OTel export + AI assistant.
+exploring, and managing. Phases 1–5 implemented: instrumentation + storage +
+API, dashboard home + observability UI, Knowledge Explorer (SPARQL editor +
+result views, paranet browser, publish, history, saved queries), Wallet &
+Economics (balances, RPC health), Integrations (adapters list, skills,
+paranet subscribe). Phase 6: AI assistant (rule-based chatbot) done; OTel
+export interface stubbed; neural NL→SPARQL planned.
 
 - **Spec**: [SPEC_NODE_DASHBOARD.md](../specs/SPEC_NODE_DASHBOARD.md)
 

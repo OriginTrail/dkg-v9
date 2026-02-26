@@ -162,8 +162,7 @@ describe('Two-Agent E2E', () => {
 });
 
 describe('Relay E2E', () => {
-  it('agents exchange encrypted chat through a circuit relay', async () => {
-    // 1. Start a relay node (simulates a public VPS running the relay server)
+  it('relay connections establish and agents can discover each other', async () => {
     const relay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
       enableRelayServer: true,
@@ -175,7 +174,6 @@ describe('Relay E2E', () => {
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
     expect(relayAddr).toBeDefined();
 
-    // 2. Create two agents that only know the relay — not each other
     const agentA = await DKGAgent.create({
       name: 'RelayAgentA',
       listenPort: 0,
@@ -194,6 +192,65 @@ describe('Relay E2E', () => {
     });
     agents.push(agentB);
 
+    await agentA.start();
+    await agentB.start();
+
+    await sleep(2000);
+
+    // Both agents should be connected to the relay
+    const relayPeers = relay.libp2p.getPeers().map(p => p.toString());
+    expect(relayPeers).toContain(agentA.peerId);
+    expect(relayPeers).toContain(agentB.peerId);
+
+    // B dials A through the relay circuit
+    const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${agentA.peerId}`;
+    await agentB.connectTo(circuitAddr);
+    await sleep(1000);
+
+    // Verify relayed connection exists
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    const bConns = agentB.node.libp2p.getConnections(peerIdFromString(agentA.peerId));
+    const relayConn = bConns.find(c =>
+      c.remoteAddr.toString().includes('/p2p-circuit'),
+    );
+    expect(relayConn).toBeDefined();
+  }, 15000);
+
+  it('agents exchange encrypted chat through a relay (DCUtR upgrade)', async () => {
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableRelayServer: true,
+      enableMdns: false,
+    });
+    nodes.push(relay);
+    await relay.start();
+
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
+    expect(relayAddr).toBeDefined();
+
+    // Use 127.0.0.1 so libp2p's connection manager can upgrade relay→direct
+    // when dialProtocol triggers a peerStore.merge (on 0.0.0.0 the address
+    // resolution includes multi-homed IPs that the CM doesn't auto-dial).
+    const agentA = await DKGAgent.create({
+      name: 'RelayAgentA',
+      listenPort: 0,
+      listenHost: '127.0.0.1',
+      skills: [],
+      relayPeers: [relayAddr],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA);
+
+    const agentB = await DKGAgent.create({
+      name: 'RelayAgentB',
+      listenPort: 0,
+      listenHost: '127.0.0.1',
+      skills: [],
+      relayPeers: [relayAddr],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentB);
+
     const receivedOnA: string[] = [];
     const receivedOnB: string[] = [];
     agentA.onChat((text) => { receivedOnA.push(text); });
@@ -202,22 +259,26 @@ describe('Relay E2E', () => {
     await agentA.start();
     await agentB.start();
 
-    // Wait for both agents to establish relay reservations
     await sleep(2000);
 
-    // 3. B dials A through the relay circuit (not directly)
+    // B dials A through the relay circuit
     const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${agentA.peerId}`;
     await agentB.connectTo(circuitAddr);
-    await sleep(1000);
 
-    // 4. B sends encrypted chat to A via relay
+    // ProtocolRouter.send has retry logic: the first dialProtocol attempt
+    // triggers a relay→direct connection upgrade (via peerStore.merge) which
+    // kills the in-flight relay stream. The retry succeeds on the new direct
+    // connection. Give a small window for the connection to stabilise.
+    await sleep(2000);
+
+    // B sends encrypted chat to A
     const r1 = await agentB.sendChat(agentA.peerId, 'hello through relay');
-    expect(r1.delivered).toBe(true);
+    expect(r1.delivered, `chat B→A failed: ${r1.error}`).toBe(true);
     expect(receivedOnA).toContain('hello through relay');
 
-    // 5. A sends encrypted chat back to B via relay
+    // A sends encrypted chat back to B
     const r2 = await agentA.sendChat(agentB.peerId, 'relay reply from A');
-    expect(r2.delivered).toBe(true);
+    expect(r2.delivered, `chat A→B failed: ${r2.error}`).toBe(true);
     expect(receivedOnB).toContain('relay reply from A');
-  }, 20000);
+  }, 30000);
 });

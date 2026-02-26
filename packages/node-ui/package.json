@@ -1,0 +1,36 @@
+{
+  "name": "@dkg/node-ui",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && pnpm build:ui",
+    "build:ui": "vite build",
+    "dev:ui": "vite",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/core": "workspace:*",
+    "@dkg/graph-viz": "workspace:*",
+    "better-sqlite3": "^11"
+  },
+  "devDependencies": {
+    "@dkg/graph-viz": "workspace:*",
+    "@codemirror/lang-sql": "^6",
+    "@codemirror/view": "^6",
+    "@codemirror/state": "^6",
+    "@types/better-sqlite3": "^7",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-router-dom": "^7",
+    "recharts": "^2",
+    "vite": "^6",
+    "vitest": "^3",
+    "typescript": "^5.7"
+  }
+}

@@ -18,7 +18,7 @@ describe('Circuit Relay', () => {
     nodes.length = 0;
   });
 
-  it('two nodes communicate through a relay', async () => {
+  it('two nodes communicate through a direct connection via relay peer', async () => {
     const relay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
       enableMdns: false,
@@ -43,15 +43,12 @@ describe('Circuit Relay', () => {
     await nodeA.start();
     await nodeB.start();
 
-    // Both nodes are connected to the relay — let's verify
     await new Promise(r => setTimeout(r, 1000));
 
     const relayPeers = relay.libp2p.getPeers().map(p => p.toString());
     expect(relayPeers).toContain(nodeA.peerId);
     expect(relayPeers).toContain(nodeB.peerId);
 
-    // Now connect nodeA to nodeB through their direct addresses
-    // (since they're on the same host, direct should work — but relay is available)
     const { multiaddr } = await import('@multiformats/multiaddr');
     const bAddr = nodeB.multiaddrs[0];
     await nodeA.libp2p.dial(multiaddr(bAddr));
@@ -73,6 +70,56 @@ describe('Circuit Relay', () => {
       enc.encode('ping'),
     );
     expect(dec.decode(response)).toBe('relayed:ping');
+  }, 30000);
+
+  it('protocol stream through circuit relay upgrades to direct via retry', async () => {
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      enableRelayServer: true,
+    });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const nodeA = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    const nodeB = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(nodeA, nodeB);
+    await nodeA.start();
+    await nodeB.start();
+    await new Promise(r => setTimeout(r, 2000));
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register('/test/relay-echo/1.0.0', async (data) => {
+      return enc.encode(`echo:${dec.decode(data)}`);
+    });
+
+    const routerB = new ProtocolRouter(nodeB);
+
+    // Dial through the circuit relay — ProtocolRouter.send will retry after
+    // the connection manager upgrades from relay to direct mid-stream.
+    const { multiaddr } = await import('@multiformats/multiaddr');
+    await nodeB.libp2p.dial(multiaddr(`${relayAddr}/p2p-circuit/p2p/${nodeA.peerId}`));
+    await new Promise(r => setTimeout(r, 2000));
+
+    const response = await routerB.send(
+      nodeA.peerId,
+      '/test/relay-echo/1.0.0',
+      enc.encode('via-circuit'),
+      15000,
+    );
+    expect(dec.decode(response)).toBe('echo:via-circuit');
+    routerA.unregister('/test/relay-echo/1.0.0');
   }, 30000);
 
   it('relay node starts with enableRelayServer', async () => {

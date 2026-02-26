@@ -1,0 +1,58 @@
+import React from 'react';
+import { Routes, Route, NavLink } from 'react-router-dom';
+import { DashboardPage } from './pages/Dashboard.js';
+import { NetworkPage } from './pages/Network.js';
+import { OperationsPage } from './pages/Operations.js';
+import { ExplorerPage } from './pages/Explorer.js';
+import { WalletPage } from './pages/Wallet.js';
+import { IntegrationsPage } from './pages/Integrations.js';
+import { ChatPanel } from './components/ChatPanel.js';
+
+export function App() {
+  return (
+    <div className="app-layout">
+      <aside className="sidebar">
+        <div className="sidebar-logo">
+          DKG Node <span>UI</span>
+        </div>
+        <nav className="sidebar-nav">
+          <NavLink to="/" end>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L1 6v9h5v-4h4v4h5V6L8 1z"/></svg>
+            Dashboard
+          </NavLink>
+          <NavLink to="/network">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><line x1="4" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="12" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
+            Network
+          </NavLink>
+          <NavLink to="/explorer">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 1a5 5 0 014.32 7.5l3.59 3.59-1.42 1.42-3.59-3.59A5 5 0 116 1zm0 2a3 3 0 100 6 3 3 0 000-6z"/></svg>
+            Explorer
+          </NavLink>
+          <NavLink to="/operations">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v2H2V2zm0 4h12v2H2V6zm0 4h8v2H2v-2z"/></svg>
+            Operations
+          </NavLink>
+          <NavLink to="/wallet">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v1H2V2zm0 3h12v8H2V5zm1 1v6h10V6H3z"/></svg>
+            Wallet
+          </NavLink>
+          <NavLink to="/integrations">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h4v4H2V2zm8 0h4v4h-4V2zM2 10h4v4H2v-4zm8 0h4v4h-4v-4z"/></svg>
+            Integrations
+          </NavLink>
+        </nav>
+      </aside>
+      <main className="main-content">
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/network" element={<NetworkPage />} />
+          <Route path="/explorer/*" element={<ExplorerPage />} />
+          <Route path="/operations/*" element={<OperationsPage />} />
+          <Route path="/wallet" element={<WalletPage />} />
+          <Route path="/integrations" element={<IntegrationsPage />} />
+        </Routes>
+      </main>
+      <ChatPanel />
+    </div>
+  );
+}

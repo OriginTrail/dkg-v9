@@ -33,6 +33,8 @@ export interface DKGAgentConfig {
   framework?: string;
   description?: string;
   listenPort?: number;
+  /** IP address to listen on. Default: '0.0.0.0' (all interfaces). Use '127.0.0.1' for tests. */
+  listenHost?: string;
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
@@ -168,9 +170,10 @@ export class DKGAgent {
     await DKGAgent.loadGenesis(store);
 
     const port = config.listenPort ?? 0;
+    const host = config.listenHost ?? '0.0.0.0';
     const nodeRole = config.nodeRole ?? 'edge';
     const nodeConfig: DKGNodeConfig = {
-      listenAddresses: [`/ip4/0.0.0.0/tcp/${port}`],
+      listenAddresses: [`/ip4/${host}/tcp/${port}`],
       announceAddresses: config.announceAddresses,
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
@@ -851,15 +854,12 @@ export class DKGAgent {
   }
 
   private async broadcastPublish(paranetId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
-    const quadsResult = await this.queryEngine.query(
-      `SELECT ?s ?p ?o WHERE { ?s ?p ?o }`,
-      { paranetId },
-    );
-
-    // Send N-Triples (not N-Quads) — paranetId is in the envelope
-    const ntriples = quadsResult.bindings.map(row => {
-      const obj = row['o'].startsWith('"') ? row['o'] : `<${row['o']}>`;
-      return `<${row['s']}> <${row['p']}> ${obj} .`;
+    // Use the public quads from the publish result to avoid leaking private
+    // triples that are stored in the same data graph.
+    const publicQuads = result.publicQuads ?? [];
+    const ntriples = publicQuads.map(q => {
+      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+      return `<${q.subject}> <${q.predicate}> ${obj} .`;
     }).join('\n');
 
     const onChain = result.onChainResult;

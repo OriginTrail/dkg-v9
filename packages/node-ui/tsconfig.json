@@ -6,9 +6,8 @@
     "composite": true
   },
   "include": ["src"],
+  "exclude": ["src/ui"],
   "references": [
-    { "path": "../core" },
-    { "path": "../agent" },
-    { "path": "../node-ui" }
+    { "path": "../core" }
   ]
 }

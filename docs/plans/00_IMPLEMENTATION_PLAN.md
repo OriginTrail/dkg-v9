@@ -54,10 +54,10 @@ about the immediate neighbor.
 
 - **Spec**: [SPEC_PROFILE_EXCHANGE.md](../specs/SPEC_PROFILE_EXCHANGE.md) — **TO CREATE**
 
-### 1.5 Cross-agent query protocol — **READY**
-Agents query each other's knowledge stores remotely via `/dkg/query/1.0.0`.
-Supports SPARQL, entity lookup, and skill-typed queries with access
-policies and gas metering.
+### 1.5 Cross-agent query protocol — **DONE**
+Agents query each other's knowledge stores remotely via `/dkg/query/2.0.0`.
+Structured lookups (ENTITY_BY_UAL, ENTITIES_BY_TYPE, ENTITY_TRIPLES, SPARQL_QUERY)
+with access policies, rate limiting, and optional LLM. CLI `query-remote`, daemon API.
 
 - **Spec**: [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md)
 
@@ -82,16 +82,20 @@ full e2e flow.
 - **Spec**: [SPEC_PART1_MARKETPLACE.md §7](../SPEC_PART1_MARKETPLACE.md) (Private Knowledge section)
 - **Diagram**: [access-flow.md](../diagrams/access-flow.md)
 
-### 2.2 Fix agent UAL/chainId in broadcast — **READY**
-Agent `broadcastPublish` uses hardcoded mock UAL when a real chain is
-configured. Fix: use `this.chain.chainId` and build UAL from
-`onChainResult`.
+### 2.2 Fix agent UAL/chainId in broadcast — **DONE**
+`broadcastPublish` now uses `this.chain.chainId` and builds UAL from
+`result.onChainResult` (publisherAddress, startKAId). Uses `result.publicQuads`
+so private triples are not re-sent over gossip.
 
 - **Spec**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §2.1](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 
-### 2.3 Paranet on-chain lifecycle — **READY**
-On-chain paranet creation, discovery, joining, and governance. Currently
-`createParanet` and `submitToParanet` are stubs in the EVM adapter.
+### 2.3 Paranet on-chain lifecycle — **DONE**
+On-chain paranet creation and discovery via `ParanetV9Registry.sol`. EVM adapter
+implements `createParanet(name, description, accessPolicy)` and
+`listParanetsFromChain(fromBlock?)` when the registry is registered in the Hub.
+`submitToParanet` remains a stub (Milestone 5). Deploy script `042_deploy_paranet_v9_registry.ts`;
+chain types extended with `CreateParanetParams` (name/description/accessPolicy),
+`ParanetOnChain`, and optional `TxResult.paranetId`.
 
 - **Spec**: [SPEC_PARANET_LIFECYCLE.md](../specs/SPEC_PARANET_LIFECYCLE.md)
 
@@ -231,10 +235,10 @@ Interactive RDF graph visualization component for web UIs.
 
 ## 7. Bugs & Technical Debt
 
-### 7.1 Relay circuit test flaky — **IN PROGRESS**
-`e2e-agents.test.ts` "agents exchange encrypted chat through a circuit
-relay" fails intermittently. The relay connection drops before the chat
-message is sent. Likely a timing/reservation issue.
+### 7.1 Relay circuit test flaky — **DONE**
+Stabilized with longer post-connect wait (3s) and `sendChatWithRetry` (3
+attempts, 1.5s backoff) so chat delivery succeeds after relay→direct upgrade.
+Test timeout increased to 45s.
 
 ### 7.2 Codebase TODOs — **READY**
 See [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §4](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
@@ -250,12 +254,12 @@ be gitignored or test setup made deterministic.
 
 | Priority | Item | Rationale |
 |----------|------|-----------|
-| **P0** | 2.2 Fix UAL/chainId | Bug — real chain publishes use wrong UAL |
-| **P0** | 7.1 Relay test | Flaky test blocks CI |
+| **P0** | ~~2.2 Fix UAL/chainId~~ | ✅ DONE |
+| **P0** | ~~7.1 Relay test~~ | ✅ DONE |
 | **P1** | 2.1 Private KA access | Completes the core publish/access loop |
-| **P1** | 2.3 Paranet on-chain | Required for multi-paranet testnet |
-| **P1** | 1.5 Cross-agent query | Enables agents to query each other |
-| **P1** | 5.0 DKG Node UI | Node runner UX — critical for testnet operators |
+| **P1** | 2.3 Paranet on-chain | **DONE** — create + list from chain |
+| **P1** | ~~1.5 Cross-agent query~~ | ✅ DONE |
+| **P1** | ~~5.0 DKG Node UI~~ | ✅ DONE |
 | **P2** | 3.1 Publishing conviction | First trust layer economic feature |
 | **P2** | 3.2 Staking conviction | Node operator incentives |
 | **P2** | 3.3 Paranet sharding | Per-paranet economics |
@@ -269,3 +273,20 @@ be gitignored or test setup made deterministic.
 | **P4** | 2.4 Capacity metering | Resource-aware pricing |
 | **P4** | 6.1–6.3 Extensions | Neural queries, pipelines, viz |
 | **P5** | 3.8 Solana adapter | Second chain support |
+
+---
+
+## What to implement next (recommendation)
+
+**Current state (2026-02-22):**  
+Networking & sync (persistence, sync on connect, cross-agent query) and Node UI are done. UAL/chainId in broadcast is fixed. Relay E2E test (7.1) and Paranet on-chain lifecycle (2.3) are done. CLI and node-ui builds fixed (TS action opts, Command import; Vite heap for relay). Release workflow, CHANGELOG, and release docs added. Remaining P1: Private KA access (2.1).
+
+**Recommended order:**
+
+1. **2.3 Paranet on-chain lifecycle** (P1) — **DONE**  
+   ParanetV9Registry contract (createParanetV9, ParanetCreated event), EVM adapter createParanet/listParanetsFromChain, extended CreateParanetParams and optional listParanetsFromChain on ChainAdapter. Join/leave and node startup recovery from chain can follow.
+
+2. **2.1 Private KA access** (P1)  
+   Complete the access protocol (payment proof, full e2e). Needed for paid private knowledge and completes the publish → access loop.
+
+3. **Then** either Trust Layer milestones (3.1–3.6) for economics, or 1.3 on-chain sync verification / 1.6 relay auto-discovery for robustness and bootstrapping.

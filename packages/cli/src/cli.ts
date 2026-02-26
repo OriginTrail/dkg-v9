@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
+import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -12,6 +14,9 @@ import {
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { runDaemon } from './daemon.js';
+
+/** Options object passed to commander action callbacks (parsed .option() values) */
+type ActionOpts = Record<string, any>;
 
 function getCliVersion(): string {
   try {
@@ -145,7 +150,7 @@ program
   .command('start')
   .description('Start the DKG daemon')
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
-  .action(async (opts) => {
+  .action(async (opts: ActionOpts) => {
     if (!configExists()) {
       console.error('No config found. Run "dkg init" first.');
       process.exit(1);
@@ -373,7 +378,7 @@ program
   .option('-s, --subject <uri>', 'Subject URI for simple publish')
   .option('-p, --predicate <uri>', 'Predicate URI for simple publish')
   .option('-o, --object <value>', 'Object value for simple publish')
-  .action(async (paranet: string, opts) => {
+  .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const rdfParser = await import('./rdf-parser.js');
@@ -430,7 +435,7 @@ program
   .description('Run a SPARQL query against a paranet (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
-  .action(async (paranet: string | undefined, opts) => {
+  .action(async (paranet: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
 
@@ -485,7 +490,7 @@ program
   .option('-p, --paranet <id>', 'Target paranet')
   .option('-l, --limit <n>', 'Max results', '100')
   .option('--timeout <ms>', 'Query timeout in ms', '5000')
-  .action(async (peer: string, opts) => {
+  .action(async (peer: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
 
@@ -585,7 +590,7 @@ program
   .command('subscribe <paranet>')
   .description('Subscribe to a paranet\'s GossipSub topic')
   .option('--save', 'Also save to config so it auto-subscribes on restart')
-  .action(async (paranet: string, opts) => {
+  .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       await client.subscribe(paranet);
@@ -618,7 +623,7 @@ paranetCmd
   .option('-d, --description <desc>', 'Description of the paranet')
   .option('--subscribe', 'Also subscribe to the paranet after creation', true)
   .option('--save', 'Persist subscription to config')
-  .action(async (id: string, opts) => {
+  .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const result = await client.createParanet(id, opts.name ?? id, opts.description);
@@ -706,7 +711,7 @@ program
   .command('logs')
   .description('Tail the daemon log')
   .option('-n, --lines <n>', 'Number of trailing lines', '30')
-  .action(async (opts) => {
+  .action(async (opts: ActionOpts) => {
     const { readFile } = await import('node:fs/promises');
     try {
       const content = await readFile(logPath(), 'utf-8');
@@ -794,7 +799,7 @@ program
   .command('set-ask <amount>')
   .description('Set the node\'s on-chain ask (TRAC per KB·epoch)')
   .option('--identity <id>', 'Override identity ID (auto-detected from primary wallet by default)')
-  .action(async (amount: string, opts) => {
+  .action(async (amount: string, opts: ActionOpts) => {
     try {
       const config = await loadConfig();
       const network = await loadNetworkConfig();
@@ -922,10 +927,6 @@ function stripQuotes(s: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
-}
-
-function fileURLToPath(url: string): string {
-  return new URL(url).pathname;
 }
 
 program.parse();

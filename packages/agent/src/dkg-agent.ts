@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC,
   paranetPublishTopic, paranetDataGraphUri, encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
@@ -118,7 +118,16 @@ export class DKGAgent {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
-    const store = config.store ?? new OxigraphStore();
+    let store: TripleStore;
+    if (config.store) {
+      store = config.store;
+    } else if (config.dataDir) {
+      const { join } = await import('node:path');
+      const persistPath = join(config.dataDir, 'store.nq');
+      store = new OxigraphStore(persistPath);
+    } else {
+      store = new OxigraphStore();
+    }
 
     let chain: ChainAdapter;
     const opKeys = config.chainConfig?.operationalKeys;
@@ -255,6 +264,26 @@ export class DKGAgent {
       }
     }
 
+    // Register sync handler: responds with all triples from requested paranets
+    this.router.register(PROTOCOL_SYNC, async (data) => {
+      const requested = new TextDecoder().decode(data).trim();
+      const paranetIds = requested ? requested.split(',') : [SYSTEM_PARANETS.AGENTS];
+      const allNquads: string[] = [];
+      for (const pid of paranetIds) {
+        const graphUri = paranetDataGraphUri(pid);
+        const result = await this.store.query(
+          `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+        );
+        if (result.type === 'quads') {
+          for (const q of result.quads) {
+            const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+            allNquads.push(`<${q.subject}> <${q.predicate}> ${obj} <${graphUri}> .`);
+          }
+        }
+      }
+      return new TextEncoder().encode(allNquads.join('\n'));
+    });
+
     // Subscribe to both system paranet GossipSub topics
     for (const systemParanet of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
       this.subscribeToParanet(systemParanet);
@@ -269,6 +298,53 @@ export class DKGAgent {
           // Bootstrap peer may be unreachable
         }
       }
+    }
+
+    // On new peer connection, request sync of system paranets so we discover
+    // agents that published their profiles before we came online.
+    // Wait for protocol identification to complete, then only sync with
+    // peers that actually support the sync protocol (skips raw relay nodes).
+    this.node.libp2p.addEventListener('peer:connect', (evt) => {
+      const remotePeer = evt.detail.toString();
+      setTimeout(async () => {
+        try {
+          const { peerIdFromString } = await import('@libp2p/peer-id');
+          const pid = peerIdFromString(remotePeer);
+          const peer = await this.node.libp2p.peerStore.get(pid);
+          if (!peer.protocols.includes(PROTOCOL_SYNC)) return;
+          await this.syncFromPeer(remotePeer);
+        } catch { /* peer gone or sync unsupported */ }
+      }, 3000);
+    });
+  }
+
+  /**
+   * Pull all triples for the given paranets from a remote peer and merge
+   * them into our local store. Used on peer:connect for initial catch-up.
+   */
+  async syncFromPeer(
+    remotePeerId: string,
+    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS],
+  ): Promise<number> {
+    const ctx = createOperationContext('sync');
+    try {
+      this.log.info(ctx, `Requesting paranet sync from ${remotePeerId}`);
+      const payload = new TextEncoder().encode(paranetIds.join(','));
+      const responseBytes = await this.router.send(remotePeerId, PROTOCOL_SYNC, payload);
+      const nquadsText = new TextDecoder().decode(responseBytes);
+      if (!nquadsText.trim()) {
+        this.log.info(ctx, `Peer ${remotePeerId} returned empty sync data`);
+        return 0;
+      }
+      const quads = parseNQuads(nquadsText);
+      if (quads.length > 0) {
+        await this.store.insert(quads);
+        this.log.info(ctx, `Synced ${quads.length} triples from ${remotePeerId}`);
+      }
+      return quads.length;
+    } catch (err) {
+      this.log.info(ctx, `Sync from ${remotePeerId} failed (peer may not support sync): ${err instanceof Error ? err.message : String(err)}`);
+      return 0;
     }
   }
 
@@ -719,4 +795,27 @@ function stripLiteral(s: string): string {
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
   if (match) return match[1];
   return s;
+}
+
+/**
+ * Minimal N-Quads parser for sync responses.
+ * Reuses the existing `splitNQuadLine` helper above.
+ */
+function parseNQuads(text: string): Quad[] {
+  const quads: Quad[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const body = trimmed.endsWith(' .') ? trimmed.slice(0, -2).trim() : trimmed;
+    const parts = splitNQuadLine(body);
+    if (parts.length >= 3) {
+      quads.push({
+        subject: strip(parts[0]),
+        predicate: strip(parts[1]),
+        object: parts[2].startsWith('"') ? parts[2] : strip(parts[2]),
+        graph: parts[3] ? strip(parts[3]) : '',
+      });
+    }
+  }
+  return quads;
 }

@@ -529,7 +529,89 @@ describe('Persistent store isolation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. SPARQL injection prevention
+// 7. Private triples not leaked via sync protocol
+// ---------------------------------------------------------------------------
+describe('Private triple confidentiality via sync protocol', () => {
+  it('syncFromPeer does not transfer private triples', async () => {
+    const agentA = await DKGAgent.create({
+      name: 'SyncPublisher',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    const agentB = await DKGAgent.create({
+      name: 'SyncReceiver',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA, agentB);
+    await agentA.start();
+    await agentB.start();
+
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    const PARANET = 'sync-privacy-test';
+    await agentA.createParanet({ id: PARANET, name: 'SyncPrivacy', description: '' });
+    agentA.subscribeToParanet(PARANET);
+    agentB.subscribeToParanet(PARANET);
+    await sleep(500);
+
+    await agentA.publish(
+      PARANET,
+      [
+        { subject: 'did:dkg:test:SyncEntity', predicate: 'http://schema.org/name', object: '"PublicViaSync"', graph: '' },
+      ],
+      [
+        { subject: 'did:dkg:test:SyncEntity', predicate: 'http://ex.org/secret', object: '"should-not-sync"', graph: '' },
+      ],
+    );
+
+    await sleep(1000);
+
+    // Now B explicitly syncs from A (the sync protocol path, not GossipSub)
+    await agentB.syncFromPeer(agentA.node.peerId, [PARANET]);
+    await sleep(500);
+
+    // B should have the public triple
+    const publicResult = await agentB.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      PARANET,
+    );
+    const publicNames = publicResult.bindings.map((b: any) => b['name']);
+    expect(publicNames).toContain('"PublicViaSync"');
+
+    // B should NOT have the private triple in either the data or private graph
+    const secretResult = await agentB.query(
+      'SELECT ?s WHERE { ?s <http://ex.org/secret> ?o }',
+      PARANET,
+    );
+    expect(secretResult.bindings).toHaveLength(0);
+
+    const bPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const bPrivateResult = await agentB.store.query(
+      `SELECT ?val WHERE { GRAPH <${bPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
+    );
+    expect(bPrivateResult.type).toBe('bindings');
+    if (bPrivateResult.type === 'bindings') {
+      expect(bPrivateResult.bindings).toHaveLength(0);
+    }
+
+    // A should still have the private triple in its private graph
+    const aPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const aPrivateResult = await agentA.store.query(
+      `SELECT ?val WHERE { GRAPH <${aPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
+    );
+    expect(aPrivateResult.type).toBe('bindings');
+    if (aPrivateResult.type === 'bindings') {
+      expect(aPrivateResult.bindings.length).toBeGreaterThanOrEqual(1);
+    }
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// 8. SPARQL injection prevention
 // ---------------------------------------------------------------------------
 describe('SPARQL injection prevention', () => {
   it('rejects SPARQL update disguised in various forms', async () => {

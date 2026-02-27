@@ -205,7 +205,7 @@ describe('ProfileManager', () => {
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
 
-    const manager = new ProfileManager(publisher);
+    const manager = new ProfileManager(publisher, store);
     const result = await manager.publishProfile({
       peerId: 'QmManaged',
       name: 'ManagedBot',
@@ -216,6 +216,59 @@ describe('ProfileManager', () => {
     expect(result.kcId).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);
     expect(manager.profileKcId).toBe(result.kcId);
+  });
+
+  it('cleans up stale profile triples before re-publishing', async () => {
+    const store = new OxigraphStore();
+    const { MockChainAdapter } = await import('@dkg/chain');
+    const { DKGPublisher } = await import('@dkg/publisher');
+    const { TypedEventBus, generateEd25519Keypair } = await import('@dkg/core');
+    const eventBus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
+
+    const manager = new ProfileManager(publisher, store);
+
+    // First publish
+    await manager.publishProfile({
+      peerId: 'QmStale',
+      name: 'OldName',
+      framework: 'DKG',
+      skills: [],
+    });
+
+    // Verify OldName is stored in the data graph
+    const graph = 'did:dkg:paranet:agents';
+    const oldCount = await store.countQuads(graph);
+    expect(oldCount).toBeGreaterThan(0);
+
+    // Second publish with different name — should replace, not accumulate
+    await manager.publishProfile({
+      peerId: 'QmStale',
+      name: 'NewName',
+      framework: 'DKG',
+      skills: [],
+    });
+
+    const newCount = await store.countQuads(graph);
+
+    // Data graph triple count should stay the same (old cleaned up, new inserted)
+    expect(newCount).toBe(oldCount);
+
+    // Data graph triple count should stay the same (old cleaned up, new inserted)
+    expect(newCount).toBe(oldCount);
+
+    // The data graph should contain NewName, not OldName
+    const result = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      const nameTriples = result.bindings.filter(b => b['p']?.includes('schema.org/name'));
+      expect(nameTriples.length).toBeGreaterThan(0);
+      expect(nameTriples.some(b => b['o']?.includes('NewName'))).toBe(true);
+      expect(nameTriples.every(b => !b['o']?.includes('OldName'))).toBe(true);
+    }
   });
 });
 

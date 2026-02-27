@@ -373,6 +373,7 @@ program
   .command('publish <paranet>')
   .description('Publish triples to a paranet from an RDF file or inline')
   .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
+  .option('--private-file <path>', 'RDF file with private triples (encrypted, access-controlled)')
   .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
   .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
   .option('-s, --subject <uri>', 'Subject URI for simple publish')
@@ -409,7 +410,16 @@ program
         process.exit(1);
       }
 
-      const result = await client.publish(paranet, quads);
+      let privateQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> | undefined;
+      if (opts.privateFile) {
+        const { readFile } = await import('node:fs/promises');
+        const raw = await readFile(opts.privateFile, 'utf-8');
+        const format = opts.format ?? rdfParser.detectFormat(opts.privateFile);
+        privateQuads = await rdfParser.parseRdf(raw, format, defaultGraph);
+        console.log(`Parsed ${privateQuads.length} private quad(s) from ${opts.privateFile} (${format})`);
+      }
+
+      const result = await client.publish(paranet, quads, privateQuads);
       console.log(`Published to "${paranet}":`);
       console.log(`  Status:    ${result.status}`);
       console.log(`  KC ID:     ${result.kcId}`);

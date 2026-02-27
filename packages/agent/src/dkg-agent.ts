@@ -4,14 +4,14 @@ import {
   paranetPublishTopic, paranetDataGraphUri, paranetMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext,
+  Logger, createOperationContext, MerkleTree,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient,
-  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
   type PublishResult,
 } from '@dkg/publisher';
 import {
@@ -117,7 +117,7 @@ export class DKGAgent {
     this.eventBus = eventBus;
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
-    this.profileManager = new ProfileManager(publisher);
+    this.profileManager = new ProfileManager(publisher, store);
   }
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
@@ -354,18 +354,35 @@ export class DKGAgent {
     // agents that published their profiles before we came online.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
+    const trySyncFromPeer = async (remotePeer: string) => {
+      const shortPeer = remotePeer.slice(-8);
+      try {
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        const pid = peerIdFromString(remotePeer);
+        const peer = await this.node.libp2p.peerStore.get(pid);
+        const hasSync = peer.protocols.includes(PROTOCOL_SYNC);
+        if (!hasSync) {
+          this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${peer.protocols.join(', ')})`);
+          return;
+        }
+        this.log.info(ctx, `Syncing agents paranet from peer ${shortPeer}...`);
+        const synced = await this.syncFromPeer(remotePeer);
+        this.log.info(ctx, `Synced ${synced} triples from peer ${shortPeer}`);
+      } catch (err: any) {
+        this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${err.message}`);
+      }
+    };
+
     this.node.libp2p.addEventListener('peer:connect', (evt) => {
       const remotePeer = evt.detail.toString();
-      setTimeout(async () => {
-        try {
-          const { peerIdFromString } = await import('@libp2p/peer-id');
-          const pid = peerIdFromString(remotePeer);
-          const peer = await this.node.libp2p.peerStore.get(pid);
-          if (!peer.protocols.includes(PROTOCOL_SYNC)) return;
-          await this.syncFromPeer(remotePeer);
-        } catch { /* peer gone or sync unsupported */ }
-      }, 3000);
+      setTimeout(() => trySyncFromPeer(remotePeer), 3000);
     });
+
+    // Sync from peers already connected (e.g. relay dialed during node.start())
+    const alreadyConnected = this.node.libp2p.getPeers();
+    for (const pid of alreadyConnected) {
+      setTimeout(() => trySyncFromPeer(pid.toString()), 3000);
+    }
   }
 
   /**
@@ -416,7 +433,8 @@ export class DKGAgent {
         const metaQuads = allQuads.filter(q => q.graph === metaGraph);
 
         // Phase 2: Verify merkle roots
-        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log);
+        const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
 
         if (verified.data.length > 0) {
           await this.store.insert(verified.data);
@@ -1004,6 +1022,7 @@ function verifySyncedData(
   metaQuads: Quad[],
   ctx: OperationContext,
   log: Logger,
+  acceptUnverified = false,
 ): { data: Quad[]; meta: Quad[]; rejected: number } {
   if (metaQuads.length === 0) {
     // No meta graph → no verification possible. Accept data as-is
@@ -1063,19 +1082,36 @@ function verifySyncedData(
     }
 
     try {
+      const allQuadsForKC: Quad[] = [];
+      for (const re of rootEntities) {
+        const quads = partitioned.get(re) ?? [];
+        allQuadsForKC.push(...quads);
+      }
+
+      // Try flat mode first (publisher default: single merkle over all triple hashes)
+      const flatHashes = allQuadsForKC.map(computeTripleHash);
+      const flatRoot = new MerkleTree(flatHashes).root;
+      const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+
+      if (flatHex === claimedHex) {
+        verifiedKcUals.add(kcUal);
+        continue;
+      }
+
+      // Try entity-proofs mode (two-level: per-entity KA roots → KC root)
       const kaRoots: Uint8Array[] = [];
       for (const re of rootEntities) {
         const quads = partitioned.get(re) ?? [];
         const publicRoot = computePublicRoot(quads);
         kaRoots.push(computeKARoot(publicRoot, undefined));
       }
-      const recomputedRoot = computeKCRoot(kaRoots);
-      const recomputedHex = Array.from(recomputedRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+      const epRoot = computeKCRoot(kaRoots);
+      const epHex = Array.from(epRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
-      if (recomputedHex === claimedHex) {
+      if (epHex === claimedHex) {
         verifiedKcUals.add(kcUal);
       } else {
-        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, recomputed ${recomputedHex.slice(0, 16)}…`);
+        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
         rejected++;
       }
     } catch {
@@ -1092,6 +1128,13 @@ function verifySyncedData(
     }
   }
 
+  // When acceptUnverified is set (system paranets), accept all data with
+  // a warning rather than dropping profiles that fail merkle verification.
+  if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
+    log.warn(ctx, `Accepting ${rejected} unverified KC(s) (system paranet, merkle mismatch)`);
+    return { data: dataQuads, meta: metaQuads, rejected: 0 };
+  }
+
   // Keep data triples whose root entity belongs to a verified KC,
   // plus any triples not associated with any KC (genesis/system data)
   const allKnownRootEntities = new Set<string>();
@@ -1100,23 +1143,18 @@ function verifySyncedData(
   }
 
   const verifiedData = dataQuads.filter(q => {
-    // If this triple's subject is a known root entity, only keep if verified
     if (allKnownRootEntities.has(q.subject)) {
       return verifiedRootEntities.has(q.subject);
     }
-    // For triples under skolemized/blank node subjects, check if their
-    // root entity prefix matches a verified entity
     for (const re of verifiedRootEntities) {
       if (q.subject.startsWith(re)) return true;
     }
-    // Not associated with any KC — keep (system/genesis data)
     return true;
   });
 
   // Keep meta triples for verified KCs + unrelated meta triples
   const verifiedMeta = metaQuads.filter(q => {
     if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
-    // KA meta triple — check if its KC is verified
     const kcUri = kaToKc.get(q.subject);
     if (kcUri) return verifiedKcUals.has(kcUri);
     return true;

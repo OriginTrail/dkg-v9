@@ -1,4 +1,6 @@
 import type { Publisher, PublishOptions, PublishResult } from '@dkg/publisher';
+import type { TripleStore } from '@dkg/storage';
+import { paranetDataGraphUri } from '@dkg/core';
 import { buildAgentProfile, AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 
 /**
@@ -7,14 +9,21 @@ import { buildAgentProfile, AGENT_REGISTRY_PARANET, type AgentProfileConfig } fr
  */
 export class ProfileManager {
   private readonly publisher: Publisher;
+  private readonly store: TripleStore;
   private currentKcId: bigint | null = null;
 
-  constructor(publisher: Publisher) {
+  constructor(publisher: Publisher, store: TripleStore) {
     this.publisher = publisher;
+    this.store = store;
   }
 
   async publishProfile(config: AgentProfileConfig): Promise<PublishResult> {
-    const { quads } = buildAgentProfile(config);
+    const { quads, rootEntity } = buildAgentProfile(config);
+
+    // Remove stale triples from prior profile publishes so the data graph
+    // contains exactly the triples the merkle root is computed over.
+    const dataGraph = paranetDataGraphUri(AGENT_REGISTRY_PARANET);
+    await this.store.deleteBySubjectPrefix(dataGraph, rootEntity);
 
     const options: PublishOptions = {
       paranetId: AGENT_REGISTRY_PARANET,

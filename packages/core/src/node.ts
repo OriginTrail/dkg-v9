@@ -154,6 +154,8 @@ export class DKGNode {
         if (!p2pComponent?.value) continue;
 
         const peerId = peerIdFromString(p2pComponent.value);
+        if (peerId.equals(this.node.peerId)) continue;
+
         this.relayTargets.push({ peerId, addr: ma });
 
         await this.node.peerStore.merge(peerId, {
@@ -212,6 +214,8 @@ export class DKGNode {
     let allConnected = true;
 
     for (const { peerId, addr } of this.relayTargets) {
+      if (peerId.equals(node.peerId)) continue;
+
       const conns = node.getConnections(peerId);
       if (conns.length > 0) continue;
 

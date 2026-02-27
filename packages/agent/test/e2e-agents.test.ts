@@ -267,32 +267,17 @@ describe('Relay E2E', () => {
 
     // ProtocolRouter.send has retry logic; relay→direct upgrade can still
     // cause the first send to fail. Wait for connection to stabilise, then
-    // retry sendChat up to 3 times so one attempt succeeds after upgrade.
+    // sendChat now has built-in retry with exponential backoff
     await sleep(3000);
 
-    async function sendChatWithRetry(
-      from: DKGAgent,
-      toPeerId: string,
-      text: string,
-      maxAttempts = 3,
-    ): Promise<{ delivered: boolean; error?: string }> {
-      let last: { delivered: boolean; error?: string } = { delivered: false };
-      for (let i = 0; i < maxAttempts; i++) {
-        last = await from.sendChat(toPeerId, text);
-        if (last.delivered) return last;
-        await sleep(1500);
-      }
-      return last;
-    }
-
     // B sends encrypted chat to A
-    const r1 = await sendChatWithRetry(agentB, agentA.peerId, 'hello through relay');
-    expect(r1.delivered, `chat B→A failed after retries: ${r1.error}`).toBe(true);
+    const r1 = await agentB.sendChat(agentA.peerId, 'hello through relay');
+    expect(r1.delivered, `chat B→A failed: ${r1.error}`).toBe(true);
     expect(receivedOnA).toContain('hello through relay');
 
     // A sends encrypted chat back to B
-    const r2 = await sendChatWithRetry(agentA, agentB.peerId, 'relay reply from A');
-    expect(r2.delivered, `chat A→B failed after retries: ${r2.error}`).toBe(true);
+    const r2 = await agentA.sendChat(agentB.peerId, 'relay reply from A');
+    expect(r2.delivered, `chat A→B failed: ${r2.error}`).toBe(true);
     expect(receivedOnB).toContain('relay reply from A');
   }, 45000);
 });

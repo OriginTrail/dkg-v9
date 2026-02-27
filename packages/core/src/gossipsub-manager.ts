@@ -1,6 +1,7 @@
 import type { DKGNode } from './node.js';
 import type { EventBus } from './types.js';
 import { DKGEvent } from './event-bus.js';
+import { withRetry } from './retry.js';
 
 export type GossipMessageHandler = (
   topic: string,
@@ -35,8 +36,8 @@ export class GossipSubManager {
         for (const handler of handlers) {
           try {
             handler(topic, data, from);
-          } catch {
-            // don't let one handler crash the loop
+          } catch (err) {
+            console.error(`[GossipSub] handler error on topic "${topic}":`, err instanceof Error ? err.message : err);
           }
         }
       }
@@ -53,7 +54,16 @@ export class GossipSubManager {
   }
 
   async publish(topic: string, data: Uint8Array): Promise<void> {
-    await this.node.libp2p.services.pubsub.publish(topic, data);
+    await withRetry(
+      () => this.node.libp2p.services.pubsub.publish(topic, data),
+      {
+        maxAttempts: 3,
+        baseDelayMs: 500,
+        onRetry: (attempt, delay) => {
+          console.warn(`[GossipSub] publish retry ${attempt}/3 on topic "${topic}" (delay ${Math.round(delay)}ms)`);
+        },
+      },
+    );
   }
 
   onMessage(topic: string, handler: GossipMessageHandler): void {

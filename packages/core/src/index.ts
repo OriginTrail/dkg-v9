@@ -16,3 +16,4 @@ export {
   DKG_ONTOLOGY,
   type GenesisQuad,
 } from './genesis.js';
+export { withRetry, type RetryOptions } from './retry.js';

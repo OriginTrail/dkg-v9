@@ -4,7 +4,7 @@ import {
   paranetPublishTopic, paranetDataGraphUri, paranetMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, MerkleTree,
+  Logger, createOperationContext, MerkleTree, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
@@ -27,6 +27,8 @@ import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
 const SYNC_PAGE_SIZE = 500;
+const SYNC_PAGE_RETRY_ATTEMPTS = 3;
+const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 
 export interface DKGAgentConfig {
   name: string;
@@ -399,20 +401,38 @@ export class DKGAgent {
     paranetIds: string[] = [SYSTEM_PARANETS.AGENTS],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
+    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
+
     try {
       for (const pid of paranetIds) {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
 
-        // Phase 1: Download all pages into a staging buffer
         const allQuads: Quad[] = [];
         let offset = 0;
         this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
+
         // eslint-disable-next-line no-constant-condition
         while (true) {
+          if (Date.now() > deadline) {
+            this.log.warn(ctx, `Sync timeout after ${SYNC_TOTAL_TIMEOUT_MS}ms (${allQuads.length} triples received so far)`);
+            break;
+          }
+
           const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
-          const responseBytes = await this.router.send(remotePeerId, PROTOCOL_SYNC, payload);
+
+          const responseBytes = await withRetry(
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
+            {
+              maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+              baseDelayMs: 1000,
+              onRetry: (attempt, delay, err) => {
+                this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+              },
+            },
+          );
+
           const nquadsText = new TextDecoder().decode(responseBytes).trim();
           if (!nquadsText) break;
 
@@ -428,11 +448,9 @@ export class DKGAgent {
 
         if (allQuads.length === 0) continue;
 
-        // Separate data vs meta triples
         const dataQuads = allQuads.filter(q => q.graph === dataGraph);
         const metaQuads = allQuads.filter(q => q.graph === metaGraph);
 
-        // Phase 2: Verify merkle roots
         const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
         const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
 
@@ -453,7 +471,7 @@ export class DKGAgent {
         this.log.info(ctx, `Sync complete: ${totalSynced} verified triples from ${remotePeerId}`);
       }
     } catch (err) {
-      this.log.info(ctx, `Sync from ${remotePeerId} failed (peer may not support sync): ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
   }
@@ -540,21 +558,26 @@ export class DKGAgent {
    * through the relay.
    */
   private async ensureCircuitRelayAddress(peerIdStr: string): Promise<void> {
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    const peerId = peerIdFromString(peerIdStr);
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const peerId = peerIdFromString(peerIdStr);
 
-    const conns = this.node.libp2p.getConnections(peerId);
-    if (conns.length > 0) return;
+      const conns = this.node.libp2p.getConnections(peerId);
+      if (conns.length > 0) return;
 
-    const agent = await this.discovery.findAgentByPeerId(peerIdStr);
-    if (!agent?.relayAddress) return;
+      const agent = await this.discovery.findAgentByPeerId(peerIdStr);
+      if (!agent?.relayAddress) return;
 
-    const circuitAddr = multiaddr(
-      `${agent.relayAddress}/p2p-circuit/p2p/${peerIdStr}`,
-    );
-    await this.node.libp2p.peerStore.merge(peerId, {
-      multiaddrs: [circuitAddr],
-    });
+      const circuitAddr = multiaddr(
+        `${agent.relayAddress}/p2p-circuit/p2p/${peerIdStr}`,
+      );
+      await this.node.libp2p.peerStore.merge(peerId, {
+        multiaddrs: [circuitAddr],
+      });
+    } catch {
+      // Best-effort: if peer ID is invalid or lookup fails, let the
+      // caller proceed — it will get a proper error from dialProtocol.
+    }
   }
 
   async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {

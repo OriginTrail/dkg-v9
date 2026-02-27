@@ -335,6 +335,43 @@ describe('Discovery Client', () => {
     expect(notFound).toBeNull();
   });
 
+  it('returns relayAddress when present in profile', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const discovery = new DiscoveryClient(engine);
+
+    const relayAddr = '/ip4/1.2.3.4/tcp/9090/p2p/QmRelay';
+    const { quads } = buildAgentProfile({
+      peerId: 'QmWithRelay',
+      name: 'RelayBot',
+      skills: [],
+      relayAddress: relayAddr,
+    });
+
+    await store.insert(quads);
+
+    const agents = await discovery.findAgents();
+    expect(agents).toHaveLength(1);
+    expect(agents[0].relayAddress).toBe(relayAddr);
+
+    const byPeerId = await discovery.findAgentByPeerId('QmWithRelay');
+    expect(byPeerId).not.toBeNull();
+    expect(byPeerId!.relayAddress).toBe(relayAddr);
+
+    // Agent without relayAddress should have undefined
+    const store2 = new OxigraphStore();
+    const engine2 = new DKGQueryEngine(store2);
+    const discovery2 = new DiscoveryClient(engine2);
+    const { quads: q2 } = buildAgentProfile({
+      peerId: 'QmNoRelay',
+      name: 'NoRelayBot',
+      skills: [],
+    });
+    await store2.insert(q2);
+    const agents2 = await discovery2.findAgents();
+    expect(agents2[0].relayAddress).toBeUndefined();
+  });
+
   it('filters agents by framework', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

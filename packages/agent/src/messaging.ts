@@ -6,6 +6,7 @@ import {
   decodeAgentMessage,
   ed25519Sign,
   ed25519Verify,
+  withRetry,
   type AgentMessageMsg,
 } from '@dkg/core';
 import type { ProtocolRouter } from '@dkg/core';
@@ -143,10 +144,15 @@ export class MessageHandler {
         senderPublicKey: this.keypair.publicKey,
       };
 
-      const responseBytes = await this.router.send(
-        recipientPeerId,
-        PROTOCOL_MESSAGE,
-        encodeAgentMessage(msg),
+      const responseBytes = await withRetry(
+        () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
+        {
+          maxAttempts: 3,
+          baseDelayMs: 500,
+          onRetry: (attempt, delay) => {
+            console.warn(`[Messaging] sendChat retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
+          },
+        },
       );
       const responseMsg = decodeAgentMessage(responseBytes);
       const plain = new TextDecoder().decode(
@@ -196,10 +202,15 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    const responseBytes = await this.router.send(
-      recipientPeerId,
-      PROTOCOL_MESSAGE,
-      encodeAgentMessage(msg),
+    const responseBytes = await withRetry(
+      () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
+      {
+        maxAttempts: 3,
+        baseDelayMs: 500,
+        onRetry: (attempt, delay) => {
+          console.warn(`[Messaging] sendSkillRequest retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
+        },
+      },
     );
 
     const responseMsg = decodeAgentMessage(responseBytes);
@@ -335,8 +346,8 @@ export class MessageHandler {
       if (this.chatHandler) {
         try {
           await this.chatHandler(text, fromPeerId.toString(), convId);
-        } catch {
-          // chat handler is fire-and-forget
+        } catch (err) {
+          console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);
         }
       }
       return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {

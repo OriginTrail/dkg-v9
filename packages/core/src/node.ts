@@ -29,11 +29,22 @@ export interface DKGServices extends Record<string, unknown> {
   relay?: unknown;
 }
 
+const RELAY_WATCHDOG_BASE_INTERVAL_MS = 15_000;
+const RELAY_WATCHDOG_MAX_INTERVAL_MS = 5 * 60_000;
+
+interface RelayTarget {
+  peerId: ReturnType<typeof peerIdFromString>;
+  addr: any;
+}
+
 export class DKGNode {
   private node: Libp2p<DKGServices> | null = null;
   private readonly config: DKGNodeConfig;
   /** Peers currently connected only via relay (candidates for DCUtR upgrade). */
   private readonly relayedPeers = new Set<string>();
+  private relayWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private relayTargets: RelayTarget[] = [];
+  private relayWatchdogConsecutiveFailures = 0;
 
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
@@ -143,6 +154,8 @@ export class DKGNode {
         if (!p2pComponent?.value) continue;
 
         const peerId = peerIdFromString(p2pComponent.value);
+        this.relayTargets.push({ peerId, addr: ma });
+
         await this.node.peerStore.merge(peerId, {
           multiaddrs: [ma],
           tags: {
@@ -153,9 +166,74 @@ export class DKGNode {
         try {
           await this.node.dial(ma);
         } catch {
-          // libp2p will auto-reconnect via the keep-alive tag
+          // watchdog will retry
         }
       }
+
+      this.startRelayWatchdog();
+    }
+  }
+
+  /**
+   * Periodically check that relay connections are alive. After a network
+   * outage (e.g. laptop sleep/wake) TCP sockets die silently and libp2p
+   * won't automatically redial. Uses exponential backoff when the relay is
+   * unreachable and resets to the base interval on successful reconnect.
+   */
+  private startRelayWatchdog(): void {
+    if (this.relayWatchdogTimer) return;
+    if (this.relayTargets.length === 0) return;
+
+    this.scheduleWatchdogTick();
+  }
+
+  private scheduleWatchdogTick(): void {
+    const delay = Math.min(
+      RELAY_WATCHDOG_BASE_INTERVAL_MS * Math.pow(2, this.relayWatchdogConsecutiveFailures),
+      RELAY_WATCHDOG_MAX_INTERVAL_MS,
+    );
+
+    this.relayWatchdogTimer = setTimeout(async () => {
+      await this.watchdogTick();
+      if (this.node) this.scheduleWatchdogTick();
+    }, delay);
+
+    if (this.relayWatchdogTimer.unref) {
+      this.relayWatchdogTimer.unref();
+    }
+  }
+
+  private async watchdogTick(): Promise<void> {
+    const node = this.node;
+    if (!node) return;
+
+    const ts = () => new Date().toISOString();
+    const short = (id: string) => id.slice(-8);
+    let allConnected = true;
+
+    for (const { peerId, addr } of this.relayTargets) {
+      const conns = node.getConnections(peerId);
+      if (conns.length > 0) continue;
+
+      allConnected = false;
+      console.log(`[${ts()}] Relay watchdog: ${short(peerId.toString())} disconnected, redialing…`);
+      try {
+        await node.dial(addr);
+        console.log(`[${ts()}] Relay watchdog: reconnected to ${short(peerId.toString())}`);
+      } catch (err: any) {
+        console.log(`[${ts()}] Relay watchdog: redial failed for ${short(peerId.toString())}: ${err.message}`);
+      }
+    }
+
+    if (allConnected) {
+      this.relayWatchdogConsecutiveFailures = 0;
+    } else {
+      this.relayWatchdogConsecutiveFailures++;
+      const nextDelay = Math.min(
+        RELAY_WATCHDOG_BASE_INTERVAL_MS * Math.pow(2, this.relayWatchdogConsecutiveFailures),
+        RELAY_WATCHDOG_MAX_INTERVAL_MS,
+      );
+      console.log(`[${ts()}] Relay watchdog: next check in ${Math.round(nextDelay / 1000)}s (attempt ${this.relayWatchdogConsecutiveFailures})`);
     }
   }
 
@@ -228,6 +306,12 @@ export class DKGNode {
 
   async stop(): Promise<void> {
     if (!this.node) return;
+    if (this.relayWatchdogTimer) {
+      clearTimeout(this.relayWatchdogTimer);
+      this.relayWatchdogTimer = null;
+    }
+    this.relayTargets = [];
+    this.relayWatchdogConsecutiveFailures = 0;
     this.relayedPeers.clear();
     await this.node.stop();
     this.node = null;

@@ -222,4 +222,45 @@ describe('Circuit Relay', () => {
     expect(summary.direct + summary.relayed).toBe(summary.total);
     expect(summary.peers.length).toBe(summary.total);
   }, 15000);
+
+  it('edge node recovers relay connection after disruption', async () => {
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      enableRelayServer: true,
+    });
+    nodes.push(relay);
+    await relay.start();
+
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Verify initial connection
+    expect(edge.libp2p.getConnections().length).toBeGreaterThan(0);
+
+    // Force-close all connections to simulate network drop
+    for (const conn of edge.libp2p.getConnections()) {
+      await conn.close();
+    }
+
+    // Connection should be restored (via keepalive tag or watchdog)
+    let restored = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (edge.libp2p.getConnections().length > 0) {
+        restored = true;
+        break;
+      }
+    }
+
+    expect(restored).toBe(true);
+  }, 30000);
 });

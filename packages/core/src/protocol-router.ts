@@ -24,7 +24,8 @@ export class ProtocolRouter {
         const responseData = await handler(requestData, peerId);
         stream.send(responseData);
         await stream.close();
-      } catch {
+      } catch (err) {
+        console.error(`[ProtocolRouter] handler error on ${protocolId} from ${connection.remotePeer.toString().slice(-8)}:`, err instanceof Error ? err.message : err);
         try {
           stream.abort(new Error('handler error'));
         } catch {
@@ -74,9 +75,12 @@ export class ProtocolRouter {
         return await readAll(stream);
       } catch (err: unknown) {
         lastErr = err;
-        const msg = err instanceof Error ? err.message : '';
+        const msg = err instanceof Error ? err.message.toLowerCase() : '';
         const recoverable = msg.includes('closed') || msg.includes('reset')
-          || msg.includes('stream returned in closed state');
+          || msg.includes('stream returned in closed state')
+          || msg.includes('econnreset') || msg.includes('etimedout')
+          || msg.includes('econnrefused') || msg.includes('epipe')
+          || msg.includes('aborted') || msg.includes('no valid addresses');
         if (!recoverable || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
         await new Promise(r => setTimeout(r, backoff));

@@ -14,6 +14,7 @@ import type {
   CreateParanetParams,
   PublishParams,
   OnChainPublishResult,
+  ConvictionAccountInfo,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -291,6 +292,71 @@ export class MockChainAdapter implements ChainAdapter {
 
   async listParanetsFromChain(): Promise<import('./chain-adapter.js').ParanetOnChain[]> {
     return [];
+  }
+
+  // --- Publishing Conviction Accounts ---
+
+  private convictionAccounts = new Map<bigint, {
+    admin: string;
+    balance: bigint;
+    initialDeposit: bigint;
+    lockEpochs: number;
+    conviction: bigint;
+    authorizedKeys: Set<string>;
+  }>();
+  private nextConvictionAccountId = 1n;
+
+  async createConvictionAccount(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult> {
+    const accountId = this.nextConvictionAccountId++;
+    const conviction = amount * BigInt(lockEpochs);
+    this.convictionAccounts.set(accountId, {
+      admin: this.signerAddress,
+      balance: amount,
+      initialDeposit: amount,
+      lockEpochs,
+      conviction,
+      authorizedKeys: new Set([this.signerAddress]),
+    });
+    this.pushEvent('ConvictionAccountCreated', { accountId: accountId.toString(), admin: this.signerAddress });
+    return { ...this.txResult(true), accountId };
+  }
+
+  async addConvictionFunds(accountId: bigint, amount: bigint): Promise<TxResult> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return this.txResult(false);
+    acct.balance += amount;
+    return this.txResult(true);
+  }
+
+  async extendConvictionLock(accountId: bigint, additionalEpochs: number): Promise<TxResult> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return this.txResult(false);
+    acct.lockEpochs += additionalEpochs;
+    acct.conviction = acct.initialDeposit * BigInt(acct.lockEpochs);
+    return this.txResult(true);
+  }
+
+  async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return { discountBps: 0, conviction: 0n };
+    const cHalf = 3_000_000n * 10n ** 18n;
+    const discountBps = Number((5000n * acct.conviction) / (acct.conviction + cHalf));
+    return { discountBps, conviction: acct.conviction };
+  }
+
+  async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return null;
+    const { discountBps } = await this.getConvictionDiscount(accountId);
+    return {
+      accountId,
+      admin: acct.admin,
+      balance: acct.balance,
+      initialDeposit: acct.initialDeposit,
+      lockEpochs: acct.lockEpochs,
+      conviction: acct.conviction,
+      discountBps,
+    };
   }
 
   // --- Test helpers ---

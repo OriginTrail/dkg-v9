@@ -100,6 +100,18 @@ export interface ParanetOnChain {
   blockNumber: number;
 }
 
+// ----- Publishing Conviction Account types -----
+
+export interface ConvictionAccountInfo {
+  accountId: bigint;
+  admin: string;
+  balance: bigint;
+  initialDeposit: bigint;
+  lockEpochs: number;
+  conviction: bigint;
+  discountBps: number;
+}
+
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
 
 export interface CreateKCParams {
@@ -167,6 +179,13 @@ export interface ChainAdapter {
   submitToParanet(kcId: string, paranetId: string): Promise<TxResult>;
   /** List paranets from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
   listParanetsFromChain?(fromBlock?: number): Promise<ParanetOnChain[]>;
+
+  // Publishing Conviction Accounts
+  createConvictionAccount?(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult>;
+  addConvictionFunds?(accountId: bigint, amount: bigint): Promise<TxResult>;
+  extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
+  getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
+  getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

@@ -102,6 +102,22 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      * @param addedStake Amount of tokens to stake (must be > 0)
      */
     function stake(uint72 identityId, uint96 addedStake) external profileExists(identityId) {
+        _stakeWithLock(identityId, addedStake, 1);
+    }
+
+    /**
+     * @notice Stake TRAC with a conviction lock for higher reward multipliers.
+     * V8-compatible: stake() defaults to 1-epoch lock (1x multiplier).
+     * @param identityId Node to stake to
+     * @param addedStake Amount of TRAC to stake
+     * @param lockEpochs Lock duration in epochs (min 1). Longer = higher reward multiplier (up to 3x at 12 epochs).
+     */
+    function stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) external profileExists(identityId) {
+        if (lockEpochs == 0) revert StakingLib.InvalidLockEpochs();
+        _stakeWithLock(identityId, addedStake, lockEpochs);
+    }
+
+    function _stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) internal {
         IERC20 token = tokenContract;
         StakingStorage ss = stakingStorage;
 
@@ -119,8 +135,15 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         _validateDelegatorEpochClaims(identityId, msg.sender);
 
         bytes32 delegatorKey = _getDelegatorKey(msg.sender);
+        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
         // settle all pending score changes for the node's delegator
-        _prepareForStakeChange(chronos.getCurrentEpoch(), identityId, delegatorKey);
+        _prepareForStakeChange(currentEpoch, identityId, delegatorKey);
+
+        // Update conviction lock: can only extend, never shorten
+        (uint40 existingLock, ) = delegatorsInfo.getDelegatorLock(identityId, msg.sender);
+        if (lockEpochs > existingLock) {
+            delegatorsInfo.setDelegatorLock(identityId, msg.sender, lockEpochs, currentEpoch);
+        }
 
         uint96 delegatorStakeBase = stakingStorage.getDelegatorStakeBase(identityId, delegatorKey);
 
@@ -240,6 +263,15 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
 
         if (removedStake == 0) {
             revert TokenLib.ZeroTokenAmount();
+        }
+
+        // Check conviction lock: cannot withdraw while lock is active
+        (uint40 lockEpochs, uint40 lockStartEpoch) = delegatorsInfo.getDelegatorLock(identityId, msg.sender);
+        if (lockEpochs > 0) {
+            uint40 currentEpochU40 = uint40(chronos.getCurrentEpoch());
+            if (currentEpochU40 < lockStartEpoch + lockEpochs) {
+                revert StakingLib.ConvictionLockActive(identityId, lockStartEpoch + lockEpochs);
+            }
         }
 
         // Validate that all claims have been settled for the node before changing stake
@@ -899,5 +931,48 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      */
     function _getDelegatorKey(address delegator) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(delegator));
+    }
+
+    // ========================================================================
+    // V9 Conviction Multiplier
+    // ========================================================================
+
+    /**
+     * @notice Compute the conviction multiplier for a delegator's lock duration.
+     * Formula: lockEpochs == 0 → 0; lockEpochs >= 1 → min(3.0, 1 + K*(lockEpochs-1)/(lockEpochs-1+H))
+     * where K = 18/7, H = 22/7. All fixed-point with 1e18 scaling.
+     * Calibration: 1 epoch = 1x, 3 epochs = 2x, 12 epochs = 3x (cap).
+     * @param lockEpochs Original lock duration
+     * @return multiplier18 Multiplier scaled by 1e18 (e.g. 3e18 = 3x)
+     */
+    function convictionMultiplier(uint40 lockEpochs) public pure returns (uint256 multiplier18) {
+        if (lockEpochs == 0) return 0;
+        if (lockEpochs == 1) return SCALE18;
+
+        // K = 18/7 ≈ 2.571, H = 22/7 ≈ 3.143
+        // We use numerators scaled by 7 to avoid fractions:
+        // multiplier = 1 + 18*(lockEpochs-1) / (7*(lockEpochs-1) + 22)
+        uint256 x = uint256(lockEpochs) - 1;
+        uint256 numerator = 18 * x * SCALE18;
+        uint256 denominator = 7 * x + 22;
+        uint256 result = SCALE18 + (numerator / denominator);
+
+        uint256 cap = 3 * SCALE18;
+        return result > cap ? cap : result;
+    }
+
+    /**
+     * @notice Get the conviction multiplier for a specific delegator on a node.
+     * @param identityId Node identity
+     * @param delegator Delegator address
+     * @return multiplier18 Multiplier scaled by 1e18
+     */
+    function getDelegatorConvictionMultiplier(
+        uint72 identityId,
+        address delegator
+    ) external view returns (uint256 multiplier18) {
+        (uint40 lockEpochs, ) = delegatorsInfo.getDelegatorLock(identityId, delegator);
+        if (lockEpochs == 0) return SCALE18; // Default: V8-compatible 1x for unset locks
+        return convictionMultiplier(lockEpochs);
     }
 }

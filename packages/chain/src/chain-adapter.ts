@@ -187,6 +187,10 @@ export interface ChainAdapter {
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
 
+  // Staking Conviction
+  stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
+  getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
+
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;

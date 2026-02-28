@@ -359,6 +359,26 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  // --- Staking Conviction ---
+
+  private delegatorLocks = new Map<string, { lockEpochs: number; startEpoch: number }>();
+
+  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    const key = `${identityId}-${this.signerAddress}`;
+    const existing = this.delegatorLocks.get(key);
+    if (!existing || lockEpochs > existing.lockEpochs) {
+      this.delegatorLocks.set(key, { lockEpochs, startEpoch: 0 });
+    }
+    return this.txResult(true);
+  }
+
+  async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
+    const key = `${identityId}-${delegator}`;
+    const lock = this.delegatorLocks.get(key);
+    const lockEpochs = lock?.lockEpochs ?? 1;
+    return { multiplier: computeConvictionMultiplier(lockEpochs) };
+  }
+
   // --- Test helpers ---
 
   getBatch(batchId: bigint) {
@@ -394,4 +414,16 @@ function toHex(bytes: Uint8Array): string {
   return '0x' + Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+/**
+ * Conviction multiplier matching the Solidity formula.
+ * lockEpochs=0 → 0, lockEpochs=1 → 1.0, lockEpochs=3 → 2.0, lockEpochs>=12 → 3.0
+ */
+export function computeConvictionMultiplier(lockEpochs: number): number {
+  if (lockEpochs <= 0) return 0;
+  if (lockEpochs === 1) return 1.0;
+  const x = lockEpochs - 1;
+  const result = 1 + (18 * x) / (7 * x + 22);
+  return Math.min(3.0, result);
 }

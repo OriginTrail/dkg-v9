@@ -15,6 +15,7 @@ import type {
   PublishParams,
   OnChainPublishResult,
   ConvictionAccountInfo,
+  PermanentPublishParams,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -160,6 +161,43 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getRequiredPublishTokenAmount(_publicByteSize: bigint, _epochs: number): Promise<bigint> {
     return 1n;
+  }
+
+  async publishKnowledgeAssetsPermanent(params: PermanentPublishParams): Promise<OnChainPublishResult> {
+    const { startId, endId } = await this.reserveUALRange(params.kaCount);
+
+    const batchId = this.nextBatchId++;
+    this.batches.set(batchId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.kaCount,
+    });
+
+    const blockNumber = this.nextBlock++;
+    const blockTimestamp = Math.floor(Date.now() / 1000);
+
+    this.events.push({
+      type: 'KnowledgeBatchCreated',
+      blockNumber,
+      data: {
+        batchId: batchId.toString(),
+        publisherAddress: this.signerAddress,
+        merkleRoot: toHex(params.merkleRoot),
+        startKAId: startId.toString(),
+        endKAId: endId.toString(),
+        kaCount: params.kaCount,
+        isPermanent: true,
+      },
+    });
+
+    return {
+      batchId,
+      startKAId: startId,
+      endKAId: endId,
+      txHash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
+      blockNumber,
+      blockTimestamp,
+      publisherAddress: this.signerAddress,
+    };
   }
 
   async verifyPublisherOwnsRange(

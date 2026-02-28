@@ -315,6 +315,125 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
+    // Permanent Publishing (Arweave-style endowment)
+    // ========================================================================
+
+    uint256 public constant ENDOWMENT_MULTIPLIER = 10;
+    uint256 public constant ENDOWMENT_EPOCHS = 100;
+    uint256 public constant DECAY_FACTOR_BPS = 9700; // 0.97 in basis points
+
+    /**
+     * @notice Publish Knowledge Assets permanently. Cost = annualCost × ENDOWMENT_MULTIPLIER.
+     * Tokens are pre-allocated across 100 epochs with geometric decay.
+     * After 100 epochs, storage is part of the network's base-layer commitment.
+     */
+    function batchMintKnowledgeAssetsPermanent(
+        uint32 kaCount,
+        uint72 publisherNodeIdentityId,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint96 tokenAmount,
+        bytes32 publisherNodeR,
+        bytes32 publisherNodeVS,
+        uint72[] calldata identityIds,
+        bytes32[] calldata r,
+        bytes32[] calldata vs
+    ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
+        (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
+
+        _verifySignature(
+            publisherNodeIdentityId,
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))
+            ),
+            publisherNodeR,
+            publisherNodeVS
+        );
+
+        _verifyReceiverSignatures(identityIds, merkleRoot, publicByteSize, r, vs);
+
+        KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
+        for (uint64 id = startKAId; id <= endKAId; id++) {
+            if (kas.isKAIdUsed(msg.sender, id)) {
+                revert KnowledgeAssetsLib.KAIdAlreadyUsed(msg.sender, id);
+            }
+        }
+
+        // Validate permanent publishing cost: annualCost × ENDOWMENT_MULTIPLIER
+        uint256 stakeWeightedAverageAsk = askStorage.getStakeWeightedAverageAsk();
+        uint96 annualCost = uint96((stakeWeightedAverageAsk * publicByteSize * 12) / 1024); // 12 epochs = 1 year
+        uint96 permanentCost = annualCost * uint96(ENDOWMENT_MULTIPLIER);
+        if (tokenAmount < permanentCost) {
+            revert KnowledgeAssetsLib.InvalidTokenAmount(permanentCost, tokenAmount);
+        }
+
+        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
+
+        batchId = kas.createKnowledgeBatch(
+            msg.sender,
+            merkleRoot,
+            publicByteSize,
+            kaCount,
+            startKAId,
+            endKAId,
+            currentEpoch,
+            currentEpoch + uint40(ENDOWMENT_EPOCHS),
+            tokenAmount,
+            true // isPermanent
+        );
+
+        // Distribute with geometric decay across ENDOWMENT_EPOCHS
+        _distributeEndowment(tokenAmount, currentEpoch);
+
+        epochStorage.addEpochProducedKnowledgeValue(
+            publisherNodeIdentityId,
+            currentEpoch,
+            tokenAmount
+        );
+
+        _addTokens(tokenAmount, address(0));
+    }
+
+    /**
+     * @dev Distribute tokens across 100 epochs with 0.97^i decay factor.
+     * Early epochs get more, later epochs get less — modeling declining storage costs.
+     */
+    function _distributeEndowment(uint96 totalAmount, uint40 startEpoch) internal {
+        uint256 remaining = totalAmount;
+        uint256 weightSum = 0;
+        uint256[] memory weights = new uint256[](ENDOWMENT_EPOCHS);
+
+        // Compute geometric weights: weight(i) = 0.97^i scaled to BPS
+        weights[0] = 10000; // 1.0 in basis points
+        weightSum = 10000;
+        for (uint256 i = 1; i < ENDOWMENT_EPOCHS; i++) {
+            weights[i] = (weights[i - 1] * DECAY_FACTOR_BPS) / 10000;
+            weightSum += weights[i];
+        }
+
+        // Allocate proportionally
+        for (uint256 i = 0; i < ENDOWMENT_EPOCHS; i++) {
+            uint96 epochAmount;
+            if (i == ENDOWMENT_EPOCHS - 1) {
+                epochAmount = uint96(remaining);
+            } else {
+                epochAmount = uint96((uint256(totalAmount) * weights[i]) / weightSum);
+                if (epochAmount > remaining) epochAmount = uint96(remaining);
+                remaining -= epochAmount;
+            }
+
+            if (epochAmount > 0) {
+                epochStorage.addTokensToEpochRange(
+                    1,
+                    startEpoch + uint40(i),
+                    startEpoch + uint40(i),
+                    epochAmount
+                );
+            }
+        }
+    }
+
+    // ========================================================================
     // Namespace Transfer
     // ========================================================================
 

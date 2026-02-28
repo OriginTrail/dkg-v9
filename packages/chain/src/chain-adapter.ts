@@ -100,6 +100,18 @@ export interface ParanetOnChain {
   blockNumber: number;
 }
 
+// ----- Permanent Publishing types -----
+
+export interface PermanentPublishParams {
+  kaCount: number;
+  publisherNodeIdentityId: bigint;
+  merkleRoot: Uint8Array;
+  publicByteSize: bigint;
+  tokenAmount: bigint;
+  publisherSignature: { r: Uint8Array; vs: Uint8Array };
+  receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
 // ----- Publishing Conviction Account types -----
 
 export interface ConvictionAccountInfo {
@@ -186,6 +198,9 @@ export interface ChainAdapter {
   extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
+
+  // Permanent Publishing
+  publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
 
   // Staking Conviction
   stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;

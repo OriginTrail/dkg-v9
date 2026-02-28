@@ -8,6 +8,7 @@ import type { DashboardDB } from './db.js';
  */
 export class OperationTracker {
   private readonly starts = new Map<string, number>();
+  private readonly phaseStarts = new Map<string, number>();
 
   constructor(private readonly db: DashboardDB | null) {}
 
@@ -62,6 +63,80 @@ export class OperationTracker {
         operation_id: ctx.operationId,
         duration_ms: startedAt ? Date.now() - startedAt : 0,
         error_message: message,
+      });
+    } catch {
+      // Must never break the node
+    }
+  }
+
+  startPhase(ctx: OperationContext, phase: string): void {
+    if (!this.db) return;
+    const now = Date.now();
+    const key = `${ctx.operationId}:${phase}`;
+    this.phaseStarts.set(key, now);
+    try {
+      this.db.insertPhase({
+        operation_id: ctx.operationId,
+        phase,
+        started_at: now,
+      });
+    } catch {
+      // Must never break the node
+    }
+  }
+
+  completePhase(ctx: OperationContext, phase: string): void {
+    if (!this.db) return;
+    const key = `${ctx.operationId}:${phase}`;
+    const startedAt = this.phaseStarts.get(key);
+    this.phaseStarts.delete(key);
+    try {
+      this.db.completePhase({
+        operation_id: ctx.operationId,
+        phase,
+        duration_ms: startedAt ? Date.now() - startedAt : 0,
+      });
+    } catch {
+      // Must never break the node
+    }
+  }
+
+  setCost(ctx: OperationContext, cost: {
+    gasUsed?: bigint;
+    gasPrice?: bigint;
+    gasCost?: bigint;
+    tracCost?: bigint;
+  }): void {
+    if (!this.db) return;
+    try {
+      const gasPriceGwei = cost.gasPrice != null
+        ? Number(cost.gasPrice) / 1e9
+        : null;
+      const gasCostEth = cost.gasCost != null
+        ? Number(cost.gasCost) / 1e18
+        : null;
+      const tracCost = cost.tracCost != null
+        ? Number(cost.tracCost) / 1e18
+        : null;
+      this.db.setOperationCost({
+        operation_id: ctx.operationId,
+        gas_used: cost.gasUsed != null ? Number(cost.gasUsed) : null,
+        gas_price_gwei: gasPriceGwei,
+        gas_cost_eth: gasCostEth,
+        trac_cost: tracCost,
+      });
+    } catch {
+      // Must never break the node
+    }
+  }
+
+  setTxHash(ctx: OperationContext, txHash?: string, chainId?: number): void {
+    if (!this.db || !txHash) return;
+    try {
+      this.db.setOperationCost({
+        operation_id: ctx.operationId,
+        tx_hash: txHash,
+        chain_id: chainId ?? null,
       });
     } catch {
       // Must never break the node

@@ -240,6 +240,118 @@ describe('DashboardDB — retention', () => {
   });
 });
 
+describe('DashboardDB — operation phases', () => {
+  it('inserts and completes phases', () => {
+    db.insertOperation({ operation_id: 'op-ph', operation_name: 'publish', started_at: 1000 });
+
+    db.insertPhase({ operation_id: 'op-ph', phase: 'prepare', started_at: 1000 });
+    db.insertPhase({ operation_id: 'op-ph', phase: 'store', started_at: 1050 });
+
+    db.completePhase({ operation_id: 'op-ph', phase: 'prepare', duration_ms: 50 });
+    db.completePhase({ operation_id: 'op-ph', phase: 'store', duration_ms: 100 });
+
+    const { phases } = db.getOperation('op-ph');
+    expect(phases).toHaveLength(2);
+    expect(phases[0].phase).toBe('prepare');
+    expect(phases[0].duration_ms).toBe(50);
+    expect(phases[0].status).toBe('success');
+    expect(phases[1].phase).toBe('store');
+    expect(phases[1].duration_ms).toBe(100);
+  });
+
+  it('returns phases ordered by started_at', () => {
+    db.insertOperation({ operation_id: 'op-order', operation_name: 'publish', started_at: 1000 });
+    db.insertPhase({ operation_id: 'op-order', phase: 'chain', started_at: 2000 });
+    db.insertPhase({ operation_id: 'op-order', phase: 'prepare', started_at: 1000 });
+    db.insertPhase({ operation_id: 'op-order', phase: 'store', started_at: 1500 });
+
+    const { phases } = db.getOperation('op-order');
+    expect(phases.map((p: any) => p.phase)).toEqual(['prepare', 'store', 'chain']);
+  });
+});
+
+describe('DashboardDB — operation cost', () => {
+  it('sets gas and TRAC cost on an operation', () => {
+    db.insertOperation({ operation_id: 'op-cost', operation_name: 'publish', started_at: 1000 });
+
+    db.setOperationCost({
+      operation_id: 'op-cost',
+      gas_used: 210000,
+      gas_price_gwei: 0.25,
+      gas_cost_eth: 0.0000525,
+      trac_cost: 0.5,
+      tx_hash: '0xabc123',
+      chain_id: 84532,
+    });
+
+    const { operation } = db.getOperation('op-cost');
+    expect(operation!.gas_used).toBe(210000);
+    expect(operation!.gas_price_gwei).toBeCloseTo(0.25);
+    expect(operation!.gas_cost_eth).toBeCloseTo(0.0000525);
+    expect(operation!.trac_cost).toBeCloseTo(0.5);
+    expect(operation!.tx_hash).toBe('0xabc123');
+    expect(operation!.chain_id).toBe(84532);
+  });
+
+  it('partial cost update preserves existing values', () => {
+    db.insertOperation({ operation_id: 'op-partial', operation_name: 'publish', started_at: 1000 });
+
+    db.setOperationCost({ operation_id: 'op-partial', tx_hash: '0xfirst' });
+    db.setOperationCost({ operation_id: 'op-partial', gas_used: 100000 });
+
+    const { operation } = db.getOperation('op-partial');
+    expect(operation!.tx_hash).toBe('0xfirst');
+    expect(operation!.gas_used).toBe(100000);
+  });
+});
+
+describe('DashboardDB — operation stats', () => {
+  beforeEach(() => {
+    const now = Date.now();
+    for (let i = 0; i < 10; i++) {
+      db.insertOperation({
+        operation_id: `st-${i}`,
+        operation_name: i < 7 ? 'publish' : 'query',
+        started_at: now - (10 - i) * 60_000,
+      });
+      if (i < 8) {
+        db.completeOperation({ operation_id: `st-${i}`, duration_ms: 1000 + i * 100 });
+      } else {
+        db.failOperation({ operation_id: `st-${i}`, duration_ms: 500, error_message: 'fail' });
+      }
+      if (i < 5) {
+        db.setOperationCost({ operation_id: `st-${i}`, gas_cost_eth: 0.001, trac_cost: 0.1 });
+      }
+    }
+  });
+
+  it('returns correct aggregate summary for all operations', () => {
+    const { summary } = db.getOperationStats({ periodMs: 86_400_000, bucketMs: 3_600_000 });
+    expect(summary.totalCount).toBe(10);
+    expect(summary.successCount).toBe(8);
+    expect(summary.errorCount).toBe(2);
+    expect(summary.successRate).toBeCloseTo(0.8);
+    expect(summary.avgDurationMs).toBeGreaterThan(0);
+    expect(summary.totalGasCostEth).toBeCloseTo(0.005);
+    expect(summary.totalTracCost).toBeCloseTo(0.5);
+  });
+
+  it('filters stats by operation name', () => {
+    const { summary } = db.getOperationStats({ name: 'publish', periodMs: 86_400_000, bucketMs: 3_600_000 });
+    expect(summary.totalCount).toBe(7);
+  });
+
+  it('returns time series buckets', () => {
+    const { timeSeries } = db.getOperationStats({ periodMs: 86_400_000, bucketMs: 3_600_000 });
+    expect(timeSeries.length).toBeGreaterThan(0);
+    const bucket = timeSeries[0];
+    expect(bucket).toHaveProperty('bucket');
+    expect(bucket).toHaveProperty('count');
+    expect(bucket).toHaveProperty('successRate');
+    expect(bucket).toHaveProperty('avgDurationMs');
+  });
+});
+
 describe('DashboardDB — schema idempotency', () => {
   it('can be opened twice on the same directory without error', () => {
     db.close();

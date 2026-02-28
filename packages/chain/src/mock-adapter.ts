@@ -273,14 +273,24 @@ export class MockChainAdapter implements ChainAdapter {
   // --- Paranets ---
 
   async createParanet(params: CreateParanetParams): Promise<TxResult> {
-    this.paranets.set(params.paranetId, params.metadata);
-    this.pushEvent('ParanetCreated', { paranetId: params.paranetId });
-    return this.txResult(true);
+    const id = params.paranetId ?? (params.name ? `mock-${params.name}` : 'mock-paranet');
+    const meta = params.metadata ?? {
+      ...(params.name && { name: params.name }),
+      ...(params.description && { description: params.description }),
+    };
+    this.paranets.set(id, meta);
+    this.pushEvent('ParanetCreated', { paranetId: id });
+    const result = this.txResult(true);
+    return { ...result, paranetId: id };
   }
 
   async submitToParanet(kcId: string, paranetId: string): Promise<TxResult> {
     this.pushEvent('KCSubmittedToParanet', { kcId, paranetId });
     return this.txResult(true);
+  }
+
+  async listParanetsFromChain(): Promise<import('./chain-adapter.js').ParanetOnChain[]> {
+    return [];
   }
 
   // --- Test helpers ---

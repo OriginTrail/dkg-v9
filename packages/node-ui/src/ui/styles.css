@@ -40,22 +40,27 @@ a:hover { text-decoration: underline; }
 
 .sidebar {
   width: var(--sidebar-w);
-  background: var(--bg-card);
-  border-right: 1px solid var(--border);
+  background: rgba(17, 24, 39, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid rgba(31, 41, 55, 0.6);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar-logo {
-  padding: 20px 16px;
+  padding: 12px 16px;
   font-size: 15px;
   font-weight: 700;
   color: var(--text-heading);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-height: 64px;
 }
 
 .sidebar-logo span {
@@ -99,6 +104,8 @@ a:hover { text-decoration: underline; }
   flex: 1;
   overflow-y: auto;
   padding: 24px 32px;
+  position: relative;
+  z-index: 1;
 }
 
 .page-title {
@@ -110,8 +117,10 @@ a:hover { text-decoration: underline; }
 
 /* Cards */
 .card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background: rgba(17, 24, 39, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(31, 41, 55, 0.6);
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
@@ -135,8 +144,10 @@ a:hover { text-decoration: underline; }
 }
 
 .stat-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background: rgba(17, 24, 39, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(31, 41, 55, 0.6);
   border-radius: var(--radius);
   padding: 16px;
 }
@@ -400,8 +411,10 @@ a:hover { text-decoration: underline; }
 }
 
 .paranet-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background: rgba(17, 24, 39, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(31, 41, 55, 0.6);
   border-radius: var(--radius);
   padding: 16px;
   cursor: pointer;
@@ -437,6 +450,40 @@ a:hover { text-decoration: underline; }
 
 .tab-item:hover { color: var(--text); }
 .tab-item.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Range pill buttons (Maze-style) */
+.range-pills {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-input);
+  border-radius: 20px;
+  padding: 3px;
+}
+
+.range-pill {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.02em;
+}
+
+.range-pill:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.range-pill.active {
+  color: #fff;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.35);
+}
 
 /* Chat FAB */
 .chat-fab {
@@ -807,8 +854,23 @@ a:hover { text-decoration: underline; }
   margin-top: 4px;
 }
 
-.chat-bubble-out .chat-bubble-time { text-align: right; }
-.chat-bubble-in .chat-bubble-time { text-align: left; }
+.chat-bubble-time {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-bubble-out .chat-bubble-time { justify-content: flex-end; }
+.chat-bubble-in .chat-bubble-time { justify-content: flex-start; }
+
+.chat-delivery {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.chat-delivery.delivered { color: rgba(255, 255, 255, 0.85); }
+.chat-delivery.failed { color: #ff8a80; }
 
 .chat-input-area {
   padding: 12px 16px;
@@ -859,3 +921,34 @@ a:hover { text-decoration: underline; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .chat-spinner { animation: spin 0.8s linear infinite; }
+
+/* Phase timeline */
+.phase-timeline-bar {
+  display: flex;
+  height: 28px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  gap: 2px;
+}
+
+.phase-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  transition: opacity 0.15s;
+}
+
+.phase-segment:hover { opacity: 0.8; }
+
+.phase-segment-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 6px;
+}

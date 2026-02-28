@@ -12,7 +12,7 @@ import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapt
 import {
   DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  type PublishResult,
+  type PublishResult, type PhaseCallback,
 } from '@dkg/publisher';
 import {
   DKGQueryEngine, QueryHandler,
@@ -580,8 +580,14 @@ export class DKGAgent {
     }
   }
 
-  async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
+  async publish(
+    paranetId: string,
+    quads: Quad[],
+    privateQuads?: Quad[],
+    opts?: { onPhase?: PhaseCallback },
+  ): Promise<PublishResult> {
     const ctx = createOperationContext('publish');
+    const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting publish to paranet "${paranetId}" with ${quads.length} triples`);
 
     const isSystem = paranetId === SYSTEM_PARANETS.AGENTS || paranetId === SYSTEM_PARANETS.ONTOLOGY;
@@ -593,9 +599,11 @@ export class DKGAgent {
         );
       }
     }
-    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx });
+    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
+    onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(paranetId, result, ctx);
+    onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kcId=${result.kcId}`);
     return result;
   }

@@ -38,10 +38,22 @@ export class MetricsCollector {
 
   start(): void {
     if (this.timer) return;
-    this.collectAndStore().catch(() => {});
+    this.collectAndStore().then(snap => {
+      this.backfillNulls(snap);
+    }).catch(() => {});
     this.timer = setInterval(() => {
       this.collectAndStore().catch(() => {});
     }, SNAPSHOT_INTERVAL_MS);
+  }
+
+  private backfillNulls(snap: MetricSnapshotRow): void {
+    try {
+      if (snap.total_triples != null) {
+        this.db.db.prepare(
+          'UPDATE metric_snapshots SET total_triples = ? WHERE total_triples IS NULL',
+        ).run(snap.total_triples);
+      }
+    } catch { /* best-effort */ }
   }
 
   stop(): void {

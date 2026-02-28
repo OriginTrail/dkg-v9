@@ -43,6 +43,10 @@ export interface OnChainPublishResult {
   blockNumber: number;
   blockTimestamp: number;
   publisherAddress: string;
+  gasUsed?: bigint;
+  effectiveGasPrice?: bigint;
+  gasCostWei?: bigint;
+  tokenAmount?: bigint;
 }
 
 export interface UpdateKAParams {
@@ -61,6 +65,8 @@ export interface TxResult {
   hash: string;
   blockNumber: number;
   success: boolean;
+  /** Set by createParanet when V9 registry is used (on-chain paranetId as hex). */
+  paranetId?: string;
 }
 
 export interface ChainEvent {
@@ -75,8 +81,23 @@ export interface EventFilter {
 }
 
 export interface CreateParanetParams {
+  /** For V9: human-readable name; paranetId is derived on-chain as keccak256(creator, name). */
+  name?: string;
+  description?: string;
+  /** 0 = open, 1 = permissioned (V9). */
+  accessPolicy?: number;
+  /** Legacy/mock: explicit id when not using chain registry. */
+  paranetId?: string;
+  metadata?: Record<string, string>;
+}
+
+/** One paranet entry from chain (e.g. ParanetCreated events). */
+export interface ParanetOnChain {
   paranetId: string;
-  metadata: Record<string, string>;
+  creator: string;
+  name: string;
+  accessPolicy: number;
+  blockNumber: number;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
@@ -144,6 +165,8 @@ export interface ChainAdapter {
   // Paranets
   createParanet(params: CreateParanetParams): Promise<TxResult>;
   submitToParanet(kcId: string, paranetId: string): Promise<TxResult>;
+  /** List paranets from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
+  listParanetsFromChain?(fromBlock?: number): Promise<ParanetOnChain[]>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

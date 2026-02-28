@@ -67,6 +67,28 @@ export async function handleNodeUIRequest(
     return json(res, 200, result);
   }
 
+  // --- Operation stats ---
+
+  if (req.method === 'GET' && path === '/api/operation-stats') {
+    const name = url.searchParams.get('name') ?? undefined;
+    const period = url.searchParams.get('period') ?? '24h';
+    const periodMs = period === '30d' ? 30 * 86_400_000
+      : period === '7d' ? 7 * 86_400_000
+      : 86_400_000;
+    const bucketMs = period === '30d' ? 86_400_000
+      : period === '7d' ? 86_400_000
+      : 3_600_000;
+    const result = db.getOperationStats({ name, periodMs, bucketMs });
+    return json(res, 200, result);
+  }
+
+  // --- Spending / Economics ---
+
+  if (req.method === 'GET' && path === '/api/economics') {
+    const spending = db.getSpendingSummary();
+    return json(res, 200, spending);
+  }
+
   // --- Logs ---
 
   if (req.method === 'GET' && path === '/api/logs') {

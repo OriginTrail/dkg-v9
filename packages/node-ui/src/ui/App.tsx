@@ -8,13 +8,17 @@ import { WalletPage } from './pages/Wallet.js';
 import { IntegrationsPage } from './pages/Integrations.js';
 import { MessagesPage } from './pages/Messages.js';
 import { ChatPanel } from './components/ChatPanel.js';
+import { ParticleSphere } from './components/ParticleSphere.js';
+import { BackgroundNetwork } from './components/BackgroundNetwork.js';
 
 export function App() {
   return (
     <div className="app-layout">
+      <BackgroundNetwork />
       <aside className="sidebar">
         <div className="sidebar-logo">
-          DKG Node <span>UI</span>
+          <ParticleSphere size={48} />
+          <div>DKG Node <span>UI</span></div>
         </div>
         <nav className="sidebar-nav">
           <NavLink to="/" end>
@@ -38,8 +42,8 @@ export function App() {
             Operations
           </NavLink>
           <NavLink to="/wallet">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v1H2V2zm0 3h12v8H2V5zm1 1v6h10V6H3z"/></svg>
-            Wallet
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 14h14v1H1v-1zM3 8l3-3 2 2 4-5 1.5 1.2L9 9 7 7l-3 3z"/><path d="M2 2h12v1H2V2zm0 3h12v8H2V5zm1 1v6h10V6H3z" opacity=".3"/></svg>
+            Economics
           </NavLink>
           <NavLink to="/integrations">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h4v4H2V2zm8 0h4v4h-4V2zM2 10h4v4H2v-4zm8 0h4v4h-4v-4z"/></svg>

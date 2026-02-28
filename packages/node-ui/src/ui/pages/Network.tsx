@@ -2,6 +2,25 @@ import React from 'react';
 import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
 
+function ConnectionBadge({ agent: a }: { agent: any }) {
+  if (a.connectionStatus === 'self') {
+    return <span className="badge" style={{ background: 'var(--text-muted)' }}>Self</span>;
+  }
+  if (a.connectionStatus === 'connected') {
+    const label = a.connectionTransport === 'relayed' ? 'Relayed' : 'Direct';
+    const duration = a.connectedSinceMs ? ` · ${formatDuration(a.connectedSinceMs)}` : '';
+    return (
+      <span
+        className="badge badge-success"
+        title={`${a.connectionDirection ?? ''} ${label.toLowerCase()} connection${duration}`}
+      >
+        {label}{duration}
+      </span>
+    );
+  }
+  return <span className="badge" style={{ background: 'var(--error)' }}>Disconnected</span>;
+}
+
 export function NetworkPage() {
   const { data: connData } = useFetch(fetchConnections, [], 10_000);
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
@@ -74,6 +93,7 @@ export function NetworkPage() {
                 <th>PeerId</th>
                 <th>Framework</th>
                 <th>Role</th>
+                <th>Connection</th>
               </tr>
             </thead>
             <tbody>
@@ -83,6 +103,7 @@ export function NetworkPage() {
                   <td className="mono">{shortId(a.peerId, 12)}</td>
                   <td>{a.framework ?? '—'}</td>
                   <td>{a.nodeRole ?? '—'}</td>
+                  <td><ConnectionBadge agent={a} /></td>
                 </tr>
               ))}
             </tbody>

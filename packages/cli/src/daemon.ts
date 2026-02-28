@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@dkg/agent';
-import { computeNetworkId } from '@dkg/core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger } from '@dkg/core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -29,21 +29,11 @@ import {
   type AutoUpdateConfig,
 } from './config.js';
 
-interface ChatEntry {
-  ts: number;
-  direction: 'in' | 'out';
-  peer: string;
-  peerName?: string;
-  text: string;
-}
-
-const MAX_MESSAGES = 500;
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const config = await loadConfig();
   const startedAt = Date.now();
-  const messages: ChatEntry[] = [];
 
   const logFile = logPath();
 
@@ -134,7 +124,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }
 
   agent.onChat((text, senderPeerId, _convId) => {
-    pushMessage(messages, { ts: Date.now(), direction: 'in', peer: senderPeerId, text });
+    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'in', peer: senderPeerId, text }); } catch { /* never crash */ }
     log(`CHAT IN  [${shortId(senderPeerId)}]: ${text}`);
   });
 
@@ -195,6 +185,28 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   log('Dashboard DB initialized at ' + join(dkgDir(), 'node-ui.db'));
 
+  Logger.setSink((entry) => {
+    try {
+      dashDb.insertLog({
+        ts: Date.now(),
+        level: entry.level,
+        operation_name: entry.operationName,
+        operation_id: entry.operationId,
+        module: entry.module,
+        message: entry.message,
+      });
+    } catch { /* DB write must never break the node */ }
+  });
+
+  // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
+  function parseRdfInt(raw: string | undefined): number {
+    if (!raw) return 0;
+    const m = raw.match(/^"?(\d+)"?\^?\^/);
+    if (m) return parseInt(m[1], 10);
+    const n = parseInt(raw, 10);
+    return isNaN(n) ? 0 : n;
+  }
+
   const metricsSource: MetricsSource = {
     getPeerCount: () => agent.node.libp2p.getConnections().length,
     getDirectPeerCount: () => agent.node.libp2p.getConnections().filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit')).length,
@@ -204,24 +216,24 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     },
     getParanetCount: async () => (await agent.listParanets()).length,
     getTotalTriples: async () => {
-      const r = await agent.query('SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }');
-      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+      const r = await agent.query('SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }');
+      return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKCs: async () => {
       const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <urn:dkg:KC> } }');
-      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+      return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKAs: async () => {
       const r = await agent.query('SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <urn:dkg:KA> } }');
-      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+      return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getConfirmedKCs: async () => {
       const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "confirmed" } }');
-      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+      return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTentativeKCs: async () => {
       const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "tentative" } }');
-      return parseInt(r?.bindings?.[0]?.c ?? '0', 10);
+      return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getStoreBytes: async () => {
       try {
@@ -238,6 +250,20 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log('Metrics collector started (2min interval)');
 
   const tracker = new OperationTracker(dashDb);
+
+  // Track peer connections
+  agent.eventBus.on(DKGEvent.CONNECTION_OPEN, (data: any) => {
+    const ctx = createOperationContext('connect');
+    tracker.start(ctx, { peerId: data.peerId });
+    tracker.complete(ctx, { details: { transport: data.transport, direction: data.direction } });
+  });
+
+  // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
+  agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
+    const ctx = createOperationContext('publish');
+    tracker.start(ctx, { paranetId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
+    tracker.complete(ctx, { tripleCount: data.tripleCount });
+  });
 
   const chatAssistant = new ChatAssistant(dashDb, async (sparql: string) => agent.query(sparql), config.llm);
   if (config.llm) log('Chat assistant ready (LLM enabled)');
@@ -274,7 +300,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant);
       if (handled) return;
 
-      await handleRequest(req, res, agent, config, startedAt, messages, opWallets, network);
+      await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
     }
@@ -316,9 +342,10 @@ async function handleRequest(
   agent: DKGAgent,
   config: DkgConfig,
   startedAt: number,
-  messages: ChatEntry[],
+  dashDb: DashboardDB,
   opWallets: import('@dkg/agent').OpWalletsConfig,
   network: Awaited<ReturnType<typeof loadNetworkConfig>>,
+  tracker: OperationTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -331,6 +358,8 @@ async function handleRequest(
     const uniquePeers = new Set(allConns.map(c => c.remotePeer.toString()));
     const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
     const networkId = await computeNetworkId();
+    const chainConf = config.chain ?? network?.chain;
+    const blockExplorerUrl = config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     return jsonResponse(res, 200, {
       name: config.name,
       peerId: agent.peerId,
@@ -341,6 +370,7 @@ async function handleRequest(
       connections: { total: allConns.length, direct: directConns.length, relayed: relayedConns },
       relayConnected: circuitAddrs.length > 0,
       multiaddrs: agent.multiaddrs,
+      blockExplorerUrl,
     });
   }
 
@@ -367,10 +397,34 @@ async function handleRequest(
     });
   }
 
-  // GET /api/agents
+  // GET /api/agents — enriched with live connection health
   if (req.method === 'GET' && path === '/api/agents') {
     const agents = await agent.findAgents();
-    return jsonResponse(res, 200, { agents });
+    const allConns = agent.node.libp2p.getConnections();
+    const connByPeer = new Map<string, { transport: string; direction: string; sinceMs: number }>();
+    for (const c of allConns) {
+      const pid = c.remotePeer.toString();
+      if (!connByPeer.has(pid)) {
+        connByPeer.set(pid, {
+          transport: c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
+          direction: c.direction,
+          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
+        });
+      }
+    }
+    const myPeerId = agent.peerId;
+    const enriched = agents.map((a: any) => {
+      const isSelf = a.peerId === myPeerId;
+      const conn = connByPeer.get(a.peerId);
+      return {
+        ...a,
+        connectionStatus: isSelf ? 'self' : conn ? 'connected' : 'disconnected',
+        connectionTransport: conn?.transport ?? null,
+        connectionDirection: conn?.direction ?? null,
+        connectedSinceMs: conn?.sinceMs ?? null,
+      };
+    });
+    return jsonResponse(res, 200, { agents: enriched });
   }
 
   // GET /api/skills
@@ -389,9 +443,7 @@ async function handleRequest(
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${to}" not found` });
 
     const result = await agent.sendChat(peerId, text);
-    if (result.delivered) {
-      pushMessage(messages, { ts: Date.now(), direction: 'out', peer: peerId, text });
-    }
+    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text, delivered: result.delivered }); } catch { /* never crash */ }
     return jsonResponse(res, 200, result);
   }
 
@@ -401,17 +453,20 @@ async function handleRequest(
     const limit = parseInt(url.searchParams.get('limit') ?? '100', 10);
     const since = parseInt(url.searchParams.get('since') ?? '0', 10);
 
-    let filtered = messages;
-    if (since > 0) {
-      filtered = filtered.filter(m => m.ts > since);
-    }
+    let peer: string | undefined;
     if (peerFilter) {
-      const peerId = await resolveNameToPeerId(agent, peerFilter);
-      if (peerId) {
-        filtered = filtered.filter(m => m.peer === peerId);
-      }
+      peer = (await resolveNameToPeerId(agent, peerFilter)) ?? undefined;
     }
-    return jsonResponse(res, 200, { messages: filtered.slice(-limit) });
+    const rows = dashDb.getChatMessages({ peer, since: since || undefined, limit });
+    const msgs = rows.map(r => ({
+      ts: r.ts,
+      direction: r.direction,
+      peer: r.peer,
+      peerName: r.peer_name ?? undefined,
+      text: r.text,
+      delivered: r.delivered == null ? undefined : r.delivered === 1,
+    }));
+    return jsonResponse(res, 200, { messages: msgs });
   }
 
   // POST /api/connect  { multiaddr: "..." }
@@ -430,22 +485,45 @@ async function handleRequest(
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
     }
-    const result = await agent.publish(paranetId, quads, privateQuads);
-    const chain = result.onChainResult;
-    return jsonResponse(res, 200, {
-      kcId: String(result.kcId),
-      status: result.status,
-      kas: result.kaManifest.map(ka => ({
-        tokenId: String(ka.tokenId),
-        rootEntity: ka.rootEntity,
-      })),
-      ...(chain && {
-        txHash: chain.txHash,
-        blockNumber: chain.blockNumber,
-        batchId: String(chain.batchId),
-        publisherAddress: chain.publisherAddress,
-      }),
-    });
+    const ctx = createOperationContext('publish');
+    tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    try {
+      const result = await agent.publish(paranetId, quads, privateQuads, {
+        onPhase: (phase, status) => {
+          if (status === 'start') tracker.startPhase(ctx, phase);
+          else tracker.completePhase(ctx, phase);
+        },
+      });
+      const chain = result.onChainResult;
+      if (chain) {
+        tracker.setCost(ctx, {
+          gasUsed: chain.gasUsed,
+          gasPrice: chain.effectiveGasPrice,
+          gasCost: chain.gasCostWei,
+          tracCost: chain.tokenAmount,
+        });
+        const chainId = (config.chain ?? network?.chain)?.chainId;
+        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
+      }
+      tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      return jsonResponse(res, 200, {
+        kcId: String(result.kcId),
+        status: result.status,
+        kas: result.kaManifest.map(ka => ({
+          tokenId: String(ka.tokenId),
+          rootEntity: ka.rootEntity,
+        })),
+        ...(chain && {
+          txHash: chain.txHash,
+          blockNumber: chain.blockNumber,
+          batchId: String(chain.batchId),
+          publisherAddress: chain.publisherAddress,
+        }),
+      });
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
   }
 
   // POST /api/query  { sparql: "...", paranetId?: "..." }
@@ -453,8 +531,20 @@ async function handleRequest(
     const body = await readBody(req);
     const { sparql, paranetId } = JSON.parse(body);
     if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
-    const result = await agent.query(sparql, paranetId);
-    return jsonResponse(res, 200, { result });
+    const ctx = createOperationContext('query');
+    tracker.start(ctx, { paranetId, details: { sparql: sparql.slice(0, 200) } });
+    tracker.startPhase(ctx, 'parse');
+    try {
+      tracker.completePhase(ctx, 'parse');
+      tracker.startPhase(ctx, 'execute');
+      const result = await agent.query(sparql, paranetId);
+      tracker.completePhase(ctx, 'execute');
+      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      return jsonResponse(res, 200, { result });
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
   }
 
   // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }
@@ -608,10 +698,6 @@ async function resolveNameToPeerId(agent: DKGAgent, nameOrId: string): Promise<s
   return match?.peerId ?? null;
 }
 
-function pushMessage(messages: ChatEntry[], entry: ChatEntry): void {
-  messages.push(entry);
-  if (messages.length > MAX_MESSAGES) messages.splice(0, messages.length - MAX_MESSAGES);
-}
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -634,6 +720,18 @@ function shortId(peerId: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function deriveBlockExplorerUrl(chainId?: string): string | undefined {
+  if (!chainId) return undefined;
+  const id = chainId.includes(':') ? chainId.split(':')[1] : chainId;
+  switch (id) {
+    case '84532': return 'https://sepolia.basescan.org';
+    case '8453': return 'https://basescan.org';
+    case '1': return 'https://etherscan.io';
+    case '11155111': return 'https://sepolia.etherscan.io';
+    default: return undefined;
+  }
 }
 
 /** Normalize repo to "owner/name" (strip URL prefix or .git suffix). */

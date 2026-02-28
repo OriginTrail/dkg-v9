@@ -315,13 +315,31 @@ describe('MockChainAdapter V9', () => {
   // Paranets
   // =====================================================================
 
-  it('creates a paranet', async () => {
+  it('creates a paranet with legacy paranetId + metadata', async () => {
     const adapter = createAdapter();
     const result = await adapter.createParanet({
       paranetId: 'test-paranet',
       metadata: { name: 'Test' },
     });
     expect(result.success).toBe(true);
+    expect(result.paranetId).toBe('test-paranet');
+  });
+
+  it('creates a paranet with V9 name/description', async () => {
+    const adapter = createAdapter();
+    const result = await adapter.createParanet({
+      name: 'MyParanet',
+      description: 'A test paranet',
+      accessPolicy: 0,
+    });
+    expect(result.success).toBe(true);
+    expect(result.paranetId).toBe('mock-MyParanet');
+  });
+
+  it('listParanetsFromChain returns empty when mock has no chain events', async () => {
+    const adapter = createAdapter();
+    const list = await adapter.listParanetsFromChain!();
+    expect(list).toEqual([]);
   });
 
   it('submits KC to paranet', async () => {

@@ -73,9 +73,10 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
 
+    onPhase?.('prepare', 'start');
     this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private (entityProofs=${entityProofs})`);
     await this.graphManager.ensureParanet(paranetId);
 
@@ -159,6 +160,9 @@ export class DKGPublisher implements Publisher {
     }
     const kaCount = manifestEntries.length;
 
+    onPhase?.('prepare', 'end');
+    onPhase?.('store', 'start');
+
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
 
@@ -184,6 +188,9 @@ export class DKGPublisher implements Publisher {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
     }
+
+    onPhase?.('store', 'end');
+    onPhase?.('chain', 'start');
 
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
@@ -254,6 +261,8 @@ export class DKGPublisher implements Publisher {
           ],
         });
 
+        onChainResult.tokenAmount = tokenAmount;
+
         // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
         ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
 
@@ -316,6 +325,8 @@ export class DKGPublisher implements Publisher {
         this.ownedEntities.get(paranetId)!.add(e.rootEntity);
       }
     }
+
+    onPhase?.('chain', 'end');
 
     const result: PublishResult = {
       kcId: onChainResult?.batchId ?? 0n,

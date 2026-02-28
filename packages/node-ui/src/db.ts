@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -29,93 +29,133 @@ export class DashboardDB {
     const version = this.db.pragma('user_version', { simple: true }) as number;
     if (version >= SCHEMA_VERSION) return;
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS metric_snapshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER NOT NULL,
-        cpu_percent REAL,
-        mem_used_bytes INTEGER,
-        mem_total_bytes INTEGER,
-        disk_used_bytes INTEGER,
-        disk_total_bytes INTEGER,
-        heap_used_bytes INTEGER,
-        uptime_seconds INTEGER,
-        peer_count INTEGER,
-        direct_peers INTEGER,
-        relayed_peers INTEGER,
-        mesh_peers INTEGER,
-        paranet_count INTEGER,
-        total_triples INTEGER,
-        total_kcs INTEGER,
-        total_kas INTEGER,
-        store_bytes INTEGER,
-        confirmed_kcs INTEGER,
-        tentative_kcs INTEGER,
-        rpc_latency_ms INTEGER,
-        rpc_healthy INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON metric_snapshots(ts);
+    if (version < 1) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS metric_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          cpu_percent REAL,
+          mem_used_bytes INTEGER,
+          mem_total_bytes INTEGER,
+          disk_used_bytes INTEGER,
+          disk_total_bytes INTEGER,
+          heap_used_bytes INTEGER,
+          uptime_seconds INTEGER,
+          peer_count INTEGER,
+          direct_peers INTEGER,
+          relayed_peers INTEGER,
+          mesh_peers INTEGER,
+          paranet_count INTEGER,
+          total_triples INTEGER,
+          total_kcs INTEGER,
+          total_kas INTEGER,
+          store_bytes INTEGER,
+          confirmed_kcs INTEGER,
+          tentative_kcs INTEGER,
+          rpc_latency_ms INTEGER,
+          rpc_healthy INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON metric_snapshots(ts);
 
-      CREATE TABLE IF NOT EXISTS operations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation_id TEXT NOT NULL,
-        operation_name TEXT NOT NULL,
-        started_at INTEGER NOT NULL,
-        duration_ms INTEGER,
-        status TEXT DEFAULT 'in_progress',
-        peer_id TEXT,
-        paranet_id TEXT,
-        triple_count INTEGER,
-        error_message TEXT,
-        details TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_ops_operation_id ON operations(operation_id);
-      CREATE INDEX IF NOT EXISTS idx_ops_started_at ON operations(started_at);
-      CREATE INDEX IF NOT EXISTS idx_ops_name ON operations(operation_name);
+        CREATE TABLE IF NOT EXISTS operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          operation_id TEXT NOT NULL,
+          operation_name TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          duration_ms INTEGER,
+          status TEXT DEFAULT 'in_progress',
+          peer_id TEXT,
+          paranet_id TEXT,
+          triple_count INTEGER,
+          error_message TEXT,
+          details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ops_operation_id ON operations(operation_id);
+        CREATE INDEX IF NOT EXISTS idx_ops_started_at ON operations(started_at);
+        CREATE INDEX IF NOT EXISTS idx_ops_name ON operations(operation_name);
 
-      CREATE TABLE IF NOT EXISTS logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER NOT NULL,
-        level TEXT NOT NULL,
-        operation_name TEXT,
-        operation_id TEXT,
-        module TEXT,
-        message TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
-      CREATE INDEX IF NOT EXISTS idx_logs_operation_id ON logs(operation_id);
-      CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
+        CREATE TABLE IF NOT EXISTS logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          level TEXT NOT NULL,
+          operation_name TEXT,
+          operation_id TEXT,
+          module TEXT,
+          message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
+        CREATE INDEX IF NOT EXISTS idx_logs_operation_id ON logs(operation_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
-        message, content=logs, content_rowid=id
-      );
+        CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
+          message, content=logs, content_rowid=id
+        );
 
-      CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
-        INSERT INTO logs_fts(rowid, message) VALUES (new.id, new.message);
-      END;
-      CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
-        INSERT INTO logs_fts(logs_fts, rowid, message) VALUES('delete', old.id, old.message);
-      END;
+        CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
+          INSERT INTO logs_fts(rowid, message) VALUES (new.id, new.message);
+        END;
+        CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
+          INSERT INTO logs_fts(logs_fts, rowid, message) VALUES('delete', old.id, old.message);
+        END;
 
-      CREATE TABLE IF NOT EXISTS query_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER NOT NULL,
-        sparql TEXT NOT NULL,
-        duration_ms INTEGER,
-        result_count INTEGER,
-        error TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_qhist_ts ON query_history(ts);
+        CREATE TABLE IF NOT EXISTS query_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          sparql TEXT NOT NULL,
+          duration_ms INTEGER,
+          result_count INTEGER,
+          error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_qhist_ts ON query_history(ts);
 
-      CREATE TABLE IF NOT EXISTS saved_queries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        description TEXT,
-        sparql TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-    `);
+        CREATE TABLE IF NOT EXISTS saved_queries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          description TEXT,
+          sparql TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+    }
+
+    if (version < 2) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS operation_phases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          operation_id TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          duration_ms INTEGER,
+          status TEXT DEFAULT 'in_progress',
+          details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_phases_op ON operation_phases(operation_id);
+
+        ALTER TABLE operations ADD COLUMN gas_used INTEGER;
+        ALTER TABLE operations ADD COLUMN gas_price_gwei REAL;
+        ALTER TABLE operations ADD COLUMN gas_cost_eth REAL;
+        ALTER TABLE operations ADD COLUMN trac_cost REAL;
+        ALTER TABLE operations ADD COLUMN tx_hash TEXT;
+        ALTER TABLE operations ADD COLUMN chain_id INTEGER;
+      `);
+    }
+
+    if (version < 3) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          direction TEXT NOT NULL,
+          peer TEXT NOT NULL,
+          peer_name TEXT,
+          text TEXT NOT NULL,
+          delivered INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_messages(ts);
+        CREATE INDEX IF NOT EXISTS idx_chat_peer ON chat_messages(peer);
+      `);
+    }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }
@@ -123,9 +163,11 @@ export class DashboardDB {
   prune(): void {
     const cutoff = Date.now() - this.retentionDays * 86_400_000;
     this.db.exec(`DELETE FROM metric_snapshots WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM operation_phases WHERE started_at < ${cutoff}`);
     this.db.exec(`DELETE FROM operations WHERE started_at < ${cutoff}`);
     this.db.exec(`DELETE FROM logs WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM query_history WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
   }
 
   // --- Prepared statements (lazy-initialized) ---
@@ -264,7 +306,7 @@ export class DashboardDB {
     return { operations, total };
   }
 
-  getOperation(operationId: string): { operation: OperationRow | null; logs: LogRow[] } {
+  getOperation(operationId: string): { operation: OperationRow | null; logs: LogRow[]; phases: OperationPhaseRow[] } {
     const operation = this.db.prepare(
       'SELECT * FROM operations WHERE operation_id = ?',
     ).get(operationId) as OperationRow | null;
@@ -273,7 +315,211 @@ export class DashboardDB {
       'SELECT * FROM logs WHERE operation_id = ? ORDER BY ts',
     ).all(operationId) as LogRow[];
 
-    return { operation, logs };
+    const phases = this.db.prepare(
+      'SELECT * FROM operation_phases WHERE operation_id = ? ORDER BY started_at',
+    ).all(operationId) as OperationPhaseRow[];
+
+    return { operation, logs, phases };
+  }
+
+  // --- Operation phases ---
+
+  insertPhase(op: { operation_id: string; phase: string; started_at: number }): void {
+    this.stmt('insertPhase', `
+      INSERT INTO operation_phases (operation_id, phase, started_at, status)
+      VALUES (@operation_id, @phase, @started_at, 'in_progress')
+    `).run(op);
+  }
+
+  completePhase(op: { operation_id: string; phase: string; duration_ms: number }): void {
+    this.stmt('completePhase', `
+      UPDATE operation_phases SET status = 'success', duration_ms = @duration_ms
+      WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
+    `).run(op);
+  }
+
+  // --- Operation cost & tx ---
+
+  setOperationCost(op: {
+    operation_id: string;
+    gas_used?: number | null;
+    gas_price_gwei?: number | null;
+    gas_cost_eth?: number | null;
+    trac_cost?: number | null;
+    tx_hash?: string | null;
+    chain_id?: number | null;
+  }): void {
+    this.stmt('setCost', `
+      UPDATE operations SET
+        gas_used = COALESCE(@gas_used, gas_used),
+        gas_price_gwei = COALESCE(@gas_price_gwei, gas_price_gwei),
+        gas_cost_eth = COALESCE(@gas_cost_eth, gas_cost_eth),
+        trac_cost = COALESCE(@trac_cost, trac_cost),
+        tx_hash = COALESCE(@tx_hash, tx_hash),
+        chain_id = COALESCE(@chain_id, chain_id)
+      WHERE operation_id = @operation_id
+    `).run({
+      operation_id: op.operation_id,
+      gas_used: op.gas_used ?? null,
+      gas_price_gwei: op.gas_price_gwei ?? null,
+      gas_cost_eth: op.gas_cost_eth ?? null,
+      trac_cost: op.trac_cost ?? null,
+      tx_hash: op.tx_hash ?? null,
+      chain_id: op.chain_id ?? null,
+    });
+  }
+
+  // --- Operation stats ---
+
+  getOperationStats(opts: {
+    name?: string;
+    periodMs: number;
+    bucketMs: number;
+  }): { summary: OperationStatsSummary; timeSeries: OperationStatsBucket[] } {
+    const cutoff = Date.now() - opts.periodMs;
+    const nameFilter = opts.name ? 'AND operation_name = ?' : '';
+    const params: unknown[] = [cutoff];
+    if (opts.name) params.push(opts.name);
+
+    const summaryRow = this.db.prepare(`
+      SELECT
+        COUNT(*) as totalCount,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount,
+        AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
+        AVG(gas_cost_eth) as avgGasCostEth,
+        SUM(gas_cost_eth) as totalGasCostEth,
+        AVG(trac_cost) as avgTracCost,
+        SUM(trac_cost) as totalTracCost
+      FROM operations WHERE started_at >= ? ${nameFilter}
+    `).get(...params) as any;
+
+    const summary: OperationStatsSummary = {
+      totalCount: summaryRow.totalCount ?? 0,
+      successCount: summaryRow.successCount ?? 0,
+      errorCount: summaryRow.errorCount ?? 0,
+      successRate: summaryRow.totalCount > 0 ? (summaryRow.successCount ?? 0) / summaryRow.totalCount : 0,
+      avgDurationMs: summaryRow.avgDurationMs ?? 0,
+      avgGasCostEth: summaryRow.avgGasCostEth ?? 0,
+      totalGasCostEth: summaryRow.totalGasCostEth ?? 0,
+      avgTracCost: summaryRow.avgTracCost ?? 0,
+      totalTracCost: summaryRow.totalTracCost ?? 0,
+    };
+
+    const bucketSize = opts.bucketMs;
+    const tsParams: unknown[] = [bucketSize, cutoff];
+    if (opts.name) tsParams.push(opts.name);
+
+    const timeSeries = this.db.prepare(`
+      SELECT
+        (CAST(started_at / ? AS INTEGER) * ?) as bucket,
+        COUNT(*) as count,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
+        AVG(gas_cost_eth) as avgGasCostEth,
+        SUM(gas_cost_eth) as totalGasCostEth
+      FROM operations
+      WHERE started_at >= ? ${nameFilter}
+      GROUP BY bucket ORDER BY bucket
+    `).all(bucketSize, bucketSize, ...params) as any[];
+
+    return {
+      summary,
+      timeSeries: timeSeries.map((r: any) => ({
+        bucket: r.bucket,
+        count: r.count,
+        successRate: r.count > 0 ? r.successCount / r.count : 0,
+        avgDurationMs: r.avgDurationMs ?? 0,
+        avgGasCostEth: r.avgGasCostEth ?? 0,
+        totalGasCostEth: r.totalGasCostEth ?? 0,
+      })),
+    };
+  }
+
+  // --- Spending summary ---
+
+  getSpendingSummary(): SpendingSummary {
+    const periods = [
+      { label: '24h', ms: 86_400_000 },
+      { label: '7d', ms: 7 * 86_400_000 },
+      { label: '30d', ms: 30 * 86_400_000 },
+      { label: 'all', ms: Date.now() },
+    ];
+    const now = Date.now();
+
+    const results: SpendingSummary = { periods: [] };
+
+    for (const p of periods) {
+      const cutoff = now - p.ms;
+      const row = this.db.prepare(`
+        SELECT
+          COUNT(*) as publishCount,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+          COALESCE(SUM(gas_cost_eth), 0) as totalGasEth,
+          COALESCE(SUM(trac_cost), 0) as totalTrac,
+          COALESCE(AVG(gas_cost_eth), 0) as avgGasEth,
+          COALESCE(AVG(trac_cost), 0) as avgTrac
+        FROM operations
+        WHERE operation_name = 'publish' AND started_at >= ?
+      `).get(cutoff) as any;
+
+      results.periods.push({
+        label: p.label,
+        publishCount: row.publishCount ?? 0,
+        successCount: row.successCount ?? 0,
+        totalGasEth: row.totalGasEth,
+        totalTrac: row.totalTrac,
+        avgGasEth: row.avgGasEth,
+        avgTrac: row.avgTrac,
+      });
+    }
+
+    return results;
+  }
+
+  // --- Chat messages ---
+
+  insertChatMessage(msg: {
+    ts: number;
+    direction: 'in' | 'out';
+    peer: string;
+    peerName?: string | null;
+    text: string;
+    delivered?: boolean | null;
+  }): void {
+    this.stmt('insertChat', `
+      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered)
+      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered)
+    `).run({
+      ts: msg.ts,
+      direction: msg.direction,
+      peer: msg.peer,
+      peer_name: msg.peerName ?? null,
+      text: msg.text,
+      delivered: msg.delivered == null ? null : msg.delivered ? 1 : 0,
+    });
+  }
+
+  getChatMessages(opts: {
+    peer?: string;
+    since?: number;
+    limit?: number;
+  } = {}): ChatMessageRow[] {
+    let sql = 'SELECT * FROM chat_messages WHERE 1=1';
+    const params: unknown[] = [];
+
+    if (opts.since) {
+      sql += ' AND ts > ?';
+      params.push(opts.since);
+    }
+    if (opts.peer) {
+      sql += ' AND peer = ?';
+      params.push(opts.peer);
+    }
+    sql += ' ORDER BY ts DESC LIMIT ?';
+    params.push(opts.limit ?? 200);
+
+    return (this.db.prepare(sql).all(...params) as ChatMessageRow[]).reverse();
   }
 
   // --- Logs ---
@@ -466,6 +712,43 @@ export interface OperationRow {
   triple_count: number | null;
   error_message: string | null;
   details: string | null;
+  gas_used: number | null;
+  gas_price_gwei: number | null;
+  gas_cost_eth: number | null;
+  trac_cost: number | null;
+  tx_hash: string | null;
+  chain_id: number | null;
+}
+
+export interface OperationPhaseRow {
+  id: number;
+  operation_id: string;
+  phase: string;
+  started_at: number;
+  duration_ms: number | null;
+  status: string;
+  details: string | null;
+}
+
+export interface OperationStatsSummary {
+  totalCount: number;
+  successCount: number;
+  errorCount: number;
+  successRate: number;
+  avgDurationMs: number;
+  avgGasCostEth: number;
+  totalGasCostEth: number;
+  avgTracCost: number;
+  totalTracCost: number;
+}
+
+export interface OperationStatsBucket {
+  bucket: number;
+  count: number;
+  successRate: number;
+  avgDurationMs: number;
+  avgGasCostEth: number;
+  totalGasCostEth: number;
 }
 
 export interface LogRow {
@@ -494,4 +777,28 @@ export interface SavedQueryRow {
   sparql: string;
   created_at: number;
   updated_at: number;
+}
+
+export interface ChatMessageRow {
+  id: number;
+  ts: number;
+  direction: 'in' | 'out';
+  peer: string;
+  peer_name: string | null;
+  text: string;
+  delivered: number | null;
+}
+
+export interface SpendingPeriod {
+  label: string;
+  publishCount: number;
+  successCount: number;
+  totalGasEth: number;
+  totalTrac: number;
+  avgGasEth: number;
+  avgTrac: number;
+}
+
+export interface SpendingSummary {
+  periods: SpendingPeriod[];
 }

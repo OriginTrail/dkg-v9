@@ -48,7 +48,16 @@ export const fetchOperations = (params: Record<string, string> = {}) => {
   return get<{ operations: any[]; total: number }>(`/api/operations${qs ? '?' + qs : ''}`);
 };
 export const fetchOperation = (id: string) =>
-  get<{ operation: any; logs: any[] }>(`/api/operations/${id}`);
+  get<{ operation: any; logs: any[]; phases: any[] }>(`/api/operations/${id}`);
+
+// --- Operation stats ---
+export const fetchOperationStats = (params: { name?: string; period?: string } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.name) qs.set('name', params.name);
+  if (params.period) qs.set('period', params.period);
+  const q = qs.toString();
+  return get<{ summary: any; timeSeries: any[] }>(`/api/operation-stats${q ? '?' + q : ''}`);
+};
 
 // --- Logs ---
 export const fetchLogs = (params: Record<string, string> = {}) => {
@@ -98,6 +107,19 @@ export const fetchMessages = (opts: { peer?: string; since?: number; limit?: num
     `/api/messages${qs ? '?' + qs : ''}`,
   );
 };
+
+// --- Economics / spending ---
+export interface SpendingPeriod {
+  label: string;
+  publishCount: number;
+  successCount: number;
+  totalGasEth: number;
+  totalTrac: number;
+  avgGasEth: number;
+  avgTrac: number;
+}
+export const fetchEconomics = () =>
+  get<{ periods: SpendingPeriod[] }>('/api/economics');
 
 // --- Wallet & chain ---
 export const fetchWalletsBalances = () =>

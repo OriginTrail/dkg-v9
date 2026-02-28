@@ -17,20 +17,22 @@
     "better-sqlite3": "^11"
   },
   "devDependencies": {
-    "@dkg/graph-viz": "workspace:*",
     "@codemirror/lang-sql": "^6",
-    "@codemirror/view": "^6",
     "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@dkg/graph-viz": "workspace:*",
     "@types/better-sqlite3": "^7",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.183.1",
     "@vitejs/plugin-react": "^4",
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",
     "recharts": "^2",
+    "three": "^0.182.0",
+    "typescript": "^5.7",
     "vite": "^6",
-    "vitest": "^3",
-    "typescript": "^5.7"
+    "vitest": "^3"
   }
 }

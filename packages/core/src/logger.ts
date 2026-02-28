@@ -7,6 +7,14 @@ export interface OperationContext {
   operationName: OperationName;
 }
 
+export type LogSink = (entry: {
+  level: string;
+  operationName: string;
+  operationId: string;
+  module: string;
+  message: string;
+}) => void;
+
 /**
  * Structured logger that prefixes every message with a timestamp,
  * operation name, and operation ID for cross-node log correlation.
@@ -14,7 +22,12 @@ export interface OperationContext {
  * Format: YYYY-MM-DD HH:MM:SS <operationName> <operationId> "<message>"
  */
 export class Logger {
+  private static sink: LogSink | null = null;
   private readonly prefix: string;
+
+  static setSink(sink: LogSink | null): void {
+    Logger.sink = sink;
+  }
 
   constructor(private readonly moduleName: string) {
     this.prefix = moduleName;
@@ -22,14 +35,17 @@ export class Logger {
 
   info(ctx: OperationContext, message: string): void {
     process.stdout.write(`${this.format(ctx, message)}\n`);
+    Logger.sink?.({ level: 'info', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
   }
 
   warn(ctx: OperationContext, message: string): void {
     process.stderr.write(`${this.format(ctx, message)} [WARN]\n`);
+    Logger.sink?.({ level: 'warn', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
   }
 
   error(ctx: OperationContext, message: string): void {
     process.stderr.write(`${this.format(ctx, message)} [ERROR]\n`);
+    Logger.sink?.({ level: 'error', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
   }
 
   private format(ctx: OperationContext, message: string): string {

@@ -12,6 +12,7 @@ import type {
   ChainEvent,
   EventFilter,
   CreateParanetParams,
+  ParanetOnChain,
   PublishParams,
   OnChainPublishResult,
 } from './chain-adapter.js';
@@ -42,6 +43,7 @@ interface ContractCache {
   knowledgeCollectionStorage?: Contract;
   staking?: Contract;
   paranet?: Contract;
+  paranetV9Registry?: Contract;
   token?: Contract;
   parametersStorage?: Contract;
   askStorage?: Contract;
@@ -128,6 +130,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.askStorage = await this.resolveContract('AskStorage');
     } catch {
       // V9 contracts not deployed — adapter works in V8-only mode
+    }
+
+    try {
+      this.contracts.paranetV9Registry = await this.resolveContract('ParanetV9Registry');
+    } catch {
+      // ParanetV9Registry not registered in Hub — createParanet/listParanetsFromChain unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -429,6 +437,10 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
 
+    const gasUsed = BigInt(receipt.gasUsed);
+    const effectiveGasPrice = BigInt(receipt.gasPrice);
+    const gasCostWei = gasUsed * effectiveGasPrice;
+
     return {
       batchId,
       startKAId,
@@ -437,6 +449,9 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       blockTimestamp,
       publisherAddress,
+      gasUsed,
+      effectiveGasPrice,
+      gasCostWei,
     };
   }
 
@@ -607,15 +622,60 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Paranets (placeholder — full implementation in Milestone 5)
+  // Paranets (V9: ParanetV9Registry when deployed)
   // =====================================================================
 
-  async createParanet(_params: CreateParanetParams): Promise<TxResult> {
-    throw new Error('createParanet: not yet implemented on EVM adapter (Milestone 5)');
+  async createParanet(params: CreateParanetParams): Promise<TxResult> {
+    await this.init();
+    const registry = this.contracts.paranetV9Registry;
+    const name = params.name ?? params.metadata?.['name'];
+    if (!registry || !name) {
+      throw new Error(
+        'createParanet: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
+          'Deploy ParanetV9Registry and register it in the Hub, or provide name.',
+      );
+    }
+    const description = params.description ?? params.metadata?.['description'] ?? '';
+    const accessPolicy = params.accessPolicy ?? 0;
+    const tx = await registry.createParanetV9(name, description, accessPolicy);
+    const receipt = await tx.wait();
+    if (!receipt) throw new Error('createParanet: no receipt');
+    let paranetIdHex: string | undefined;
+    const created = registry.interface.parseLog({
+      topics: receipt.logs[receipt.logs.length - 1]?.topics as string[],
+      data: receipt.logs[receipt.logs.length - 1]?.data ?? '0x',
+    });
+    if (created?.name === 'ParanetCreated') paranetIdHex = String(created.args.paranetId);
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: true,
+      paranetId: paranetIdHex,
+    };
   }
 
   async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> {
     throw new Error('submitToParanet: not yet implemented on EVM adapter (Milestone 5)');
+  }
+
+  async listParanetsFromChain(fromBlock?: number): Promise<ParanetOnChain[]> {
+    await this.init();
+    const registry = this.contracts.paranetV9Registry;
+    if (!registry) return [];
+    const filter = registry.filters.ParanetCreated();
+    const start = fromBlock ?? 0;
+    const logs = await registry.queryFilter(filter, start);
+    return logs.map((log) => {
+      const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+      if (!parsed || parsed.name !== 'ParanetCreated') return null;
+      return {
+        paranetId: String(parsed.args.paranetId),
+        creator: String(parsed.args.creator),
+        name: String(parsed.args.name),
+        accessPolicy: Number(parsed.args.accessPolicy),
+        blockNumber: log.blockNumber,
+      };
+    }).filter((x): x is ParanetOnChain => x !== null);
   }
 
   // =====================================================================

@@ -8,6 +8,7 @@ interface Message {
   peer: string;
   peerName?: string;
   text: string;
+  delivered?: boolean;
 }
 
 interface Agent {
@@ -143,6 +144,19 @@ export function MessagesPage() {
                       <div className="chat-bubble-text">{msg.text}</div>
                       <div className="chat-bubble-time">
                         {new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {msg.direction === 'out' && (
+                          <span className={`chat-delivery ${msg.delivered !== false ? 'delivered' : 'failed'}`} title={msg.delivered !== false ? 'Delivered' : 'Not delivered'}>
+                            {msg.delivered !== false ? (
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M1.5 8.5l3 3 2-2M5.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            ) : (
+                              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/>
+                              </svg>
+                            )}
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))

@@ -66,6 +66,8 @@ export interface DkgConfig {
   chain?: ChainConfig;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  /** Block explorer URL for TX links (default: derived from chainId). */
+  blockExplorerUrl?: string;
 }
 
 const DEFAULT_CONFIG: DkgConfig = {

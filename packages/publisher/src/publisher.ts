@@ -9,6 +9,8 @@ export interface KAManifestEntry {
   privateTripleCount?: number;
 }
 
+export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
+
 export interface PublishOptions {
   paranetId: string;
   quads: Quad[];
@@ -22,6 +24,8 @@ export interface PublishOptions {
    * revealing others). Off by default — the flat hash is simpler and cheaper.
    */
   entityProofs?: boolean;
+  /** Optional callback invoked at each phase boundary for instrumentation. */
+  onPhase?: PhaseCallback;
 }
 
 export interface PublishResult {

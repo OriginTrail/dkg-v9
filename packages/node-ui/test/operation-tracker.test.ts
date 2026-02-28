@@ -90,4 +90,65 @@ describe('OperationTracker', () => {
     // Should silently catch the error, not throw
     expect(() => tracker.complete(c)).not.toThrow();
   });
+
+  it('tracks phase lifecycle (startPhase → completePhase)', async () => {
+    const c = ctx('publish', 'op-phases');
+    tracker.start(c, { paranetId: 'testing' });
+
+    tracker.startPhase(c, 'prepare');
+    await new Promise(r => setTimeout(r, 10));
+    tracker.completePhase(c, 'prepare');
+
+    tracker.startPhase(c, 'store');
+    await new Promise(r => setTimeout(r, 10));
+    tracker.completePhase(c, 'store');
+
+    tracker.complete(c);
+
+    const { phases } = db.getOperation('op-phases');
+    expect(phases).toHaveLength(2);
+    expect(phases[0].phase).toBe('prepare');
+    expect(phases[0].status).toBe('success');
+    expect(phases[0].duration_ms).toBeGreaterThanOrEqual(0);
+    expect(phases[1].phase).toBe('store');
+    expect(phases[1].status).toBe('success');
+  });
+
+  it('sets cost via setCost()', () => {
+    const c = ctx('publish', 'op-cost');
+    tracker.start(c);
+    tracker.setCost(c, {
+      gasUsed: 210000n,
+      gasPrice: 250000000n,
+      gasCost: 52500000000000n,
+      tracCost: 500000000000000000n,
+    });
+    tracker.complete(c);
+
+    const { operation } = db.getOperation('op-cost');
+    expect(operation!.gas_used).toBe(210000);
+    expect(operation!.gas_price_gwei).toBeCloseTo(0.25);
+    expect(operation!.gas_cost_eth).toBeCloseTo(0.0000525);
+    expect(operation!.trac_cost).toBeCloseTo(0.5);
+  });
+
+  it('sets tx hash via setTxHash()', () => {
+    const c = ctx('publish', 'op-tx');
+    tracker.start(c);
+    tracker.setTxHash(c, '0xdeadbeef', 84532);
+    tracker.complete(c);
+
+    const { operation } = db.getOperation('op-tx');
+    expect(operation!.tx_hash).toBe('0xdeadbeef');
+    expect(operation!.chain_id).toBe(84532);
+  });
+
+  it('phase/cost methods are no-ops when db is null', () => {
+    const nullTracker = new OperationTracker(null);
+    const c = ctx('publish', 'op-null');
+    nullTracker.startPhase(c, 'prepare');
+    nullTracker.completePhase(c, 'prepare');
+    nullTracker.setCost(c, { gasUsed: 100n });
+    nullTracker.setTxHash(c, '0xabc');
+  });
 });

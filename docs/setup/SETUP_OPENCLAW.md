@@ -16,9 +16,9 @@ packages/adapter-openclaw/README.md
 
 ## Quick Overview
 
-1. `npm install @dkg/adapter-openclaw` — OpenClaw auto-discovers the plugin
-2. Enable in `~/.openclaw/openclaw.json` — add `load.paths` and `plugins.entries["adapter-openclaw"].enabled: true`
-3. Configure in `<workspace>/config.json` — under the `"dkg-node"` key
+1. `cd WORKSPACE_DIR && npm install @dkg/adapter-openclaw` — install in your workspace
+2. Enable in `~/.openclaw/openclaw.json` — add `~/` prefixed `load.paths` and `plugins.entries["adapter-openclaw"].enabled: true`
+3. Configure in `WORKSPACE_DIR/config.json` — under the `"dkg-node"` key
 4. Set `DKG_EVM_PRIVATE_KEY` in `~/.openclaw/.env` for on-chain publishing (optional)
 5. Copy `skills/dkg-node/SKILL.md` to your workspace, restart gateway
 

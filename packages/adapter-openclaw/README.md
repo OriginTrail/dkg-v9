@@ -4,60 +4,98 @@ Turn your OpenClaw agent into a DKG V9 node. Your agent gets a persistent identi
 
 ## Architecture Overview
 
-The DKG plugin uses **two configuration layers**:
+The DKG plugin uses **three configuration layers**. Understanding these prevents the most common setup mistakes.
 
 | Layer | File | What it controls |
 |-------|------|-----------------|
-| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin load path + enable/disable (`plugins.entries["adapter-openclaw"].enabled: true`) |
-| **Workspace config** | `<workspace>/config.json` | All DKG settings (dataDir, relayPeers, chainConfig, etc.) |
-| **Environment** | `~/.openclaw/.env` | Secrets (EVM private key) |
+| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin loading and enable/disable — `plugins.load.paths` and `plugins.entries` |
+| **Workspace config** | `WORKSPACE_DIR/config.json` | All DKG node settings (name, relayPeers, chainConfig, etc.) under a `"dkg-node"` key |
+| **Environment** | `~/.openclaw/.env` | Secrets (`DKG_EVM_PRIVATE_KEY`) |
 
-OpenClaw's `plugins.entries` only accepts `{ enabled: boolean }` — no other keys. All DKG configuration goes in the workspace `config.json` under a `"dkg-node"` key.
+**Key rules:**
+- `plugins.entries` only accepts `{ enabled: boolean }` — never put DKG settings there.
+- All DKG settings go in the workspace `config.json` under the `"dkg-node"` key.
+- To find your workspace directory, look for `agents.defaults.workspace` in `~/.openclaw/openclaw.json`.
 
 ## Quick Setup (5 steps)
 
-### 1. Install
+> **For agents:** Each step includes exact commands. Before starting, read `~/.openclaw/openclaw.json` to find the workspace directory (`agents.defaults.workspace`). When editing JSON config files, always **merge** new keys into the existing content — never overwrite the file.
+
+### 1. Install the package
+
+Install `@dkg/adapter-openclaw` inside your workspace directory (the path from `agents.defaults.workspace` in `~/.openclaw/openclaw.json`):
 
 ```bash
+cd WORKSPACE_DIR
 npm install @dkg/adapter-openclaw
 ```
 
-After installing, you need to tell OpenClaw where to find the plugin and enable it in the next step.
+This places the plugin at `WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/`.
 
-### 2. Enable the Plugin
+### 2. Enable the plugin in openclaw.json
 
-Add the plugin to `~/.openclaw/openclaw.json`:
+Edit `~/.openclaw/openclaw.json` to add the DKG plugin. You must **merge** the following into the existing `plugins` section — do NOT replace the entire file or remove existing plugin entries.
+
+**Add these two things inside the `plugins` section:**
+
+1. A `load.paths` entry pointing to the installed package using a `~/` prefix path
+2. An `entries` entry with key `adapter-openclaw` set to `{ "enabled": true }`
+
+**How to construct the `load.paths` value:** Take the workspace path from `agents.defaults.workspace`, replace the `$HOME` prefix (e.g. `/home/user`) with `~`, and append `/node_modules/@dkg/adapter-openclaw`.
+
+For example, if your workspace is `/home/user/my-openclaw/workspace`, the load path is `~/my-openclaw/workspace/node_modules/@dkg/adapter-openclaw`.
+
+> **Why `~/`?** OpenClaw's gateway runs as a system service whose working directory varies by platform (`$HOME` on Linux, `/` on macOS). Relative paths break across platforms. The `~/` prefix is expanded to `$HOME` by OpenClaw before path resolution, making it portable across Linux and macOS.
+
+**Example — if your openclaw.json currently has:**
 
 ```json
 {
+  "agents": { "defaults": { "workspace": "/home/user/my-openclaw/workspace" } },
   "plugins": {
-    "load": {
-      "paths": ["node_modules/@dkg/adapter-openclaw"]
-    },
     "entries": {
-      "adapter-openclaw": {
-        "enabled": true
-      }
+      "telegram": { "enabled": true }
     }
   }
 }
 ```
 
-**Important details:**
-- `load.paths` is resolved relative to the OpenClaw project root.
-- The `entries` key must be `adapter-openclaw` — this matches the plugin's manifest ID (not the npm package name).
-- Only `enabled: boolean` is allowed in entries — no other keys. Do not put DKG config in this file.
+**Change the `plugins` section to:**
 
-### 3. Configure the Node
+```json
+{
+  "agents": { "defaults": { "workspace": "/home/user/my-openclaw/workspace" } },
+  "plugins": {
+    "load": {
+      "paths": ["~/my-openclaw/workspace/node_modules/@dkg/adapter-openclaw"]
+    },
+    "entries": {
+      "telegram": { "enabled": true },
+      "adapter-openclaw": { "enabled": true }
+    }
+  }
+}
+```
 
-Add a `"dkg-node"` block to your workspace's `config.json`. The two fields that determine **which network** you join are:
+**What was added:**
+- `plugins.load.paths` — the path to the installed plugin directory, using the `~/` prefix for cross-platform portability. Constructed by replacing `$HOME` with `~` in the workspace path and appending `/node_modules/@dkg/adapter-openclaw`.
+- `plugins.entries["adapter-openclaw"]` — enables the plugin. The key `adapter-openclaw` is the plugin's manifest ID (not the npm package name `@dkg/adapter-openclaw`).
 
-- **`relayPeers`** — the relay node your agent connects through (determines which P2P network)
+**Common mistakes:**
+- Using a bare relative path in `load.paths` (e.g. `node_modules/...`) — the gateway's working directory varies by platform, so relative paths break. Use `~/` prefix paths instead.
+- Using the npm package name `@dkg/adapter-openclaw` as the entries key — use `adapter-openclaw` instead.
+- Replacing the entire `plugins` block and losing existing entries like `telegram`.
+- Putting DKG config (relayPeers, chainConfig, etc.) in this file — those go in the workspace `config.json`.
+
+### 3. Configure the DKG node
+
+Create or edit `config.json` **inside the workspace directory** (the path from `agents.defaults.workspace` in `openclaw.json`).
+
+Add a `"dkg-node"` key with your network settings. The two fields that determine **which network** you join are:
+- **`relayPeers`** — the relay node your agent connects through (determines which P2P swarm)
 - **`chainConfig`** — the RPC endpoint and Hub contract (determines which chain for on-chain finality)
 
-Together, these define the network. Use the values from the table below for your target network.
-
-**Testnet example** (the only network available today):
+**Testnet config** (the only network available today):
 
 ```json
 {
@@ -76,9 +114,13 @@ Together, these define the network. Use the values from the table below for your
 }
 ```
 
-See the [Networks](#networks) section below for relay and chain values per network.
+If the file already exists with other config, **merge** the `"dkg-node"` key into it — don't overwrite the file.
 
-### 4. Set Up On-Chain Publishing
+If the file doesn't exist, create it with the content above.
+
+See the [Networks](#networks) section for relay and chain values per network.
+
+### 4. Set up on-chain publishing (optional)
 
 For publishing knowledge with on-chain finality, add your EVM private key to `~/.openclaw/.env`:
 
@@ -86,19 +128,22 @@ For publishing knowledge with on-chain finality, add your EVM private key to `~/
 DKG_EVM_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
 ```
 
+If `~/.openclaw/.env` already exists, append this line — don't overwrite the file.
+
 If you don't have a `chainConfig` block in your `config.json`, testnet defaults (Base Sepolia RPC + Hub) are applied automatically when the env var is detected — so for the testnet, just the env var is enough.
 
 Without a private key, the node still works for P2P networking, querying, and receiving replicated data. On-chain operations (publishing with finality) require a funded wallet on the target chain. For the testnet, get free Base Sepolia ETH from [Alchemy](https://www.alchemy.com/faucets/base-sepolia) or [Coinbase](https://portal.cdp.coinbase.com/products/faucet).
 
-### 5. Copy the SKILL.md and Restart
+### 5. Copy the SKILL.md and restart
 
-The SKILL.md file teaches your agent how to use the DKG tools. Copy it from this package into your workspace's skills directory:
+The SKILL.md file teaches your agent how to use the DKG tools. Copy it from the installed package into the workspace's skills directory.
 
 ```bash
-# Replace <workspace> with your actual workspace path
-# (shown in OpenClaw gateway logs on startup, or check openclaw.json)
-mkdir -p <workspace>/skills/dkg-node
-cp node_modules/@dkg/adapter-openclaw/skills/dkg-node/SKILL.md <workspace>/skills/dkg-node/SKILL.md
+# WORKSPACE_DIR = the value of agents.defaults.workspace from openclaw.json
+
+mkdir -p "$WORKSPACE_DIR/skills/dkg-node"
+cp "$WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/skills/dkg-node/SKILL.md" \
+   "$WORKSPACE_DIR/skills/dkg-node/SKILL.md"
 ```
 
 Then restart the gateway:
@@ -114,6 +159,8 @@ Ask your agent to call `dkg_status`. If the node starts successfully, you'll see
 The DKG node starts **lazily** — it boots on the first tool call, not just on `session_start`. This means the plugin works even if added to a running gateway with existing sessions.
 
 ## Configuration Reference
+
+These keys go inside `"dkg-node"` in your workspace `config.json`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -175,7 +222,7 @@ await agent.sendChat(agents[0].peerId, 'Hello from OpenClaw!');
 
 ## Networks
 
-Which network you join is determined by `relayPeers` and `chainConfig` in your config. Use the values below for each network.
+Which network you join is determined by `relayPeers` and `chainConfig` in your workspace `config.json`. Use the values below for each network.
 
 ### Testnet (active)
 
@@ -196,9 +243,14 @@ Mainnet relay and chain values will be published here when available. The config
 ## Troubleshooting
 
 **"plugin not found" or "plugin id mismatch":**
-- The `plugins.entries` key must be `adapter-openclaw` (the manifest ID), not the npm package name.
-- `plugins.load.paths` must point to the installed package directory (relative to OpenClaw project root).
-- Correct config: `"entries": { "adapter-openclaw": { "enabled": true } }`
+- The `plugins.entries` key must be `adapter-openclaw` (the manifest ID), not the npm package name `@dkg/adapter-openclaw`.
+- `plugins.load.paths` must use a `~/` prefix path (not a bare relative path).
+- Verify the package is installed: `ls $WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/openclaw.plugin.json` should exist.
+
+**"plugin path not found":**
+- The path in `load.paths` must start with `~/`. Bare relative paths (e.g. `node_modules/...`) resolve from the gateway's working directory, which varies by platform (`$HOME` on Linux, `/` on macOS).
+- Construct the path by replacing `$HOME` with `~` in your workspace path, then appending `/node_modules/@dkg/adapter-openclaw`.
+- Check the error message — it shows the absolute path OpenClaw tried to load from.
 
 **"DKG node not started" / tools fail:**
 - Call `dkg_status` first — it returns diagnostic config info even when the node can't start.

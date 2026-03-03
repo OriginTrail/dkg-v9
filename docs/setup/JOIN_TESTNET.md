@@ -229,21 +229,22 @@ If your machine runs an OpenClaw agent, add DKG as a plugin. Your agent gets DKG
 
 ### 1. Install
 
+Install inside your workspace directory (the path from `agents.defaults.workspace` in `~/.openclaw/openclaw.json`):
+
 ```bash
+cd WORKSPACE_DIR
 npm install @dkg/adapter-openclaw
 ```
 
-OpenClaw discovers the plugin automatically via the `openclaw.extensions` field in the package's `package.json`. No need for `plugins.load.paths`.
-
 ### 2. Enable the Plugin
 
-Add to `~/.openclaw/openclaw.json`:
+**Merge** these into the `plugins` section of `~/.openclaw/openclaw.json` (don't remove existing entries):
 
 ```json
 {
   "plugins": {
     "load": {
-      "paths": ["node_modules/@dkg/adapter-openclaw"]
+      "paths": ["~/path/to/workspace/node_modules/@dkg/adapter-openclaw"]
     },
     "entries": {
       "adapter-openclaw": {
@@ -254,7 +255,7 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-- `load.paths` is resolved relative to the OpenClaw project root.
+- `load.paths` must use a `~/` prefix path (replace `$HOME` with `~` in your workspace path, append `/node_modules/@dkg/adapter-openclaw`). Bare relative paths break across platforms.
 - The `entries` key must be `adapter-openclaw` (the plugin manifest ID), not the npm package name.
 - Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
 

@@ -3,7 +3,7 @@ import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import {
   executeQuery, fetchParanets, fetchQueryHistory, fetchSavedQueries,
-  createSavedQuery, deleteSavedQuery, publishTriples,
+  createSavedQuery, deleteSavedQuery, publishTriples, sendChatMessage,
 } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
@@ -42,6 +42,7 @@ type Triple = { subject: string; predicate: string; object: string };
 type DatasetMode = 'paranet' | 'coordination';
 type ThemeKey = 'dark' | 'midnight' | 'cyberpunk' | 'light' | 'aurora';
 type HopFilter = 'all' | 1 | 2 | 3;
+type VizProfile = 'structure' | 'flow' | 'llm';
 
 interface ThemeSpec {
   label: string;
@@ -92,7 +93,7 @@ function GraphZoomToFit() {
     if (!viz) return;
     const t = setTimeout(() => {
       try {
-        viz.zoomToFit(40, 400);
+        viz.zoomToFit(40);
       } catch {
         // ignore
       }
@@ -208,6 +209,48 @@ interface PredicateStat {
   label: string;
   count: number;
 }
+
+interface VizProfileSpec {
+  label: string;
+  theme: ThemeKey;
+  description: string;
+  edgeWidth: number;
+  glowLinks: boolean;
+  defaultHops: HopFilter;
+}
+
+interface LlmVizAdvice {
+  predicates?: string[];
+  maxHops?: HopFilter;
+  note?: string;
+}
+
+const VIZ_PROFILES: Record<VizProfile, VizProfileSpec> = {
+  structure: {
+    label: 'V1 - Ontology Structure',
+    theme: 'aurora',
+    description: 'Highlights structural and type relations for architecture understanding.',
+    edgeWidth: 0.9,
+    glowLinks: false,
+    defaultHops: 2,
+  },
+  flow: {
+    label: 'V2 - Dependency Flow',
+    theme: 'midnight',
+    description: 'Emphasizes imports/calls/dependencies with animated glow traces.',
+    edgeWidth: 1.1,
+    glowLinks: true,
+    defaultHops: 2,
+  },
+  llm: {
+    label: 'V3 - LLM Guided Lens',
+    theme: 'aurora',
+    description: 'Uses ontology plus LLM recommendations for what to emphasize.',
+    edgeWidth: 1.0,
+    glowLinks: true,
+    defaultHops: 3,
+  },
+};
 
 function buildTypeMap(triples: Triple[]): Map<string, string[]> {
   const types = new Map<string, string[]>();
@@ -326,6 +369,69 @@ function escapeSparqlString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function buildPredicateStats(triples: Triple[], maxItems = 12): PredicateStat[] {
+  const counts = new Map<string, number>();
+  for (const t of triples) counts.set(t.predicate, (counts.get(t.predicate) ?? 0) + 1);
+  return Array.from(counts.entries())
+    .map(([predicate, count]) => ({ predicate, count, label: shortLabel(predicate) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, maxItems);
+}
+
+function scorePredicateForProfile(label: string, profile: VizProfile): number {
+  const s = label.toLowerCase();
+  const structureKeys = ['type', 'contains', 'defines', 'member', 'has', 'part', 'belongs', 'class', 'file', 'module', 'folder', 'package'];
+  const flowKeys = ['call', 'import', 'depend', 'extends', 'implements', 'uses', 'invoke', 'reference', 'handoff'];
+  const semanticKeys = ['agent', 'task', 'run', 'dataset', 'knowledge', 'provenance', 'trust', 'score'];
+  const hit = (keys: string[]) => keys.reduce((acc, k) => acc + (s.includes(k) ? 1 : 0), 0);
+  if (profile === 'structure') return hit(structureKeys) * 3 + hit(semanticKeys);
+  if (profile === 'flow') return hit(flowKeys) * 3 + hit(structureKeys);
+  return hit(flowKeys) * 2 + hit(structureKeys) * 2 + hit(semanticKeys);
+}
+
+function selectPredicatesForProfile(
+  stats: PredicateStat[],
+  profile: VizProfile,
+  llmAdvicePredicates?: string[],
+): Set<string> {
+  if (profile === 'llm' && llmAdvicePredicates && llmAdvicePredicates.length > 0) {
+    const asLower = new Set(llmAdvicePredicates.map((p) => p.toLowerCase()));
+    const fromAdvice = stats
+      .filter((s) => asLower.has(s.predicate.toLowerCase()) || asLower.has(s.label.toLowerCase()))
+      .map((s) => s.predicate);
+    if (fromAdvice.length > 0) return new Set(fromAdvice);
+  }
+
+  const ranked = stats
+    .map((s) => ({ ...s, score: scorePredicateForProfile(s.label, profile) + scorePredicateForProfile(s.predicate, profile) }))
+    .sort((a, b) => (b.score === a.score ? b.count - a.count : b.score - a.score));
+
+  const strong = ranked.filter((r) => r.score > 0).slice(0, 8).map((r) => r.predicate);
+  if (strong.length >= 4) return new Set(strong);
+  return new Set(stats.slice(0, Math.min(8, stats.length)).map((s) => s.predicate));
+}
+
+function parseLlmVizAdvice(reply: string): LlmVizAdvice | null {
+  const fenced = reply.match(/```json\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced?.[1] ?? reply;
+  const objectMatch = candidate.match(/\{[\s\S]*\}/);
+  if (!objectMatch) return null;
+  try {
+    const parsed = JSON.parse(objectMatch[0]) as Record<string, unknown>;
+    const pred = Array.isArray(parsed.predicates)
+      ? parsed.predicates.filter((p): p is string => typeof p === 'string')
+      : undefined;
+    const hopsRaw = parsed.maxHops;
+    const maxHops: HopFilter | undefined = hopsRaw === 'all' || hopsRaw === 1 || hopsRaw === 2 || hopsRaw === 3
+      ? hopsRaw
+      : undefined;
+    const note = typeof parsed.note === 'string' ? parsed.note : undefined;
+    return { predicates: pred, maxHops, note };
+  } catch {
+    return null;
+  }
+}
+
 function buildCoordinationTriples(limit: number): Triple[] {
   const triples: Triple[] = [];
   const push = (subject: string, predicate: string, object: string) => {
@@ -420,6 +526,7 @@ function GraphTab() {
   const [limit, setLimit] = useState<number>(10000);
   const [refreshKey, setRefreshKey] = useState(0);
   const [datasetMode, setDatasetMode] = useState<DatasetMode>('paranet');
+  const [vizProfile, setVizProfile] = useState<VizProfile>('structure');
   const [theme, setTheme] = useState<ThemeKey>('aurora');
   const [graphTotalCount, setGraphTotalCount] = useState<number | null>(null);
   const [coordinationSourceLabel, setCoordinationSourceLabel] = useState('Synthetic from experiment stream patterns');
@@ -427,6 +534,8 @@ function GraphTab() {
   const [maxHops, setMaxHops] = useState<HopFilter>('all');
   const [predicateStats, setPredicateStats] = useState<PredicateStat[]>([]);
   const [selectedPredicates, setSelectedPredicates] = useState<Set<string>>(new Set());
+  const [llmAdvice, setLlmAdvice] = useState<LlmVizAdvice | null>(null);
+  const [llmAdviceLoading, setLlmAdviceLoading] = useState(false);
   
   // Filters
   const [typeFilter, setTypeFilter] = useState('');
@@ -436,6 +545,7 @@ function GraphTab() {
   
   // Selected node
   const [selectedNode, setSelectedNode] = useState<NodeDetails | null>(null);
+  const activeProfile = VIZ_PROFILES[vizProfile];
   const activeTheme = THEMES[theme];
   const selectedParanet = useMemo(
     () => paranets.find((p: any) => p.id === paranetFilter) ?? null,
@@ -451,15 +561,64 @@ function GraphTab() {
     },
     animation: {
       fadeIn: true,
-      linkParticles: false,
-      linkParticleCount: 0,
+      linkParticles: activeProfile.glowLinks,
+      linkParticleCount: activeProfile.glowLinks ? 1 : 0,
       linkParticleSpeed: 0.005,
       linkParticleColor: activeTheme.glow,
-      linkParticleWidth: 0.8,
+      linkParticleWidth: activeProfile.glowLinks ? 1.2 : 0.8,
       drift: false,
-      hoverTrace: false,
+      hoverTrace: activeProfile.glowLinks,
     },
-  }), [activeTheme]);
+  }), [activeTheme, activeProfile]);
+
+  // Keep "version" opinionated by default, while still allowing manual theme override later.
+  useEffect(() => {
+    setTheme(activeProfile.theme);
+    setMaxHops(activeProfile.defaultHops);
+  }, [activeProfile.theme, activeProfile.defaultHops]);
+
+  const applyProfilePredicateSelection = useCallback((stats: PredicateStat[], advice?: LlmVizAdvice | null) => {
+    const chosen = selectPredicatesForProfile(stats, vizProfile, advice?.predicates);
+    setSelectedPredicates(chosen);
+    if (advice?.maxHops) {
+      setMaxHops(advice.maxHops);
+    } else {
+      setMaxHops(VIZ_PROFILES[vizProfile].defaultHops);
+    }
+  }, [vizProfile]);
+
+  const requestLlmVisualizationAdvice = useCallback(async () => {
+    if (!allTriples || allTriples.length === 0 || predicateStats.length === 0) return;
+    setLlmAdviceLoading(true);
+    try {
+      const sampleTriples = allTriples.slice(0, 160).map((t) => `${t.subject} ${t.predicate} ${t.object}`).join('\n');
+      const predicateSummary = predicateStats.map((p) => `${p.predicate} (${p.count})`).join('\n');
+      const prompt = `You are assisting graph visualization (not data mutation). Given RDF triples, suggest what predicates to highlight.
+Return STRICT JSON ONLY:
+{"predicates":["..."],"maxHops":"all|1|2|3","note":"short reason"}
+
+Constraints:
+- We only change visualization filters/highlights.
+- Prefer ontology relations that improve code graph understanding (contains, defines, imports, calls, extends, implements, dependency-like edges).
+- Pick up to 8 predicates.
+
+Top predicates:
+${predicateSummary}
+
+Sample triples:
+${sampleTriples}`;
+      const res = await sendChatMessage(prompt);
+      const advice = parseLlmVizAdvice(String(res?.reply ?? ''));
+      if (advice) {
+        setLlmAdvice(advice);
+        applyProfilePredicateSelection(predicateStats, advice);
+      }
+    } catch {
+      // Non-fatal: remain on ontology heuristic defaults
+    } finally {
+      setLlmAdviceLoading(false);
+    }
+  }, [allTriples, predicateStats, applyProfilePredicateSelection]);
 
   const loadGraph = useCallback(async () => {
     setLoading(true);
@@ -486,14 +645,9 @@ function GraphTab() {
           }));
           setAllTriples(discovered);
           setTypeMap(buildTypeMap(discovered));
-          const counts = new Map<string, number>();
-          for (const t of discovered) counts.set(t.predicate, (counts.get(t.predicate) ?? 0) + 1);
-          const stats = Array.from(counts.entries())
-            .map(([predicate, count]) => ({ predicate, count, label: shortLabel(predicate) }))
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 12);
+          const stats = buildPredicateStats(discovered, 12);
           setPredicateStats(stats);
-          setSelectedPredicates(new Set(stats.map((s) => s.predicate)));
+          applyProfilePredicateSelection(stats, llmAdvice);
           setGraphTotalCount(discovered.length);
           setCoordinationSourceLabel('Loaded from saved coordination-like graph data');
           return;
@@ -502,14 +656,9 @@ function GraphTab() {
         const generated = buildCoordinationTriples(limit);
         setAllTriples(generated);
         setTypeMap(buildTypeMap(generated));
-        const counts = new Map<string, number>();
-        for (const t of generated) counts.set(t.predicate, (counts.get(t.predicate) ?? 0) + 1);
-        const stats = Array.from(counts.entries())
-          .map(([predicate, count]) => ({ predicate, count, label: shortLabel(predicate) }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 12);
+        const stats = buildPredicateStats(generated, 12);
         setPredicateStats(stats);
-        setSelectedPredicates(new Set(stats.map((s) => s.predicate)));
+        applyProfilePredicateSelection(stats, llmAdvice);
         setGraphTotalCount(generated.length);
         setCoordinationSourceLabel('Synthetic from experiment stream patterns');
         setEmptyReason('');
@@ -566,14 +715,9 @@ function GraphTab() {
         }));
         setAllTriples(rawTriples);
         setTypeMap(buildTypeMap(rawTriples));
-        const counts = new Map<string, number>();
-        for (const t of rawTriples) counts.set(t.predicate, (counts.get(t.predicate) ?? 0) + 1);
-        const stats = Array.from(counts.entries())
-          .map(([predicate, count]) => ({ predicate, count, label: shortLabel(predicate) }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 12);
+        const stats = buildPredicateStats(rawTriples, 12);
         setPredicateStats(stats);
-        setSelectedPredicates(new Set(stats.map((s) => s.predicate)));
+        applyProfilePredicateSelection(stats, llmAdvice);
         setEmptyReason('');
       } else {
         setAllTriples([]);
@@ -595,7 +739,7 @@ function GraphTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, refreshKey, paranetFilter, datasetMode, selectedParanet]);
+  }, [limit, refreshKey, paranetFilter, datasetMode, selectedParanet, applyProfilePredicateSelection, llmAdvice]);
 
   // Re-filter when filters change (without re-fetching)
   useEffect(() => {
@@ -619,6 +763,11 @@ function GraphTab() {
   useEffect(() => {
     loadGraph();
   }, [loadGraph]);
+
+  useEffect(() => {
+    if (predicateStats.length === 0) return;
+    applyProfilePredicateSelection(predicateStats, llmAdvice);
+  }, [vizProfile, predicateStats, llmAdvice, applyProfilePredicateSelection]);
 
   const handleNodeClick = useCallback((node: any) => {
     if (!allTriples) return;
@@ -648,6 +797,16 @@ function GraphTab() {
           {/* Toolbar */}
           <div className="graph-toolbar">
             <div className="graph-toolbar-row">
+              <select
+                className="input"
+                value={vizProfile}
+                onChange={(e) => setVizProfile(e.target.value as VizProfile)}
+                style={{ width: 'auto', minWidth: 220 }}
+              >
+                {(Object.entries(VIZ_PROFILES) as Array<[VizProfile, VizProfileSpec]>).map(([key, v]) => (
+                  <option key={key} value={key}>{v.label}</option>
+                ))}
+              </select>
               <select
                 className="input"
                 value={datasetMode}
@@ -697,6 +856,7 @@ function GraphTab() {
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </select>
+              <span className="graph-mode-description">{activeProfile.description}</span>
             </div>
             <div className="graph-toolbar-row">
               <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>Depth</label>
@@ -733,8 +893,21 @@ function GraphTab() {
               <button className="btn btn-ghost btn-sm" onClick={() => setRefreshKey((k) => k + 1)} disabled={loading}>
                 {loading ? 'Loading…' : 'Refresh'}
               </button>
+              {vizProfile === 'llm' && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => { void requestLlmVisualizationAdvice(); }}
+                  disabled={llmAdviceLoading || !allTriples || allTriples.length === 0}
+                  title="Ask LLM what predicates and depth to emphasize"
+                >
+                  {llmAdviceLoading ? 'LLM analyzing…' : 'LLM Suggest Highlights'}
+                </button>
+              )}
               {datasetMode === 'coordination' && (
                 <span className="graph-info-pill">{coordinationSourceLabel}</span>
+              )}
+              {vizProfile === 'llm' && llmAdvice?.note && (
+                <span className="graph-info-pill">{llmAdvice.note}</span>
               )}
               {datasetMode === 'paranet' && paranetFilter && graphTotalCount != null && (
                 <span className="graph-info-pill">
@@ -811,7 +984,7 @@ function GraphTab() {
                     classColors: activeTheme.typeColors,
                     defaultNodeColor: activeTheme.defaultNode,
                     defaultEdgeColor: activeTheme.edge,
-                    edgeWidth: 0.8,
+                    edgeWidth: activeProfile.edgeWidth,
                   },
                   hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
                 }}

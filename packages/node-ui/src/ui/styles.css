@@ -1104,6 +1104,11 @@ a:hover { text-decoration: underline; }
   flex-wrap: wrap;
 }
 
+.graph-mode-description {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .graph-legend {
   display: flex;
   gap: 16px;

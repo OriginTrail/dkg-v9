@@ -154,3 +154,30 @@ Next improvement for D:
 - Add checkpoint compliance scoring (plan/decision/handoff completeness per stream).
 - Track conflict/rework explicitly (interface contradictions and rollback edits).
 - Run at N=8 to stress decentralized coordination and observe scaling curve.
+
+## Experiment D (Apples-to-Apples): D1A/D2A on 8-feature suite
+
+To make D1/D2 directly comparable with prior arms, we ran:
+- **D1A:** shared Markdown collaboration protocol across the same 8 benchmark features.
+- **D2A:** DKG publish/query collaboration protocol across the same 8 benchmark features.
+
+Run IDs:
+- D1A: `d1a-20260303-091815`
+- D2A: `d2a-20260303-094616`
+
+Totals:
+- **D1A:** 8/8 success, $21.98 total, 424 turns
+- **D2A:** 5/8 success, $21.92 total, 246 turns
+
+Per-feature (cost / turns):
+
+| Feature | Control | Exp-A | Exp-A2 | Exp-B2 | Exp-AB | Exp-C1 | Exp-C2 | Exp-D1A | Exp-D2A |
+|---|---|---|---|---|---|---|---|---|---|
+| X/Twitter DM channel | $1.08 / 21t | $2.70 / 22t | FAIL | $3.38 / 51t | $1.59 / 34t | FAIL | $1.90 / 53t | $3.17 / 63t | $2.98 / 59t |
+| Pinecone memory backend | $1.75 / 31t | $0.83 / 23t | $1.71 / 29t | $2.16 / 36t | $1.99 / 14t | $2.31 / 42t | $1.97 / 41t | $1.75 / 37t | $2.02 / 39t |
+| Sessions export CLI | $1.69 / 30t | $1.44 / 33t | $6.04 / 23t | $2.62 / 14t | FAIL | $2.97 / 51t | $2.54 / 46t | $2.59 / 49t | $2.25 / 46t |
+| Webhook delivery logging | $1.14 / 23t | $0.98 / 21t | $2.41 / 51t | $1.88 / 49t | $2.16 / 27t | $2.36 / 47t | $2.97 / 51t | $2.62 / 51t | $2.65 / 51t |
+| Reddit channel | FAIL | $2.70 / 9t | $3.93 / 29t | $3.23 / 28t | FAIL | $2.79 / 49t | $4.47 / 49t | $5.03 / 64t | FAIL |
+| Matrix channel card | $1.33 / 24t | $1.47 / 29t | $1.68 / 57t | $1.98 / 65t | $1.86 / 42t | $3.33 / 51t | $2.50 / 52t | $1.75 / 44t | FAIL |
+| Session archiving | $2.88 / 51t | $0.67 / 11t | $2.51 / 51t | $1.83 / 38t | $1.72 / 26t | $4.48 / 51t | $3.37 / 51t | $2.68 / 51t | $2.71 / 51t |
+| Mistral portal auth | $1.71 / 25t | $0.52 / 10t | $2.11 / 37t | $3.17 / 72t | $2.13 / 52t | $2.32 / 62t | $1.72 / 37t | $2.41 / 65t | FAIL |

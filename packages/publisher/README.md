@@ -7,6 +7,8 @@ Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowle
 - **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Collection UAL
 - **PublishHandler** — P2P protocol handler that processes incoming publish requests from other nodes, validates data, stores triples, and returns signed ACKs
 - **WorkspaceHandler** — feeless "workspace mode" publishing for local-only or staging workflows
+- **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within paranets
+- **Context Oracle** — `ContextOracle` class providing verifiable read operations on Context Graphs: `queryWithProofs` (SPARQL with Merkle inclusion proofs), `entityWithProofs` (entity lookup with proofs), and `proveTriple` (single triple existence proof). Provenance triples are scoped to subjects discovered in the query results for efficiency.
 - **Merkle trees** — per-KA triple hashing, public/private sub-roots, and collection-level Merkle root computation
 - **Skolemization** — blank node to skolemized URI conversion for deterministic RDF processing
 - **Auto-partitioning** — splits a batch of RDF triples into individual Knowledge Assets by root entity

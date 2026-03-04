@@ -114,15 +114,16 @@ A session is immutable after activation (v1: no membership changes mid-session).
 #### Session creation flow
 
 1. Creator node publishes a `SessionProposed` event to the session gossip topic, containing all session fields and the creator's Ed25519 signature.
-2. Each listed member node receives the proposal via GossipSub.
+2. Each listed member node receives the proposal via GossipSub and **cryptographically verifies the creator's Ed25519 signature** against the `createdBy` public key from the membership list. Invalid signatures are rejected before any local state is created.
 3. Each member validates the proposal (checks own PeerId is listed, reducer is available locally, quorum policy is acceptable).
 4. Each member publishes a `SessionAccepted` event containing `sessionId`, `configHash`, and member Ed25519 signature.
 5. When the creator observes acceptance signatures from all members, the creator publishes `SessionActivated`.
-6. Session status transitions to `active`. Rounds may begin.
+6. Each member receiving `SessionActivated` **independently verifies that all non-creator members have accepted** before transitioning to `active` status. This prevents a malicious creator from bypassing the acceptance requirement via a forged gossip event.
+7. Session status transitions to `active`. Rounds may begin.
 
 If any member does not accept within a configurable timeout (default: 60 seconds), session transitions to `aborted`.
 
-This ensures no node is enrolled without consent.
+This ensures no node is enrolled without consent and no session can activate without full membership agreement.
 
 ### 4.2 Session Namespace
 
@@ -214,7 +215,7 @@ All AKA events share a common envelope:
 | `InputSubmitted` | Any member | Signed input for this round. |
 | `RoundProposal` | Proposer | Collected inputs + computed `nextStateHash`. |
 | `RoundAck` | Any member | Validation-ACK confirming agreement with proposal. |
-| `RoundFinalized` | Proposer (or any, on quorum) | Quorum reached; round is final. |
+| `RoundFinalized` | Proposer only | Quorum reached; round is final. Contains ACK signatures; receivers verify each cryptographically. |
 | `RoundTimeout` | Any member | Timeout triggered; initiates fallback. |
 
 ---
@@ -282,7 +283,7 @@ Every node maintaining an AKA session MUST run a session validator that enforces
 
 ### 8.1 Session existence
 
-Referenced `sessionId` exists locally and status is `active`.
+Referenced `sessionId` exists locally and status is `active`. **Exception:** `SessionAborted` events are also valid when the session is in `proposed` status (allowing a creator to abort a session that has not yet activated).
 
 ### 8.2 Membership gating
 
@@ -299,6 +300,8 @@ Event has all required fields for its type. Field types and values are within ex
 ### 8.5 Replay protection
 
 The tuple `(sessionId, round, signerPeerId, type)` is unique. Additionally, `nonce` MUST be unique per signer per session.
+
+**Exception for `RoundAck`:** The replay fingerprint for `RoundAck` events appends a SHA-256 hash of the full event payload to the tuple key. This ensures that two `RoundAck` events from the same signer with different payloads (e.g. different `nextStateHash`) are **not** suppressed by replay protection — both are admitted so that the `SessionManager` can detect and handle equivocation (see section 10.4).
 
 ### 8.6 Timing
 
@@ -323,8 +326,11 @@ If any check fails, the event is stored in raw paranet storage (data availabilit
 This is the key integration point with existing DKG mechanics:
 
 - When a node receives a `RoundProposal`, it runs the reducer locally with the specified inputs and `prevStateHash`.
-- If the locally computed `nextStateHash` matches the proposal's `nextStateHash`, the node publishes a `RoundAck`.
+- Before ACKing, the node **independently verifies** `computeInputSetHash(proposal.includedInputs)` matches `proposal.inputSetHash`, and that the locally computed `nextStateHash` matches the proposal's `nextStateHash`.
+- If both checks pass, the node publishes a `RoundAck`.
 - A `RoundAck` IS a DKG ACK with enriched semantics: it confirms not just data receipt but state transition validity.
+- **Only the designated proposer** (per the rotation rule) may publish `RoundFinalized`. Non-proposer nodes that observe quorum MUST NOT publish `RoundFinalized` to prevent state divergence.
+- The `RoundFinalized` event includes the collected ACK signatures. Each receiving node **cryptographically verifies every signature** by reconstructing the expected `RoundAck` payload and verifying against the signer's public key from the membership list.
 - The on-chain finalization mechanism treats `RoundAck` signatures identically to existing publish ACKs. The transaction finalizes only when quorum is met.
 
 This means:
@@ -332,6 +338,7 @@ This means:
 - No new on-chain contract logic is needed for v1 (reuse existing ACK collection and threshold checks).
 - The only change is that nodes add a validation step before ACKing.
 - If quorum is not met (disagreement or missing acks), the on-chain transaction does not finalize, which is exactly the safety property we want.
+- A malicious proposer cannot fabricate `signerPeerIds` — every signature is verified against the actual signer's public key.
 
 ### 9.2 Soft Finality (Off-chain)
 
@@ -360,7 +367,7 @@ Recommended checkpoint cadence: every N rounds or on session end, where N is app
 | Condition | Action |
 |---|---|
 | Proposer does not publish `RoundStart` within `proposerGracePeriod` | Next member in rotation becomes proposer (view change). |
-| View change exhausts all members for one round | Round is skipped; session pauses. After `maxConsecutiveSkips` (default: 3), any member MAY propose `SessionAborted`. |
+| View change exhausts all members for one round | The current round number increments and the next round begins with its designated proposer. After `maxConsecutiveSkips` consecutive fully-exhausted rounds (default: 3), any member MAY propose `SessionAborted`. |
 
 ### 10.2 Quorum not reached
 
@@ -377,6 +384,8 @@ If multiple `RoundProposal` events exist for the same round (from different prop
 ### 10.4 Equivocation
 
 If a member publishes conflicting `RoundAck` events for the same round (different `nextStateHash` values), this is recorded as fault evidence. The session MAY continue, but the equivocating member's ACKs are excluded from quorum for the remainder of the session.
+
+Note: Replay protection for `RoundAck` uses a SHA-256 hash of the full payload in the fingerprint (see section 8.5). This ensures conflicting ACKs with different `nextStateHash` values are not silently dropped by deduplication — both are admitted and routed to the `SessionManager`, which detects the equivocation and records it.
 
 ### 10.5 Node crash and recovery
 

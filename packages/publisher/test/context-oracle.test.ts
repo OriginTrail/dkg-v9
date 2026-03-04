@@ -370,6 +370,56 @@ describe('ContextOracle', () => {
         oracle.proveTriple(PARANET, CG_ID, 'http://x"> DROP ALL', 'http://schema.org/name', '"Alice"'),
       ).rejects.toThrow('Unsafe characters in IRI');
     });
+
+    it('proveTriple rejects literal with unbalanced quotes (SPARQL injection)', async () => {
+      await expect(
+        oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"hello" . } SELECT * WHERE { ?x ?y ?z'),
+      ).rejects.toThrow('Malformed or unsafe SPARQL literal');
+    });
+
+    it('proveTriple rejects literal that closes early and injects patterns', async () => {
+      await expect(
+        oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"x" ; <http://evil.com/prop> "y"'),
+      ).rejects.toThrow('Malformed or unsafe SPARQL literal');
+    });
+
+    it('proveTriple accepts well-formed simple literal', async () => {
+      const askResult: AskResult = { type: 'boolean', value: false };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+
+      const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"');
+      expect(result.exists).toBe(false);
+    });
+
+    it('proveTriple accepts well-formed language-tagged literal', async () => {
+      const askResult: AskResult = { type: 'boolean', value: false };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+
+      const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"@en');
+      expect(result.exists).toBe(false);
+    });
+
+    it('proveTriple accepts well-formed typed literal', async () => {
+      const askResult: AskResult = { type: 'boolean', value: false };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+
+      const result = await oracle.proveTriple(
+        PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/age',
+        '"30"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      );
+      expect(result.exists).toBe(false);
+    });
+
+    it('proveTriple accepts literal with escaped characters', async () => {
+      const askResult: AskResult = { type: 'boolean', value: false };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+
+      const result = await oracle.proveTriple(
+        PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/desc',
+        '"line1\\nline2\\twith \\"quotes\\""',
+      );
+      expect(result.exists).toBe(false);
+    });
   });
 });
 

@@ -234,8 +234,17 @@ function assertSafeIri(value: string): string {
   return value;
 }
 
+const SAFE_LITERAL_RE = /^"(?:[^"\\]|\\.)*"(?:@[a-zA-Z]+(?:-[a-zA-Z0-9]+)*|\^\^<[^<>"{}|\\^`\x00-\x20]+>)?$/;
+
+function assertSafeLiteral(value: string): string {
+  if (!SAFE_LITERAL_RE.test(value)) {
+    throw new Error(`Malformed or unsafe SPARQL literal: ${value}`);
+  }
+  return value;
+}
+
 function formatSparqlTerm(term: string): string {
-  if (term.startsWith('"')) return term;
+  if (term.startsWith('"')) return assertSafeLiteral(term);
   if (term.startsWith('_:')) return term;
   if (term.startsWith('<')) {
     assertSafeIri(term.slice(1, -1));

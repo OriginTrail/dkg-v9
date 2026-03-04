@@ -64,8 +64,25 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers` — list connected peers
 - `GET /api/status` — node status
 - `POST /api/sessions` — create AKA sessions (experimental)
+- `POST /api/context-graphs` — create a Context Graph (M/N signature-gated subgraph)
+- `GET /api/context-graphs/:id` — get Context Graph metadata
+- `POST /api/context-graphs/:id/publish` — publish KAs into a Context Graph
+- `GET /api/oracle/:contextGraphId/entity` — entity lookup with Merkle inclusion proofs
+- `POST /api/oracle/:contextGraphId/query` — SPARQL query with proofs
+- `POST /api/oracle/:contextGraphId/prove` — single triple existence proof
+- `GET /api/apps` — list installed DKG apps
 
-All endpoints (except public paths) require an API token via `Authorization: Bearer <token>` header.
+All endpoints (except public paths and oracle endpoints) require an API token via `Authorization: Bearer <token>` header.
+
+## Installable Apps
+
+The daemon includes a generic app loader that discovers and serves third-party DKG apps without any per-app code changes. Apps are npm packages with a `dkgApp` manifest in their `package.json`. The daemon:
+
+1. **Discovers** installed apps from `node_modules` (packages with a `dkgApp` field) or explicit config.
+2. **Loads** each app's API handler and invokes it for requests under `/api/apps/:appId/*`.
+3. **Serves** each app's built UI (static assets) at `/apps/:appId/`.
+
+Node runners install an app (`pnpm add dkg-app-my-game`), restart, and it appears in the Node UI sidebar. See [`docs/plans/DKG_APPS_INSTALLABLE.md`](../../docs/plans/DKG_APPS_INSTALLABLE.md) for the full design.
 
 ## Internal Dependencies
 

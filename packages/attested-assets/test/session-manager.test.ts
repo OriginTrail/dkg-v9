@@ -731,4 +731,59 @@ describe('SessionManager', () => {
       expect(roundState.viewChangeCount).toBe(2);
     });
   });
+
+  describe('handleIncomingEvent — validator drops invalid events', () => {
+    it('drops event with invalid signature before processing', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      acceptAllMembers(config.sessionId);
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+
+      // Craft a SessionAborted event with a garbage signature
+      const event: AKAEvent = {
+        mode: 'AKA',
+        type: 'SessionAborted',
+        sessionId: config.sessionId,
+        round: 0,
+        prevStateHash: session.latestStateHash,
+        signerPeerId: 'peer-1',
+        signature: new Uint8Array(64), // all zeros — invalid
+        timestamp: Date.now(),
+        nonce: `peer-1-test-abort-${Date.now()}`,
+        payload: new TextEncoder().encode('forged abort'),
+      };
+
+      await manager.handleIncomingEvent(event, 'peer-1');
+
+      // Session should still be active — the invalid event was dropped
+      expect(session.config.status).toBe('active');
+    });
+  });
+
+  describe('createSession — membership invariants', () => {
+    it('rejects membership with duplicate peerId', async () => {
+      const duplicateMembership: SessionMember[] = [
+        { peerId: 'peer-1', pubKey: kp1.publicKey, displayName: 'Alice', role: 'creator' },
+        { peerId: 'peer-1', pubKey: kp2.publicKey, displayName: 'Bob', role: 'member' },
+      ];
+
+      await expect(
+        manager.createSession('paranet-1', 'app', duplicateMembership, quorumPolicy, reducerConfig, 30000, null),
+      ).rejects.toThrow('duplicate peerId');
+    });
+
+    it('rejects membership without localPeerId', async () => {
+      const noLocalMembership: SessionMember[] = [
+        { peerId: 'peer-99', pubKey: kp1.publicKey, displayName: 'Alice', role: 'creator' },
+        { peerId: 'peer-100', pubKey: kp2.publicKey, displayName: 'Bob', role: 'member' },
+      ];
+
+      await expect(
+        manager.createSession('paranet-1', 'app', noLocalMembership, quorumPolicy, reducerConfig, 30000, null),
+      ).rejects.toThrow('localPeerId must be included');
+    });
+  });
 });

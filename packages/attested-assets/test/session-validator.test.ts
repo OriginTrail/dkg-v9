@@ -6,6 +6,7 @@ import { generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
 import type { AKAEvent, SessionState, SessionConfig, RoundState, RoundAckPayload } from '../src/types.js';
 
 let kp: Ed25519Keypair;
+let kp2: Ed25519Keypair;
 const encoder = new TextEncoder();
 
 function makeSessionConfig(overrides: Partial<SessionConfig> = {}): SessionConfig {
@@ -17,7 +18,7 @@ function makeSessionConfig(overrides: Partial<SessionConfig> = {}): SessionConfi
     createdAt: '2026-01-01T00:00:00Z',
     membership: [
       { peerId: 'peer-1', pubKey: kp.publicKey, displayName: 'Alice', role: 'creator' },
-      { peerId: 'peer-2', pubKey: new Uint8Array(32), displayName: 'Bob', role: 'member' },
+      { peerId: 'peer-2', pubKey: kp2.publicKey, displayName: 'Bob', role: 'member' },
     ],
     membershipRoot: '0xroot',
     quorumPolicy: { type: 'THRESHOLD', numerator: 2, denominator: 3, minSigners: 2 },
@@ -68,26 +69,29 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
 async function makeSignedEvent(
   type: AKAEvent['type'],
   overrides: Partial<AKAEvent> = {},
+  signerKey?: Ed25519Keypair,
 ): Promise<AKAEvent> {
   const payload = encoder.encode('test-payload');
+  const key = signerKey ?? kp;
+  const round = overrides.round ?? 1;
   const sig = await signAKAPayload(
     {
       domain: 'AKA-v1',
       network: 'test',
       paranetId: 'paranet-1',
       sessionId: 'session-1',
-      round: 1,
+      round,
       type,
     },
     Array.from(payload),
-    kp.secretKey,
+    key.secretKey,
   );
 
   return {
     mode: 'AKA',
     type,
     sessionId: 'session-1',
-    round: 1,
+    round,
     prevStateHash: '0xgenesis',
     signerPeerId: 'peer-1',
     signature: sig,
@@ -103,6 +107,7 @@ describe('SessionValidator', () => {
 
   beforeEach(async () => {
     kp = await generateEd25519Keypair();
+    kp2 = await generateEd25519Keypair();
     validator = new SessionValidator();
   });
 
@@ -320,6 +325,81 @@ describe('SessionValidator', () => {
     expect(result1.valid).toBe(true);
     const result2 = await validator.validate(event2, session, 'test');
     expect(result2.valid).toBe(true);
+  });
+
+  describe('authority checks — proposer and creator events', () => {
+    it('rejects RoundStart from non-proposer', async () => {
+      const session = makeSessionState({
+        config: makeSessionConfig({ status: 'active' }),
+      });
+      const roundState = makeRoundState(1, { proposerPeerId: 'peer-2' });
+      session.roundStates.set(1, roundState);
+
+      const event = await makeSignedEvent('RoundStart', {
+        round: 1,
+        signerPeerId: 'peer-1',
+        prevStateHash: session.latestStateHash,
+      });
+
+      const result = await validator.validate(event, session, 'test');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('not the proposer');
+    });
+
+    it('rejects RoundFinalized from non-proposer', async () => {
+      const session = makeSessionState({
+        config: makeSessionConfig({ status: 'active' }),
+      });
+      const roundState = makeRoundState(1, { proposerPeerId: 'peer-2' });
+      session.roundStates.set(1, roundState);
+
+      const event = await makeSignedEvent('RoundFinalized', {
+        round: 1,
+        signerPeerId: 'peer-1',
+        prevStateHash: session.latestStateHash,
+      });
+
+      const result = await validator.validate(event, session, 'test');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('not the proposer');
+    });
+
+    it('rejects SessionActivated from non-creator', async () => {
+      const session = makeSessionState({
+        config: makeSessionConfig({ status: 'proposed' }),
+      });
+
+      const event = await makeSignedEvent(
+        'SessionActivated',
+        {
+          round: 0,
+          signerPeerId: 'peer-2',
+          prevStateHash: session.latestStateHash,
+        },
+        kp2,
+      );
+
+      const result = await validator.validate(event, session, 'test');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('not the session creator');
+    });
+
+    it('accepts RoundStart from correct proposer', async () => {
+      const session = makeSessionState({
+        config: makeSessionConfig({ status: 'active' }),
+      });
+      const roundState = makeRoundState(1, { proposerPeerId: 'peer-1' });
+      session.roundStates.set(1, roundState);
+
+      const event = await makeSignedEvent('RoundStart', {
+        round: 1,
+        signerPeerId: 'peer-1',
+        prevStateHash: session.latestStateHash,
+      });
+
+      const result = await validator.validate(event, session, 'test');
+      expect(result.valid).toBe(true);
+    });
   });
 });
 

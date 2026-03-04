@@ -75,8 +75,8 @@ jobs:
               }
             );
 
-            // Build set of valid (path:line) pairs from right-side added lines only.
-            // This enforces changed-lines-only inline comments.
+            // Build set of valid (path:line) pairs from right-side diff hunk lines
+            // (added + context). This keeps comments bound to changed areas.
             const validLines = new Set();
             for (const file of files) {
               // Skip binary/large/truncated files with no patch
@@ -100,7 +100,8 @@ jobs:
                 if (line.startsWith('-')) continue;
                 // Ignore hunk metadata lines
                 if (line.startsWith('\\')) continue;
-                // Context lines are intentionally not valid targets.
+                // Context lines on the right side are also valid targets
+                validLines.add(`${file.filename}:${currentLine}`);
                 currentLine++;
               }
             }

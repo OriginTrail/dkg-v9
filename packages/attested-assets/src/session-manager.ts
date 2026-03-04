@@ -533,12 +533,18 @@ export class SessionManager {
 
     try {
       const finPayload = decodeRoundFinalizedPayload(event.payload);
+
+      const uniqueSigners = new Set(finPayload.signerPeerIds);
+      if (uniqueSigners.size !== finPayload.signerPeerIds.length) return;
+
+      if (finPayload.signatures.length !== finPayload.signerPeerIds.length) return;
+
       const activeMemberCount = getActiveMemberCount(
         session.config.membership.length,
         session.equivocators.size,
         session.inactiveMembers.size,
       );
-      if (!isQuorumMet(session.config.quorumPolicy, activeMemberCount, finPayload.signerPeerIds.length)) {
+      if (!isQuorumMet(session.config.quorumPolicy, activeMemberCount, uniqueSigners.size)) {
         return;
       }
       const memberPeerIds = new Set(session.config.membership.map(m => m.peerId));
@@ -783,8 +789,17 @@ export class SessionManager {
         return;
       }
 
-      session.currentRound = round + 1;
-      this.getOrCreateRoundState(session, round + 1);
+      const nextRound = round + 1;
+      session.currentRound = nextRound;
+      const nextRoundState = this.getOrCreateRoundState(session, nextRound);
+
+      if (nextRoundState.proposerPeerId === this.config.localPeerId) {
+        this.startRound(sessionId).catch(() => {});
+      } else {
+        this.setTimer(`timeout-${sessionId}-${nextRound}`, session.config.roundTimeout, () => {
+          this.handleRoundTimeout(sessionId, nextRound);
+        });
+      }
       return;
     }
 

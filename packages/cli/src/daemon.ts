@@ -356,12 +356,12 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Installable DKG apps (API handlers + static UI)
       // Only inject the auth token into HTML when the request itself is authenticated,
-      // preventing token exfiltration via the public /apps/ path.
+      // and inject the caller's own token (not a different one) to avoid leaking credentials.
       if (installedApps.length > 0) {
         let appInjectToken: string | undefined;
-        if (authEnabled && firstToken) {
+        if (authEnabled) {
           const reqToken = extractBearerToken(req.headers.authorization);
-          if (reqToken && validTokens.has(reqToken)) appInjectToken = firstToken;
+          if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
         }
         const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken);
         if (appHandled) return;

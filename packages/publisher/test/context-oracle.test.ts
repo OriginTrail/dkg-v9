@@ -118,9 +118,12 @@ describe('ContextOracle', () => {
     it('returns bindings and provenance triples with proofs', async () => {
       const selectResult: SelectResult = {
         type: 'bindings',
-        bindings: [{ name: '"Alice"' }, { name: '"Bob"' }],
+        bindings: [
+          { s: 'did:dkg:agent:Alice', name: '"Alice"' },
+          { s: 'did:dkg:agent:Bob', name: '"Bob"' },
+        ],
       };
-      const constructResult: SelectResult = {
+      const provenanceResult: SelectResult = {
         type: 'bindings',
         bindings: [
           { s: 'did:dkg:agent:Alice', p: 'http://schema.org/name', o: '"Alice"' },
@@ -129,11 +132,11 @@ describe('ContextOracle', () => {
       };
       (store.query as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(selectResult)
-        .mockResolvedValueOnce(constructResult);
+        .mockResolvedValueOnce(provenanceResult);
 
       const result = await oracle.queryWithProofs(
         PARANET, CG_ID,
-        'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+        'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
       );
 
       expect(result.bindings).toHaveLength(2);

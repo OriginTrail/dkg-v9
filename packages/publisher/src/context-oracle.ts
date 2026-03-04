@@ -116,16 +116,8 @@ export class ContextOracle {
     const selectResult = await this.store.query(wrappedSparql);
     const bindings = selectResult.type === 'bindings' ? selectResult.bindings : [];
 
-    // Extract provenance: run a CONSTRUCT to get the actual triples
-    const constructSparql = selectToConstruct(sparql, graphUri);
-    const constructResult = await this.store.query(constructSparql);
-    const quads: Quad[] = constructResult.type === 'quads'
-      ? constructResult.quads
-      : constructResult.type === 'bindings'
-        ? constructResult.bindings.map(row => ({
-            subject: row['s'], predicate: row['p'], object: row['o'], graph: graphUri,
-          }))
-        : [];
+    // Extract provenance: fetch triples for subjects found in the bindings
+    const quads = await this.fetchProvenanceTriples(bindings, graphUri);
 
     const provedTriples = this.attachProofs(contextGraphId, quads);
     const batchIds = uniqueBatchIds(provedTriples);
@@ -195,6 +187,30 @@ export class ContextOracle {
     return results;
   }
 
+  private async fetchProvenanceTriples(
+    bindings: Array<Record<string, string>>,
+    graphUri: string,
+  ): Promise<Quad[]> {
+    const subjects = new Set<string>();
+    for (const row of bindings) {
+      for (const val of Object.values(row)) {
+        if (val && !val.startsWith('"') && !val.startsWith('_:')) {
+          try { assertSafeIri(val); subjects.add(val); } catch { /* skip unsafe */ }
+        }
+      }
+    }
+    if (subjects.size === 0) return [];
+
+    const values = [...subjects].map(s => `<${s}>`).join(' ');
+    const result = await this.store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${graphUri}> { ?s ?p ?o . VALUES ?s { ${values} } } }`,
+    );
+    if (result.type !== 'bindings') return [];
+    return result.bindings.map(row => ({
+      subject: row['s'], predicate: row['p'], object: row['o'], graph: graphUri,
+    }));
+  }
+
   private buildVerification(contextGraphId: string, batchIds: string[]): VerificationInfo {
     return {
       chainId: this.chain.chainId,
@@ -255,13 +271,3 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
 
-/**
- * Fetch all triples in the context graph for provenance attachment.
- * We return every triple in the graph rather than attempting to convert
- * the SELECT body into a CONSTRUCT template (which risks cross-joins
- * when the body uses different variable names).
- * The caller's proof index filters the result to relevant triples.
- */
-function selectToConstruct(_sparql: string, graphUri: string): string {
-  return `SELECT ?s ?p ?o WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`;
-}

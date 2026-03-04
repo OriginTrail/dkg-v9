@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SessionValidator, detectEquivocation } from '../src/session-validator.js';
 import { signAKAPayload } from '../src/canonical.js';
+import { encodeRoundAckPayload } from '../src/proto/aka-events.js';
 import { generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
 import type { AKAEvent, SessionState, SessionConfig, RoundState, RoundAckPayload } from '../src/types.js';
 
@@ -39,6 +40,7 @@ function makeRoundState(round: number, overrides: Partial<RoundState> = {}): Rou
     inputs: new Map(),
     proposal: null,
     acks: new Map(),
+    ackSignatures: new Map(),
     startTime: Date.now() - 1000,
     deadline: Date.now() + 29000,
     ...overrides,
@@ -53,10 +55,12 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     currentRound: 1,
     latestFinalizedRound: 0,
     latestStateHash: '0xgenesis',
+    latestStateBytes: new Uint8Array([0, 0, 0, 0]),
     roundStates,
     equivocators: new Set(),
     inactiveMembers: new Map(),
     consecutiveSkips: 0,
+    acceptedMembers: new Set(),
     ...overrides,
   };
 }
@@ -236,6 +240,86 @@ describe('SessionValidator', () => {
     const retry = await makeSignedEvent('InputSubmitted', { nonce: event.nonce });
     const result = await validator.validate(retry, session, 'test');
     expect(result.valid).toBe(true);
+  });
+
+  it('SessionAborted passes validation while session is proposed', async () => {
+    const session = makeSessionState();
+    session.config.status = 'proposed';
+    const event = await makeSignedEvent('SessionAborted');
+    const result = await validator.validate(event, session, 'test');
+    expect(result.valid).toBe(true);
+  });
+
+  it('Conflicting RoundAcks from same signer are not both blocked by replay', async () => {
+    const session = makeSessionState();
+    const payload1: RoundAckPayload = {
+      round: 1,
+      prevStateHash: '0xgenesis',
+      inputSetHash: '0xi',
+      nextStateHash: '0xA',
+      turnCommitment: '0xc',
+    };
+    const payload2: RoundAckPayload = {
+      round: 1,
+      prevStateHash: '0xgenesis',
+      inputSetHash: '0xi',
+      nextStateHash: '0xB',
+      turnCommitment: '0xc',
+    };
+    const encoded1 = encodeRoundAckPayload(payload1);
+    const encoded2 = encodeRoundAckPayload(payload2);
+    const sig1 = await signAKAPayload(
+      {
+        domain: 'AKA-v1',
+        network: 'test',
+        paranetId: 'paranet-1',
+        sessionId: 'session-1',
+        round: 1,
+        type: 'RoundAck',
+      },
+      Array.from(encoded1),
+      kp.secretKey,
+    );
+    const sig2 = await signAKAPayload(
+      {
+        domain: 'AKA-v1',
+        network: 'test',
+        paranetId: 'paranet-1',
+        sessionId: 'session-1',
+        round: 1,
+        type: 'RoundAck',
+      },
+      Array.from(encoded2),
+      kp.secretKey,
+    );
+    const event1: AKAEvent = {
+      mode: 'AKA',
+      type: 'RoundAck',
+      sessionId: 'session-1',
+      round: 1,
+      prevStateHash: '0xgenesis',
+      signerPeerId: 'peer-1',
+      signature: sig1,
+      timestamp: Date.now(),
+      nonce: 'round-ack-nonce-1',
+      payload: encoded1,
+    };
+    const event2: AKAEvent = {
+      mode: 'AKA',
+      type: 'RoundAck',
+      sessionId: 'session-1',
+      round: 1,
+      prevStateHash: '0xgenesis',
+      signerPeerId: 'peer-1',
+      signature: sig2,
+      timestamp: Date.now(),
+      nonce: 'round-ack-nonce-2',
+      payload: encoded2,
+    };
+    const result1 = await validator.validate(event1, session, 'test');
+    expect(result1.valid).toBe(true);
+    const result2 = await validator.validate(event2, session, 'test');
+    expect(result2.valid).toBe(true);
   });
 });
 

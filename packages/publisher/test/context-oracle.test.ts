@@ -167,6 +167,33 @@ describe('ContextOracle', () => {
         oracle.queryWithProofs(PARANET, CG_ID, alreadyWrapped),
       ).rejects.toThrow('User queries must not contain GRAPH clauses');
     });
+
+    it('provenance query scopes to subjects from bindings', async () => {
+      const selectResult: SelectResult = {
+        type: 'bindings',
+        bindings: [
+          { s: 'did:dkg:agent:Alice', name: '"Alice"' },
+        ],
+      };
+      const provenanceResult: SelectResult = {
+        type: 'bindings',
+        bindings: [
+          { s: 'did:dkg:agent:Alice', p: 'http://schema.org/name', o: '"Alice"' },
+          { s: 'did:dkg:agent:Alice', p: 'http://schema.org/age', o: '"30"' },
+        ],
+      };
+      (store.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(selectResult)
+        .mockResolvedValueOnce(provenanceResult);
+
+      await oracle.queryWithProofs(
+        PARANET, CG_ID,
+        'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
+      );
+
+      const secondCallSparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+      expect(secondCallSparql).toContain('VALUES ?s { <did:dkg:agent:Alice> }');
+    });
   });
 
   describe('proveTriple', () => {

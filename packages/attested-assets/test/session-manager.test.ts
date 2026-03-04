@@ -1,10 +1,30 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { SessionManager, AKASessionEvent } from '../src/session-manager.js';
 import { ReducerRegistry } from '../src/reducer.js';
-import { computeStateHash, computeConfigHash } from '../src/canonical.js';
-import { encodeSessionConfig } from '../src/proto/aka-events.js';
+import {
+  signAKAPayload,
+  computeInputSetHash,
+  computeStateHash,
+  computeTurnCommitment,
+  computeMembershipRoot,
+  computeConfigHash,
+} from '../src/canonical.js';
+import {
+  encodeSessionConfig,
+  encodeRoundAckPayload,
+  encodeRoundFinalizedPayload,
+  encodeRoundProposalPayload,
+  encodeInputPayload,
+} from '../src/proto/aka-events.js';
 import { TypedEventBus, generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
-import type { ReducerModule, QuorumPolicy, SessionMember, AKAEvent } from '../src/types.js';
+import type {
+  ReducerModule,
+  QuorumPolicy,
+  SessionMember,
+  AKAEvent,
+  RoundAckPayload,
+  RoundProposalPayload,
+} from '../src/types.js';
 
 const mockGossip = {
   subscribe: vi.fn(),
@@ -42,10 +62,16 @@ describe('SessionManager', () => {
   let kp1: Ed25519Keypair;
   let kp2: Ed25519Keypair;
 
+  let membership: SessionMember[];
+
   beforeEach(async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     kp1 = await generateEd25519Keypair();
     kp2 = await generateEd25519Keypair();
+    membership = [
+      { peerId: 'peer-1', pubKey: kp1.publicKey, displayName: 'Alice', role: 'creator' },
+      { peerId: 'peer-2', pubKey: kp2.publicKey, displayName: 'Bob', role: 'member' },
+    ];
     eventBus = new TypedEventBus();
     reducerRegistry = new ReducerRegistry();
     reducerRegistry.register(makeTestReducer());
@@ -74,11 +100,6 @@ describe('SessionManager', () => {
     manager.destroy();
     vi.useRealTimers();
   });
-
-  const membership: SessionMember[] = [
-    { peerId: 'peer-1', pubKey: kp1?.publicKey ?? new Uint8Array(32), displayName: 'Alice', role: 'creator' },
-    { peerId: 'peer-2', pubKey: kp2?.publicKey ?? new Uint8Array(32), displayName: 'Bob', role: 'member' },
-  ];
 
   const quorumPolicy: QuorumPolicy = { type: 'THRESHOLD', numerator: 2, denominator: 3, minSigners: 2 };
   const reducerConfig = { name: 'test-reducer', version: '1.0.0', hash: 'test-hash-123' };
@@ -472,6 +493,242 @@ describe('SessionManager', () => {
       await expect(
         manager.submitInput(config.sessionId, new Uint8Array([1, 2, 3]), 2),
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe('handleIncomingEvent — SessionActivated gate', () => {
+    it('rejects SessionActivated when members have not accepted', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'test-app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      const sessionId = config.sessionId;
+      const payload = new Uint8Array(0);
+      const signature = await signAKAPayload(
+        {
+          domain: 'AKA-v1',
+          network: 'test-net',
+          paranetId: 'paranet-1',
+          sessionId,
+          round: 0,
+          type: 'SessionActivated',
+        },
+        Array.from(payload),
+        kp1.secretKey,
+      );
+      const event: AKAEvent = {
+        mode: 'AKA',
+        type: 'SessionActivated',
+        sessionId,
+        round: 0,
+        prevStateHash: config.genesisStateHash,
+        signerPeerId: 'peer-1',
+        signature,
+        timestamp: Date.now(),
+        nonce: `peer-1-${sessionId.slice(0, 8)}-SessionActivated-0-${Date.now()}`,
+        payload,
+      };
+
+      await manager.handleIncomingEvent(event, 'peer-1');
+
+      const session = manager.getSession(sessionId)!;
+      expect(session.config.status).toBe('proposed');
+    });
+
+    it('accepts SessionActivated when all members have accepted', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'test-app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      acceptAllMembers(config.sessionId);
+      const sessionId = config.sessionId;
+      const payload = new Uint8Array(0);
+      const signature = await signAKAPayload(
+        {
+          domain: 'AKA-v1',
+          network: 'test-net',
+          paranetId: 'paranet-1',
+          sessionId,
+          round: 0,
+          type: 'SessionActivated',
+        },
+        Array.from(payload),
+        kp1.secretKey,
+      );
+      const event: AKAEvent = {
+        mode: 'AKA',
+        type: 'SessionActivated',
+        sessionId,
+        round: 0,
+        prevStateHash: config.genesisStateHash,
+        signerPeerId: 'peer-1',
+        signature,
+        timestamp: Date.now(),
+        nonce: `peer-1-${sessionId.slice(0, 8)}-SessionActivated-0-${Date.now()}`,
+        payload,
+      };
+
+      await manager.handleIncomingEvent(event, 'peer-1');
+
+      const session = manager.getSession(sessionId)!;
+      expect(session.config.status).toBe('active');
+    });
+  });
+
+  describe('handleRoundAck — proposal field matching', () => {
+    it('rejects RoundAck whose fields don\'t match the proposal', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      acceptAllMembers(config.sessionId);
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+      manager.startRound(config.sessionId).catch(() => {});
+
+      const roundState = session.roundStates.get(2)!;
+      roundState.proposal = {
+        round: 2,
+        prevStateHash: session.latestStateHash,
+        inputSetHash: 'correct-input-hash',
+        nextStateHash: 'correct-next-hash',
+        includedMembers: ['peer-1'],
+        includedInputs: [new Uint8Array([1])],
+      };
+      roundState.status = 'awaiting_acks';
+
+      const ackPayload: RoundAckPayload = {
+        round: 2,
+        prevStateHash: session.latestStateHash,
+        inputSetHash: 'WRONG-input-hash',
+        nextStateHash: 'correct-next-hash',
+        turnCommitment: 'tc',
+      };
+      const payload = encodeRoundAckPayload(ackPayload);
+      const signature = await signAKAPayload(
+        {
+          domain: 'AKA-v1',
+          network: 'test-net',
+          paranetId: 'paranet-1',
+          sessionId: config.sessionId,
+          round: 2,
+          type: 'RoundAck',
+        },
+        Array.from(payload),
+        kp2.secretKey,
+      );
+      const event: AKAEvent = {
+        mode: 'AKA',
+        type: 'RoundAck',
+        sessionId: config.sessionId,
+        round: 2,
+        prevStateHash: session.latestStateHash,
+        signerPeerId: 'peer-2',
+        signature,
+        timestamp: Date.now(),
+        nonce: `peer-2-${config.sessionId.slice(0, 8)}-RoundAck-2-${Date.now()}`,
+        payload,
+      };
+
+      await manager.handleIncomingEvent(event, 'peer-2');
+
+      expect(roundState.acks.size).toBe(0);
+    });
+  });
+
+  describe('handleRoundFinalized — duplicate signerPeerIds', () => {
+    it('rejects RoundFinalized with duplicate signerPeerIds', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      acceptAllMembers(config.sessionId);
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+      await manager.startRound(config.sessionId);
+      const roundState = session.roundStates.get(2)!;
+      roundState.proposal = {
+        round: 2,
+        prevStateHash: session.latestStateHash,
+        inputSetHash: 'x',
+        nextStateHash: 'x',
+        includedMembers: ['peer-1'],
+        includedInputs: [],
+      };
+      roundState.status = 'awaiting_acks';
+
+      const finPayload = encodeRoundFinalizedPayload({
+        round: 2,
+        nextStateHash: 'x',
+        signerPeerIds: ['peer-1', 'peer-1'],
+        signatures: [new Uint8Array(64), new Uint8Array(64)],
+      });
+      const signature = await signAKAPayload(
+        {
+          domain: 'AKA-v1',
+          network: 'test-net',
+          paranetId: 'paranet-1',
+          sessionId: config.sessionId,
+          round: 2,
+          type: 'RoundFinalized',
+        },
+        Array.from(finPayload),
+        kp1.secretKey,
+      );
+      const event: AKAEvent = {
+        mode: 'AKA',
+        type: 'RoundFinalized',
+        sessionId: config.sessionId,
+        round: 2,
+        prevStateHash: session.latestStateHash,
+        signerPeerId: 'peer-1',
+        signature,
+        timestamp: Date.now(),
+        nonce: `peer-1-${config.sessionId.slice(0, 8)}-RoundFinalized-2-${Date.now()}`,
+        payload: finPayload,
+      };
+
+      await manager.handleIncomingEvent(event, 'peer-1');
+
+      expect(session.latestFinalizedRound).toBe(0);
+    });
+  });
+
+  describe('state bytes — reducer receives actual state, not hash', () => {
+    it('latestStateBytes is set from genesis and is not hash text', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      const session = manager.getSession(config.sessionId)!;
+
+      expect(session.latestStateBytes).toEqual(new Uint8Array([0, 0, 0, 0]));
+      expect(session.latestStateBytes).not.toEqual(
+        new TextEncoder().encode(session.latestStateHash),
+      );
+    });
+  });
+
+  describe('timeout — remote proposer timer', () => {
+    it('after view change to remote proposer, a new timer fires on subsequent timeout', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      acceptAllMembers(config.sessionId);
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+      await manager.startRound(config.sessionId);
+
+      const roundState = session.roundStates.get(2)!;
+      expect(roundState.status).toBe('collecting_inputs');
+
+      vi.advanceTimersByTime(30000);
+      expect(roundState.viewChangeCount).toBe(1);
+      expect(roundState.proposerPeerId).toBe('peer-2');
+
+      vi.advanceTimersByTime(30000);
+      expect(roundState.viewChangeCount).toBe(2);
     });
   });
 });

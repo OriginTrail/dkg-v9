@@ -140,5 +140,13 @@ describe('app-loader', () => {
       expect(res._status).toBe(200);
       expect(res._body).toContain('App UI');
     });
+
+    it('serveAppStatic does not inject token when authToken is undefined', async () => {
+      // Server does not pass authToken to handleAppRequest, so token must not appear
+      const res = await httpGet(server, '/apps/test-app/');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('App UI');
+      expect(res.body).not.toContain('__DKG_TOKEN__');
+    });
   });
 });

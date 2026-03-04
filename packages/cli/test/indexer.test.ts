@@ -103,6 +103,42 @@ describe('indexRepository', () => {
     expect(hasPythonClass).toBe(true);
   });
 
+  it('resolves Python relative imports by leading-dot depth', async () => {
+    await write(
+      join(repoRoot, 'packages/app/src/sub/child.py'),
+      [
+        'from .sibling import helper',
+        'from ..tool import process',
+        '',
+      ].join('\n'),
+    );
+
+    await write(
+      join(repoRoot, 'packages/app/src/sub/sibling.py'),
+      'def helper(): pass\n',
+    );
+
+    const result = await indexRepository(repoRoot);
+
+    const childModule = result.quads.find(
+      q => q.predicate.endsWith('path') && q.object.includes('sub/child.py'),
+    );
+    expect(childModule).toBeTruthy();
+
+    const childSubject = childModule!.subject;
+    const imports = result.quads.filter(
+      q => q.predicate.endsWith('imports') && q.subject === childSubject,
+    );
+
+    const importedPaths = imports.map(q => q.object);
+
+    const hasSiblingImport = importedPaths.some(o => o.includes('sub/sibling'));
+    expect(hasSiblingImport).toBe(true);
+
+    const hasParentImport = importedPaths.some(o => o.includes('src/tool'));
+    expect(hasParentImport).toBe(true);
+  });
+
   it('indexes non-code content when includeContent is enabled', async () => {
     const withoutContent = await indexRepository(repoRoot, { includeContent: false });
     const withContent = await indexRepository(repoRoot, { includeContent: true });

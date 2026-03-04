@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { SessionManager, AKASessionEvent } from '../src/session-manager.js';
 import { ReducerRegistry } from '../src/reducer.js';
-import { computeStateHash } from '../src/canonical.js';
+import { computeStateHash, computeConfigHash } from '../src/canonical.js';
+import { encodeSessionConfig } from '../src/proto/aka-events.js';
 import { TypedEventBus, generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
-import type { ReducerModule, QuorumPolicy, SessionMember } from '../src/types.js';
+import type { ReducerModule, QuorumPolicy, SessionMember, AKAEvent } from '../src/types.js';
 
 const mockGossip = {
   subscribe: vi.fn(),
@@ -278,5 +279,173 @@ describe('SessionManager', () => {
     );
 
     expect(config.genesisStateHash).toBe(expectedHash);
+  });
+
+  describe('handleIncomingEvent — SessionProposed validation', () => {
+    function fakeProposalEvent(overrides: Partial<AKAEvent & { config: any }> = {}): AKAEvent {
+      const config = overrides.config ?? {
+        sessionId: 'fake-session-id-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcde',
+        paranetId: 'paranet-1',
+        appId: 'test-app',
+        createdBy: 'peer-1',
+        membership,
+        quorum: quorumPolicy,
+        reducer: reducerConfig,
+        roundTimeout: 30000,
+        maxRounds: 0,
+        genesisStateHash: 'abc',
+        configHash: '',
+        status: 'proposed' as const,
+      };
+      config.configHash = computeConfigHash(config);
+
+      return {
+        mode: 'AKA' as const,
+        type: 'SessionProposed',
+        sessionId: config.sessionId,
+        round: 0,
+        prevStateHash: '',
+        signerPeerId: overrides.signerPeerId ?? 'peer-1',
+        signature: new Uint8Array(64),
+        timestamp: Date.now(),
+        nonce: 'nonce-1',
+        payload: encodeSessionConfig(config),
+        ...overrides,
+      };
+    }
+
+    it('rejects proposal with wrong configHash', async () => {
+      const event = fakeProposalEvent();
+      const config = {
+        sessionId: event.sessionId,
+        paranetId: 'paranet-1',
+        appId: 'test-app',
+        createdBy: 'peer-1',
+        membership,
+        quorum: quorumPolicy,
+        reducer: reducerConfig,
+        roundTimeout: 30000,
+        maxRounds: 0,
+        genesisStateHash: 'abc',
+        configHash: 'wrong-hash-on-purpose',
+        status: 'proposed' as const,
+      };
+      event.payload = encodeSessionConfig(config);
+
+      const handler = vi.fn();
+      const bus = new TypedEventBus();
+      const mgr = new SessionManager(mockGossip as any, bus, reducerRegistry, {
+        localPeerId: 'peer-1', secretKey: kp1.secretKey, network: 'test-net',
+      });
+      bus.on(AKASessionEvent.SESSION_PROPOSED, handler);
+
+      await mgr.handleIncomingEvent(event, 'peer-1');
+      expect(handler).not.toHaveBeenCalled();
+      mgr.destroy();
+    });
+
+    it('rejects proposal where signer is not the creator', async () => {
+      const event = fakeProposalEvent({ signerPeerId: 'peer-2' });
+
+      const handler = vi.fn();
+      const bus = new TypedEventBus();
+      const mgr = new SessionManager(mockGossip as any, bus, reducerRegistry, {
+        localPeerId: 'peer-1', secretKey: kp1.secretKey, network: 'test-net',
+      });
+      bus.on(AKASessionEvent.SESSION_PROPOSED, handler);
+
+      await mgr.handleIncomingEvent(event, 'peer-2');
+      expect(handler).not.toHaveBeenCalled();
+      mgr.destroy();
+    });
+
+    it('rejects proposal where sessionId in event does not match config', async () => {
+      const event = fakeProposalEvent();
+      event.sessionId = 'mismatched-session-id-00000000000000000000000000000000000000000000000000000000000';
+
+      const handler = vi.fn();
+      const bus = new TypedEventBus();
+      const mgr = new SessionManager(mockGossip as any, bus, reducerRegistry, {
+        localPeerId: 'peer-1', secretKey: kp1.secretKey, network: 'test-net',
+      });
+      bus.on(AKASessionEvent.SESSION_PROPOSED, handler);
+
+      await mgr.handleIncomingEvent(event, 'peer-1');
+      expect(handler).not.toHaveBeenCalled();
+      mgr.destroy();
+    });
+
+    it('rejects proposal where local peer is not a member', async () => {
+      const event = fakeProposalEvent();
+
+      const handler = vi.fn();
+      const bus = new TypedEventBus();
+      const mgr = new SessionManager(mockGossip as any, bus, reducerRegistry, {
+        localPeerId: 'peer-999', secretKey: kp1.secretKey, network: 'test-net',
+      });
+      bus.on(AKASessionEvent.SESSION_PROPOSED, handler);
+
+      await mgr.handleIncomingEvent(event, 'peer-1');
+      expect(handler).not.toHaveBeenCalled();
+      mgr.destroy();
+    });
+  });
+
+  describe('startRound/submitInput — round mismatch validation', () => {
+    it('startRound rejects when requestedRound does not match currentRound', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+
+      await expect(
+        manager.startRound(config.sessionId, 5),
+      ).rejects.toThrow('round mismatch: requested 5 but current round is 2');
+    });
+
+    it('startRound succeeds when requestedRound matches currentRound', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+
+      await expect(manager.startRound(config.sessionId, 2)).resolves.not.toThrow();
+    });
+
+    it('submitInput rejects when requestedRound does not match currentRound', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+      await manager.startRound(config.sessionId, 2);
+
+      await expect(
+        manager.submitInput(config.sessionId, new Uint8Array([1]), 7),
+      ).rejects.toThrow('round mismatch: requested 7 but current round is 2');
+    });
+
+    it('submitInput succeeds when requestedRound matches currentRound', async () => {
+      const config = await manager.createSession(
+        'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
+      );
+      await manager.activateSession(config.sessionId);
+
+      const session = manager.getSession(config.sessionId)!;
+      session.currentRound = 2;
+      await manager.startRound(config.sessionId, 2);
+
+      await expect(
+        manager.submitInput(config.sessionId, new Uint8Array([1, 2, 3]), 2),
+      ).resolves.not.toThrow();
+    });
   });
 });

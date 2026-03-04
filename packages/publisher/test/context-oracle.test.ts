@@ -295,6 +295,58 @@ describe('ContextOracle', () => {
       expect(result.verification.merkleRoots[BATCH_ID]).toBe(expectedRoot);
     });
   });
+
+  describe('SPARQL injection prevention', () => {
+    it('rejects entityUri with angle brackets', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com> } } SELECT * WHERE { <x'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('rejects entityUri with double quotes', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com"'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('rejects entityUri with curly braces', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/path{inject}'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('rejects entityUri with backslash', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com\\path'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('rejects entityUri with control characters', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/\x00inject'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('rejects entityUri with space', async () => {
+      await expect(
+        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/some path'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+
+    it('allows safe IRIs through', async () => {
+      const selectResult: SelectResult = { type: 'bindings', bindings: [] };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+
+      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      expect(result.triples).toHaveLength(0);
+    });
+
+    it('proveTriple rejects unsafe subject IRI', async () => {
+      await expect(
+        oracle.proveTriple(PARANET, CG_ID, 'http://x"> DROP ALL', 'http://schema.org/name', '"Alice"'),
+      ).rejects.toThrow('Unsafe characters in IRI');
+    });
+  });
 });
 
 function hexToBytes(h: string): Uint8Array {

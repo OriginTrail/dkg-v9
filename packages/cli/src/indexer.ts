@@ -382,7 +382,7 @@ async function indexPythonFile(
   const testCandidates = [
     `${baseRel}_test.py`,
     `${baseRel}.test.py`,
-    rel.replace('/src/', '/tests/').replace(/\.py$/, '.py'),
+    rel.replace('/src/', '/tests/'),
   ];
   for (const tc of testCandidates) {
     if (existsSync(join(repoRoot, tc))) {

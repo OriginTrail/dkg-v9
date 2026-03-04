@@ -147,7 +147,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
     const goldenHex =
-      'aad3f53f9989ce94954b83fe52098a3eb75262d4023ba4688c63952ab4e9a0e0';
+      '89a5e67f0c299318f22ba653ebae8eb5eb98e49f69126e901b067a6596abcc4b';
     expect(actualHex).toBe(goldenHex);
   });
 

@@ -41,8 +41,12 @@ export class SessionValidator {
       );
     }
 
-    if (event.type === 'RoundProposal') {
+    if (event.type === 'RoundProposal' || event.type === 'RoundStart' || event.type === 'RoundFinalized') {
       checks.push(() => this.checkProposerAuthority(event, session));
+    }
+
+    if (event.type === 'SessionActivated') {
+      checks.push(() => this.checkCreatorAuthority(event, session));
     }
 
     for (const check of checks) {
@@ -144,6 +148,16 @@ export class SessionValidator {
   private checkEquivocation(event: AKAEvent, session: SessionState): ValidationResult {
     if (session.equivocators.has(event.signerPeerId)) {
       return { valid: false, reason: `signer ${event.signerPeerId} is an equivocator` };
+    }
+    return { valid: true };
+  }
+
+  private checkCreatorAuthority(event: AKAEvent, session: SessionState): ValidationResult {
+    if (event.signerPeerId !== session.config.createdBy) {
+      return {
+        valid: false,
+        reason: `${event.signerPeerId} is not the session creator (expected ${session.config.createdBy})`,
+      };
     }
     return { valid: true };
   }

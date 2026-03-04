@@ -120,8 +120,6 @@ describe('ContextOracle', () => {
         type: 'bindings',
         bindings: [{ name: '"Alice"' }, { name: '"Bob"' }],
       };
-      // Return 2 provenance triples (even count) to avoid the known
-      // MerkleTree.verify promoted-leaf issue with odd-length layers
       const constructResult: SelectResult = {
         type: 'bindings',
         bindings: [

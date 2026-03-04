@@ -44,6 +44,7 @@ import {
   decodeInputPayload,
   decodeRoundStartPayload,
   decodeRoundAckPayload,
+  decodeRoundFinalizedPayload,
   decodeSessionConfig,
 } from './proto/aka-events.js';
 
@@ -117,6 +118,17 @@ export class SessionManager {
     roundTimeout: number,
     maxRounds: number | null,
   ): Promise<SessionConfig> {
+    if (membership.length < 2) {
+      throw new Error('membership must have at least 2 members');
+    }
+    const peerIds = membership.map(m => m.peerId);
+    if (new Set(peerIds).size !== peerIds.length) {
+      throw new Error('duplicate peerId in membership');
+    }
+    if (!peerIds.includes(this.config.localPeerId)) {
+      throw new Error('localPeerId must be included in membership');
+    }
+
     const reducer = this.reducerRegistry.resolve(reducerConfig);
     if (!reducer) {
       throw new Error(`reducer ${reducerConfig.name}@${reducerConfig.version} not found or hash mismatch`);
@@ -495,6 +507,23 @@ export class SessionManager {
   private handleRoundFinalized(event: AKAEvent, session: SessionState): void {
     const roundState = session.roundStates.get(event.round);
     if (!roundState?.proposal) return;
+
+    try {
+      const finPayload = decodeRoundFinalizedPayload(event.payload);
+      const activeMemberCount = getActiveMemberCount(
+        session.config.membership.length,
+        session.equivocators.size,
+        session.inactiveMembers.size,
+      );
+      if (!isQuorumMet(session.config.quorumPolicy, activeMemberCount, finPayload.signerPeerIds.length)) {
+        return;
+      }
+      const memberPeerIds = new Set(session.config.membership.map(m => m.peerId));
+      const allSignersAreMembers = finPayload.signerPeerIds.every(id => memberPeerIds.has(id));
+      if (!allSignersAreMembers) return;
+    } catch {
+      return;
+    }
 
     roundState.status = 'finalized';
     session.latestFinalizedRound = event.round;

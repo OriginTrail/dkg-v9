@@ -196,6 +196,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian {
     /**
      * @notice Verify that a triple (identified by its hash) is included in a context graph batch
      *         by checking a Merkle inclusion proof against the batch's on-chain merkle root.
+     * @dev    The off-chain Merkle tree duplicates the last leaf when a layer has odd count
+     *         (rather than promoting it). This guarantees every level has a sibling and proofs
+     *         have consistent depth, so the simple loop below is correct.
      * @param contextGraphId   The context graph the batch belongs to
      * @param batchId          The batch within this context graph
      * @param tripleHash       keccak256 hash of the triple (subject, predicate, object)

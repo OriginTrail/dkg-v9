@@ -72,7 +72,11 @@ export class AKAGossipHandler {
         const eventHandlers = this.handlers.get(topic);
         if (eventHandlers) {
           for (const h of eventHandlers) {
-            h(event, from);
+            try {
+              Promise.resolve(h(event, from)).catch(() => {});
+            } catch {
+              // sync handler threw — drop
+            }
           }
         }
       } catch {

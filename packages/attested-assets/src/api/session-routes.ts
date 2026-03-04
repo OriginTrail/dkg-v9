@@ -240,8 +240,13 @@ function serializeConfig(config: SessionConfig): Record<string, unknown> {
   };
 }
 
+const HEX_RE = /^(0x)?[0-9a-fA-F]*$/;
+
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0 || !HEX_RE.test(clean)) {
+    throw new Error('invalid hex string');
+  }
   const bytes = new Uint8Array(clean.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);

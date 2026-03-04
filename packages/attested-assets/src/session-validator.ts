@@ -211,7 +211,10 @@ export class SessionValidator {
   }
 
   private recordEvent(event: AKAEvent): void {
-    const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}`;
+    const payloadSuffix = event.type === 'RoundAck'
+      ? `|${Array.from(event.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join('')}`
+      : '';
+    const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}${payloadSuffix}`;
     this.seenTuples.add(tupleKey);
 
     const nonceKey = `${event.sessionId}|${event.signerPeerId}`;

@@ -21,6 +21,7 @@ import {
   computeStateHash,
   computeTurnCommitment,
   signAKAPayload,
+  verifyAKASignature,
   type SigningContext,
 } from './canonical.js';
 import { ReducerRegistry } from './reducer.js';
@@ -382,7 +383,7 @@ export class SessionManager {
     this.sessions.clear();
   }
 
-  private handleSessionProposed(event: AKAEvent): void {
+  private async handleSessionProposed(event: AKAEvent): Promise<void> {
     try {
       const config = decodeSessionConfig(event.payload);
 
@@ -391,9 +392,21 @@ export class SessionManager {
 
       if (config.sessionId !== event.sessionId) return;
 
-      const signerIsMember = config.membership.some(m => m.peerId === event.signerPeerId);
-      if (!signerIsMember) return;
       if (event.signerPeerId !== config.createdBy) return;
+
+      const creator = config.membership.find(m => m.peerId === event.signerPeerId);
+      if (!creator) return;
+
+      const sigCtx: SigningContext = {
+        domain: 'AKA-v1',
+        network: this.config.network,
+        paranetId: config.paranetId,
+        sessionId: config.sessionId,
+        round: 0,
+        type: 'SessionProposed',
+      };
+      const sigValid = await verifyAKASignature(sigCtx, Array.from(event.payload), event.signature, creator.pubKey);
+      if (!sigValid) return;
 
       const isMember = config.membership.some((m) => m.peerId === this.config.localPeerId);
       if (!isMember) return;
@@ -538,6 +551,7 @@ export class SessionManager {
       if (uniqueSigners.size !== finPayload.signerPeerIds.length) return;
 
       if (finPayload.signatures.length !== finPayload.signerPeerIds.length) return;
+      if (finPayload.signatures.some(sig => sig.length < 64)) return;
 
       const activeMemberCount = getActiveMemberCount(
         session.config.membership.length,
@@ -698,6 +712,7 @@ export class SessionManager {
     const roundState = session.roundStates.get(round);
     if (!roundState?.proposal) return;
     if (roundState.status === 'finalized') return;
+    if (roundState.proposerPeerId !== this.config.localPeerId) return;
 
     const activeMemberCount = getActiveMemberCount(
       session.config.membership.length,

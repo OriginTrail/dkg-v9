@@ -1,68 +1,112 @@
 import React from 'react';
-import { Routes, Route, NavLink } from 'react-router-dom';
+import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
-import { NetworkPage } from './pages/Network.js';
-import { OperationsPage } from './pages/Operations.js';
 import { ExplorerPage } from './pages/Explorer.js';
-import { WalletPage } from './pages/Wallet.js';
-import { IntegrationsPage } from './pages/Integrations.js';
-import { MessagesPage } from './pages/Messages.js';
-import { ChatPanel } from './components/ChatPanel.js';
-import { ParticleSphere } from './components/ParticleSphere.js';
-import { BackgroundNetwork } from './components/BackgroundNetwork.js';
+import { AgentHubPage } from './pages/AgentHub.js';
+import { AppsPage } from './pages/Apps.js';
+import { SettingsPage } from './pages/Settings.js';
+
+const NAV = [
+  {
+    to: '/',
+    end: true,
+    label: 'Dashboard',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/explorer',
+    label: 'Memory Explorer',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/>
+        <circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/>
+        <line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/>
+        <line x1="15.5" y1="7.5" x2="8.5" y2="16.5"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/agent',
+    label: 'Agent Hub',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/apps',
+    label: 'Apps',
+    badge: 'NEW',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="5 3 19 12 5 21 5 3"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/settings',
+    label: 'Settings',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    ),
+  },
+];
 
 export function App() {
   return (
     <div className="app-layout">
-      <BackgroundNetwork />
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <ParticleSphere size={48} />
-          <div>DKG Node <span>UI</span></div>
+          <div className="logo-icon">◆</div>
+          <div>
+            <div className="logo-text">DKG Node</div>
+            <div className="logo-version">v9 TESTNET</div>
+          </div>
         </div>
+
         <nav className="sidebar-nav">
-          <NavLink to="/" end>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L1 6v9h5v-4h4v4h5V6L8 1z"/></svg>
-            Dashboard
-          </NavLink>
-          <NavLink to="/network">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><line x1="4" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="12" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
-            Network
-          </NavLink>
-          <NavLink to="/messages">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14v9H5l-4 3V2zm2 2v5.17l1.59-1.59.41-.58H13V4H3z"/></svg>
-            Messages
-          </NavLink>
-          <NavLink to="/explorer">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 1a5 5 0 014.32 7.5l3.59 3.59-1.42 1.42-3.59-3.59A5 5 0 116 1zm0 2a3 3 0 100 6 3 3 0 000-6z"/></svg>
-            Explorer
-          </NavLink>
-          <NavLink to="/operations">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v2H2V2zm0 4h12v2H2V6zm0 4h8v2H2v-2z"/></svg>
-            Operations
-          </NavLink>
-          <NavLink to="/wallet">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 14h14v1H1v-1zM3 8l3-3 2 2 4-5 1.5 1.2L9 9 7 7l-3 3z"/><path d="M2 2h12v1H2V2zm0 3h12v8H2V5zm1 1v6h10V6H3z" opacity=".3"/></svg>
-            Economics
-          </NavLink>
-          <NavLink to="/integrations">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h4v4H2V2zm8 0h4v4h-4V2zM2 10h4v4H2v-4zm8 0h4v4h-4v-4z"/></svg>
-            Integrations
-          </NavLink>
+          {NAV.map(item => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+              {item.badge && <span className="nav-badge">{item.badge}</span>}
+            </NavLink>
+          ))}
         </nav>
+
+        <div className="sidebar-footer">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 8px rgba(74,222,128,0.4)', display: 'inline-block' }} />
+            <span style={{ color: 'var(--green)', fontWeight: 600 }}>Online</span>
+            <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>14 peers</span>
+          </div>
+          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>Base Sepolia · syncing…</div>
+        </div>
       </aside>
+
       <main className="main-content">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/network" element={<NetworkPage />} />
-          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
-          <Route path="/operations/*" element={<OperationsPage />} />
-          <Route path="/wallet" element={<WalletPage />} />
-          <Route path="/integrations" element={<IntegrationsPage />} />
+          <Route path="/agent" element={<AgentHubPage />} />
+          <Route path="/apps/*" element={<AppsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
-      <ChatPanel />
     </div>
   );
 }

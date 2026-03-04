@@ -10,7 +10,7 @@
 
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve, relative } from 'node:path';
 import { createRequire } from 'node:module';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -140,7 +140,14 @@ export async function handleAppRequest(
 }
 
 async function serveAppStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
-  let filePath = (!urlPath || urlPath === '/') ? join(staticDir, 'index.html') : join(staticDir, urlPath);
+  const resolved = resolve(staticDir, (urlPath && urlPath !== '/') ? urlPath.replace(/^\//, '') : 'index.html');
+  const rel = relative(staticDir, resolved);
+  if (rel.startsWith('..') || resolve(staticDir, rel) !== resolved) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid path' }));
+    return true;
+  }
+  let filePath = resolved;
 
   const ext = filePath.slice(filePath.lastIndexOf('.'));
   if (!MIME[ext]) filePath = join(staticDir, 'index.html');

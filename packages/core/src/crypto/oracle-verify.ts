@@ -101,13 +101,10 @@ export function verifyOracleResponse(
       continue;
     }
     const rootBytes = hexToBytes(onChainRoot);
-    for (const tr of tripleResults) {
+    for (let i = 0; i < tripleResults.length; i++) {
+      const tr = tripleResults[i];
       if (tr.batchId === batchId && tr.proofValid) {
-        const proofRoot = hexToBytes(
-          triples.find(
-            t => t.subject === tr.subject && t.predicate === tr.predicate && t.object === tr.object,
-          )!.proof.merkleRoot,
-        );
+        const proofRoot = hexToBytes(triples[i].proof.merkleRoot);
         if (!bytesEqual(proofRoot, rootBytes)) {
           tr.proofValid = false;
         }

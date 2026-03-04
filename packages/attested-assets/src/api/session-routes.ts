@@ -134,8 +134,9 @@ export function createSessionRoutes(manager: SessionManager): SessionRouteHandle
       path: '/api/sessions/:id/rounds/:n/start',
       handler: async (req) => {
         try {
-          await manager.startRound(req.params.id);
-          return { status: 200, body: { started: true, round: Number(req.params.n) } };
+          const requestedRound = Number(req.params.n);
+          await manager.startRound(req.params.id, requestedRound);
+          return { status: 200, body: { started: true, round: requestedRound } };
         } catch (err) {
           return { status: 400, body: { error: errorMessage(err) } };
         }
@@ -148,8 +149,9 @@ export function createSessionRoutes(manager: SessionManager): SessionRouteHandle
       handler: async (req) => {
         try {
           const body = req.body as SubmitInputBody;
+          const requestedRound = Number(req.params.n);
           const data = hexToBytes(body.data);
-          await manager.submitInput(req.params.id, data);
+          await manager.submitInput(req.params.id, data, requestedRound);
           return { status: 200, body: { submitted: true } };
         } catch (err) {
           return { status: 400, body: { error: errorMessage(err) } };

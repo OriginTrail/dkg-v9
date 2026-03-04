@@ -81,6 +81,8 @@ export class SessionManager {
   private readonly eventBus: EventBus;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  private readonly incomingEventHandler: (event: AKAEvent, from: string) => void;
+
   constructor(
     gossip: GossipSubManager,
     eventBus: EventBus,
@@ -96,6 +98,13 @@ export class SessionManager {
       acceptTimeoutMs: DEFAULT_ACCEPT_TIMEOUT_MS,
       ...config,
     };
+    this.incomingEventHandler = (event, from) => this.handleIncomingEvent(event, from);
+  }
+
+  subscribeParanet(paranetId: string): void {
+    const topic = paranetSessionsTopic(paranetId);
+    this.gossipHandler.subscribeParanet(paranetId);
+    this.gossipHandler.onEvent(topic, this.incomingEventHandler);
   }
 
   async createSession(
@@ -146,6 +155,7 @@ export class SessionManager {
     this.sessions.set(sessionId, sessionState);
 
     this.gossipHandler.subscribeSession(paranetId, sessionId);
+    this.gossipHandler.onEvent(sessionTopic(paranetId, sessionId), this.incomingEventHandler);
 
     const payload = encodeSessionConfig(sessionConfig);
     const event = await this.buildEvent('SessionProposed', sessionId, 0, genesisStateHash, payload);
@@ -206,12 +216,15 @@ export class SessionManager {
     this.eventBus.emit(AKASessionEvent.SESSION_ACTIVATED, { sessionId });
   }
 
-  async startRound(sessionId: string): Promise<void> {
+  async startRound(sessionId: string, requestedRound?: number): Promise<void> {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`session ${sessionId} not found`);
     if (session.config.status !== 'active') throw new Error('session not active');
 
     const round = session.currentRound;
+    if (requestedRound !== undefined && requestedRound !== round) {
+      throw new Error(`round mismatch: requested ${requestedRound} but current round is ${round}`);
+    }
     const roundState = this.getOrCreateRoundState(session, round);
 
     if (roundState.proposerPeerId !== this.config.localPeerId) {
@@ -252,11 +265,14 @@ export class SessionManager {
     });
   }
 
-  async submitInput(sessionId: string, data: Uint8Array): Promise<void> {
+  async submitInput(sessionId: string, data: Uint8Array, requestedRound?: number): Promise<void> {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`session ${sessionId} not found`);
 
     const round = session.currentRound;
+    if (requestedRound !== undefined && requestedRound !== round) {
+      throw new Error(`round mismatch: requested ${requestedRound} but current round is ${round}`);
+    }
     const roundState = session.roundStates.get(round);
     if (!roundState || roundState.status !== 'collecting_inputs') {
       throw new Error(`round ${round} is not collecting inputs`);
@@ -275,7 +291,7 @@ export class SessionManager {
     await this.gossipHandler.publishEvent(topic, event);
   }
 
-  handleIncomingEvent(event: AKAEvent, from: string): void {
+  async handleIncomingEvent(event: AKAEvent, from: string): Promise<void> {
     const session = this.sessions.get(event.sessionId);
 
     if (event.type === 'SessionProposed' && !session) {
@@ -284,6 +300,11 @@ export class SessionManager {
     }
 
     if (!session) return;
+
+    const validation = await this.validator.validate(event, session, this.config.network);
+    if (!validation.valid) {
+      return;
+    }
 
     switch (event.type) {
       case 'SessionAccepted':
@@ -351,6 +372,7 @@ export class SessionManager {
       this.sessions.set(config.sessionId, sessionState);
 
       this.gossipHandler.subscribeSession(config.paranetId, config.sessionId);
+      this.gossipHandler.onEvent(sessionTopic(config.paranetId, config.sessionId), this.incomingEventHandler);
 
       this.eventBus.emit(AKASessionEvent.SESSION_PROPOSED, {
         sessionId: config.sessionId,

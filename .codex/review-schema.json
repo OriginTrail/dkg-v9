@@ -1,10 +1,6 @@
 {
   "type": "object",
   "properties": {
-    "summary": {
-      "type": "string",
-      "description": "Brief overall assessment of the PR (2-4 sentences)"
-    },
     "comments": {
       "type": "array",
       "description": "Inline review comments on specific changed lines",
@@ -30,6 +26,6 @@
       }
     }
   },
-  "required": ["summary", "comments"],
+  "required": ["comments"],
   "additionalProperties": false
 }

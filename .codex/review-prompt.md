@@ -131,7 +131,6 @@ Return raw JSON only (no markdown fences), matching the provided schema:
 
 ```json
 {
-  "summary": "2-4 sentence PR assessment.",
   "comments": [
     {
       "path": "packages/example/src/file.ts",
@@ -143,11 +142,3 @@ Return raw JSON only (no markdown fences), matching the provided schema:
 ```
 
 `line` must be a right-side line that exists in diff hunks.
-
-## Summary Guidance
-
-In `summary`, write 2-4 sentences about only this PR's diff:
-
-- Lead with blockers if any.
-- State whether maintainability in touched areas improved, stayed neutral, or worsened.
-- If the PR is clean and low risk, say so explicitly.

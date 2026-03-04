@@ -21,10 +21,6 @@ patchedDependencies:
 importers:
 
   .:
-    dependencies:
-      dkg-app-oregon-trail:
-        specifier: link:../oregon-trail-dkg
-        version: link:../oregon-trail-dkg
     devDependencies:
       '@types/node':
         specifier: ^22

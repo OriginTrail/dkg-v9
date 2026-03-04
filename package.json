@@ -22,9 +22,6 @@
     "mcp": "node packages/mcp-server/dist/index.js",
     "index": "node packages/cli/dist/cli.js index"
   },
-  "optionalDependencies": {
-    "dkg-app-oregon-trail": "link:../oregon-trail-dkg"
-  },
   "devDependencies": {
     "@types/node": "^22",
     "@vitest/coverage-v8": "^3",

@@ -32,14 +32,13 @@ export class MerkleTree {
   private buildTree(): void {
     let current = this.layers[0];
     while (current.length > 1) {
+      if (current.length % 2 !== 0) {
+        current = [...current, current[current.length - 1]];
+        this.layers[this.layers.length - 1] = current;
+      }
       const next: Uint8Array[] = [];
       for (let i = 0; i < current.length; i += 2) {
-        if (i + 1 < current.length) {
-          next.push(hashPair(current[i], current[i + 1]));
-        } else {
-          // odd leaf promoted
-          next.push(current[i]);
-        }
+        next.push(hashPair(current[i], current[i + 1]));
       }
       this.layers.push(next);
       current = next;

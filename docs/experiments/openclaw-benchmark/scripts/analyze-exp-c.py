@@ -14,7 +14,7 @@ import statistics
 import subprocess
 from pathlib import Path
 
-BASE = Path("/Users/aleatoric/dev/dkg-v9/experiments/openclaw-benchmark")
+BASE = Path("/Users/aleatoric/dev/dkg-v9/docs/experiments/openclaw-benchmark")
 RESULTS = BASE / "results"
 
 

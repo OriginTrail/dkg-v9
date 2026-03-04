@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import statistics
 
-BASE = Path("/Users/aleatoric/dev/dkg-v9/experiments/openclaw-benchmark/results")
+BASE = Path("/Users/aleatoric/dev/dkg-v9/docs/experiments/openclaw-benchmark/results")
 
 
 def summarize(exp: str):

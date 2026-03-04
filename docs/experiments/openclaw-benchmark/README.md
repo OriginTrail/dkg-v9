@@ -7,7 +7,7 @@ and consistency compared to isolated agent workflows.
 ## Structure
 
 ```
-experiments/openclaw-benchmark/
+docs/experiments/openclaw-benchmark/
 ├── README.md           ← This file
 ├── RESULTS.md          ← Main findings, deltas, conclusions
 ├── tasks/              ← Task sets + next experiment definitions

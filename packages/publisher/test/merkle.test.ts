@@ -209,7 +209,7 @@ describe('Merkle / triple hashing (robust)', () => {
       const root = computePublicRoot(triples);
       const actualHex = hex(root!);
       const goldenHex =
-        'aad3f53f9989ce94954b83fe52098a3eb75262d4023ba4688c63952ab4e9a0e0';
+        '89a5e67f0c299318f22ba653ebae8eb5eb98e49f69126e901b067a6596abcc4b';
       expect(actualHex).toHaveLength(64);
       expect(actualHex).toBe(goldenHex);
     });
@@ -335,13 +335,10 @@ describe('Merkle / triple hashing (robust)', () => {
       const sortedLeaves = [...hashes].sort(compareBytes);
       expect(root).toHaveLength(32);
       expect(hex(root)).toBe(
-        'aad3f53f9989ce94954b83fe52098a3eb75262d4023ba4688c63952ab4e9a0e0',
+        '89a5e67f0c299318f22ba653ebae8eb5eb98e49f69126e901b067a6596abcc4b',
       );
 
-      // Verify proof for the first pair of leaves (indices 0 and 1). Full verification
-      // for all 6 leaves would require the core MerkleTree to handle odd-sized layers
-      // (promoted nodes) in proof/verify; we lock in the root and one pair here.
-      for (const i of [0, 1]) {
+      for (let i = 0; i < sortedLeaves.length; i++) {
         const proof = tree.proof(i);
         expect(MerkleTree.verify(root, sortedLeaves[i]!, proof, i)).toBe(true);
       }

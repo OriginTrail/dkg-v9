@@ -9,6 +9,7 @@
     "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "dev:ui": "vite",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

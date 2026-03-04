@@ -28,7 +28,8 @@ import {
   type DkgConfig,
   type AutoUpdateConfig,
 } from './config.js';
-import { loadTokens, httpAuthGuard } from './auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { loadApps, handleAppRequest, type LoadedApp } from './app-loader.js';
 
 
 export async function runDaemon(foreground: boolean): Promise<void> {
@@ -321,6 +322,13 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     log('API authentication disabled (auth.enabled = false)');
   }
 
+  // --- Installable Apps ---
+
+  const installedApps: LoadedApp[] = await loadApps(agent, config, log);
+  if (installedApps.length > 0) {
+    log(`${installedApps.length} DKG app(s) loaded: ${installedApps.map(a => a.label).join(', ')}`);
+  }
+
   // --- HTTP API ---
 
   const server = createServer(async (req, res) => {
@@ -345,6 +353,19 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined);
       if (handled) return;
+
+      // Installable DKG apps (API handlers + static UI)
+      // Only inject the auth token into HTML when the request itself is authenticated,
+      // and inject the caller's own token (not a different one) to avoid leaking credentials.
+      if (installedApps.length > 0) {
+        let appInjectToken: string | undefined;
+        if (authEnabled) {
+          const reqToken = extractBearerToken(req.headers.authorization);
+          if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
+        }
+        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken);
+        if (appHandled) return;
+      }
 
       await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
     } catch (err: any) {

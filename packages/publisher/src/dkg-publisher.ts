@@ -204,7 +204,7 @@ export class DKGPublisher implements Publisher {
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o } }`;
     } else {
       const filters = selection.rootEntities
-        .map((r) => `STRSTARTS(STR(?s), "${r.replace(/"/g, '\\"')}")`)
+        .map((r) => `STRSTARTS(STR(?s), "${r.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}")`)
         .join(' || ');
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o . FILTER(${filters}) } }`;
     }

@@ -57,6 +57,8 @@ export interface DkgConfig {
   name: string;
   relay?: string;
   apiPort: number;
+  /** Host to bind the API server (default '127.0.0.1', use '0.0.0.0' for external access). */
+  apiHost?: string;
   listenPort: number;
   nodeRole: 'core' | 'edge';
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
@@ -68,6 +70,14 @@ export interface DkgConfig {
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
+  /** Triple store backend override (default: oxigraph-worker with file persistence). */
+  store?: { backend: string; options?: Record<string, unknown> };
+  /**
+   * API authentication. When enabled, all non-public endpoints require
+   * a Bearer token in the Authorization header. A token is auto-generated
+   * on first start and stored in `<DKG_HOME>/auth.token`.
+   */
+  auth?: { enabled?: boolean; tokens?: string[] };
 }
 
 const DEFAULT_CONFIG: DkgConfig = {
@@ -107,7 +117,7 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 }
 
 export function dkgDir(): string {
-  return join(homedir(), '.dkg');
+  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
 }
 
 export function configPath(): string {

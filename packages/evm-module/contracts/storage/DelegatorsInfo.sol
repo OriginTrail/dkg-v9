@@ -35,6 +35,10 @@ contract DelegatorsInfo is INamed, IVersioned, ContractStatus, IInitializable {
     // IdentityId => Delegator => LastStakeHeldEpoch (the last epoch when delegator held stake, 0 if fully claimed)
     mapping(uint72 => mapping(address => uint256)) public lastStakeHeldEpoch;
 
+    // V9 Staking Conviction: lock tracking per delegator per node
+    mapping(uint72 => mapping(address => uint40)) public delegatorLockEpochs;
+    mapping(uint72 => mapping(address => uint40)) public delegatorLockStartEpoch;
+
     event DelegatorAdded(uint72 indexed identityId, address indexed delegator);
     event DelegatorRemoved(uint72 indexed identityId, address indexed delegator);
     event DelegatorLastClaimedEpochUpdated(
@@ -214,5 +218,27 @@ contract DelegatorsInfo is INamed, IVersioned, ContractStatus, IInitializable {
                 i++;
             }
         }
+    }
+
+    // V9 Conviction lock setters/getters
+
+    function setDelegatorLock(
+        uint72 identityId,
+        address delegator,
+        uint40 lockEpochs,
+        uint40 lockStartEpoch
+    ) external onlyContracts {
+        delegatorLockEpochs[identityId][delegator] = lockEpochs;
+        delegatorLockStartEpoch[identityId][delegator] = lockStartEpoch;
+    }
+
+    function getDelegatorLock(
+        uint72 identityId,
+        address delegator
+    ) external view returns (uint40 lockEpochs, uint40 lockStartEpoch) {
+        return (
+            delegatorLockEpochs[identityId][delegator],
+            delegatorLockStartEpoch[identityId][delegator]
+        );
     }
 }

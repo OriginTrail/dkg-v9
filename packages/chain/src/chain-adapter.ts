@@ -81,11 +81,17 @@ export interface EventFilter {
 }
 
 export interface CreateParanetParams {
-  /** For V9: human-readable name; paranetId is derived on-chain as keccak256(creator, name). */
+  /**
+   * Human-readable paranet name. The on-chain paranetId is derived as
+   * keccak256(bytes(name)) — only the hash goes to the chain. The cleartext
+   * name is never stored on-chain unless revealOnChain is true.
+   */
   name?: string;
   description?: string;
   /** 0 = open, 1 = permissioned (V9). */
   accessPolicy?: number;
+  /** If true, immediately reveal name+description on-chain after creation. Default: false. */
+  revealOnChain?: boolean;
   /** Legacy/mock: explicit id when not using chain registry. */
   paranetId?: string;
   metadata?: Record<string, string>;
@@ -93,11 +99,52 @@ export interface CreateParanetParams {
 
 /** One paranet entry from chain (e.g. ParanetCreated events). */
 export interface ParanetOnChain {
+  /** bytes32 hex — keccak256(bytes(name)). */
   paranetId: string;
   creator: string;
-  name: string;
   accessPolicy: number;
   blockNumber: number;
+  metadataRevealed: boolean;
+  /** Only set if metadata was revealed on-chain. */
+  name?: string;
+  /** Only set if metadata was revealed on-chain. */
+  description?: string;
+}
+
+// ----- FairSwap types -----
+
+export interface FairSwapPurchaseInfo {
+  purchaseId: bigint;
+  buyer: string;
+  seller: string;
+  kcId: bigint;
+  kaId: bigint;
+  price: bigint;
+  state: number; // 0=None, 1=Initiated, 2=Fulfilled, 3=KeyRevealed, 4=Completed, 5=Disputed, 6=Refunded, 7=Expired
+}
+
+// ----- Permanent Publishing types -----
+
+export interface PermanentPublishParams {
+  kaCount: number;
+  publisherNodeIdentityId: bigint;
+  merkleRoot: Uint8Array;
+  publicByteSize: bigint;
+  tokenAmount: bigint;
+  publisherSignature: { r: Uint8Array; vs: Uint8Array };
+  receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
+// ----- Publishing Conviction Account types -----
+
+export interface ConvictionAccountInfo {
+  accountId: bigint;
+  admin: string;
+  balance: bigint;
+  initialDeposit: bigint;
+  lockEpochs: number;
+  conviction: bigint;
+  discountBps: number;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
@@ -165,8 +212,33 @@ export interface ChainAdapter {
   // Paranets
   createParanet(params: CreateParanetParams): Promise<TxResult>;
   submitToParanet(kcId: string, paranetId: string): Promise<TxResult>;
+  /** Reveal cleartext name+description on-chain for a paranet you created. Optional. */
+  revealParanetMetadata?(paranetId: string, name: string, description: string): Promise<TxResult>;
   /** List paranets from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
   listParanetsFromChain?(fromBlock?: number): Promise<ParanetOnChain[]>;
+
+  // Publishing Conviction Accounts
+  createConvictionAccount?(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult>;
+  addConvictionFunds?(accountId: bigint, amount: bigint): Promise<TxResult>;
+  extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
+  getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
+  getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
+
+  // FairSwap (Private Knowledge Exchange)
+  initiatePurchase?(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult>;
+  fulfillPurchase?(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult>;
+  revealKey?(purchaseId: bigint, key: Uint8Array): Promise<TxResult>;
+  disputeDelivery?(purchaseId: bigint, proof: Uint8Array): Promise<TxResult>;
+  claimPayment?(purchaseId: bigint): Promise<TxResult>;
+  claimRefund?(purchaseId: bigint): Promise<TxResult>;
+  getFairSwapPurchase?(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null>;
+
+  // Permanent Publishing
+  publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
+
+  // Staking Conviction
+  stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
+  getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

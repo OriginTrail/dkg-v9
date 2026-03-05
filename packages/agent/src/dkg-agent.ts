@@ -12,7 +12,7 @@ import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapt
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  generateTentativeMetadata, generateKCMetadata, getConfirmedStatusQuad,
+  generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
@@ -1226,8 +1226,8 @@ export class DKGAgent {
       for await (const event of this.chain.listenForEvents(filter)) {
         if (event.blockNumber !== blockNumber) continue;
 
-        if (txHash && event.data['txHash']) {
-          if ((event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase()) {
+        if (txHash) {
+          if (!event.data['txHash'] || (event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase()) {
             continue;
           }
         }
@@ -1260,17 +1260,14 @@ export class DKGAgent {
   private async promoteGossipToConfirmed(
     ual: string,
     paranetId: string,
-    kcMeta: { ual: string; paranetId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
-    kaMetadata: KAMetadata[],
+    _kcMeta: { ual: string; paranetId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
+    _kaMetadata: KAMetadata[],
   ): Promise<void> {
-    const tentativeQuads = generateTentativeMetadata(kcMeta, kaMetadata);
-    const confirmedQuads = [
-      ...generateKCMetadata(kcMeta, kaMetadata),
-      getConfirmedStatusQuad(ual, paranetId),
-    ];
+    const tentativeStatus = getTentativeStatusQuad(ual, paranetId);
+    const confirmedStatus = getConfirmedStatusQuad(ual, paranetId);
     try {
-      await this.store.delete(tentativeQuads);
-      await this.store.insert(confirmedQuads);
+      await this.store.delete([tentativeStatus]);
+      await this.store.insert([confirmedStatus]);
     } catch (err) {
       this.log.warn(
         createOperationContext('gossip'),

@@ -10,15 +10,34 @@ import type { ViewConfig } from '@dkg/graph-viz';
 
 export function ExplorerPage() {
   return (
-    <div>
-      <h1 className="page-title">Knowledge Explorer</h1>
-      <div className="tab-group">
-        <NavLink to="/explorer" end className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Graph</NavLink>
-        <NavLink to="/explorer/sparql" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>SPARQL</NavLink>
-        <NavLink to="/explorer/paranets" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Paranets</NavLink>
-        <NavLink to="/explorer/publish" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Publish</NavLink>
-        <NavLink to="/explorer/history" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>History</NavLink>
-        <NavLink to="/explorer/saved" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Saved</NavLink>
+    <div className="page-section" style={{ display: 'flex', flexDirection: 'column', gap: 0, padding: '28px 32px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div>
+          <h1 className="serif" style={{ fontSize: 22, fontWeight: 700 }}>Memory Explorer</h1>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Browse, query, and publish Knowledge Assets</p>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
+        {[
+          { to: '/explorer',          label: 'Graph',    end: true },
+          { to: '/explorer/sparql',   label: 'SPARQL',   end: false },
+          { to: '/explorer/paranets', label: 'Paranets', end: false },
+          { to: '/explorer/publish',  label: 'Publish',  end: false },
+          { to: '/explorer/history',  label: 'History',  end: false },
+          { to: '/explorer/saved',    label: 'Saved',    end: false },
+        ].map(t => (
+          <NavLink
+            key={t.to}
+            to={t.to}
+            end={t.end}
+            className={({ isActive }) =>
+              `mode-tab${isActive ? ' active' : ''}`
+            }
+            style={{ textDecoration: 'none', padding: '6px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em', color: 'inherit' }}
+          >
+            {t.label}
+          </NavLink>
+        ))}
       </div>
       <Routes>
         <Route path="/" element={<GraphTab />} />

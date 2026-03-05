@@ -345,8 +345,11 @@ function GraphTab() {
         try {
           let membershipSparql: string;
           if (selectedParanet?.uri) {
-            const escapedUri = escapeSparqlString(selectedParanet.uri);
-            membershipSparql = `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${escapedUri}")) } LIMIT ${limit}`;
+            const safeIri = validateIri(selectedParanet.uri);
+            const escapedUri = safeIri ? escapeSparqlString(safeIri) : '';
+            membershipSparql = safeIri
+              ? `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${safeIri}> || STRSTARTS(STR(?g), "${escapedUri}/")) } LIMIT ${limit}`
+              : `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT ${limit}`;
           } else {
             membershipSparql = `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT ${limit}`;
           }

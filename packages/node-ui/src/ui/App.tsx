@@ -89,7 +89,7 @@ function useLiveStatus() {
       fetch('/api/status', { headers })
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (!cancelled) setStatus(d); })
-        .catch(() => {});
+        .catch(() => { if (!cancelled) setStatus(null); });
     };
     poll();
     const t = setInterval(poll, 10_000);

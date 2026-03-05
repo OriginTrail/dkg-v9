@@ -168,6 +168,16 @@ describe('dashboard uses runtime data', () => {
   it('publish CTA is disabled with coming-soon state', () => {
     expect(dashboard).toMatch(/coming soon/i);
   });
+
+  it('paranet list uses id as React key, not name', () => {
+    expect(dashboard).toMatch(/key=\{p\.id/);
+    expect(dashboard).not.toMatch(/key=\{p\.name\}/);
+  });
+
+  it('status text uses live paranet count, not fallback data', () => {
+    expect(dashboard).toMatch(/paranets\.length\s*\?.*participating in/);
+    expect(dashboard).not.toMatch(/displayParanets\.length\s*\?.*participating in/);
+  });
 });
 
 describe('sidebar uses live status', () => {
@@ -183,6 +193,10 @@ describe('sidebar uses live status', () => {
     expect(app).toContain('installedApps');
     expect(app).toMatch(/installedApps\.filter/);
   });
+
+  it('clears status to null on fetch failure so stale data is not shown', () => {
+    expect(app).toMatch(/\.catch\(\(\)\s*=>\s*\{[^}]*setStatus\(null\)/);
+  });
 });
 
 describe('explorer graph query safety', () => {
@@ -197,14 +211,25 @@ describe('explorer graph query safety', () => {
     expect(explorer).toMatch(/FILTER\(\?g\s*=\s*</);
     expect(explorer).toMatch(/STRSTARTS\(STR\(\?g\),\s*".*\/"\)/);
   });
+
+  it('membership query uses same exact+prefix filter as main query', () => {
+    const membershipSection = explorer.slice(explorer.indexOf('membershipSparql'));
+    expect(membershipSection).toMatch(/FILTER\(\?g\s*=\s*</);
+    expect(membershipSection).toMatch(/STRSTARTS\(STR\(\?g\),\s*".*\/"\)/);
+  });
 });
 
-describe('iframe onError fallback', () => {
-  it('AppHostPage handles onError by falling back to app.path', () => {
-    const appHost = readFile('pages/AppHost.tsx');
+describe('iframe app hosting', () => {
+  const appHost = readFile('pages/AppHost.tsx');
+
+  it('preflights staticUrl with fetch before setting iframe src', () => {
+    expect(appHost).toContain('fetch(app.staticUrl');
+    expect(appHost).toContain('triedStatic');
+  });
+
+  it('still handles onError as secondary fallback', () => {
     expect(appHost).toContain('onError');
     expect(appHost).toContain('handleError');
-    expect(appHost).toContain('triedStatic');
   });
 });
 
@@ -215,10 +240,9 @@ describe('x-forwarded-proto allowlist', () => {
     expect(loader).toMatch(/new Set\(\[['"]http['"],\s*['"]https['"]\]\)/);
   });
 
-  it('app-loader comment correctly states apps share one origin', () => {
+  it('app-loader does not claim apps get separate origins', () => {
     const loader = readFileSync(resolve(CLI_DIR, 'app-loader.ts'), 'utf-8');
-    expect(loader).toContain('all apps');
-    expect(loader).toContain('share a single static-server origin');
     expect(loader).not.toMatch(/gives each app a different.*origin/);
+    expect(loader).toContain('ALLOWED_PROTOS');
   });
 });

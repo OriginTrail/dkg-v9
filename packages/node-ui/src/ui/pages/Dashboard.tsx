@@ -161,6 +161,7 @@ export function DashboardPage() {
 
   const PARANET_COLORS = ['var(--green)', 'var(--blue)', 'var(--amber)', 'var(--purple)', '#f472b6', '#22d3ee'];
   const paranets = (paranetData?.paranets ?? []).map((p: any, i: number) => ({
+    id: p.id ?? `paranet-${i}`,
     name: p.name ?? p.id ?? `Paranet ${i + 1}`,
     assets: p.assetCount ?? p.assets ?? '—',
     agents: p.agentCount ?? p.agents ?? '—',
@@ -190,7 +191,7 @@ export function DashboardPage() {
         <div>
           <h1 className="serif" style={{ fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
           <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-            {status ? `Your node is live${displayParanets.length ? ` and participating in ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
+            {status ? `Your node is live${paranets.length ? ` and participating in ${paranets.length} paranet${paranets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
           </p>
         </div>
         <button
@@ -237,8 +238,8 @@ export function DashboardPage() {
               Paranets
               {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
             </div>
-            {displayParanets.map((p: any) => (
-              <div key={p.name} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer' }}>
+            {displayParanets.map((p: any, i: number) => (
+              <div key={p.id ?? `fallback-${i}`} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />

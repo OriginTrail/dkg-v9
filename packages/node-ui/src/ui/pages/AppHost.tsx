@@ -33,8 +33,17 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
 
   useEffect(() => {
     if (!app) return;
+    let cancelled = false;
     triedStatic.current = false;
-    setSrc(app.staticUrl || `${app.path}/`);
+
+    if (app.staticUrl) {
+      fetch(app.staticUrl, { method: 'HEAD', mode: 'no-cors' })
+        .then(() => { if (!cancelled) setSrc(app.staticUrl!); })
+        .catch(() => { if (!cancelled) setSrc(`${app.path}/`); });
+    } else {
+      setSrc(`${app.path}/`);
+    }
+    return () => { cancelled = true; };
   }, [app?.id, app?.staticUrl, app?.path]);
 
   const sendToken = useCallback(() => {

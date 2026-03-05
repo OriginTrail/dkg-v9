@@ -368,4 +368,26 @@ describe('I-009: SPARQL keyword detection — no false positives on literals/com
     );
     expect(response.status).toBe('OK');
   });
+
+  it('rejects GRAPH after comparison operator (< is not confused with IRI)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <${SCHEMA_NAME}> ?v FILTER(?v < 1) GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH');
+  });
+
+  it('rejects FROM after comparison operator', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s FROM <${OTHER_GRAPH}> WHERE { ?s <${SCHEMA_NAME}> ?v FILTER(?v < 100) }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+  });
 });

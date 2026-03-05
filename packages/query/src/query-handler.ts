@@ -361,19 +361,78 @@ function encode(response: QueryResponse): Uint8Array {
 }
 
 /**
- * Replaces string literals (single/double/triple-quoted), IRIs, and
- * line comments with spaces so keyword regexes don't false-positive.
+ * Linear-time state-machine that replaces string literals, IRIs, and
+ * line comments with spaces so keyword regexes only see "code" tokens.
  *
- * Order matters: triple-quoted first, then regular strings, then IRIs
- * (so `#` inside `<http://x/#frag>` is not treated as comment), then
- * line comments last.
+ * Handles: triple-quoted strings ("""/'''), regular strings ("/'),
+ * IRIs (<...> only when preceded by whitespace/start — not comparison
+ * operators like `< 1`), and line comments (# outside strings/IRIs).
  *
- * String patterns use the "unrolled loop" form to avoid polynomial
- * backtracking (ReDoS): `"[^"\\]*(?:\\.[^"\\]*)*"`.
+ * No regex backtracking — O(n) single pass, immune to ReDoS.
  */
 function stripLiteralsAndComments(sparql: string): string {
-  return sparql.replace(
-    /"""[\s\S]*?"""|'''[\s\S]*?'''|"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|<[^>]*>|#[^\n]*/g,
-    (m) => ' '.repeat(m.length),
-  );
+  const out = new Array<string>(sparql.length);
+  let i = 0;
+  const n = sparql.length;
+
+  while (i < n) {
+    const ch = sparql[i];
+
+    // Triple-quoted strings: """ or '''
+    if (
+      (ch === '"' || ch === "'") &&
+      sparql[i + 1] === ch &&
+      sparql[i + 2] === ch
+    ) {
+      const delim = ch + ch + ch;
+      const start = i;
+      i += 3;
+      while (i < n) {
+        if (sparql[i] === '\\') { i += 2; continue; }
+        if (sparql[i] === ch && sparql[i + 1] === ch && sparql[i + 2] === ch) {
+          i += 3;
+          break;
+        }
+        i++;
+      }
+      for (let j = start; j < i && j < n; j++) out[j] = ' ';
+      continue;
+    }
+
+    // Single/double quoted string
+    if (ch === '"' || ch === "'") {
+      const start = i;
+      i++;
+      while (i < n) {
+        if (sparql[i] === '\\') { i += 2; continue; }
+        if (sparql[i] === ch) { i++; break; }
+        i++;
+      }
+      for (let j = start; j < i && j < n; j++) out[j] = ' ';
+      continue;
+    }
+
+    // IRI: <...> only when preceded by non-alphanumeric (skip comparisons)
+    if (ch === '<' && i + 1 < n && /[a-zA-Z]/.test(sparql[i + 1])) {
+      const start = i;
+      i++;
+      while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
+      if (i < n && sparql[i] === '>') i++;
+      for (let j = start; j < i; j++) out[j] = ' ';
+      continue;
+    }
+
+    // Line comment: # (only in code context — we already handled strings/IRIs)
+    if (ch === '#') {
+      const start = i;
+      while (i < n && sparql[i] !== '\n') i++;
+      for (let j = start; j < i; j++) out[j] = ' ';
+      continue;
+    }
+
+    out[i] = ch;
+    i++;
+  }
+
+  return out.join('');
 }

@@ -335,16 +335,18 @@ describe('Discovery Client', () => {
     expect(notFound).toBeNull();
   });
 
-  it('returns relayAddress when present in profile', async () => {
+  it('returns relayAddress and publicKey when present in profile', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const discovery = new DiscoveryClient(engine);
 
     const relayAddr = '/ip4/1.2.3.4/tcp/9090/p2p/QmRelay';
+    const publicKey = Buffer.from('a'.repeat(32)).toString('base64');
     const { quads } = buildAgentProfile({
       peerId: 'QmWithRelay',
       name: 'RelayBot',
       skills: [],
+      publicKey,
       relayAddress: relayAddr,
     });
 
@@ -353,10 +355,12 @@ describe('Discovery Client', () => {
     const agents = await discovery.findAgents();
     expect(agents).toHaveLength(1);
     expect(agents[0].relayAddress).toBe(relayAddr);
+    expect(agents[0].publicKey).toBe(publicKey);
 
     const byPeerId = await discovery.findAgentByPeerId('QmWithRelay');
     expect(byPeerId).not.toBeNull();
     expect(byPeerId!.relayAddress).toBe(relayAddr);
+    expect(byPeerId!.publicKey).toBe(publicKey);
 
     // Agent without relayAddress should have undefined
     const store2 = new OxigraphStore();
@@ -370,6 +374,7 @@ describe('Discovery Client', () => {
     await store2.insert(q2);
     const agents2 = await discovery2.findAgents();
     expect(agents2[0].relayAddress).toBeUndefined();
+    expect(agents2[0].publicKey).toBeUndefined();
   });
 
   it('filters agents by framework', async () => {

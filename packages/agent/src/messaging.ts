@@ -47,6 +47,14 @@ export type ChatHandler = (
   conversationId: string,
 ) => void | Promise<void>;
 
+export type PeerPublicKeyResolver = (
+  peerId: string,
+) => Promise<Uint8Array | null | undefined>;
+
+interface MessageHandlerOptions {
+  resolvePeerPublicKey?: PeerPublicKeyResolver;
+}
+
 interface ConversationState {
   highWaterMark: number;
   lastActivity: number;
@@ -69,6 +77,7 @@ export class MessageHandler {
   private readonly x25519Private: Uint8Array;
   private readonly peerId: string;
   private readonly eventBus: EventBus;
+  private readonly resolvePeerPublicKey?: PeerPublicKeyResolver;
   private readonly conversations = new Map<string, ConversationState>();
   private readonly skillHandlers = new Map<string, SkillHandler>();
   private readonly peerKeys = new Map<string, Uint8Array>();
@@ -80,12 +89,14 @@ export class MessageHandler {
     x25519Private: Uint8Array,
     peerId: string,
     eventBus: EventBus,
+    options?: MessageHandlerOptions,
   ) {
     this.router = router;
     this.keypair = keypair;
     this.x25519Private = x25519Private;
     this.peerId = peerId;
     this.eventBus = eventBus;
+    this.resolvePeerPublicKey = options?.resolvePeerPublicKey;
 
     router.register(PROTOCOL_MESSAGE, this.handleIncoming.bind(this));
   }
@@ -398,6 +409,14 @@ export class MessageHandler {
   private async resolvePeerKey(peerId: string): Promise<Uint8Array> {
     const cached = this.peerKeys.get(peerId);
     if (cached) return cached;
+
+    if (this.resolvePeerPublicKey) {
+      const keyFromProfile = await this.resolvePeerPublicKey(peerId);
+      if (keyFromProfile && keyFromProfile.length === 32) {
+        this.peerKeys.set(peerId, keyFromProfile);
+        return keyFromProfile;
+      }
+    }
 
     const key = await ed25519KeyFromPeerId(peerId);
     this.peerKeys.set(peerId, key);

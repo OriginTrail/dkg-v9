@@ -21,13 +21,7 @@ export class GossipSubManager {
   }
 
   private setupListener(): void {
-    const pubsub = this.node.libp2p.services.pubsub;
-    pubsub.addEventListener('message', (evt) => {
-      const msg = evt.detail;
-      const topic = msg.topic;
-      const data =
-        msg.data instanceof Uint8Array ? msg.data : new Uint8Array(0);
-      const from = 'from' in msg ? String(msg.from) : 'unknown';
+    this.node.onPubsubMessage((topic, data, from) => {
 
       this.eventBus.emit(DKGEvent.GOSSIP_MESSAGE, { topic, data, from });
 
@@ -45,17 +39,17 @@ export class GossipSubManager {
   }
 
   subscribe(topic: string): void {
-    this.node.libp2p.services.pubsub.subscribe(topic);
+    this.node.subscribeTopic(topic);
   }
 
   unsubscribe(topic: string): void {
-    this.node.libp2p.services.pubsub.unsubscribe(topic);
+    this.node.unsubscribeTopic(topic);
     this.topicHandlers.delete(topic);
   }
 
   async publish(topic: string, data: Uint8Array): Promise<void> {
     await withRetry(
-      () => this.node.libp2p.services.pubsub.publish(topic, data),
+      () => this.node.publishTopic(topic, data),
       {
         maxAttempts: 3,
         baseDelayMs: 500,
@@ -83,6 +77,6 @@ export class GossipSubManager {
   }
 
   get subscribedTopics(): string[] {
-    return this.node.libp2p.services.pubsub.getTopics();
+    return this.node.getSubscribedTopics();
   }
 }

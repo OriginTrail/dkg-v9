@@ -169,9 +169,9 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     log(`Relay: ${relayPeers[0]}${relayPeers.length > 1 ? ` (+${relayPeers.length - 1} more)` : ''}`);
     for (let i = 0; i < 10; i++) {
       await sleep(1000);
-      const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
-      if (circuitAddrs.length) {
-        log(`Circuit reservation granted (${circuitAddrs.length} addresses)`);
+      const relayAddrs = agent.node.getRelayReservationAddresses();
+      if (relayAddrs.length) {
+        log(`Circuit reservation granted (${relayAddrs.length} addresses)`);
         break;
       }
       if (i === 9) log('WARNING: no circuit addresses after 10s');
@@ -239,9 +239,9 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }
 
   const metricsSource: MetricsSource = {
-    getPeerCount: () => new Set(agent.node.libp2p.getConnections().map(c => c.remotePeer.toString())).size,
-    getDirectPeerCount: () => new Set(agent.node.libp2p.getConnections().filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit')).map(c => c.remotePeer.toString())).size,
-    getRelayedPeerCount: () => new Set(agent.node.libp2p.getConnections().filter(c => c.remoteAddr?.toString().includes('/p2p-circuit')).map(c => c.remotePeer.toString())).size,
+    getPeerCount: () => new Set(agent.node.getConnections().map(c => c.peerId)).size,
+    getDirectPeerCount: () => new Set(agent.node.getConnections().filter(c => c.transport === 'direct').map(c => c.peerId)).size,
+    getRelayedPeerCount: () => new Set(agent.node.getConnections().filter(c => c.transport === 'relayed').map(c => c.peerId)).size,
     getMeshPeerCount: () => {
       try { return (agent.gossip as any).gossipsub?.getMeshPeers?.()?.length ?? 0; } catch { return 0; }
     },
@@ -399,11 +399,10 @@ async function handleRequest(
 
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {
-    const allConns = agent.node.libp2p.getConnections();
-    const directConns = allConns.filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit'));
+    const allConns = agent.node.getConnections();
+    const directConns = allConns.filter(c => c.transport === 'direct');
     const relayedConns = allConns.length - directConns.length;
-    const uniquePeers = new Set(allConns.map(c => c.remotePeer.toString()));
-    const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+    const uniquePeers = new Set(allConns.map(c => c.peerId));
     const networkId = await computeNetworkId();
     const chainConf = config.chain ?? network?.chain;
     const blockExplorerUrl = config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
@@ -416,7 +415,7 @@ async function handleRequest(
       uptimeMs: Date.now() - startedAt,
       connectedPeers: uniquePeers.size,
       connections: { total: allConns.length, direct: directConns.length, relayed: relayedConns },
-      relayConnected: circuitAddrs.length > 0,
+      relayConnected: agent.node.hasRelayReservation(),
       multiaddrs: agent.multiaddrs,
       blockExplorerUrl,
     });
@@ -424,18 +423,15 @@ async function handleRequest(
 
   // GET /api/connections — detailed per-connection info with transport type
   if (req.method === 'GET' && path === '/api/connections') {
-    const allConns = agent.node.libp2p.getConnections();
-    const connections = allConns.map(c => {
-      const addr = c.remoteAddr?.toString() ?? 'unknown';
-      return {
-        peerId: c.remotePeer.toString(),
-        remoteAddr: addr,
-        transport: addr.includes('/p2p-circuit') ? 'relayed' : 'direct',
-        direction: c.direction,
-        openedAt: c.timeline?.open ?? null,
-        durationMs: c.timeline?.open ? Date.now() - c.timeline.open : null,
-      };
-    });
+    const now = Date.now();
+    const connections = agent.node.getConnections().map(c => ({
+      peerId: c.peerId,
+      remoteAddr: c.remoteAddr,
+      transport: c.transport,
+      direction: c.direction,
+      openedAt: c.openedAt,
+      durationMs: c.openedAt ? now - c.openedAt : null,
+    }));
     const direct = connections.filter(c => c.transport === 'direct').length;
     return jsonResponse(res, 200, {
       total: connections.length,
@@ -448,15 +444,15 @@ async function handleRequest(
   // GET /api/agents — enriched with live connection health
   if (req.method === 'GET' && path === '/api/agents') {
     const agents = await agent.findAgents();
-    const allConns = agent.node.libp2p.getConnections();
+    const allConns = agent.node.getConnections();
     const connByPeer = new Map<string, { transport: string; direction: string; sinceMs: number }>();
     for (const c of allConns) {
-      const pid = c.remotePeer.toString();
+      const pid = c.peerId;
       if (!connByPeer.has(pid)) {
         connByPeer.set(pid, {
-          transport: c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
+          transport: c.transport,
           direction: c.direction,
-          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
+          sinceMs: c.openedAt ? Date.now() - c.openedAt : 0,
         });
       }
     }

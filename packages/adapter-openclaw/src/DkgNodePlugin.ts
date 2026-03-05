@@ -144,13 +144,13 @@ export class DkgNodePlugin {
   private async handleStatus(): Promise<OpenClawToolResult> {
     try {
       const agent = this.requireAgent();
-      const peers = agent.node.libp2p.getPeers();
+      const peers = agent.node.getPeers();
       return {
         status: 'ok',
         data: {
           peerId: agent.peerId,
           multiaddrs: agent.multiaddrs,
-          connectedPeers: peers.map(p => p.toString()),
+          connectedPeers: peers,
           peerCount: peers.length,
         },
       };

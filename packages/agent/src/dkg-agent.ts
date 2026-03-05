@@ -23,9 +23,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
-import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
+import { ed25519ToX25519Private } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
-import { multiaddr } from '@multiformats/multiaddr';
 
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
@@ -293,6 +292,18 @@ export class DKGAgent {
       x25519Priv,
       this.node.peerId,
       this.eventBus,
+      {
+        resolvePeerPublicKey: async (peerId) => {
+          const found = await this.discovery.findAgentByPeerId(peerId);
+          if (!found?.publicKey) return null;
+          try {
+            const key = Uint8Array.from(Buffer.from(found.publicKey, 'base64'));
+            return key.length === 32 ? key : null;
+          } catch {
+            return null;
+          }
+        },
+      },
     );
 
     // Wire up pending chat handler
@@ -362,7 +373,7 @@ export class DKGAgent {
     if (this.config.bootstrapPeers) {
       for (const addr of this.config.bootstrapPeers) {
         try {
-          await this.node.libp2p.dial(multiaddr(addr));
+          await this.node.dial(addr);
         } catch {
           // Bootstrap peer may be unreachable
         }
@@ -376,12 +387,9 @@ export class DKGAgent {
     const trySyncFromPeer = async (remotePeer: string) => {
       const shortPeer = remotePeer.slice(-8);
       try {
-        const { peerIdFromString } = await import('@libp2p/peer-id');
-        const pid = peerIdFromString(remotePeer);
-        const peer = await this.node.libp2p.peerStore.get(pid);
-        const hasSync = peer.protocols.includes(PROTOCOL_SYNC);
+        const hasSync = await this.node.peerSupportsProtocol(remotePeer, PROTOCOL_SYNC);
         if (!hasSync) {
-          this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${peer.protocols.join(', ')})`);
+          this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol`);
           return;
         }
         this.log.info(ctx, `Syncing agents paranet from peer ${shortPeer}...`);
@@ -392,15 +400,18 @@ export class DKGAgent {
       }
     };
 
-    this.node.libp2p.addEventListener('peer:connect', (evt) => {
-      const remotePeer = evt.detail.toString();
-      setTimeout(() => trySyncFromPeer(remotePeer), 3000);
+    this.node.onPeerConnect((remotePeer) => {
+      setTimeout(() => {
+        void trySyncFromPeer(remotePeer);
+      }, 3000);
     });
 
     // Sync from peers already connected (e.g. relay dialed during node.start())
-    const alreadyConnected = this.node.libp2p.getPeers();
+    const alreadyConnected = this.node.getPeers();
     for (const pid of alreadyConnected) {
-      setTimeout(() => trySyncFromPeer(pid.toString()), 3000);
+      setTimeout(() => {
+        void trySyncFromPeer(pid);
+      }, 3000);
     }
   }
 
@@ -565,32 +576,23 @@ export class DKGAgent {
   }
 
   async connectTo(multiaddress: string): Promise<void> {
-    await this.node.libp2p.dial(multiaddr(multiaddress));
+    await this.node.dial(multiaddress);
   }
 
   /**
-   * Ensure libp2p knows how to reach a peer via circuit relay. If the peer
-   * isn't directly connected and their profile advertises a relay address, we
-   * add a /p2p-circuit multiaddr to the peer store so dialProtocol can route
-   * through the relay.
+   * Ensure the transport provider knows how to route to a peer through relay.
+   * If the peer isn't directly connected and their profile advertises relay
+   * info, add a provider-specific relay-routed address hint.
    */
   private async ensureCircuitRelayAddress(peerIdStr: string): Promise<void> {
     try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const peerId = peerIdFromString(peerIdStr);
-
-      const conns = this.node.libp2p.getConnections(peerId);
+      const conns = this.node.getConnections(peerIdStr);
       if (conns.length > 0) return;
 
       const agent = await this.discovery.findAgentByPeerId(peerIdStr);
       if (!agent?.relayAddress) return;
 
-      const circuitAddr = multiaddr(
-        `${agent.relayAddress}/p2p-circuit/p2p/${peerIdStr}`,
-      );
-      await this.node.libp2p.peerStore.merge(peerId, {
-        multiaddrs: [circuitAddr],
-      });
+      await this.node.addRelayAddress(peerIdStr, agent.relayAddress);
     } catch {
       // Best-effort: if peer ID is invalid or lookup fails, let the
       // caller proceed — it will get a proper error from dialProtocol.

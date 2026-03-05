@@ -1,5 +1,5 @@
 import type { DKGNode } from './node.js';
-import type { ConnectionInfo, ConnectionTransport, EventBus } from './types.js';
+import type { ConnectionInfo, EventBus } from './types.js';
 import { DKGEvent } from './event-bus.js';
 
 /**
@@ -17,37 +17,29 @@ export class PeerDiscoveryManager {
   }
 
   private setupListeners(): void {
-    const libp2p = this.node.libp2p;
-
-    libp2p.addEventListener('peer:connect', (evt) => {
-      const peerId = evt.detail.toString();
+    this.node.onPeerConnect((peerId) => {
       this.eventBus.emit(DKGEvent.PEER_CONNECTED, { peerId });
     });
 
-    libp2p.addEventListener('peer:disconnect', (evt) => {
-      const peerId = evt.detail.toString();
+    this.node.onPeerDisconnect((peerId) => {
       this.eventBus.emit(DKGEvent.PEER_DISCONNECTED, { peerId });
     });
 
-    libp2p.addEventListener('connection:open', (evt) => {
-      const conn = evt.detail;
-      const info = this.connectionToInfo(conn);
+    this.node.onConnectionOpen((info) => {
       this.eventBus.emit(DKGEvent.CONNECTION_OPEN, info);
     });
 
-    libp2p.addEventListener('connection:close', (evt) => {
-      const conn = evt.detail;
-      const info = this.connectionToInfo(conn);
+    this.node.onConnectionClose((info) => {
       this.eventBus.emit(DKGEvent.CONNECTION_CLOSE, info);
     });
   }
 
   async getPeers(): Promise<string[]> {
-    return this.node.libp2p.getPeers().map((p) => p.toString());
+    return this.node.getPeers();
   }
 
   async getConnections(): Promise<ConnectionInfo[]> {
-    return this.node.libp2p.getConnections().map((c) => this.connectionToInfo(c));
+    return this.node.getConnections();
   }
 
   /** Convenience: group connections by transport type. */
@@ -62,17 +54,4 @@ export class PeerDiscoveryManager {
     return { total: peers.length, direct, relayed: peers.length - direct, peers };
   }
 
-  private connectionToInfo(conn: any): ConnectionInfo {
-    const addr = conn.remoteAddr?.toString() ?? 'unknown';
-    const transport: ConnectionTransport = addr.includes('/p2p-circuit')
-      ? 'relayed'
-      : 'direct';
-    return {
-      peerId: conn.remotePeer.toString(),
-      remoteAddr: addr,
-      transport,
-      direction: conn.direction,
-      openedAt: conn.timeline?.open ?? Date.now(),
-    };
-  }
 }

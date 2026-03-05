@@ -16,7 +16,7 @@ import { autoNAT } from '@libp2p/autonat';
 import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
-import type { ConnectionTransport, DKGNodeConfig } from './types.js';
+import type { ConnectionInfo, ConnectionTransport, DKGNodeConfig } from './types.js';
 import { DHT_PROTOCOL } from './constants.js';
 
 export interface DKGServices extends Record<string, unknown> {
@@ -36,6 +36,11 @@ interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
   addr: any;
 }
+
+type ProtocolHandler = (data: Uint8Array, remotePeerId: string) => Promise<Uint8Array>;
+type PubsubMessageHandler = (topic: string, data: Uint8Array, from: string) => void;
+type PeerHandler = (peerId: string) => void;
+type ConnectionHandler = (info: ConnectionInfo) => void;
 
 export class DKGNode {
   private node: Libp2p<DKGServices> | null = null;
@@ -254,7 +259,9 @@ export class DKGNode {
       const conn = evt.detail;
       const pid = conn.remotePeer.toString();
       const addr = conn.remoteAddr?.toString() ?? 'unknown';
-      const transport: ConnectionTransport = addr.includes('/p2p-circuit') ? 'relayed' : 'direct';
+      const transport: ConnectionTransport = this.isRelayedAddress(addr)
+        ? 'relayed'
+        : 'direct';
       const dir = conn.direction;
 
       if (transport === 'relayed') {
@@ -284,7 +291,9 @@ export class DKGNode {
       const conn = evt.detail;
       const pid = conn.remotePeer.toString();
       const addr = conn.remoteAddr?.toString() ?? 'unknown';
-      const transport: ConnectionTransport = addr.includes('/p2p-circuit') ? 'relayed' : 'direct';
+      const transport: ConnectionTransport = this.isRelayedAddress(addr)
+        ? 'relayed'
+        : 'direct';
       const durationMs = conn.timeline.close
         ? conn.timeline.close - conn.timeline.open
         : '?';
@@ -321,6 +330,193 @@ export class DKGNode {
     this.node = null;
   }
 
+  async dial(address: string): Promise<void> {
+    const node = this.requireNode();
+    const { multiaddr } = await import('@multiformats/multiaddr');
+    await node.dial(multiaddr(address));
+  }
+
+  getPeers(): string[] {
+    return this.requireNode().getPeers().map((p) => p.toString());
+  }
+
+  getConnections(peerIdStr?: string): ConnectionInfo[] {
+    const node = this.requireNode();
+    const conns = peerIdStr
+      ? node.getConnections(peerIdFromString(peerIdStr))
+      : node.getConnections();
+    return conns.map((c) => this.connectionToInfo(c));
+  }
+
+  onPeerConnect(handler: PeerHandler): () => void {
+    const node = this.requireNode();
+    const listener = ((evt: any) => {
+      handler(evt.detail.toString());
+    }) as EventListener;
+    node.addEventListener('peer:connect', listener);
+    return () => node.removeEventListener('peer:connect', listener);
+  }
+
+  onPeerDisconnect(handler: PeerHandler): () => void {
+    const node = this.requireNode();
+    const listener = ((evt: any) => {
+      handler(evt.detail.toString());
+    }) as EventListener;
+    node.addEventListener('peer:disconnect', listener);
+    return () => node.removeEventListener('peer:disconnect', listener);
+  }
+
+  onConnectionOpen(handler: ConnectionHandler): () => void {
+    const node = this.requireNode();
+    const listener = ((evt: any) => {
+      handler(this.connectionToInfo(evt.detail));
+    }) as EventListener;
+    node.addEventListener('connection:open', listener);
+    return () => node.removeEventListener('connection:open', listener);
+  }
+
+  onConnectionClose(handler: ConnectionHandler): () => void {
+    const node = this.requireNode();
+    const listener = ((evt: any) => {
+      handler(this.connectionToInfo(evt.detail));
+    }) as EventListener;
+    node.addEventListener('connection:close', listener);
+    return () => node.removeEventListener('connection:close', listener);
+  }
+
+  async peerSupportsProtocol(peerIdStr: string, protocolId: string): Promise<boolean> {
+    const node = this.requireNode();
+    try {
+      const peer = await node.peerStore.get(peerIdFromString(peerIdStr));
+      return peer.protocols.includes(protocolId);
+    } catch {
+      return false;
+    }
+  }
+
+  async addPeerAddress(
+    peerIdStr: string,
+    address: string,
+    options?: { keepAlive?: boolean },
+  ): Promise<void> {
+    const node = this.requireNode();
+    const { multiaddr } = await import('@multiformats/multiaddr');
+    const peerId = peerIdFromString(peerIdStr);
+    const ma = multiaddr(address);
+    const mergeData: any = { multiaddrs: [ma] };
+    if (options?.keepAlive) {
+      mergeData.tags = { 'keep-alive-dkg-relay': { value: 100 } };
+    }
+    await node.peerStore.merge(peerId, mergeData);
+  }
+
+  buildRelayAddress(relayAddress: string, peerIdStr: string): string {
+    const relayBase = relayAddress.endsWith('/')
+      ? relayAddress.slice(0, -1)
+      : relayAddress;
+    return `${relayBase}/p2p-circuit/p2p/${peerIdStr}`;
+  }
+
+  async addRelayAddress(
+    peerIdStr: string,
+    relayAddress: string,
+    options?: { keepAlive?: boolean },
+  ): Promise<void> {
+    await this.addPeerAddress(
+      peerIdStr,
+      this.buildRelayAddress(relayAddress, peerIdStr),
+      options,
+    );
+  }
+
+  getRelayReservationAddresses(): string[] {
+    return this.multiaddrs.filter((addr) => this.isRelayedAddress(addr));
+  }
+
+  hasRelayReservation(): boolean {
+    return this.getRelayReservationAddresses().length > 0;
+  }
+
+  handleProtocol(protocolId: string, handler: ProtocolHandler): void {
+    const node = this.requireNode();
+    node.handle(protocolId, async (stream: any, connection: any) => {
+      try {
+        const requestData = await readAll(stream);
+        const responseData = await handler(requestData, connection.remotePeer.toString());
+        stream.send(responseData);
+        await stream.close();
+      } catch (err) {
+        console.error(
+          `[DKGNode] protocol handler error on ${protocolId} from ${connection.remotePeer.toString().slice(-8)}:`,
+          err instanceof Error ? err.message : err,
+        );
+        try {
+          stream.abort(new Error('handler error'));
+        } catch {
+          // stream already closed
+        }
+      }
+    }, { runOnLimitedConnection: true });
+  }
+
+  unhandleProtocol(protocolId: string): void {
+    this.requireNode().unhandle(protocolId);
+  }
+
+  async sendProtocol(
+    peerIdStr: string,
+    protocolId: string,
+    data: Uint8Array,
+    timeoutMs = 10_000,
+  ): Promise<Uint8Array> {
+    const node = this.requireNode();
+    const peerId = peerIdFromString(peerIdStr);
+    const signal = AbortSignal.timeout(timeoutMs);
+    const stream = await node.dialProtocol(peerId, protocolId, {
+      runOnLimitedConnection: true,
+      signal,
+    });
+
+    if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
+      stream.abort(new Error('stream closed before send'));
+      throw new Error('stream returned in closed state');
+    }
+
+    stream.send(data);
+    await stream.close({ signal });
+
+    return await readAll(stream);
+  }
+
+  onPubsubMessage(handler: PubsubMessageHandler): () => void {
+    const pubsub = this.requireNode().services.pubsub;
+    const listener = ((evt: any) => {
+      const msg = evt.detail;
+      const topic = msg.topic;
+      const data = msg.data instanceof Uint8Array ? msg.data : new Uint8Array(0);
+      const from = 'from' in msg ? String(msg.from) : 'unknown';
+      handler(topic, data, from);
+    }) as EventListener;
+    pubsub.addEventListener('message', listener);
+    return () => pubsub.removeEventListener('message', listener);
+  }
+
+  subscribeTopic(topic: string): void {
+    this.requireNode().services.pubsub.subscribe(topic);
+  }
+
+  unsubscribeTopic(topic: string): void {
+    this.requireNode().services.pubsub.unsubscribe(topic);
+  }
+
+  async publishTopic(topic: string, data: Uint8Array): Promise<void> {
+    await this.requireNode().services.pubsub.publish(topic, data);
+  }
+
+  getSubscribedTopics(): string[] {
+    return this.requireNode().services.pubsub.getTopics();
+  }
+
   get peerId(): string {
     return this.requireNode().peerId.toString();
   }
@@ -347,4 +543,55 @@ export class DKGNode {
     if (!this.node) throw new Error('DKGNode not started');
     return this.node;
   }
+
+  private connectionToInfo(conn: any): ConnectionInfo {
+    const addr = conn.remoteAddr?.toString() ?? 'unknown';
+    const transport: ConnectionTransport = this.isRelayedAddress(addr)
+      ? 'relayed'
+      : 'direct';
+    return {
+      peerId: conn.remotePeer.toString(),
+      remoteAddr: addr,
+      transport,
+      direction: conn.direction,
+      openedAt: conn.timeline?.open ?? Date.now(),
+    };
+  }
+
+  private isRelayedAddress(addr: string): boolean {
+    return addr.includes('/p2p-circuit');
+  }
+}
+
+async function readAll(stream: AsyncIterable<any>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of stream) {
+    if (chunk instanceof Uint8Array) {
+      chunks.push(chunk);
+      continue;
+    }
+
+    if (chunk && typeof chunk.subarray === 'function') {
+      chunks.push(new Uint8Array(chunk.subarray()));
+      continue;
+    }
+
+    if (chunk && typeof chunk.slice === 'function') {
+      chunks.push(new Uint8Array(chunk.slice()));
+    }
+  }
+  return concat(chunks);
+}
+
+function concat(arrays: Uint8Array[]): Uint8Array {
+  if (arrays.length === 0) return new Uint8Array(0);
+  if (arrays.length === 1) return arrays[0];
+  const total = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) {
+    result.set(a, offset);
+    offset += a.length;
+  }
+  return result;
 }

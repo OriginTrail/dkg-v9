@@ -22,8 +22,7 @@ describe('AppHost — app resolution security', () => {
   });
 
   it('returns undefined for an unknown app ID', () => {
-    const app = resolveApp('nonexistent', INSTALLED_APPS);
-    expect(app).toBeUndefined();
+    expect(resolveApp('nonexistent', INSTALLED_APPS)).toBeUndefined();
   });
 
   it('returns undefined for path-traversal attempts', () => {
@@ -45,50 +44,43 @@ describe('AppHost — app resolution security', () => {
   });
 });
 
-describe('AppHost — conditional sandbox policy', () => {
-  it('sandbox is conditional on isCrossOrigin (uses staticUrl presence)', async () => {
+describe('AppHost — sandbox policy', () => {
+  it('sandbox never includes allow-same-origin (apps share one static-server origin)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    expect(src).toContain('isCrossOrigin');
-    expect(src).toContain('app?.staticUrl');
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).not.toContain('allow-same-origin');
   });
 
-  it('cross-origin sandbox includes allow-same-origin (safe on different origin)', () => {
-    const flags = ['allow-scripts', 'allow-forms', 'allow-popups'];
-    const isCrossOrigin = true;
-    if (isCrossOrigin) flags.push('allow-same-origin');
-    const policy = flags.join(' ');
-    expect(policy).toContain('allow-same-origin');
-    expect(policy).toContain('allow-scripts');
-  });
-
-  it('same-origin fallback sandbox omits allow-same-origin (prevents escape)', () => {
-    const flags = ['allow-scripts', 'allow-forms', 'allow-popups'];
-    const isCrossOrigin = false;
-    if (isCrossOrigin) flags.push('allow-same-origin');
-    const policy = flags.join(' ');
-    expect(policy).not.toContain('allow-same-origin');
-    expect(policy).toContain('allow-scripts');
-  });
-
-  it('sandbox flags array never includes allow-top-navigation', async () => {
+  it('sandbox includes allow-scripts, allow-forms, allow-popups', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    const flagsArrayMatch = src.match(/const flags\s*=\s*\[([^\]]+)\]/);
-    expect(flagsArrayMatch).toBeTruthy();
-    expect(flagsArrayMatch![1]).not.toContain('allow-top-navigation');
-    const pushMatch = src.match(/flags\.push\(([^)]+)\)/g) ?? [];
-    for (const p of pushMatch) {
-      expect(p).not.toContain('allow-top-navigation');
-    }
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).toContain('allow-scripts');
+    expect(sandboxMatch![1]).toContain('allow-forms');
+    expect(sandboxMatch![1]).toContain('allow-popups');
+  });
+
+  it('sandbox blocks top-level navigation (no allow-top-navigation in sandbox value)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).not.toContain('allow-top-navigation');
   });
 
   it('uses staticUrl (different origin) when available, falling back to same-origin path', async () => {
@@ -195,21 +187,16 @@ describe('AppHost — postMessage token handoff', () => {
 
   it('does not send token when no token is set', () => {
     const mockPostMessage = vi.fn();
-    const mockIframe = {
-      contentWindow: { postMessage: mockPostMessage },
-    };
-
     delete (globalThis as any).__DKG_TOKEN__;
 
     const sendToken = () => {
       const t = (globalThis as any).__DKG_TOKEN__;
-      if (t && mockIframe.contentWindow) {
-        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+      if (t) {
+        mockPostMessage({ type: 'dkg-token', token: t }, '*');
       }
     };
 
     sendToken();
-
     expect(mockPostMessage).not.toHaveBeenCalled();
   });
 

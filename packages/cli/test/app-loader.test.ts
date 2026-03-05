@@ -301,6 +301,15 @@ describe('startAppStaticServer', () => {
     expect(res.headers['access-control-allow-origin']).toBe('*');
   });
 
+  it('returns 400 for malformed requests instead of crashing', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/%00%00%00');
+    expect([200, 400, 404]).toContain(res.status);
+  });
+
   it('rejects with EADDRINUSE when port is already taken', async () => {
     const blocker = createServer();
     const blockerPort = await new Promise<number>((resolve) => {
@@ -321,8 +330,8 @@ describe('startAppStaticServer', () => {
 });
 
 describe('deriveOrigin', () => {
-  function fakeReq(host?: string, proto?: string): IncomingMessage {
-    const headers: Record<string, string> = {};
+  function fakeReq(host?: string, proto?: string | string[]): IncomingMessage {
+    const headers: Record<string, string | string[]> = {};
     if (host) headers.host = host;
     if (proto) headers['x-forwarded-proto'] = proto;
     return { headers } as unknown as IncomingMessage;
@@ -338,6 +347,10 @@ describe('deriveOrigin', () => {
 
   it('handles x-forwarded-proto with multiple values (uses first)', () => {
     expect(deriveOrigin(fakeReq('mynode.local:443', 'https, http'), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('handles x-forwarded-proto as string[] (Node repeated headers)', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', ['https', 'http']), 19300)).toBe('https://mynode.local:19300');
   });
 
   it('falls back to 127.0.0.1 when Host header is missing', () => {

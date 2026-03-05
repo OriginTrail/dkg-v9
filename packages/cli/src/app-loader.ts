@@ -105,7 +105,9 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
  * and the `Host` header for hostname, replacing the port.
  */
 export function deriveOrigin(req: IncomingMessage, port: number): string {
-  const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || 'http';
+  const rawProto = req.headers['x-forwarded-proto'];
+  const protoHeader = Array.isArray(rawProto) ? rawProto[0] : rawProto;
+  const proto = protoHeader?.split(',')[0]?.trim() || 'http';
   const reqHost = req.headers.host;
   const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
   return `${proto}://${hostname}:${port}`;
@@ -224,32 +226,39 @@ export async function startAppStaticServer(
   log?: (msg: string) => void,
 ): Promise<{ server: Server; port: number }> {
   const appServer = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const path = url.pathname;
+    try {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const path = url.pathname;
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      });
-      res.end();
-      return;
-    }
-
-    if (path.startsWith('/apps/')) {
-      const segments = path.slice('/apps/'.length).split('/');
-      const appId = segments[0];
-      const app = apps.find(a => a.id === appId);
-      if (app) {
-        const apiOrigin = apiPortRef.value ? deriveOrigin(req, apiPortRef.value) : undefined;
-        await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
         return;
       }
-    }
 
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
+      if (path.startsWith('/apps/')) {
+        const segments = path.slice('/apps/'.length).split('/');
+        const appId = segments[0];
+        const app = apps.find(a => a.id === appId);
+        if (app) {
+          const apiOrigin = apiPortRef.value ? deriveOrigin(req, apiPortRef.value) : undefined;
+          await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
+          return;
+        }
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+    } catch {
+      if (!res.headersSent) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad request');
+      }
+    }
   });
 
   await new Promise<void>((resolve, reject) => {

@@ -162,16 +162,16 @@ async function serveAppStatic(res: ServerResponse, staticDir: string, urlPath: s
       const injection = `<script>window.__DKG_TOKEN__=${JSON.stringify(authToken)}</script>`;
       const injected = html.replace('</head>', `${injection}</head>`);
       const buf = Buffer.from(injected, 'utf-8');
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache' });
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
       res.end(buf);
     } else {
       const s = await stat(filePath);
       const contentType = MIME[mimeExt] ?? 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': s.size, 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable' });
+      res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': s.size, 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable', 'Access-Control-Allow-Origin': '*' });
       createReadStream(filePath).pipe(res);
     }
   } catch {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.writeHead(404, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
     res.end('App UI not found');
   }
 

@@ -37,7 +37,6 @@ function GameTab() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [appInstalled, setAppInstalled] = useState<boolean | null>(null);
-  const trimmedName = useMemo(() => playerName.trim(), [playerName]);
 
   useEffect(() => {
     gameApi.info()

@@ -22,8 +22,9 @@ Severity scale used here: High (security/correctness/operational risk), Medium (
 3. `I-018` - full-monorepo fork model does not scale
 4. `I-013` - unclear extension governance (core vs plugin vs adapter)
 5. `I-017` - missing plugin runtime for dependency/lifecycle/collision control
-6. `I-001` - publish state loss on restart
-7. `I-004` + `I-009` - query exposure and scope bypass risk
+6. `I-022` - GossipSub publish missing txHash/blockNumber (slows verification)
+7. `I-001` - publish state loss on restart
+8. `I-004` + `I-009` - query exposure and scope bypass risk
 
 Issue IDs stay stable on purpose, so references do not break.
 
@@ -38,6 +39,7 @@ Issue IDs stay stable on purpose, so references do not break.
 | Plugin runtime | No first-class plugin kernel yet | High | I-017 |
 | Publish recovery | In-flight publish state is lost on restart | High | I-001 |
 | Query exposure | Remote queries are too open by default and can bypass graph limits | High | I-004, I-009 |
+| Publish verification speed | GossipSub broadcast missing txHash/blockNumber forces receivers to poll chain | High | I-022 |
 | Signature trust | Receiver signature flow is unclear and effectively self-attested | High | I-003 |
 | Access checks | Private access verification is incomplete | High | I-005 |
 | Update safety | Daemon auto-update can hard reset local state | High | I-006 |
@@ -299,6 +301,14 @@ Issue IDs stay stable on purpose, so references do not break.
 - Decision option A (recommended): document in README that local installs require `pnpm --filter @dkg/adapter-openclaw run build` before `npm install`. Add a `prepack` script as a safety net.
 - Decision option B: no action needed if all contributors use published packages.
 - Evidence: `packages/adapter-openclaw/package.json:23`.
+
+### I-022 - GossipSub publish broadcast does not include txHash or blockNumber
+- Severity: High
+- What is happening: when a publisher broadcasts a confirmed publish via GossipSub, the `PublishRequestMsg` includes `chainId`, `startKAId`, `endKAId`, and `publisherAddress`, but does **not** include `txHash` or `blockNumber` from the `OnChainPublishResult`.
+- Why it matters: receiving nodes cannot do a targeted on-chain verification (single `eth_getTransactionReceipt` call). Instead, they must either scan blocks via the `chain-event-poller` or query the Hub contract to find the matching event. Including `txHash` and `blockNumber` in the gossip message would allow receivers to verify the publish with one cheap RPC call to a specific block, eliminating the need for continuous chain polling for publish confirmation.
+- Decision option A (keep this design): receivers continue using `chain-event-poller` to scan for `KnowledgeBatchCreated` events across blocks. Works but is slower and more RPC-intensive.
+- Decision option B (change, recommended): add `txHash` (string) and `blockNumber` (uint64) fields to `PublishRequestMsg` protobuf schema. Publisher already has this data in `OnChainPublishResult`. Receivers can then do a single targeted verification: fetch the tx receipt at the given block, confirm the `KnowledgeBatchCreated` event matches the merkle root and KA range. Chain-event-poller can remain as a fallback for missed gossip messages or untrusted broadcasts.
+- Evidence: `packages/core/src/proto/publish.ts:11` (schema missing fields), `packages/agent/src/dkg-agent.ts:1140` (broadcast does not include on-chain proof), `packages/chain/src/chain-adapter.ts:38` (OnChainPublishResult has the data), `packages/publisher/src/chain-event-poller.ts:95` (current polling approach).
 
 ## eval.txt Coverage (Issues and Decisions)
 

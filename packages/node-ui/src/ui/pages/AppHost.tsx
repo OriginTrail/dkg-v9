@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 
 export interface InstalledApp {
@@ -11,13 +11,18 @@ export interface InstalledApp {
 /**
  * Hosts a DKG app in an iframe.
  *
- * When `staticUrl` is available, the iframe loads from a separate-origin
- * server (different port). Combined with `sandbox="allow-scripts
- * allow-same-origin allow-forms allow-popups"`, this provides real
- * isolation: `allow-same-origin` refers to the *app's own* origin
- * (different port), not the parent's, so the iframe cannot access
- * parent DOM/cookies/storage. Top-level navigation is blocked by
- * omitting `allow-top-navigation`.
+ * Sandbox permissions are conditional on the iframe origin:
+ *
+ * - **Cross-origin** (`staticUrl` present, different port): sandbox includes
+ *   `allow-same-origin` — safe because it refers to the app's own origin,
+ *   not the parent's. The app gets localStorage/sessionStorage on its
+ *   own origin while remaining isolated from the parent.
+ *
+ * - **Same-origin fallback** (`staticUrl` absent): sandbox omits
+ *   `allow-same-origin` to prevent the app from escaping the sandbox
+ *   and accessing parent-origin data.
+ *
+ * Top-level navigation is always blocked (no `allow-top-navigation`).
  *
  * Token is passed via postMessage handshake (app requests it, we respond).
  */
@@ -47,6 +52,13 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
     return () => window.removeEventListener('message', handler);
   }, [sendToken]);
 
+  const isCrossOrigin = !!app?.staticUrl;
+  const sandboxPolicy = useMemo(() => {
+    const flags = ['allow-scripts', 'allow-forms', 'allow-popups'];
+    if (isCrossOrigin) flags.push('allow-same-origin');
+    return flags.join(' ');
+  }, [isCrossOrigin]);
+
   if (!app) {
     return (
       <div style={{ padding: 32, color: '#aaa' }}>
@@ -62,7 +74,7 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
       ref={iframeRef}
       src={iframeSrc}
       onLoad={sendToken}
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      sandbox={sandboxPolicy}
       style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
       title={app.label}
     />

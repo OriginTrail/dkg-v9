@@ -100,6 +100,18 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
 }
 
 /**
+ * Derive a client-facing origin URL from request headers.
+ * Uses `x-forwarded-proto` for scheme (respects reverse proxies/TLS termination)
+ * and the `Host` header for hostname, replacing the port.
+ */
+export function deriveOrigin(req: IncomingMessage, port: number): string {
+  const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || 'http';
+  const reqHost = req.headers.host;
+  const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
+  return `${proto}://${hostname}:${port}`;
+}
+
+/**
  * Handle incoming requests for installed apps.
  * - GET /api/apps → list of installed apps
  * - GET /apps/:id/* → serve static UI files
@@ -120,9 +132,7 @@ export async function handleAppRequest(
   if (req.method === 'GET' && path === '/api/apps') {
     let staticBaseUrl: string | undefined;
     if (appStaticPort) {
-      const reqHost = req.headers.host;
-      const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
-      staticBaseUrl = `http://${hostname}:${appStaticPort}`;
+      staticBaseUrl = deriveOrigin(req, appStaticPort);
     }
     const list = apps.map(a => ({
       id: a.id,
@@ -210,7 +220,7 @@ export async function startAppStaticServer(
   apps: LoadedApp[],
   host: string,
   port: number,
-  apiOriginRef: { value: string },
+  apiPortRef: { value: number },
   log?: (msg: string) => void,
 ): Promise<{ server: Server; port: number }> {
   const appServer = createServer(async (req, res) => {
@@ -232,7 +242,8 @@ export async function startAppStaticServer(
       const appId = segments[0];
       const app = apps.find(a => a.id === appId);
       if (app) {
-        await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOriginRef.value);
+        const apiOrigin = apiPortRef.value ? deriveOrigin(req, apiPortRef.value) : undefined;
+        await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
         return;
       }
     }

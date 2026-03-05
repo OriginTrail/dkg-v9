@@ -327,13 +327,13 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const installedApps: LoadedApp[] = await loadApps(agent, config, log);
   let appStaticPort: number | undefined;
   let appStaticServer: import('node:http').Server | undefined;
-  const apiOriginRef = { value: '' };
+  const apiPortRef = { value: 0 };
   if (installedApps.length > 0) {
     log(`${installedApps.length} DKG app(s) loaded: ${installedApps.map(a => a.label).join(', ')}`);
     const appHost = config.apiHost || '127.0.0.1';
     const desiredAppPort = (config.apiPort || 19200) + 100;
     try {
-      const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiOriginRef, log);
+      const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiPortRef, log);
       appStaticServer = result.server;
       appStaticPort = result.port;
     } catch (err: any) {
@@ -391,7 +391,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     server.listen(apiPort, apiHost, () => resolve());
   });
   const boundPort = (server.address() as any).port as number;
-  apiOriginRef.value = `http://${apiHost}:${boundPort}`;
+  apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
   await writePid(process.pid);
 

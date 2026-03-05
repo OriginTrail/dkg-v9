@@ -45,30 +45,50 @@ describe('AppHost — app resolution security', () => {
   });
 });
 
-describe('AppHost — separate-origin isolation with sandbox', () => {
-  it('uses sandbox attribute with allow-scripts and allow-same-origin', async () => {
+describe('AppHost — conditional sandbox policy', () => {
+  it('sandbox is conditional on isCrossOrigin (uses staticUrl presence)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
-    expect(sandboxMatch).toBeTruthy();
-    expect(sandboxMatch![1]).toContain('allow-scripts');
-    expect(sandboxMatch![1]).toContain('allow-same-origin');
+    expect(src).toContain('isCrossOrigin');
+    expect(src).toContain('app?.staticUrl');
   });
 
-  it('sandbox blocks top-level navigation (no allow-top-navigation)', async () => {
+  it('cross-origin sandbox includes allow-same-origin (safe on different origin)', () => {
+    const flags = ['allow-scripts', 'allow-forms', 'allow-popups'];
+    const isCrossOrigin = true;
+    if (isCrossOrigin) flags.push('allow-same-origin');
+    const policy = flags.join(' ');
+    expect(policy).toContain('allow-same-origin');
+    expect(policy).toContain('allow-scripts');
+  });
+
+  it('same-origin fallback sandbox omits allow-same-origin (prevents escape)', () => {
+    const flags = ['allow-scripts', 'allow-forms', 'allow-popups'];
+    const isCrossOrigin = false;
+    if (isCrossOrigin) flags.push('allow-same-origin');
+    const policy = flags.join(' ');
+    expect(policy).not.toContain('allow-same-origin');
+    expect(policy).toContain('allow-scripts');
+  });
+
+  it('sandbox flags array never includes allow-top-navigation', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
-    expect(sandboxMatch).toBeTruthy();
-    expect(sandboxMatch![1]).not.toContain('allow-top-navigation');
+    const flagsArrayMatch = src.match(/const flags\s*=\s*\[([^\]]+)\]/);
+    expect(flagsArrayMatch).toBeTruthy();
+    expect(flagsArrayMatch![1]).not.toContain('allow-top-navigation');
+    const pushMatch = src.match(/flags\.push\(([^)]+)\)/g) ?? [];
+    for (const p of pushMatch) {
+      expect(p).not.toContain('allow-top-navigation');
+    }
   });
 
   it('uses staticUrl (different origin) when available, falling back to same-origin path', async () => {

@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { handleAppRequest, startAppStaticServer, type LoadedApp } from '../src/app-loader.js';
+import { handleAppRequest, startAppStaticServer, deriveOrigin, type LoadedApp } from '../src/app-loader.js';
 
 async function write(path: string, content: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
@@ -170,6 +170,17 @@ describe('app-loader', () => {
       expect(list[0].staticUrl).toBe('http://192.168.1.50:19300/apps/test-app/');
     });
 
+    it('uses https scheme when x-forwarded-proto is https', async () => {
+      const { req, res } = fakeReqRes('mynode.example.com:19200');
+      (req as any).headers['x-forwarded-proto'] = 'https';
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('https://mynode.example.com:19300/apps/test-app/');
+    });
+
     it('falls back to 127.0.0.1 when Host header is missing', async () => {
       const { req, res } = fakeReqRes();
       (req as any).headers = {};
@@ -212,7 +223,7 @@ describe('startAppStaticServer', () => {
   });
 
   it('starts on the specified port and serves app static files', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
     expect(result.port).toBeGreaterThan(0);
@@ -223,7 +234,7 @@ describe('startAppStaticServer', () => {
   });
 
   it('serves nested assets', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -233,7 +244,7 @@ describe('startAppStaticServer', () => {
   });
 
   it('returns 404 for unknown app', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -242,7 +253,7 @@ describe('startAppStaticServer', () => {
   });
 
   it('does not serve API routes', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -251,7 +262,7 @@ describe('startAppStaticServer', () => {
   });
 
   it('does NOT inject auth tokens into HTML (static-only server)', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -260,8 +271,8 @@ describe('startAppStaticServer', () => {
     expect(res.body).not.toContain('__DKG_TOKEN__');
   });
 
-  it('injects apiOrigin into HTML so apps know where to send API calls', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+  it('derives apiOrigin at request time from Host header and apiPort', async () => {
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -270,19 +281,19 @@ describe('startAppStaticServer', () => {
     expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:19200"');
   });
 
-  it('reads apiOriginRef.value at request time (supports late binding)', async () => {
-    const ref = { value: '' };
+  it('reads apiPortRef.value at request time (supports late binding)', async () => {
+    const ref = { value: 0 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
-    ref.value = 'http://127.0.0.1:55555';
+    ref.value = 55555;
     const res = await httpGetPort(result.port, '/apps/test-app/');
     expect(res.status).toBe(200);
     expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:55555"');
   });
 
   it('includes CORS headers on static responses', async () => {
-    const ref = { value: 'http://127.0.0.1:19200' };
+    const ref = { value: 19200 };
     const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
@@ -299,13 +310,46 @@ describe('startAppStaticServer', () => {
     });
 
     try {
-      const ref = { value: 'http://127.0.0.1:19200' };
+      const ref = { value: 19200 };
       await expect(
         startAppStaticServer(apps, '127.0.0.1', blockerPort, ref),
       ).rejects.toThrow(/EADDRINUSE/);
     } finally {
       await new Promise<void>(r => blocker.close(() => r()));
     }
+  });
+});
+
+describe('deriveOrigin', () => {
+  function fakeReq(host?: string, proto?: string): IncomingMessage {
+    const headers: Record<string, string> = {};
+    if (host) headers.host = host;
+    if (proto) headers['x-forwarded-proto'] = proto;
+    return { headers } as unknown as IncomingMessage;
+  }
+
+  it('derives http origin from Host header', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:19200'), 19300)).toBe('http://mynode.local:19300');
+  });
+
+  it('uses https when x-forwarded-proto is https', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'https'), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('handles x-forwarded-proto with multiple values (uses first)', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'https, http'), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('falls back to 127.0.0.1 when Host header is missing', () => {
+    expect(deriveOrigin(fakeReq(), 19300)).toBe('http://127.0.0.1:19300');
+  });
+
+  it('strips port from Host header', () => {
+    expect(deriveOrigin(fakeReq('192.168.1.50:19200'), 19300)).toBe('http://192.168.1.50:19300');
+  });
+
+  it('handles Host header without port', () => {
+    expect(deriveOrigin(fakeReq('mynode.local'), 19300)).toBe('http://mynode.local:19300');
   });
 });
 

@@ -64,7 +64,28 @@ export class AccessHandler {
         return this.deny('KA not found');
       }
 
-      // Require signature for non-public access policies
+      // Enforce access policy (cheap peerId checks first, before expensive crypto)
+      if (meta.accessPolicy === 'ownerOnly') {
+        if (meta.publisherPeerId && fromPeerId !== meta.publisherPeerId) {
+          this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
+            kaUal: request.kaUal,
+            requester: fromPeerId,
+            granted: false,
+          });
+          return this.deny('Access denied: owner-only policy');
+        }
+      } else if (meta.accessPolicy === 'allowList') {
+        if (meta.allowedPeers && !meta.allowedPeers.includes(fromPeerId)) {
+          this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
+            kaUal: request.kaUal,
+            requester: fromPeerId,
+            granted: false,
+          });
+          return this.deny('Access denied: not on allow list');
+        }
+      }
+
+      // Verify signature for non-public access policies
       if (meta.accessPolicy !== 'public') {
         if (!request.requesterSignature || request.requesterSignature.length === 0) {
           return this.deny('Access denied: signature required for non-public access');
@@ -85,28 +106,6 @@ export class AccessHandler {
           return this.deny('Access denied: invalid signature');
         }
       }
-
-      // Enforce access policy
-      if (meta.accessPolicy === 'ownerOnly') {
-        if (meta.publisherPeerId && fromPeerId !== meta.publisherPeerId) {
-          this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
-            kaUal: request.kaUal,
-            requester: fromPeerId,
-            granted: false,
-          });
-          return this.deny('Access denied: owner-only policy');
-        }
-      } else if (meta.accessPolicy === 'allowList') {
-        if (meta.allowedPeers && !meta.allowedPeers.includes(fromPeerId)) {
-          this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
-            kaUal: request.kaUal,
-            requester: fromPeerId,
-            granted: false,
-          });
-          return this.deny('Access denied: not on allow list');
-        }
-      }
-      // 'public' policy: no restrictions (signature optional)
 
       const hasPrivate =
         this.privateStore.hasPrivateTriples(meta.paranetId, meta.rootEntity) ||

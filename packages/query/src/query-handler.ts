@@ -280,22 +280,19 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    // Block SERVICE clauses
-    if (/\bSERVICE\b/i.test(sparql)) {
+    // Strip string literals and comments so regexes don't false-positive
+    // on keywords inside quoted values or variable names like ?graph.
+    const stripped = stripLiteralsAndComments(sparql);
+
+    if (/\bSERVICE\b/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
     }
 
-    // Block explicit GRAPH clauses that could bypass paranet scoping.
-    // The query engine's wrapWithGraph() skips wrapping when it detects
-    // an existing GRAPH clause, which would allow cross-paranet access.
-    // Uses \bGRAPH\s+ to catch all forms: <uri>, ?var, and prefix:name.
-    if (/\bGRAPH\s+/i.test(sparql)) {
+    if (/\bGRAPH\s+/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
-    // Block FROM/FROM NAMED clauses that could also bypass graph scoping.
-    // Uses \bFROM\s+ to catch all IRI forms: <uri>, prefix:name, etc.
-    if (/\bFROM\s+/i.test(sparql)) {
+    if (/\bFROM\s+/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
@@ -361,4 +358,91 @@ function formatObject(value: string): string {
 
 function encode(response: QueryResponse): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(response));
+}
+
+/**
+ * Linear-time state-machine that replaces string literals, IRIs, and
+ * line comments with spaces so keyword regexes only see "code" tokens.
+ *
+ * Handles: triple-quoted strings ("""/'''), regular strings ("/'),
+ * IRIs (<...> only when preceded by whitespace/start — not comparison
+ * operators like `< 1`), and line comments (# outside strings/IRIs).
+ *
+ * No regex backtracking — O(n) single pass, immune to ReDoS.
+ */
+function stripLiteralsAndComments(sparql: string): string {
+  const out = new Array<string>(sparql.length);
+  let i = 0;
+  const n = sparql.length;
+
+  while (i < n) {
+    const ch = sparql[i];
+
+    // Triple-quoted strings: """ or '''
+    if (
+      (ch === '"' || ch === "'") &&
+      sparql[i + 1] === ch &&
+      sparql[i + 2] === ch
+    ) {
+      const delim = ch + ch + ch;
+      const start = i;
+      i += 3;
+      while (i < n) {
+        if (sparql[i] === '\\') { i += 2; continue; }
+        if (sparql[i] === ch && sparql[i + 1] === ch && sparql[i + 2] === ch) {
+          i += 3;
+          break;
+        }
+        i++;
+      }
+      for (let j = start; j < i && j < n; j++) out[j] = ' ';
+      continue;
+    }
+
+    // Single/double quoted string
+    if (ch === '"' || ch === "'") {
+      const start = i;
+      i++;
+      while (i < n) {
+        if (sparql[i] === '\\') { i += 2; continue; }
+        if (sparql[i] === ch) { i++; break; }
+        i++;
+      }
+      for (let j = start; j < i && j < n; j++) out[j] = ' ';
+      continue;
+    }
+
+    // IRI: <...> — '<' is an IRI only when NOT preceded by a word character
+    // (letter, digit, ?, $, _) or closing paren/bracket. Those mean comparison.
+    // Everything else (operators, whitespace, punctuation, start-of-input) is
+    // a valid IRI boundary — covers =, !, +, -, *, /, ^, :, (, {, etc.
+    if (ch === '<') {
+      const prev = i > 0 ? sparql[i - 1] : '';
+      const isComparison = prev && (/[a-zA-Z0-9?$_]/.test(prev) || prev === ')' || prev === ']');
+      if (!isComparison) {
+        const next = sparql[i + 1];
+        if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
+          const start = i;
+          i++;
+          while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
+          if (i < n && sparql[i] === '>') i++;
+          for (let j = start; j < i; j++) out[j] = ' ';
+          continue;
+        }
+      }
+    }
+
+    // Line comment: # (only in code context — we already handled strings/IRIs)
+    if (ch === '#') {
+      const start = i;
+      while (i < n && sparql[i] !== '\n') i++;
+      for (let j = start; j < i; j++) out[j] = ' ';
+      continue;
+    }
+
+    out[i] = ch;
+    i++;
+  }
+
+  return out.join('');
 }

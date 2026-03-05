@@ -219,6 +219,44 @@ describe('explorer graph query safety', () => {
   });
 });
 
+describe('Apps.tsx playerName fallback', () => {
+  const apps = readFile('pages/Apps.tsx');
+
+  it('shows manual name input when API did not provide nodeName', () => {
+    expect(apps).toContain('placeholder="Enter your name"');
+    expect(apps).toContain('type="text"');
+  });
+
+  it('gates read-only display on info?.nodeName, not trimmedName (input stays visible while typing)', () => {
+    expect(apps).toMatch(/info\?\.nodeName\s*\?/);
+    expect(apps).not.toMatch(/\{trimmedName\s*\?/);
+  });
+
+  it('does not trim playerName on every keystroke (allows spaces while typing)', () => {
+    expect(apps).not.toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\.trim\(\)\)/);
+    expect(apps).toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\)/);
+  });
+
+  it('derives trimmedName via useMemo for consistent normalization', () => {
+    expect(apps).toMatch(/trimmedName\s*=\s*useMemo\(\(\)\s*=>\s*playerName\.trim\(\)/);
+  });
+
+  it('uses trimmedName (not raw playerName) for API calls and comparisons', () => {
+    expect(apps).toMatch(/gameApi\.join\([^,]+,\s*trimmedName\)/);
+    expect(apps).toMatch(/gameApi\.create\(trimmedName/);
+    expect(apps).toMatch(/playerName=\{trimmedName\}/);
+  });
+
+  it('disables Join button when trimmedName is empty', () => {
+    expect(apps).toMatch(/disabled=\{.*!trimmedName/);
+  });
+
+  it('still auto-populates playerName from gameApi.info() when available', () => {
+    expect(apps).toContain('data.nodeName');
+    expect(apps).toContain('setPlayerName(data.nodeName)');
+  });
+});
+
 describe('iframe app hosting', () => {
   const appHost = readFile('pages/AppHost.tsx');
 

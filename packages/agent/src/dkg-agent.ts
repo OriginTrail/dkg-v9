@@ -1,7 +1,7 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetDataGraphUri, paranetMetaGraphUri,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetDataGraphUri, paranetMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
@@ -415,7 +415,7 @@ export class DKGAgent {
    */
   async syncFromPeer(
     remotePeerId: string,
-    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS],
+    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, 'origin-trail-game'],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
@@ -764,9 +764,11 @@ export class DKGAgent {
   subscribeToParanet(paranetId: string): void {
     const publishTopic = paranetPublishTopic(paranetId);
     const workspaceTopic = paranetWorkspaceTopic(paranetId);
+    const appTopic = paranetAppTopic(paranetId);
 
     this.gossip.subscribe(publishTopic);
     this.gossip.subscribe(workspaceTopic);
+    this.gossip.subscribe(appTopic);
 
     this.gossip.onMessage(publishTopic, async (_topic, data) => {
       try {

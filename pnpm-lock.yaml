@@ -21,6 +21,10 @@ patchedDependencies:
 importers:
 
   .:
+    dependencies:
+      dkg-app-origin-trail-game:
+        specifier: link:/Users/aleatoric/dev/oregon-trail-dkg
+        version: link:../oregon-trail-dkg
     devDependencies:
       '@types/node':
         specifier: ^22

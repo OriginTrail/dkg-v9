@@ -217,7 +217,7 @@ function formatTerm(term: string): string {
 
 function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {
   if (term.startsWith('"')) {
-    const match = term.match(/^"(.*)"(?:@(\S+)|\^\^<(.+)>)?$/s);
+    const match = term.match(/^"((?:[^"\\]|\\.)*)"(?:@(\S+)|\^\^<([^>]+)>)?$/);
     if (match) {
       if (match[2]) return oxigraph.literal(match[1], match[2]);
       if (match[3]) return oxigraph.literal(match[1], oxigraph.namedNode(match[3]));

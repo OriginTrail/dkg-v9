@@ -8,13 +8,14 @@ import {
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
-import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
+import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  generateTentativeMetadata, generateKCMetadata, getConfirmedStatusQuad,
+  generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
+import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
@@ -774,10 +775,17 @@ export class DKGAgent {
     this.gossip.subscribe(appTopic);
 
     this.gossip.onMessage(publishTopic, async (_topic, data) => {
+      const ctx = createOperationContext('gossip');
       try {
         const request = decodePublishRequest(data);
         const nquadsStr = new TextDecoder().decode(request.nquads);
         const quads = parseSimpleNQuads(nquadsStr);
+
+        if (quads.length === 0 && !request.ual) {
+          this.log.warn(ctx, 'Gossip: empty broadcast with no UAL, ignoring');
+          return;
+        }
+
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureParanet(request.paranetId);
         const dataGraph = graphManager.dataGraphUri(request.paranetId);
@@ -841,8 +849,6 @@ export class DKGAgent {
           }
 
           const merkleRoot = computeKCRoot(kaRoots);
-          const startKAId = protoToNumber(request.startKAId);
-          const isConfirmedOnChain = startKAId > 0 && !!request.publisherAddress;
 
           const kcMeta = {
             ual: request.ual,
@@ -853,13 +859,36 @@ export class DKGAgent {
             timestamp: new Date(),
           };
 
-          const metaQuads = isConfirmedOnChain
-            ? [...generateKCMetadata(kcMeta, kaMetadata), getConfirmedStatusQuad(request.ual, request.paranetId)]
-            : generateTentativeMetadata(kcMeta, kaMetadata);
+          // Always store gossip-received data as tentative first —
+          // never trust self-reported on-chain status from gossip messages.
+          const metaQuads = generateTentativeMetadata(kcMeta, kaMetadata);
           await this.store.insert(metaQuads);
+
+          // If the gossip message includes on-chain proof (txHash + blockNumber),
+          // attempt targeted verification and promote to confirmed if valid.
+          const txHash = request.txHash ?? '';
+          const blockNumber = protoToNumber(request.blockNumber ?? 0);
+          const startKAId = protoToBigInt(request.startKAId ?? 0);
+          const endKAId = protoToBigInt(request.endKAId ?? 0);
+
+          if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
+            const verified = await this.verifyGossipOnChain(
+              txHash, blockNumber, merkleRoot, request.publisherAddress,
+              startKAId, endKAId,
+              ctx,
+            );
+            if (verified) {
+              await this.promoteGossipToConfirmed(request.ual, request.paranetId, kcMeta, kaMetadata);
+              this.log.info(ctx, `Gossip publish ${request.ual} verified on-chain (tx=${txHash.slice(0, 10)}…, block=${blockNumber})`);
+            } else {
+              this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (on-chain verification failed or pending)`);
+            }
+          } else {
+            this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (no on-chain proof in message)`);
+          }
         }
-      } catch {
-        // Silently handle malformed broadcasts
+      } catch (err) {
+        this.log.warn(ctx, `Gossip: failed to process publish broadcast: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 
@@ -1159,6 +1188,8 @@ export class DKGAgent {
       chainId: this.chain.chainId,
       publisherSignatureR: new Uint8Array(0),
       publisherSignatureVs: new Uint8Array(0),
+      txHash: onChain?.txHash ?? '',
+      blockNumber: onChain?.blockNumber ?? 0,
     });
 
     const topic = paranetPublishTopic(paranetId);
@@ -1167,6 +1198,88 @@ export class DKGAgent {
       await this.gossip.publish(topic, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    }
+  }
+
+  /**
+   * Verify a gossip-received publish by doing a targeted on-chain lookup
+   * at the exact block specified in the gossip message. Uses both fromBlock
+   * and toBlock to constrain the scan to a single block, and validates
+   * txHash against event data when available.
+   */
+  private async verifyGossipOnChain(
+    txHash: string,
+    blockNumber: number,
+    expectedMerkleRoot: Uint8Array,
+    expectedPublisher: string,
+    expectedStartKAId: bigint,
+    expectedEndKAId: bigint,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    if (this.chain.chainId === 'none') return false;
+
+    if (blockNumber <= 0) {
+      this.log.warn(ctx, `Gossip verification skipped: invalid blockNumber=${blockNumber}`);
+      return false;
+    }
+
+    try {
+      const filter: EventFilter = {
+        eventTypes: ['KnowledgeBatchCreated'],
+        fromBlock: blockNumber,
+        toBlock: blockNumber,
+      };
+      for await (const event of this.chain.listenForEvents(filter)) {
+        if (event.blockNumber !== blockNumber) continue;
+
+        if (txHash) {
+          if (!event.data['txHash'] || (event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase()) {
+            continue;
+          }
+        }
+
+        const eventMerkle = typeof event.data['merkleRoot'] === 'string'
+          ? ethers.getBytes(event.data['merkleRoot'] as string)
+          : event.data['merkleRoot'] as Uint8Array;
+        const eventPublisher = (event.data['publisherAddress'] as string) ?? '';
+        const eventStartKAId = BigInt(event.data['startKAId'] as string ?? '0');
+        const eventEndKAId = BigInt(event.data['endKAId'] as string ?? '0');
+
+        const merkleMatch = ethers.hexlify(eventMerkle) === ethers.hexlify(expectedMerkleRoot);
+        const publisherMatch = eventPublisher.toLowerCase() === expectedPublisher.toLowerCase();
+        const rangeMatch = eventStartKAId === expectedStartKAId && eventEndKAId === expectedEndKAId;
+
+        if (merkleMatch && publisherMatch && rangeMatch) {
+          return true;
+        }
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Gossip on-chain verification failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return false;
+  }
+
+  /**
+   * Promote gossip-received tentative data to confirmed via a status-only
+   * swap: insert the confirmed quad first, then delete the tentative one,
+   * so metadata is never lost even if the second operation fails.
+   */
+  private async promoteGossipToConfirmed(
+    ual: string,
+    paranetId: string,
+    _kcMeta: { ual: string; paranetId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
+    _kaMetadata: KAMetadata[],
+  ): Promise<void> {
+    const tentativeStatus = getTentativeStatusQuad(ual, paranetId);
+    const confirmedStatus = getConfirmedStatusQuad(ual, paranetId);
+    try {
+      await this.store.insert([confirmedStatus]);
+      await this.store.delete([tentativeStatus]);
+    } catch (err) {
+      this.log.warn(
+        createOperationContext('gossip'),
+        `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }
@@ -1236,6 +1349,12 @@ function strip(s: string): string {
 function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
   if (typeof val === 'number') return val;
   return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
+}
+
+function protoToBigInt(val: number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
+  if (typeof val === 'bigint') return val;
+  if (typeof val === 'number') return BigInt(val);
+  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
 function stripLiteral(s: string): string {

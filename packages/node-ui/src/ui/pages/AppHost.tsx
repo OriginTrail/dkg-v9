@@ -36,7 +36,7 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
       ref={iframeRef}
       src={`${app.path}/`}
       onLoad={handleLoad}
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      sandbox="allow-scripts allow-forms allow-popups"
       style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
       title={app.label}
     />

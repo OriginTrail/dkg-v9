@@ -66,6 +66,18 @@ describe('AppHost — iframe sandbox policy', () => {
     expect(src).not.toContain('allow-top-navigation');
   });
 
+  it('sandbox does not include allow-same-origin (prevents iframe escaping sandbox)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).not.toContain('allow-same-origin');
+  });
+
   it('component does not render iframe when app is not found', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');

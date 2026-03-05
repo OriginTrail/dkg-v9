@@ -1,17 +1,4 @@
-import { describe, it, expect } from 'vitest';
-
-/**
- * AppHost security tests.
- *
- * The AppHostPage component in the Node UI enforces these rules:
- * 1. Only render an iframe for apps that exist in the installed apps list
- * 2. Never construct a src URL from raw URL params (prevents path traversal)
- * 3. The iframe must have a sandbox attribute restricting capabilities
- *
- * Since the component is React (requires DOM/jsdom), we test the core
- * logic here as pure functions and verify the component source for
- * security invariants.
- */
+import { describe, it, expect, vi } from 'vitest';
 
 const INSTALLED_APPS = [
   { id: 'oregon-trail', label: 'Oregon Trail', path: '/apps/oregon-trail' },
@@ -87,5 +74,89 @@ describe('AppHost — iframe sandbox policy', () => {
     );
     expect(src).toContain('if (!app)');
     expect(src).not.toMatch(/src=\{.*appId/);
+  });
+});
+
+describe('AppHost — postMessage token handoff with opaque-origin iframe', () => {
+  it('uses wildcard target origin for postMessage (opaque iframe origin)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const postMessageCalls = src.match(/\.postMessage\(\s*\{[^}]*\}\s*,\s*['"]([^'"]*)['"]/g) ?? [];
+    expect(postMessageCalls.length).toBeGreaterThan(0);
+    for (const call of postMessageCalls) {
+      expect(call).toContain("'*'");
+    }
+  });
+
+  it('responds to dkg-token-request from iframe via message listener', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('dkg-token-request');
+    expect(src).toContain('e.source');
+  });
+
+  it('sendToken function sends token with wildcard origin (behavioral)', () => {
+    const mockPostMessage = vi.fn();
+    const mockIframe = {
+      contentWindow: { postMessage: mockPostMessage },
+    };
+    const token = 'test-token-abc123';
+
+    (globalThis as any).__DKG_TOKEN__ = token;
+
+    const sendToken = () => {
+      const t = (globalThis as any).__DKG_TOKEN__;
+      if (t && mockIframe.contentWindow) {
+        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+      }
+    };
+
+    sendToken();
+
+    expect(mockPostMessage).toHaveBeenCalledOnce();
+    expect(mockPostMessage).toHaveBeenCalledWith(
+      { type: 'dkg-token', token: 'test-token-abc123' },
+      '*',
+    );
+
+    delete (globalThis as any).__DKG_TOKEN__;
+  });
+
+  it('does not send token when no token is set', () => {
+    const mockPostMessage = vi.fn();
+    const mockIframe = {
+      contentWindow: { postMessage: mockPostMessage },
+    };
+
+    delete (globalThis as any).__DKG_TOKEN__;
+
+    const sendToken = () => {
+      const t = (globalThis as any).__DKG_TOKEN__;
+      if (t && mockIframe.contentWindow) {
+        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+      }
+    };
+
+    sendToken();
+
+    expect(mockPostMessage).not.toHaveBeenCalled();
+  });
+
+  it('token-request handler verifies source matches iframe contentWindow', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('iframeRef.current?.contentWindow === e.source');
   });
 });

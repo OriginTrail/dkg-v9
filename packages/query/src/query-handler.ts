@@ -412,15 +412,14 @@ function stripLiteralsAndComments(sparql: string): string {
       continue;
     }
 
-    // IRI: <...> — require a real token boundary before '<'.
-    // In SPARQL, IRI '<' is preceded by whitespace, '(', '{', ',', ';', '.',
-    // '^' (^^<type>), ':', or start-of-input. After a variable/literal char
-    // (letter, digit, ?, $, _, ), >) it's always a comparison operator.
+    // IRI: <...> — '<' is an IRI only when NOT preceded by a word character
+    // (letter, digit, ?, $, _) or closing paren/bracket. Those mean comparison.
+    // Everything else (operators, whitespace, punctuation, start-of-input) is
+    // a valid IRI boundary — covers =, !, +, -, *, /, ^, :, (, {, etc.
     if (ch === '<') {
       const prev = i > 0 ? sparql[i - 1] : '';
-      const atTokenBoundary = !prev || prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r'
-        || prev === '(' || prev === '{' || prev === ',' || prev === ';' || prev === '.' || prev === '^' || prev === ':';
-      if (atTokenBoundary) {
+      const isComparison = prev && (/[a-zA-Z0-9?$_]/.test(prev) || prev === ')' || prev === ']');
+      if (!isComparison) {
         const next = sparql[i + 1];
         if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
           const start = i;

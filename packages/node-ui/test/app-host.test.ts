@@ -45,15 +45,30 @@ describe('AppHost — app resolution security', () => {
   });
 });
 
-describe('AppHost — separate-origin isolation', () => {
-  it('component does NOT use sandbox attribute (relies on cross-origin isolation)', async () => {
+describe('AppHost — separate-origin isolation with sandbox', () => {
+  it('uses sandbox attribute with allow-scripts and allow-same-origin', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    expect(src).not.toMatch(/\bsandbox[=\s]/);
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).toContain('allow-scripts');
+    expect(sandboxMatch![1]).toContain('allow-same-origin');
+  });
+
+  it('sandbox blocks top-level navigation (no allow-top-navigation)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).not.toContain('allow-top-navigation');
   });
 
   it('uses staticUrl (different origin) when available, falling back to same-origin path', async () => {
@@ -107,6 +122,16 @@ describe('AppHost — postMessage token handoff', () => {
     }
   });
 
+  it('sends apiOrigin alongside token in postMessage', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('apiOrigin: window.location.origin');
+  });
+
   it('responds to dkg-token-request from iframe via message listener', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
@@ -130,7 +155,10 @@ describe('AppHost — postMessage token handoff', () => {
     const sendToken = () => {
       const t = (globalThis as any).__DKG_TOKEN__;
       if (t && mockIframe.contentWindow) {
-        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+        mockIframe.contentWindow.postMessage(
+          { type: 'dkg-token', token: t, apiOrigin: 'http://localhost:19200' },
+          '*',
+        );
       }
     };
 
@@ -138,7 +166,7 @@ describe('AppHost — postMessage token handoff', () => {
 
     expect(mockPostMessage).toHaveBeenCalledOnce();
     expect(mockPostMessage).toHaveBeenCalledWith(
-      { type: 'dkg-token', token: 'test-token-abc123' },
+      { type: 'dkg-token', token: 'test-token-abc123', apiOrigin: 'http://localhost:19200' },
       '*',
     );
 

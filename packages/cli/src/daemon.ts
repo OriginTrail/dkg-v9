@@ -325,16 +325,20 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   // --- Installable Apps ---
 
   const installedApps: LoadedApp[] = await loadApps(agent, config, log);
-  let appStaticBaseUrl: string | undefined;
+  let appStaticPort: number | undefined;
   let appStaticServer: import('node:http').Server | undefined;
+  const apiOriginRef = { value: '' };
   if (installedApps.length > 0) {
     log(`${installedApps.length} DKG app(s) loaded: ${installedApps.map(a => a.label).join(', ')}`);
     const appHost = config.apiHost || '127.0.0.1';
-    const appPort = (config.apiPort || 19200) + 100;
-    const mainApiOrigin = `http://${appHost}:${config.apiPort || 19200}`;
-    const result = await startAppStaticServer(installedApps, appHost, appPort, mainApiOrigin, log);
-    appStaticServer = result.server;
-    appStaticBaseUrl = `http://${appHost}:${result.port}`;
+    const desiredAppPort = (config.apiPort || 19200) + 100;
+    try {
+      const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiOriginRef, log);
+      appStaticServer = result.server;
+      appStaticPort = result.port;
+    } catch (err: any) {
+      log(`App static server failed to start: ${err.message}. Apps will be served from main server.`);
+    }
   }
 
   // --- HTTP API ---
@@ -371,7 +375,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
           const reqToken = extractBearerToken(req.headers.authorization);
           if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
         }
-        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticBaseUrl);
+        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
         if (appHandled) return;
       }
 
@@ -387,6 +391,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     server.listen(apiPort, apiHost, () => resolve());
   });
   const boundPort = (server.address() as any).port as number;
+  apiOriginRef.value = `http://${apiHost}:${boundPort}`;
   await writeApiPort(boundPort);
   await writePid(process.pid);
 

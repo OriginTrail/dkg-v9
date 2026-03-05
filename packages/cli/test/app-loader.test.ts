@@ -20,11 +20,11 @@ function makeApp(id: string, staticDir: string): LoadedApp {
   };
 }
 
-function httpGet(server: Server, path: string): Promise<{ status: number; body: string }> {
+function httpGet(server: Server, path: string, headers?: Record<string, string>): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const addr = server.address() as { port: number };
     import('node:http').then(({ get }) => {
-      get(`http://127.0.0.1:${addr.port}${path}`, (res) => {
+      get(`http://127.0.0.1:${addr.port}${path}`, { headers }, (res) => {
         let body = '';
         res.on('data', (c: Buffer) => { body += c.toString(); });
         res.on('end', () => resolve({ status: res.statusCode!, body }));
@@ -33,8 +33,8 @@ function httpGet(server: Server, path: string): Promise<{ status: number; body: 
   });
 }
 
-function fakeReqRes(): { req: IncomingMessage; res: ServerResponse & { _status: number; _body: string; _headers: Record<string, unknown> } } {
-  const req = { method: 'GET', headers: {} } as unknown as IncomingMessage;
+function fakeReqRes(host?: string): { req: IncomingMessage; res: ServerResponse & { _status: number; _body: string; _headers: Record<string, unknown> } } {
+  const req = { method: 'GET', headers: { host: host || '127.0.0.1:19200' } } as unknown as IncomingMessage;
   const collected = { _status: 0, _body: '', _headers: {} as Record<string, unknown> };
   const res = {
     ...collected,
@@ -149,18 +149,39 @@ describe('app-loader', () => {
     });
   });
 
-  describe('/api/apps response with appStaticBaseUrl', () => {
-    it('includes staticUrl when appStaticBaseUrl is provided', async () => {
-      const { req, res } = fakeReqRes();
+  describe('/api/apps staticUrl derived from request Host header', () => {
+    it('includes staticUrl using request hostname when appStaticPort is provided', async () => {
+      const { req, res } = fakeReqRes('mynode.example.com:19200');
       const url = { pathname: '/api/apps' } as URL;
       (req as any).method = 'GET';
 
-      await handleAppRequest(req, res, url, apps, undefined, 'http://127.0.0.1:19300');
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://mynode.example.com:19300/apps/test-app/');
+    });
+
+    it('strips port from Host header when deriving hostname', async () => {
+      const { req, res } = fakeReqRes('192.168.1.50:19200');
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://192.168.1.50:19300/apps/test-app/');
+    });
+
+    it('falls back to 127.0.0.1 when Host header is missing', async () => {
+      const { req, res } = fakeReqRes();
+      (req as any).headers = {};
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
       const list = JSON.parse(res._body);
       expect(list[0].staticUrl).toBe('http://127.0.0.1:19300/apps/test-app/');
     });
 
-    it('omits staticUrl when appStaticBaseUrl is not provided', async () => {
+    it('omits staticUrl when appStaticPort is not provided', async () => {
       const { req, res } = fakeReqRes();
       const url = { pathname: '/api/apps' } as URL;
       (req as any).method = 'GET';
@@ -191,7 +212,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('starts on the specified port and serves app static files', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
     expect(result.port).toBeGreaterThan(0);
 
@@ -201,7 +223,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('serves nested assets', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPort(result.port, '/apps/test-app/assets/app.js');
@@ -210,7 +233,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('returns 404 for unknown app', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPort(result.port, '/apps/unknown/');
@@ -218,7 +242,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('does not serve API routes', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPort(result.port, '/api/apps');
@@ -226,7 +251,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('does NOT inject auth tokens into HTML (static-only server)', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPort(result.port, '/apps/test-app/');
@@ -235,7 +261,8 @@ describe('startAppStaticServer', () => {
   });
 
   it('injects apiOrigin into HTML so apps know where to send API calls', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPort(result.port, '/apps/test-app/');
@@ -243,12 +270,42 @@ describe('startAppStaticServer', () => {
     expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:19200"');
   });
 
+  it('reads apiOriginRef.value at request time (supports late binding)', async () => {
+    const ref = { value: '' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    ref.value = 'http://127.0.0.1:55555';
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:55555"');
+  });
+
   it('includes CORS headers on static responses', async () => {
-    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    const ref = { value: 'http://127.0.0.1:19200' };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
     appServer = result.server;
 
     const res = await httpGetPortFull(result.port, '/apps/test-app/');
     expect(res.headers['access-control-allow-origin']).toBe('*');
+  });
+
+  it('rejects with EADDRINUSE when port is already taken', async () => {
+    const blocker = createServer();
+    const blockerPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => {
+        resolve((blocker.address() as any).port);
+      });
+    });
+
+    try {
+      const ref = { value: 'http://127.0.0.1:19200' };
+      await expect(
+        startAppStaticServer(apps, '127.0.0.1', blockerPort, ref),
+      ).rejects.toThrow(/EADDRINUSE/);
+    } finally {
+      await new Promise<void>(r => blocker.close(() => r()));
+    }
   });
 });
 

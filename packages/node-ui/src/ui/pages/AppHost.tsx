@@ -12,9 +12,12 @@ export interface InstalledApp {
  * Hosts a DKG app in an iframe.
  *
  * When `staticUrl` is available, the iframe loads from a separate-origin
- * server (different port). This provides real browser isolation (same-origin
- * policy) without needing the `sandbox` attribute — so localStorage,
- * sessionStorage, and normal asset loading all work.
+ * server (different port). Combined with `sandbox="allow-scripts
+ * allow-same-origin allow-forms allow-popups"`, this provides real
+ * isolation: `allow-same-origin` refers to the *app's own* origin
+ * (different port), not the parent's, so the iframe cannot access
+ * parent DOM/cookies/storage. Top-level navigation is blocked by
+ * omitting `allow-top-navigation`.
  *
  * Token is passed via postMessage handshake (app requests it, we respond).
  */
@@ -59,6 +62,7 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
       ref={iframeRef}
       src={iframeSrc}
       onLoad={sendToken}
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
       title={app.label}
     />

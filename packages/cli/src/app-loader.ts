@@ -113,16 +113,22 @@ export async function handleAppRequest(
   url: URL,
   apps: LoadedApp[],
   authToken?: string,
-  appStaticBaseUrl?: string,
+  appStaticPort?: number,
 ): Promise<boolean> {
   const path = url.pathname;
 
   if (req.method === 'GET' && path === '/api/apps') {
+    let staticBaseUrl: string | undefined;
+    if (appStaticPort) {
+      const reqHost = req.headers.host;
+      const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
+      staticBaseUrl = `http://${hostname}:${appStaticPort}`;
+    }
     const list = apps.map(a => ({
       id: a.id,
       label: a.label,
       path: a.path,
-      ...(appStaticBaseUrl ? { staticUrl: `${appStaticBaseUrl}${a.path}/` } : {}),
+      ...(staticBaseUrl ? { staticUrl: `${staticBaseUrl}${a.path}/` } : {}),
     }));
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(list));
@@ -204,7 +210,7 @@ export async function startAppStaticServer(
   apps: LoadedApp[],
   host: string,
   port: number,
-  apiOrigin: string,
+  apiOriginRef: { value: string },
   log?: (msg: string) => void,
 ): Promise<{ server: Server; port: number }> {
   const appServer = createServer(async (req, res) => {
@@ -226,7 +232,7 @@ export async function startAppStaticServer(
       const appId = segments[0];
       const app = apps.find(a => a.id === appId);
       if (app) {
-        await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
+        await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOriginRef.value);
         return;
       }
     }
@@ -235,8 +241,12 @@ export async function startAppStaticServer(
     res.end('Not found');
   });
 
-  await new Promise<void>((resolve) => {
-    appServer.listen(port, host, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    appServer.once('error', reject);
+    appServer.listen(port, host, () => {
+      appServer.removeListener('error', reject);
+      resolve();
+    });
   });
   const boundPort = (appServer.address() as any).port as number;
   log?.(`App static server listening on http://${host}:${boundPort}`);

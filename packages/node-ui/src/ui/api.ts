@@ -103,6 +103,16 @@ export const deleteSavedQuery = (id: number) =>
 export const sendChatMessage = (message: string) =>
   post<{ reply: string; data?: unknown; sparql?: string }>('/api/chat-assistant', { message });
 
+// --- Memory ---
+export interface MemorySession {
+  session: string;
+  messages: Array<{ author: string; text: string; ts: string }>;
+}
+export const fetchMemorySessions = (limit = 20) =>
+  get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
+export const fetchMemoryStats = () =>
+  get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
+
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>
   post<{ delivered: boolean; error?: string }>('/api/chat', { to, text });

@@ -15,6 +15,7 @@ export interface LlmConfig {
   apiKey: string;
   model?: string;
   baseURL?: string;
+  systemPrompt?: string;
 }
 
 type QueryFn = (sparql: string) => Promise<{ bindings: Array<Record<string, string>> }>;

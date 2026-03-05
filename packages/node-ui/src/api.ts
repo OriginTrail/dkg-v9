@@ -5,6 +5,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
 import type { MetricsCollector } from './metrics-collector.js';
+import type { ChatMemoryManager } from './chat-memory.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -31,6 +32,7 @@ export async function handleNodeUIRequest(
   chatAssistant?: ChatAssistant,
   metricsCollector?: MetricsCollector,
   authToken?: string,
+  memoryManager?: ChatMemoryManager,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -154,6 +156,27 @@ export async function handleNodeUIRequest(
     if (isNaN(id)) return json(res, 400, { error: 'Invalid ID' });
     db.deleteSavedQuery(id);
     return json(res, 200, { ok: true });
+  }
+
+  // --- Memory ---
+
+  if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
+    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    try {
+      const sessions = await memoryManager.getRecentChats(limit);
+      return json(res, 200, { sessions });
+    } catch (err: any) {
+      return json(res, 200, { sessions: [] });
+    }
+  }
+
+  if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
+    try {
+      const stats = await memoryManager.getStats();
+      return json(res, 200, stats);
+    } catch (err: any) {
+      return json(res, 200, { paranetId: 'agent-memory', initialized: false, chatTriples: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+    }
   }
 
   // --- Chat assistant ---

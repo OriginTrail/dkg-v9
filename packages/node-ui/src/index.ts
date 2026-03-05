@@ -21,5 +21,7 @@ export type { MetricsSource } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
 export { ChatAssistant } from './chat-assistant.js';
 export type { ChatRequest, ChatResponse, LlmConfig } from './chat-assistant.js';
+export { ChatMemoryManager } from './chat-memory.js';
+export type { MemoryToolContext, MemoryStats, MemoryEntity } from './chat-memory.js';
 export { initTelemetry, recordGauge, setOperationSpan, isTelemetryConfigured } from './telemetry.js';
 export type { TelemetryConfig } from './telemetry.js';

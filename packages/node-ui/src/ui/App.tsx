@@ -7,7 +7,7 @@ import { AppsPage } from './pages/Apps.js';
 import { SettingsPage } from './pages/Settings.js';
 import { MessagesPage } from './pages/Messages.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
-import { ChatPanel } from './components/ChatPanel.js';
+
 
 const chevronIcon = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -164,7 +164,6 @@ export function App() {
           <Route path="/integrations" element={<Navigate to="/settings" replace />} />
         </Routes>
       </main>
-      <ChatPanel />
     </div>
   );
 }

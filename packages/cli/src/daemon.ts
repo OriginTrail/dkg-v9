@@ -13,6 +13,7 @@ import {
   OperationTracker,
   handleNodeUIRequest,
   ChatAssistant,
+  ChatMemoryManager,
   type MetricsSource,
 } from '@dkg/node-ui';
 import {
@@ -301,6 +302,18 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   if (config.llm) log('Chat assistant ready (LLM enabled)');
   else log('Chat assistant ready');
 
+  const memoryManager = new ChatMemoryManager(
+    {
+      query: (sparql, opts) => agent.query(sparql, opts),
+      writeToWorkspace: (paranetId, quads) => agent.writeToWorkspace(paranetId, quads),
+      enshrineFromWorkspace: (paranetId, selection, opts) => agent.enshrineFromWorkspace(paranetId, selection, opts),
+      createParanet: (opts) => agent.createParanet(opts),
+      listParanets: () => agent.listParanets(),
+    },
+    config.llm ?? { apiKey: '' },
+  );
+  log('Memory manager ready');
+
   // Resolve the static UI directory (built by @dkg/node-ui)
   let nodeUiStaticDir: string;
   try {
@@ -367,7 +380,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager);
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)

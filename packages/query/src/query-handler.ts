@@ -412,14 +412,19 @@ function stripLiteralsAndComments(sparql: string): string {
       continue;
     }
 
-    // IRI: <...> only when preceded by non-alphanumeric (skip comparisons)
-    if (ch === '<' && i + 1 < n && /[a-zA-Z]/.test(sparql[i + 1])) {
-      const start = i;
-      i++;
-      while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
-      if (i < n && sparql[i] === '>') i++;
-      for (let j = start; j < i; j++) out[j] = ' ';
-      continue;
+    // IRI: <...> — distinguish from comparison operators (< <=).
+    // Comparisons are followed by whitespace, =, >, or end-of-input.
+    // IRIs are followed by any other char (letter, digit, #, /, :, etc).
+    if (ch === '<') {
+      const next = i + 1 < n ? sparql[i + 1] : '';
+      if (next && next !== ' ' && next !== '\t' && next !== '\n' && next !== '\r' && next !== '=' && next !== '>') {
+        const start = i;
+        i++;
+        while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
+        if (i < n && sparql[i] === '>') i++;
+        for (let j = start; j < i; j++) out[j] = ' ';
+        continue;
+      }
     }
 
     // Line comment: # (only in code context — we already handled strings/IRIs)

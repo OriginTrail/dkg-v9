@@ -704,42 +704,48 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
     const { Logger } = await import('@dkg/core');
     const logs: Array<{ level: string; message: string }> = [];
     Logger.setSink((entry) => logs.push(entry));
+    let agent: DKGAgent | undefined;
 
-    const agent = await DKGAgent.create({
-      name: 'PublicWarnTest',
-      listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
-      queryAccess: { defaultPolicy: 'public' },
-    });
-    await agent.start();
+    try {
+      agent = await DKGAgent.create({
+        name: 'PublicWarnTest',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+        queryAccess: { defaultPolicy: 'public' },
+      });
+      await agent.start();
 
-    const warning = logs.find(
-      l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
-    );
-    expect(warning).toBeDefined();
-
-    await agent.stop().catch(() => {});
-    Logger.setSink(null);
+      const warning = logs.find(
+        l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
+      );
+      expect(warning).toBeDefined();
+    } finally {
+      await agent?.stop().catch(() => {});
+      Logger.setSink(null);
+    }
   });
 
   it('does not emit public-query warning when queryAccess is omitted (deny default)', async () => {
     const { Logger } = await import('@dkg/core');
     const logs: Array<{ level: string; message: string }> = [];
     Logger.setSink((entry) => logs.push(entry));
+    let agent: DKGAgent | undefined;
 
-    const agent = await DKGAgent.create({
-      name: 'DenyDefaultTest',
-      listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
-    });
-    await agent.start();
+    try {
+      agent = await DKGAgent.create({
+        name: 'DenyDefaultTest',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+      });
+      await agent.start();
 
-    const warning = logs.find(
-      l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
-    );
-    expect(warning).toBeUndefined();
-
-    await agent.stop().catch(() => {});
-    Logger.setSink(null);
+      const warning = logs.find(
+        l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
+      );
+      expect(warning).toBeUndefined();
+    } finally {
+      await agent?.stop().catch(() => {});
+      Logger.setSink(null);
+    }
   });
 });

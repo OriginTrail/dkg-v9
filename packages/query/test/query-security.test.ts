@@ -390,4 +390,15 @@ describe('I-009: SPARQL keyword detection — no false positives on literals/com
     expect(response.status).toBe('ERROR');
     expect(response.error).toContain('FROM');
   });
+
+  it('rejects GRAPH after short IRI like <#frag> (# inside IRI not treated as comment)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <#type> ?t . GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH');
+  });
 });

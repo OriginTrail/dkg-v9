@@ -79,7 +79,7 @@ function GameTab() {
       <div>
         <HeroBanner compact />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-          {trimmedName ? (
+          {info?.nodeName ? (
             <>
               <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
               Playing as <strong style={{ color: 'var(--text)' }}>{trimmedName}</strong>

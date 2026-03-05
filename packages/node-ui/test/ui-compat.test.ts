@@ -222,9 +222,14 @@ describe('explorer graph query safety', () => {
 describe('Apps.tsx playerName fallback', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('shows manual name input when playerName is empty', () => {
+  it('shows manual name input when API did not provide nodeName', () => {
     expect(apps).toContain('placeholder="Enter your name"');
     expect(apps).toContain('type="text"');
+  });
+
+  it('gates read-only display on info?.nodeName, not trimmedName (input stays visible while typing)', () => {
+    expect(apps).toMatch(/info\?\.nodeName\s*\?/);
+    expect(apps).not.toMatch(/\{trimmedName\s*\?/);
   });
 
   it('does not trim playerName on every keystroke (allows spaces while typing)', () => {

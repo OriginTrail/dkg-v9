@@ -22,7 +22,11 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
   return res.json() as Promise<T>;
 }
 

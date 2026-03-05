@@ -132,6 +132,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
+    syncParanets: config.paranets ?? [],
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -371,17 +372,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
+      // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
       // Only inject the auth token into HTML when the request itself is authenticated,
       // and inject the caller's own token (not a different one) to avoid leaking credentials.
-      if (installedApps.length > 0) {
-        let appInjectToken: string | undefined;
-        if (authEnabled) {
-          const reqToken = extractBearerToken(req.headers.authorization);
-          if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
-        }
-        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
-        if (appHandled) return;
+      let appInjectToken: string | undefined;
+      if (installedApps.length > 0 && authEnabled) {
+        const reqToken = extractBearerToken(req.headers.authorization);
+        if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
       }
+      const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
+      if (appHandled) return;
 
       await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
     } catch (err: any) {

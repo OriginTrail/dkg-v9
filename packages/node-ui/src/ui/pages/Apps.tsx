@@ -36,14 +36,16 @@ function GameTab() {
   const [swarm, setSwarm] = useState<any>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [appInstalled, setAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
-    gameApi.info().then((data: any) => {
-      setInfo(data);
-      if (data?.nodeName) setPlayerName(data.nodeName);
-    }).catch(() => {
-      // API unavailable — playerName stays empty, manual input required
-    });
+    gameApi.info()
+      .then((data: any) => {
+        setInfo(data);
+        setAppInstalled(true);
+        if (data.nodeName) setPlayerName(data.nodeName);
+      })
+      .catch(() => { setAppInstalled(false); });
   }, []);
 
   const refreshLobby = useCallback(async () => {
@@ -74,6 +76,22 @@ function GameTab() {
     finally { setLoading(false); }
   };
 
+  if (appInstalled === false) {
+    return (
+      <div className="card" style={{ maxWidth: 480, margin: '24px auto', padding: 24 }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>OriginTrail Game not installed</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5, marginBottom: 16 }}>
+          The swarm game requires the <code className="mono" style={{ fontSize: 11 }}>dkg-app-origin-trail-game</code> package.
+          The app is linked to <code className="mono" style={{ fontSize: 11 }}>oregon-trail-dkg</code> in the dkg-v9 repo.
+        </p>
+        <p style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.5 }}>
+          To install: clone the <code className="mono" style={{ fontSize: 11 }}>oregon-trail-dkg</code> repo to the path in dkg-v9&apos;s <code className="mono" style={{ fontSize: 11 }}>package.json</code>, run{' '}
+          <code className="mono" style={{ fontSize: 11 }}>pnpm install</code>, then restart the node.
+        </p>
+      </div>
+    );
+  }
+
   if (view === 'lobby') {
     return (
       <div>
@@ -88,13 +106,7 @@ function GameTab() {
           ) : (
             <>
               <span>Name:</span>
-              <input
-                type="text"
-                placeholder="Enter your name"
-                value={playerName}
-                onChange={e => setPlayerName(e.target.value)}
-                style={{ padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }}
-              />
+              <input type="text" placeholder="Enter your name" value={playerName} onChange={e => setPlayerName(e.target.value)} style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }} />
             </>
           )}
         </div>
@@ -317,9 +329,9 @@ function CreateSwarmForm({ playerName, loading, onSubmit }: { playerName: string
         ))}
       </div>
       <button
-        disabled={!name.trim() || !playerName.trim() || loading}
+        disabled={!name.trim() || loading}
         onClick={() => onSubmit(name.trim(), max)}
-        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
+        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() ? 'var(--green)' : 'var(--border)', color: name.trim() ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
       >
         Launch Swarm
       </button>

@@ -1,6 +1,9 @@
 import { cpus, totalmem, freemem } from 'node:os';
 import { memoryUsage } from 'node:process';
-import { statfs, stat } from 'node:fs/promises';
+import { statfs } from 'node:fs';
+import { promisify } from 'node:util';
+
+const statfsAsync = promisify(statfs);
 import type { DashboardDB, MetricSnapshotRow } from './db.js';
 
 export interface MetricsSource {
@@ -81,7 +84,7 @@ export class MetricsCollector {
     let diskTotal: number | null = null;
     if (this.dataDir) {
       try {
-        const s = await statfs(this.dataDir);
+        const s = await statfsAsync(this.dataDir);
         diskTotal = s.blocks * s.bsize;
         diskUsed = diskTotal - s.bavail * s.bsize;
       } catch { /* ignore */ }

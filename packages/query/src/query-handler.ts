@@ -412,18 +412,24 @@ function stripLiteralsAndComments(sparql: string): string {
       continue;
     }
 
-    // IRI: <...> — only when followed by a valid IRI-start character.
-    // Letters (scheme like http:), #, /, ., _ cover all real IRIs.
-    // Digits (?v<1), ? (?v<?w), $, ", ', (, - are comparisons.
+    // IRI: <...> — require a real token boundary before '<'.
+    // In SPARQL, IRI '<' is preceded by whitespace, '(', '{', ',', ';', '.',
+    // '^' (^^<type>), ':', or start-of-input. After a variable/literal char
+    // (letter, digit, ?, $, _, ), >) it's always a comparison operator.
     if (ch === '<') {
-      const next = sparql[i + 1];
-      if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
-        const start = i;
-        i++;
-        while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
-        if (i < n && sparql[i] === '>') i++;
-        for (let j = start; j < i; j++) out[j] = ' ';
-        continue;
+      const prev = i > 0 ? sparql[i - 1] : '';
+      const atTokenBoundary = !prev || prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r'
+        || prev === '(' || prev === '{' || prev === ',' || prev === ';' || prev === '.' || prev === '^' || prev === ':';
+      if (atTokenBoundary) {
+        const next = sparql[i + 1];
+        if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
+          const start = i;
+          i++;
+          while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
+          if (i < n && sparql[i] === '>') i++;
+          for (let j = start; j < i; j++) out[j] = ' ';
+          continue;
+        }
       }
     }
 

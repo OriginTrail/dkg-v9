@@ -5,7 +5,7 @@
   "relays": [
     "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
   ],
-  "defaultParanets": ["testing"],
+  "defaultParanets": ["testing", "origin-trail-game"],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,

@@ -49,5 +49,8 @@
     "patchedDependencies": {
       "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
     }
+  },
+  "dependencies": {
+    "dkg-app-origin-trail-game": "link:/Users/aleatoric/dev/oregon-trail-dkg"
   }
 }

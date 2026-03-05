@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { gameApi } from '../api.js';
 
-type GameView = 'setup' | 'lobby' | 'swarm';
+type GameView = 'lobby' | 'swarm';
 
 const PHASES = [
   { name: 'The Prompt Bazaar',            pct: 100 },
@@ -28,10 +28,8 @@ export function AppsPage() {
    ═══════════════════════════════════════════════════ */
 
 function GameTab() {
-  const [view, setView] = useState<GameView>('setup');
-  const [playerName, setPlayerName] = useState(() => {
-    try { return localStorage.getItem('ot-player-name') ?? ''; } catch { return ''; }
-  });
+  const [view, setView] = useState<GameView>('lobby');
+  const [playerName, setPlayerName] = useState('');
   const [info, setInfo] = useState<any>(null);
   const [lobby, setLobby] = useState<{ openSwarms: any[]; mySwarms: any[] } | null>(null);
   const [swarm, setSwarm] = useState<any>(null);
@@ -39,7 +37,10 @@ function GameTab() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    gameApi.info().then(setInfo).catch(() => {});
+    gameApi.info().then((data: any) => {
+      setInfo(data);
+      if (data?.nodeName) setPlayerName(data.nodeName);
+    }).catch(() => {});
   }, []);
 
   const refreshLobby = useCallback(async () => {
@@ -59,11 +60,6 @@ function GameTab() {
     }
   }, [view, swarm?.id]);
 
-  const saveName = (name: string) => {
-    setPlayerName(name);
-    try { localStorage.setItem('ot-player-name', name); } catch { /* sandboxed */ }
-  };
-
   const act = async (fn: () => Promise<any>) => {
     setError('');
     setLoading(true);
@@ -75,51 +71,17 @@ function GameTab() {
     finally { setLoading(false); }
   };
 
-  if (view === 'setup') {
-    return (
-      <div>
-        <HeroBanner />
-        <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 16, marginTop: 20 }}>
-          {/* Enter name + How to play */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div className="card" style={{ padding: '24px 20px' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14 }}>Enter Your Trail Name</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input
-                  value={playerName}
-                  onChange={e => saveName(e.target.value)}
-                  placeholder="Your trail name..."
-                  style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: 13, outline: 'none', fontFamily: 'inherit' }}
-                  onKeyDown={e => e.key === 'Enter' && playerName.trim() && setView('lobby')}
-                />
-                <button
-                  disabled={!playerName.trim()}
-                  onClick={() => setView('lobby')}
-                  style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: playerName.trim() ? 'var(--green)' : 'var(--border)', color: playerName.trim() ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700, opacity: playerName.trim() ? 1 : 0.5 }}
-                >
-                  Enter Lobby
-                </button>
-              </div>
-              {info && (
-                <div className="mono" style={{ fontSize: 10, color: info.dkgEnabled ? 'var(--green)' : 'var(--amber)', marginTop: 10 }}>
-                  DKG: {info.dkgEnabled ? 'Connected' : 'Offline'} · Node: {info.peerId?.slice(0, 12)}…
-                </div>
-              )}
-            </div>
-            <HowToPlay />
-          </div>
-
-          {/* Leaderboard */}
-          <LeaderboardCard />
-        </div>
-      </div>
-    );
-  }
-
   if (view === 'lobby') {
     return (
       <div>
         <HeroBanner compact />
+        {playerName && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
+            Playing as <strong style={{ color: 'var(--text)' }}>{playerName}</strong>
+            {info?.peerId && <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>({info.peerId.slice(-8)})</span>}
+          </div>
+        )}
         {error && <ErrorBanner msg={error} onDismiss={() => setError('')} />}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
           {/* My Swarms */}

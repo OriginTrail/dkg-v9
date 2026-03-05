@@ -40,7 +40,9 @@ function GameTab() {
     gameApi.info().then((data: any) => {
       setInfo(data);
       if (data?.nodeName) setPlayerName(data.nodeName);
-    }).catch(() => {});
+    }).catch(() => {
+      // API unavailable — playerName stays empty, manual input required
+    });
   }, []);
 
   const refreshLobby = useCallback(async () => {
@@ -75,13 +77,26 @@ function GameTab() {
     return (
       <div>
         <HeroBanner compact />
-        {playerName && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-            Playing as <strong style={{ color: 'var(--text)' }}>{playerName}</strong>
-            {info?.peerId && <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>({info.peerId.slice(-8)})</span>}
-          </div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+          {playerName ? (
+            <>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
+              Playing as <strong style={{ color: 'var(--text)' }}>{playerName}</strong>
+              {info?.peerId && <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>({info.peerId.slice(-8)})</span>}
+            </>
+          ) : (
+            <>
+              <span>Name:</span>
+              <input
+                type="text"
+                placeholder="Enter your name"
+                value={playerName}
+                onChange={e => setPlayerName(e.target.value.trim())}
+                style={{ padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }}
+              />
+            </>
+          )}
+        </div>
         {error && <ErrorBanner msg={error} onDismiss={() => setError('')} />}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
           {/* My Swarms */}
@@ -112,7 +127,7 @@ function GameTab() {
               <SwarmRow key={w.id} swarm={w} action={
                 <button
                   onClick={() => act(() => gameApi.join(w.id, playerName))}
-                  disabled={loading}
+                  disabled={loading || !playerName}
                   style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid rgba(74,222,128,.25)', background: 'var(--green-dim)', color: 'var(--green)', fontSize: 11, fontWeight: 600 }}
                 >
                   Join
@@ -301,9 +316,9 @@ function CreateSwarmForm({ playerName, loading, onSubmit }: { playerName: string
         ))}
       </div>
       <button
-        disabled={!name.trim() || loading}
+        disabled={!name.trim() || !playerName || loading}
         onClick={() => onSubmit(name.trim(), max)}
-        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() ? 'var(--green)' : 'var(--border)', color: name.trim() ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
+        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
       >
         Launch Swarm
       </button>

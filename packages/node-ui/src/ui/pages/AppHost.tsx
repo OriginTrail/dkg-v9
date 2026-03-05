@@ -35,10 +35,13 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
     if (!app) return;
     let cancelled = false;
     triedStatic.current = false;
+    setSrc(null);
 
     if (app.staticUrl) {
-      fetch(app.staticUrl, { method: 'HEAD', mode: 'no-cors' })
-        .then(() => { if (!cancelled) setSrc(app.staticUrl!); })
+      fetch(app.staticUrl, { method: 'HEAD' })
+        .then(r => {
+          if (!cancelled) setSrc(r.ok ? app.staticUrl! : `${app.path}/`);
+        })
         .catch(() => { if (!cancelled) setSrc(`${app.path}/`); });
     } else {
       setSrc(`${app.path}/`);

@@ -71,6 +71,8 @@ export interface DKGAgentConfig {
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
+  /** Additional paranet IDs to sync on peer connect (beyond system paranets). */
+  syncParanets?: string[];
 }
 
 /**
@@ -236,7 +238,7 @@ export class DKGAgent {
     const queryAccessConfig: QueryAccessConfig = this.config.queryAccess ?? {
       defaultPolicy: 'deny',
     };
-    if (queryAccessConfig.defaultPolicy === 'public') {
+    if (this.config.queryAccess?.defaultPolicy === 'public') {
       this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
     }
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
@@ -418,7 +420,7 @@ export class DKGAgent {
    */
   async syncFromPeer(
     remotePeerId: string,
-    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, 'origin-trail-game'],
+    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, ...(this.config.syncParanets ?? [])],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;

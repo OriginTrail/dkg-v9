@@ -280,22 +280,19 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing sparql');
     }
 
-    // Block SERVICE clauses
-    if (/\bSERVICE\b/i.test(sparql)) {
+    // Strip string literals and comments so regexes don't false-positive
+    // on keywords inside quoted values or variable names like ?graph.
+    const stripped = stripLiteralsAndComments(sparql);
+
+    if (/\bSERVICE\b/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'SERVICE clauses are not allowed in remote queries');
     }
 
-    // Block explicit GRAPH clauses that could bypass paranet scoping.
-    // The query engine's wrapWithGraph() skips wrapping when it detects
-    // an existing GRAPH clause, which would allow cross-paranet access.
-    // Uses \bGRAPH\s+ to catch all forms: <uri>, ?var, and prefix:name.
-    if (/\bGRAPH\s+/i.test(sparql)) {
+    if (/\bGRAPH\s+/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
-    // Block FROM/FROM NAMED clauses that could also bypass graph scoping.
-    // Uses \bFROM\s+ to catch all IRI forms: <uri>, prefix:name, etc.
-    if (/\bFROM\s+/i.test(sparql)) {
+    if (/\bFROM\s+/i.test(stripped)) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
@@ -361,4 +358,15 @@ function formatObject(value: string): string {
 
 function encode(response: QueryResponse): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(response));
+}
+
+/**
+ * Replaces string literals (single/double/triple-quoted) and # comments
+ * with whitespace so that keyword regexes don't match inside values.
+ */
+function stripLiteralsAndComments(sparql: string): string {
+  return sparql.replace(
+    /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|#[^\n]*/g,
+    (m) => ' '.repeat(m.length),
+  );
 }

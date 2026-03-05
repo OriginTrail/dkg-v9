@@ -5,6 +5,7 @@ import { ExplorerPage } from './pages/Explorer.js';
 import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
 import { SettingsPage } from './pages/Settings.js';
+import { MessagesPage } from './pages/Messages.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
 import { ChatPanel } from './components/ChatPanel.js';
 
@@ -38,6 +39,15 @@ const NAV_MAIN = [
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/messages',
+    label: 'Messages',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
       </svg>
     ),
   },
@@ -200,6 +210,7 @@ export function App() {
           <Route path="/explorer/*" element={<ExplorerPage />} />
           <Route path="/agent" element={<AgentHubPage />} />
           <Route path="/apps/*" element={<AppsPage />} />
+          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
         </Routes>

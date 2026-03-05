@@ -20,6 +20,8 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('chainId', 9, 'string'))
   .add(new Field('publisherSignatureR', 10, 'bytes'))
   .add(new Field('publisherSignatureVs', 11, 'bytes'))
+  .add(new Field('txHash', 12, 'string'))
+  .add(new Field('blockNumber', 13, 'uint64'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -50,6 +52,10 @@ export interface PublishRequestMsg {
   chainId: string;
   publisherSignatureR: Uint8Array;
   publisherSignatureVs: Uint8Array;
+  /** Transaction hash from on-chain publish (allows targeted receipt verification). */
+  txHash?: string;
+  /** Block number of the on-chain publish transaction. */
+  blockNumber?: number | Long;
 }
 
 export interface PublishAckMsg {

@@ -138,6 +138,18 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
+  it('rejects SPARQL with GRAPH variable pattern (bypass via ?var)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+  });
+
   it('rejects SPARQL with GRAPH clause targeting the allowed paranet too', async () => {
     // Even queries targeting the "correct" graph should not use explicit GRAPH
     const response = await handler.handle(

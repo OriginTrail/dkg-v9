@@ -288,7 +288,8 @@ export class QueryHandler {
     // Block explicit GRAPH clauses that could bypass paranet scoping.
     // The query engine's wrapWithGraph() skips wrapping when it detects
     // an existing GRAPH clause, which would allow cross-paranet access.
-    if (/\bGRAPH\s*</i.test(sparql)) {
+    // Must catch both GRAPH <uri> and GRAPH ?var forms.
+    if (/\bGRAPH\s*[?$<]/i.test(sparql)) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 

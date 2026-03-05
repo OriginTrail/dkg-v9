@@ -863,12 +863,13 @@ export class DKGAgent {
           // attempt targeted verification and promote to confirmed if valid.
           const txHash = request.txHash ?? '';
           const blockNumber = protoToNumber(request.blockNumber ?? 0);
-          const startKAId = protoToNumber(request.startKAId);
+          const startKAId = protoToBigInt(request.startKAId ?? 0);
+          const endKAId = protoToBigInt(request.endKAId ?? 0);
 
-          if (txHash && blockNumber > 0 && startKAId > 0 && request.publisherAddress) {
+          if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
             const verified = await this.verifyGossipOnChain(
               txHash, blockNumber, merkleRoot, request.publisherAddress,
-              BigInt(startKAId), BigInt(protoToNumber(request.endKAId)),
+              startKAId, endKAId,
               ctx,
             );
             if (verified) {
@@ -1254,8 +1255,9 @@ export class DKGAgent {
   }
 
   /**
-   * Promote gossip-received tentative data to confirmed by replacing the
-   * tentative metadata quads with confirmed ones.
+   * Promote gossip-received tentative data to confirmed via a status-only
+   * swap: insert the confirmed quad first, then delete the tentative one,
+   * so metadata is never lost even if the second operation fails.
    */
   private async promoteGossipToConfirmed(
     ual: string,
@@ -1266,8 +1268,8 @@ export class DKGAgent {
     const tentativeStatus = getTentativeStatusQuad(ual, paranetId);
     const confirmedStatus = getConfirmedStatusQuad(ual, paranetId);
     try {
-      await this.store.delete([tentativeStatus]);
       await this.store.insert([confirmedStatus]);
+      await this.store.delete([tentativeStatus]);
     } catch (err) {
       this.log.warn(
         createOperationContext('gossip'),
@@ -1342,6 +1344,12 @@ function strip(s: string): string {
 function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
   if (typeof val === 'number') return val;
   return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
+}
+
+function protoToBigInt(val: number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
+  if (typeof val === 'bigint') return val;
+  if (typeof val === 'number') return BigInt(val);
+  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
 function stripLiteral(s: string): string {

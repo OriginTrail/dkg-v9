@@ -294,8 +294,12 @@ function GraphTab() {
       if (selectedParanet?.uri) {
         const escapedUri = escapeSparqlString(selectedParanet.uri);
         sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-          GRAPH ?g { ?s ?p ?o }
-          FILTER(STRSTARTS(STR(?g), "${escapedUri}"))
+          {
+            GRAPH ?g { ?s ?p ?o }
+            FILTER(STRSTARTS(STR(?g), "${escapedUri}"))
+          } UNION {
+            GRAPH <${escapedUri}> { ?s ?p ?o }
+          }
         } LIMIT ${limit}`;
       } else {
         sparql = `CONSTRUCT { ?s ?p ?o } WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT ${limit}`;
@@ -308,7 +312,7 @@ function GraphTab() {
         let countSparql: string;
         if (selectedParanet?.uri) {
           const escapedUri = escapeSparqlString(selectedParanet.uri);
-          countSparql = `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${escapedUri}")) }`;
+          countSparql = `SELECT (COUNT(*) AS ?count) WHERE { { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${escapedUri}")) } UNION { GRAPH <${escapedUri}> { ?s ?p ?o } } }`;
         } else {
           countSparql = `SELECT (COUNT(*) AS ?count) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } }`;
         }

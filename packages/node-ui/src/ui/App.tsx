@@ -1,16 +1,57 @@
 import React, { useEffect, useState } from 'react';
-import { Routes, Route, NavLink } from 'react-router-dom';
+import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
-import { NetworkPage } from './pages/Network.js';
-import { OperationsPage } from './pages/Operations.js';
 import { ExplorerPage } from './pages/Explorer.js';
-import { WalletPage } from './pages/Wallet.js';
-import { IntegrationsPage } from './pages/Integrations.js';
-import { MessagesPage } from './pages/Messages.js';
+import { AgentHubPage } from './pages/AgentHub.js';
+import { AppsPage } from './pages/Apps.js';
+import { SettingsPage } from './pages/Settings.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
 import { ChatPanel } from './components/ChatPanel.js';
-import { ParticleSphere } from './components/ParticleSphere.js';
-import { BackgroundNetwork } from './components/BackgroundNetwork.js';
+
+const NAV_MAIN = [
+  {
+    to: '/',
+    end: true,
+    label: 'Dashboard',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/explorer',
+    label: 'Memory Explorer',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/>
+        <circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/>
+        <line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/>
+        <line x1="15.5" y1="7.5" x2="8.5" y2="16.5"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/agent',
+    label: 'Agent Hub',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/settings',
+    label: 'Settings',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    ),
+  },
+];
 
 function useInstalledApps(): InstalledApp[] {
   const [apps, setApps] = useState<InstalledApp[]>([]);
@@ -26,68 +67,140 @@ function useInstalledApps(): InstalledApp[] {
   return apps;
 }
 
+function AppsNavItem({ installedApps }: { installedApps: InstalledApp[] }) {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+
+  const allApps = [
+    {
+      id: 'apps-hub',
+      label: 'Browse Apps',
+      desc: 'Discover, benchmark, connect',
+      href: '/apps',
+      icon: '📦',
+    },
+    ...installedApps.map(a => ({
+      id: a.id,
+      label: a.label,
+      desc: a.description ?? '',
+      href: `/app/${a.id}`,
+      icon: '🎮',
+    })),
+  ];
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div
+        className="nav-btn"
+        style={{ cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span>Apps</span>
+        {installedApps.length > 0 && <span className="nav-badge">{installedApps.length}</span>}
+        <svg
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={{ marginLeft: 'auto', transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'none' }}
+        >
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      {open && (
+        <div style={{
+          position: 'absolute',
+          left: '100%',
+          top: 0,
+          marginLeft: 8,
+          width: 220,
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          zIndex: 100,
+          overflow: 'hidden',
+        }}>
+          <div style={{ padding: '10px 14px 6px', fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+            Apps
+          </div>
+          {allApps.map(app => (
+            <button
+              key={app.id}
+              onClick={() => { setOpen(false); navigate(app.href); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                width: '100%', padding: '10px 14px',
+                background: 'transparent', border: 'none',
+                borderTop: '1px solid var(--border)',
+                cursor: 'pointer', textAlign: 'left',
+              }}
+            >
+              <span style={{ fontSize: 18, lineHeight: 1 }}>{app.icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{app.label}</span>
+                {app.desc && <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 1 }}>{app.desc}</div>}
+              </div>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const installedApps = useInstalledApps();
 
   return (
     <div className="app-layout">
-      <BackgroundNetwork />
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <ParticleSphere size={48} />
-          <div>DKG Node <span>UI</span></div>
+          <div className="logo-icon">◆</div>
+          <div>
+            <div className="logo-text">DKG Node</div>
+            <div className="logo-version">v9 TESTNET</div>
+          </div>
         </div>
+
         <nav className="sidebar-nav">
-          <NavLink to="/" end>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L1 6v9h5v-4h4v4h5V6L8 1z"/></svg>
-            Dashboard
-          </NavLink>
-          <NavLink to="/network">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><line x1="4" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="12" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
-            Network
-          </NavLink>
-          <NavLink to="/messages">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14v9H5l-4 3V2zm2 2v5.17l1.59-1.59.41-.58H13V4H3z"/></svg>
-            Messages
-          </NavLink>
-          <NavLink to="/explorer">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 1a5 5 0 014.32 7.5l3.59 3.59-1.42 1.42-3.59-3.59A5 5 0 116 1zm0 2a3 3 0 100 6 3 3 0 000-6z"/></svg>
-            Explorer
-          </NavLink>
-          <NavLink to="/operations">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v2H2V2zm0 4h12v2H2V6zm0 4h8v2H2v-2z"/></svg>
-            Operations
-          </NavLink>
-          <NavLink to="/wallet">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 14h14v1H1v-1zM3 8l3-3 2 2 4-5 1.5 1.2L9 9 7 7l-3 3z"/><path d="M2 2h12v1H2V2zm0 3h12v8H2V5zm1 1v6h10V6H3z" opacity=".3"/></svg>
-            Economics
-          </NavLink>
-          <NavLink to="/integrations">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h4v4H2V2zm8 0h4v4h-4V2zM2 10h4v4H2v-4zm8 0h4v4h-4v-4z"/></svg>
-            Integrations
-          </NavLink>
-          {installedApps.length > 0 && (
-            <>
-              <div className="sidebar-section-label">Apps</div>
-              {installedApps.map(app => (
-                <NavLink key={app.id} to={`/app/${app.id}`}>
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1h10a2 2 0 012 2v10a2 2 0 01-2 2H3a2 2 0 01-2-2V3a2 2 0 012-2zm0 2v10h10V3H3z"/></svg>
-                  {app.label}
-                </NavLink>
-              ))}
-            </>
-          )}
+          {NAV_MAIN.map(item => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+
+          <AppsNavItem installedApps={installedApps} />
         </nav>
+
+        <div className="sidebar-footer">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 8px rgba(74,222,128,0.4)', display: 'inline-block' }} />
+            <span style={{ color: 'var(--green)', fontWeight: 600 }}>Online</span>
+            <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>v9</span>
+          </div>
+          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>Base Sepolia Testnet</div>
+        </div>
       </aside>
+
       <main className="main-content">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/network" element={<NetworkPage />} />
-          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
-          <Route path="/operations/*" element={<OperationsPage />} />
-          <Route path="/wallet" element={<WalletPage />} />
-          <Route path="/integrations" element={<IntegrationsPage />} />
+          <Route path="/agent" element={<AgentHubPage />} />
+          <Route path="/apps/*" element={<AppsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
         </Routes>
       </main>

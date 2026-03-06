@@ -35,6 +35,7 @@ export class ChainEventPoller {
   private readonly onParanetCreated?: OnParanetCreated;
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
+  private headKnown = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -84,19 +85,32 @@ export class ChainEventPoller {
 
     const ctx = createOperationContext('publish');
 
+    // Resolve the actual chain head so we can bound the scan precisely.
+    // Without a known head we cannot safely advance the cursor.
+    let head: number | undefined;
+    if (this.chain.getBlockNumber) {
+      try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
+    }
+
+    // On first successful head fetch, seed cursor near the tip. Full-history
+    // paranet discovery is handled by discoverParanetsFromChain(); the poller
+    // only needs real-time monitoring for KnowledgeBatchCreated confirmations
+    // and new ParanetCreated events.
+    if (head != null && !this.headKnown) {
+      this.headKnown = true;
+      if (this.lastBlock === 0) {
+        this.lastBlock = Math.max(0, head - 500);
+        this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
+      }
+    }
+
     const eventTypes = ['KnowledgeBatchCreated'];
     if (watchParanets) eventTypes.push('ParanetCreated');
 
     const fromBlock = this.lastBlock + 1;
-    let upperBound = fromBlock + ChainEventPoller.MAX_RANGE - 1;
-
-    // Cap to the actual chain head so we know the true scanned range.
-    if (this.chain.getBlockNumber) {
-      try {
-        const head = await this.chain.getBlockNumber();
-        upperBound = Math.min(upperBound, head);
-      } catch { /* fall back to estimated upper bound */ }
-    }
+    const upperBound = head != null
+      ? Math.min(fromBlock + ChainEventPoller.MAX_RANGE - 1, head)
+      : fromBlock + ChainEventPoller.MAX_RANGE - 1;
 
     if (fromBlock > upperBound) return;
 
@@ -114,9 +128,11 @@ export class ChainEventPoller {
       }
     }
 
-    // Always advance cursor to the scanned upper bound, even if no events
-    // were found, so the window progresses toward the chain head.
-    this.lastBlock = upperBound;
+    // Only advance cursor when the upper bound is anchored to a real chain
+    // head. Without that guarantee we'd skip blocks that don't exist yet.
+    if (head != null) {
+      this.lastBlock = upperBound;
+    }
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {

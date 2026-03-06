@@ -95,12 +95,24 @@ export async function parseRdf(
 
 function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
   if (term.termType === 'Literal') {
-    if (term.language) return `"${term.value}"@${term.language}`;
+    const escaped = escapeLiteralValue(term.value);
+    if (term.language) return `"${escaped}"@${term.language}`;
     if (term.datatype && term.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${term.value}"^^<${term.datatype.value}>`;
+      return `"${escaped}"^^<${term.datatype.value}>`;
     }
-    return `"${term.value}"`;
+    return `"${escaped}"`;
   }
   if (term.termType === 'BlankNode') return `_:${term.value}`;
   return term.value;
+}
+
+function escapeLiteralValue(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+    .replace(/\u0008/g, '\\b')
+    .replace(/\u000c/g, '\\f');
 }

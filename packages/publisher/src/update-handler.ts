@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { EventBus } from '@dkg/core';
-import type { ChainAdapter } from '@dkg/chain';
+import type { ChainAdapter, KAUpdateVerification } from '@dkg/chain';
 import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -25,10 +25,10 @@ export class UpdateHandler {
   private readonly log = new Logger('UpdateHandler');
   /**
    * Track the highest applied block number per (paranetId:batchId).
-   * Only updates from a strictly higher block are accepted, preventing
-   * both duplicate and rollback replays.
+   * Only updates from a strictly higher chain-verified block are accepted,
+   * preventing both duplicate and rollback replays.
    */
-  private readonly appliedBlockHeight = new Map<string, bigint>();
+  private readonly appliedBlockHeight = new Map<string, number>();
 
   constructor(store: TripleStore, chain: ChainAdapter, eventBus: EventBus) {
     this.store = store;
@@ -48,8 +48,6 @@ export class UpdateHandler {
         manifest,
         publisherAddress,
         txHash,
-        blockNumber,
-        newMerkleRoot,
       } = request;
 
       this.log.info(
@@ -57,44 +55,43 @@ export class UpdateHandler {
         `KA update from ${fromPeerId} for paranet ${paranetId} batchId=${batchId} tx=${txHash}`,
       );
 
-      // Monotonic ordering: reject if we already applied a same-or-newer block for this batch
-      const orderKey = `${paranetId}:${batchId}`;
-      const blockBig = BigInt(blockNumber);
-      const lastApplied = this.appliedBlockHeight.get(orderKey);
-      if (lastApplied !== undefined && blockBig <= lastApplied) {
-        this.log.info(ctx, `KA update skipped: block ${blockNumber} <= last applied ${lastApplied} for batchId=${batchId}`);
-        return;
-      }
+      // --- Chain verification (returns chain-sourced merkle root + block number) ---
+      let verifiedMerkleRoot: Uint8Array | undefined;
+      let verifiedBlockNumber: number | undefined;
 
-      // Fail-closed: require chain verification when the adapter supports it.
-      // On chainId === 'none' (local/dev), verifyKAUpdate won't exist — allow that.
       if (!this.chain.verifyKAUpdate) {
         if (this.chain.chainId !== 'none') {
           this.log.warn(ctx, `KA update rejected: chain adapter does not implement verifyKAUpdate (chainId=${this.chain.chainId})`);
           return;
         }
+        // chainId=none (local/dev): no chain to verify against — skip verification
       } else {
-        const verified = await this.chain.verifyKAUpdate(txHash, BigInt(batchId), publisherAddress);
-        if (!verified) {
+        const verification: KAUpdateVerification = await this.chain.verifyKAUpdate(txHash, BigInt(batchId), publisherAddress);
+        if (!verification.verified) {
           this.log.warn(ctx, `KA update rejected: tx ${txHash} not verified for batchId=${batchId} publisher=${publisherAddress}`);
+          return;
+        }
+        verifiedMerkleRoot = verification.onChainMerkleRoot;
+        verifiedBlockNumber = verification.blockNumber;
+      }
+
+      // Monotonic ordering using chain-verified block number (not gossip-supplied)
+      if (verifiedBlockNumber !== undefined) {
+        const orderKey = `${paranetId}:${batchId}`;
+        const lastApplied = this.appliedBlockHeight.get(orderKey);
+        if (lastApplied !== undefined && verifiedBlockNumber <= lastApplied) {
+          this.log.info(ctx, `KA update skipped: chain block ${verifiedBlockNumber} <= last applied ${lastApplied} for batchId=${batchId}`);
           return;
         }
       }
 
-      // Require newMerkleRoot to be present (expected 32 bytes)
-      if (!newMerkleRoot || newMerkleRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {
-        this.log.warn(ctx, `KA update rejected: newMerkleRoot missing or wrong length (got ${newMerkleRoot?.length ?? 0}, expected ${EXPECTED_MERKLE_ROOT_LEN})`);
-        return;
-      }
-
-      // Merkle root integrity: recompute from the received payload and compare
+      // Merkle root integrity: recompute from the received payload
       await this.graphManager.ensureParanet(paranetId);
       const dataGraph = this.graphManager.dataGraphUri(paranetId);
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
       const partitioned = autoPartition(quads);
 
-      // Reject if payload contains roots not declared in the manifest
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));
       for (const payloadRoot of partitioned.keys()) {
         if (!manifestRoots.has(payloadRoot)) {
@@ -112,7 +109,15 @@ export class UpdateHandler {
       }
       const computedRoot = computeKCRoot(kaRoots);
 
-      if (!buffersEqual(computedRoot, new Uint8Array(newMerkleRoot))) {
+      // Compare computed root against chain-verified on-chain root (preferred)
+      // or gossip-supplied root (only on chainId=none where no chain exists).
+      const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
+      if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {
+        this.log.warn(ctx, `KA update rejected: merkle root missing or wrong length (got ${referenceRoot?.length ?? 0}, expected ${EXPECTED_MERKLE_ROOT_LEN})`);
+        return;
+      }
+
+      if (!buffersEqual(computedRoot, new Uint8Array(referenceRoot))) {
         this.log.warn(ctx, `KA update rejected: merkle root mismatch for batchId=${batchId} (tampered payload)`);
         return;
       }
@@ -130,7 +135,10 @@ export class UpdateHandler {
       }
       await this.store.insert(authenticatedQuads);
 
-      this.appliedBlockHeight.set(orderKey, blockBig);
+      if (verifiedBlockNumber !== undefined) {
+        const orderKey = `${paranetId}:${batchId}`;
+        this.appliedBlockHeight.set(orderKey, verifiedBlockNumber);
+      }
 
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 

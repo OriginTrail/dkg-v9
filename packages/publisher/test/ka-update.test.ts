@@ -24,7 +24,6 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
-/** Compute merkle root for a set of quads + manifest so test gossip messages pass verification. */
 function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
   const partitioned = autoPartition(quads);
   const kaRoots: Uint8Array[] = [];
@@ -35,6 +34,32 @@ function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; 
     kaRoots.push(computeKARoot(pubRoot, privRoot));
   }
   return computeKCRoot(kaRoots);
+}
+
+/** Build a gossip message that matches an on-chain update (same quads → same merkle root). */
+function buildGossipMessage(opts: {
+  paranetId: string;
+  batchId: bigint;
+  quads: Quad[];
+  manifest: { rootEntity: string; privateTripleCount: number }[];
+  publisherPeerId: string;
+  publisherAddress: string;
+  txHash: string;
+  blockNumber: number;
+}) {
+  const gossipRoot = computeGossipMerkleRoot(opts.quads, opts.manifest);
+  return encodeKAUpdateRequest({
+    paranetId: opts.paranetId,
+    batchId: opts.batchId,
+    nquads: quadsToNQuads(opts.quads, `did:dkg:paranet:${opts.paranetId}`),
+    manifest: opts.manifest,
+    publisherPeerId: opts.publisherPeerId,
+    publisherAddress: opts.publisherAddress,
+    txHash: opts.txHash,
+    blockNumber: BigInt(opts.blockNumber),
+    newMerkleRoot: gossipRoot,
+    timestampMs: BigInt(Date.now()),
+  });
 }
 
 describe('KAUpdateRequest encode/decode', () => {
@@ -121,27 +146,23 @@ describe('UpdateHandler', () => {
     });
     expect(original.status).toBe('confirmed');
 
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"')],
+      quads: updateQuads,
     });
     expect(updateResult.onChainResult).toBeDefined();
 
-    const newQuads = [q(ENTITY_A, 'http://schema.org/name', '"From gossip update"')];
-    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
-    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
-
-    const message = encodeKAUpdateRequest({
+    // Gossip must send the SAME quads as the publisher's update to match the on-chain merkle root
+    const message = buildGossipMessage({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(newQuads, DATA_GRAPH),
-      manifest: gossipManifest,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
-      newMerkleRoot: gossipRoot,
-      timestampMs: BigInt(Date.now()),
+      blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
     await handler.handle(message, '12D3KooWPeerA');
@@ -152,7 +173,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('From gossip update');
+      expect(nameResult.bindings[0]['o']).toContain('Updated via update()');
     }
 
     const descResult = await store.query(
@@ -170,26 +191,21 @@ describe('UpdateHandler', () => {
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+      quads: updateQuads,
     });
 
-    const attackerQuads = [q(ENTITY_A, 'http://schema.org/name', '"Attacker override"')];
-    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
-    const gossipRoot = computeGossipMerkleRoot(attackerQuads, gossipManifest);
-
-    const message = encodeKAUpdateRequest({
+    const message = buildGossipMessage({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(attackerQuads, DATA_GRAPH),
-      manifest: gossipManifest,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWAttacker',
       publisherAddress: '0xWrongAddress',
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
-      newMerkleRoot: gossipRoot,
-      timestampMs: BigInt(Date.now()),
+      blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
     await handler.handle(message, '12D3KooWAttacker');
@@ -203,31 +219,30 @@ describe('UpdateHandler', () => {
     }
   });
 
-  it('rejects update with tampered merkle root', async () => {
+  it('rejects gossip with tampered quads (payload root != on-chain root)', async () => {
     const original = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Legit update"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+      quads: updateQuads,
     });
 
+    // Attacker sends different quads but reuses the valid txHash.
+    // The on-chain merkle root matches the legit update, not the tampered payload.
     const tamperedQuads = [q(ENTITY_A, 'http://schema.org/name', '"Tampered content"')];
-    const fakeRoot = new Uint8Array(32);
-    fakeRoot.set([0xDE, 0xAD, 0xBE, 0xEF]);
-    const message = encodeKAUpdateRequest({
+    const message = buildGossipMessage({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(tamperedQuads, DATA_GRAPH),
+      quads: tamperedQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber) + 1n,
-      newMerkleRoot: fakeRoot,
-      timestampMs: BigInt(Date.now()),
+      blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
     await handler.handle(message, '12D3KooWPeerA');
@@ -237,43 +252,7 @@ describe('UpdateHandler', () => {
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
-      expect(nameResult.bindings[0]['o']).toContain('Updated');
-    }
-  });
-
-  it('rejects update with missing/short merkle root', async () => {
-    const original = await publisher.publish({
-      paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
-    });
-
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
-    });
-
-    const newQuads = [q(ENTITY_A, 'http://schema.org/name', '"Should not apply"')];
-    const message = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
-      nquads: quadsToNQuads(newQuads, DATA_GRAPH),
-      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
-      publisherPeerId: '12D3KooWPeerA',
-      publisherAddress: wallet.address,
-      txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber) + 1n,
-      newMerkleRoot: new Uint8Array(),
-      timestampMs: BigInt(Date.now()),
-    });
-
-    await handler.handle(message, '12D3KooWPeerA');
-
-    const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
-    );
-    expect(nameResult.type).toBe('bindings');
-    if (nameResult.type === 'bindings') {
-      expect(nameResult.bindings[0]['o']).toContain('Updated');
+      expect(nameResult.bindings[0]['o']).toContain('Legit update');
     }
   });
 
@@ -283,9 +262,10 @@ describe('UpdateHandler', () => {
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+      quads: updateQuads,
     });
 
     const quadsWithExtra = [
@@ -303,7 +283,7 @@ describe('UpdateHandler', () => {
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber) + 1n,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
       newMerkleRoot: gossipRoot,
       timestampMs: BigInt(Date.now()),
     });
@@ -319,51 +299,121 @@ describe('UpdateHandler', () => {
     }
   });
 
-  it('rejects stale update with lower block number (monotonic ordering)', async () => {
+  it('uses chain-verified block number for ordering, not gossip-supplied value', async () => {
     const original = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
-    const updateResult = await publisher.update(original.kcId, {
+    const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
+    const update1 = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+      quads: update1Quads,
     });
+    const chainBlock1 = update1.onChainResult!.blockNumber;
 
-    const firstQuads = [q(ENTITY_A, 'http://schema.org/name', '"First gossip"')];
-    const firstManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
-    const firstRoot = computeGossipMerkleRoot(firstQuads, firstManifest);
-    const highBlock = BigInt(updateResult.onChainResult!.blockNumber) + 10n;
-
-    const firstMsg = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
-      nquads: quadsToNQuads(firstQuads, DATA_GRAPH),
-      manifest: firstManifest,
-      publisherPeerId: '12D3KooWPeerA',
-      publisherAddress: wallet.address,
-      txHash: updateResult.onChainResult!.txHash,
-      blockNumber: highBlock,
-      newMerkleRoot: firstRoot,
-      timestampMs: BigInt(Date.now()),
-    });
-    await handler.handle(firstMsg, '12D3KooWPeerA');
-
-    const staleQuads = [q(ENTITY_A, 'http://schema.org/name', '"Stale rollback"')];
-    const staleRoot = computeGossipMerkleRoot(staleQuads, firstManifest);
-    const staleMsg = encodeKAUpdateRequest({
+    // Send gossip for update1 with a forged high block number.
+    // The handler should use the chain-verified block (chainBlock1), not 999999.
+    const msg1 = encodeKAUpdateRequest({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(staleQuads, DATA_GRAPH),
-      manifest: firstManifest,
+      nquads: quadsToNQuads(update1Quads, DATA_GRAPH),
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
-      txHash: '0xoldtx',
-      blockNumber: highBlock - 5n,
-      newMerkleRoot: staleRoot,
+      txHash: update1.onChainResult!.txHash,
+      blockNumber: 999999n, // forged!
+      newMerkleRoot: computeGossipMerkleRoot(update1Quads, [{ rootEntity: ENTITY_A }]),
       timestampMs: BigInt(Date.now()),
     });
-    await handler.handle(staleMsg, '12D3KooWPeerA');
+
+    await handler.handle(msg1, '12D3KooWPeerA');
+
+    // Verify update1 was applied
+    let result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings[0]['o']).toContain('Update 1');
+    }
+
+    // Now do update2 — its chain block will be chainBlock1 + N (strictly higher)
+    const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
+    const update2 = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: update2Quads,
+    });
+    expect(update2.onChainResult!.blockNumber).toBeGreaterThan(chainBlock1);
+
+    // If the handler had stored 999999 (gossip value), this would be rejected.
+    // Since it stored chainBlock1 (chain-verified), update2's higher block passes.
+    const msg2 = buildGossipMessage({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      quads: update2Quads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: update2.onChainResult!.txHash,
+      blockNumber: update2.onChainResult!.blockNumber,
+    });
+
+    await handler.handle(msg2, '12D3KooWPeerA');
+
+    result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings[0]['o']).toContain('Update 2');
+    }
+  });
+
+  it('rejects stale update with lower chain-verified block number', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    // Do two updates: update1 at block B1, update2 at block B2 > B1
+    const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
+    const update1 = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: update1Quads,
+    });
+
+    const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
+    const update2 = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: update2Quads,
+    });
+
+    // Apply update2's gossip first (newer block)
+    const msg2 = buildGossipMessage({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      quads: update2Quads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: update2.onChainResult!.txHash,
+      blockNumber: update2.onChainResult!.blockNumber,
+    });
+    await handler.handle(msg2, '12D3KooWPeerA');
+
+    // Now try to apply update1's gossip (older block) — should be rejected
+    const msg1 = buildGossipMessage({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      quads: update1Quads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: update1.onChainResult!.txHash,
+      blockNumber: update1.onChainResult!.blockNumber,
+    });
+    await handler.handle(msg1, '12D3KooWPeerA');
 
     const nameResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
@@ -371,57 +421,37 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('First gossip');
+      expect(nameResult.bindings[0]['o']).toContain('Update 2');
     }
   });
 
-  it('rejects replayed update (same block height)', async () => {
+  it('rejects replayed update (same chain block height)', async () => {
     const original = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+      quads: updateQuads,
     });
 
-    const newQuads = [q(ENTITY_A, 'http://schema.org/name', '"From gossip"')];
-    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
-    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
-
-    const message = encodeKAUpdateRequest({
+    const message = buildGossipMessage({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(newQuads, DATA_GRAPH),
-      manifest: gossipManifest,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
-      newMerkleRoot: gossipRoot,
-      timestampMs: BigInt(Date.now()),
+      blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
     await handler.handle(message, '12D3KooWPeerA');
 
-    const secondQuads = [q(ENTITY_A, 'http://schema.org/name', '"Should be ignored"')];
-    const secondRoot = computeGossipMerkleRoot(secondQuads, gossipManifest);
-
-    const replayMessage = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
-      nquads: quadsToNQuads(secondQuads, DATA_GRAPH),
-      manifest: gossipManifest,
-      publisherPeerId: '12D3KooWPeerA',
-      publisherAddress: wallet.address,
-      txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
-      newMerkleRoot: secondRoot,
-      timestampMs: BigInt(Date.now()),
-    });
-
-    await handler.handle(replayMessage, '12D3KooWPeerA');
+    // Replay same message — should be rejected (same block height)
+    await handler.handle(message, '12D3KooWPeerA');
 
     const nameResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
@@ -429,7 +459,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('From gossip');
+      expect(nameResult.bindings[0]['o']).toContain('Updated');
     }
   });
 
@@ -493,40 +523,34 @@ describe('UpdateHandler', () => {
       ],
     });
 
+    const updateQuads = [
+      q(ENTITY_A, 'http://schema.org/name', '"A-updated"'),
+      q(ENTITY_B, 'http://schema.org/name', '"B-updated"'),
+    ];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [
-        q(ENTITY_A, 'http://schema.org/name', '"A-updated"'),
-        q(ENTITY_B, 'http://schema.org/name', '"B-updated"'),
-      ],
+      quads: updateQuads,
     });
 
-    const newQuads = [
-      q(ENTITY_A, 'http://schema.org/name', '"A-gossip"'),
-      q(ENTITY_B, 'http://schema.org/name', '"B-gossip"'),
-    ];
     const gossipManifest = [
       { rootEntity: ENTITY_A, privateTripleCount: 0 },
       { rootEntity: ENTITY_B, privateTripleCount: 0 },
     ];
-    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
 
-    const message = encodeKAUpdateRequest({
+    const message = buildGossipMessage({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(newQuads, DATA_GRAPH),
+      quads: updateQuads,
       manifest: gossipManifest,
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
-      newMerkleRoot: gossipRoot,
-      timestampMs: BigInt(Date.now()),
+      blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
     await handler.handle(message, '12D3KooWPeerA');
 
-    for (const [entity, expected] of [[ENTITY_A, 'A-gossip'], [ENTITY_B, 'B-gossip']] as const) {
+    for (const [entity, expected] of [[ENTITY_A, 'A-updated'], [ENTITY_B, 'B-updated']] as const) {
       const result = await store.query(
         `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${entity}> <http://schema.org/name> ?o } }`,
       );
@@ -536,5 +560,50 @@ describe('UpdateHandler', () => {
         expect(result.bindings[0]['o']).toContain(expected);
       }
     }
+  });
+
+  it('verifyKAUpdate returns on-chain merkle root and block number', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: updateQuads,
+    });
+
+    const verification = await chain.verifyKAUpdate(
+      updateResult.onChainResult!.txHash,
+      original.kcId,
+      wallet.address,
+    );
+
+    expect(verification.verified).toBe(true);
+    expect(verification.onChainMerkleRoot).toBeInstanceOf(Uint8Array);
+    expect(verification.onChainMerkleRoot!.length).toBe(32);
+    expect(verification.blockNumber).toBeGreaterThan(0);
+  });
+
+  it('verifyKAUpdate rejects wrong publisher', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+    });
+
+    const verification = await chain.verifyKAUpdate(
+      '0xfaketx',
+      original.kcId,
+      '0xWrongPublisher',
+    );
+
+    expect(verification.verified).toBe(false);
+    expect(verification.onChainMerkleRoot).toBeUndefined();
   });
 });

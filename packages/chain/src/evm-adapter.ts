@@ -15,6 +15,7 @@ import type {
   ParanetOnChain,
   PublishParams,
   OnChainPublishResult,
+  KAUpdateVerification,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -484,30 +485,41 @@ export class EVMChainAdapter implements ChainAdapter {
   // V9: Update Verification (for gossip receivers)
   // =====================================================================
 
-  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<boolean> {
+  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsStorage) return false;
+    if (!this.contracts.knowledgeAssetsStorage) return { verified: false };
 
     try {
       const receipt = await this.provider.getTransactionReceipt(txHash);
-      if (!receipt || receipt.status !== 1) return false;
+      if (!receipt || receipt.status !== 1) return { verified: false };
 
       const storage = this.contracts.knowledgeAssetsStorage;
+
+      let onChainMerkleRoot: Uint8Array | undefined;
       for (const log of receipt.logs) {
         try {
           const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (
-            parsed?.name === 'KnowledgeBatchUpdated' &&
-            BigInt(parsed.args.batchId) === batchId &&
-            parsed.args.publisher?.toLowerCase() === publisherAddress.toLowerCase()
-          ) {
-            return true;
+          if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
+            onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
+            break;
           }
         } catch { /* not this contract */ }
       }
-      return false;
+
+      if (!onChainMerkleRoot) return { verified: false };
+
+      const onChainPublisher: string = await storage.getBatchPublisher(batchId);
+      if (onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
+        return { verified: false };
+      }
+
+      return {
+        verified: true,
+        onChainMerkleRoot,
+        blockNumber: receipt.blockNumber,
+      };
     } catch {
-      return false;
+      return { verified: false };
     }
   }
 

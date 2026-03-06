@@ -69,6 +69,14 @@ export interface TxResult {
   paranetId?: string;
 }
 
+export interface KAUpdateVerification {
+  verified: boolean;
+  /** The merkle root stored on-chain for this batch (from KnowledgeBatchUpdated event). */
+  onChainMerkleRoot?: Uint8Array;
+  /** The block number of the on-chain update transaction. */
+  blockNumber?: number;
+}
+
 export interface ChainEvent {
   type: string;
   blockNumber: number;
@@ -199,9 +207,10 @@ export interface ChainAdapter {
   /**
    * Verify that a KnowledgeBatchUpdated event exists for the given batchId and txHash,
    * and that the publisher address matches the original batch publisher.
-   * Used by receiving nodes to authenticate gossip-propagated KA updates.
+   * Returns chain-verified merkle root and block number so the caller can bind
+   * the gossip payload to on-chain state (instead of trusting gossip-supplied values).
    */
-  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<boolean>;
+  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification>;
 
   // V9 storage extension
   extendStorage(params: ExtendStorageParams): Promise<TxResult>;

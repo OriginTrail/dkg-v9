@@ -4,6 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
+import type { ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
@@ -18,6 +19,11 @@ const MIME: Record<string, string> = {
   '.woff': 'font/woff',
 };
 
+export interface LlmSettingsCallbacks {
+  getLlm: () => { apiKey?: string; model?: string; baseURL?: string } | undefined;
+  setLlm: (llm: { apiKey: string; model?: string; baseURL?: string } | null) => Promise<void>;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/logs, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
@@ -31,6 +37,8 @@ export async function handleNodeUIRequest(
   chatAssistant?: ChatAssistant,
   metricsCollector?: MetricsCollector,
   authToken?: string,
+  memoryManager?: ChatMemoryManager,
+  llmSettings?: LlmSettingsCallbacks,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -156,17 +164,86 @@ export async function handleNodeUIRequest(
     return json(res, 200, { ok: true });
   }
 
+  // --- LLM settings ---
+
+  if (req.method === 'GET' && path === '/api/settings/llm') {
+    if (chatAssistant) {
+      const info = chatAssistant.getLlmConfig();
+      return json(res, 200, info);
+    }
+    return json(res, 200, { configured: false });
+  }
+
+  if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
+    const body = await readBody(req);
+    const { apiKey, model, baseURL } = JSON.parse(body);
+    if (typeof apiKey !== 'string') return json(res, 400, { error: 'Missing "apiKey" string' });
+
+    const llm = apiKey.trim()
+      ? { apiKey: apiKey.trim(), model: model || undefined, baseURL: baseURL || undefined }
+      : null;
+    try {
+      await llmSettings.setLlm(llm);
+      const info = chatAssistant?.getLlmConfig() ?? { configured: !!llm };
+      return json(res, 200, { ok: true, ...info });
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to save LLM config' });
+    }
+  }
+
   // --- Chat assistant ---
 
   if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
     const body = await readBody(req);
-    const { message } = JSON.parse(body);
+    const { message, sessionId: rawSessionId } = JSON.parse(body);
     if (!message) return json(res, 400, { error: 'Missing "message"' });
     try {
       const reply = await chatAssistant.answer({ message });
-      return json(res, 200, reply);
+      const sessionId = typeof rawSessionId === 'string' && rawSessionId ? rawSessionId : crypto.randomUUID();
+      if (memoryManager) {
+        try {
+          await memoryManager.storeChatExchange(sessionId, message, reply.reply, reply.toolCalls);
+        } catch (storeErr: any) {
+          console.error('[chat-assistant] Failed to store conversation:', storeErr?.message ?? storeErr);
+        }
+      }
+      return json(res, 200, { ...reply, sessionId });
     } catch (err: any) {
       return json(res, 500, { error: err.message });
+    }
+  }
+
+  // --- Memory (chat history stored in DKG) ---
+
+  if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    const limit = Math.max(1, Math.min(isNaN(rawLimit) ? 20 : rawLimit, 100));
+    try {
+      const sessions = await memoryManager.getRecentChats(limit);
+      return json(res, 200, { sessions });
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to fetch sessions' });
+    }
+  }
+
+  if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && memoryManager) {
+    const sessionId = decodeURIComponent(path.slice('/api/memory/sessions/'.length));
+    if (!sessionId) return json(res, 400, { error: 'Missing session ID' });
+    try {
+      const session = await memoryManager.getSession(sessionId);
+      if (!session) return json(res, 404, { error: 'Session not found' });
+      return json(res, 200, session);
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to fetch session' });
+    }
+  }
+
+  if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
+    try {
+      const stats = await memoryManager.getStats();
+      return json(res, 200, stats);
+    } catch (err: any) {
+      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 

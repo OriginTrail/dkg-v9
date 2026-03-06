@@ -56,6 +56,16 @@ async function del<T>(path: string): Promise<T> {
 
 // --- Status ---
 export const fetchStatus = () => get<any>('/api/status');
+
+// --- LLM Settings ---
+export interface LlmSettingsResponse {
+  configured: boolean;
+  model?: string;
+  baseURL?: string;
+}
+export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
+export const updateLlmSettings = (data: { apiKey: string; model?: string; baseURL?: string }) =>
+  put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
 
@@ -91,8 +101,8 @@ export const fetchLogs = (params: Record<string, string> = {}) => {
 export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
 
 // --- Query ---
-export const executeQuery = (sparql: string, paranetId?: string) =>
-  post<{ result: any }>('/api/query', { sparql, paranetId });
+export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_workspace') =>
+  post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace, graphSuffix });
 
 // --- Publish ---
 export const publishTriples = (paranetId: string, quads: any[]) =>
@@ -112,8 +122,20 @@ export const deleteSavedQuery = (id: number) =>
   del<{ ok: boolean }>(`/api/saved-queries/${id}`);
 
 // --- Chat assistant ---
-export const sendChatMessage = (message: string) =>
-  post<{ reply: string; data?: unknown; sparql?: string }>('/api/chat-assistant', { message });
+export const sendChatMessage = (message: string, sessionId?: string) =>
+  post<{ reply: string; data?: unknown; sparql?: string; sessionId?: string }>('/api/chat-assistant', { message, sessionId });
+
+// --- Memory (private chat memories in DKG) ---
+export interface MemorySession {
+  session: string;
+  messages: Array<{ author: string; text: string; ts: string }>;
+}
+export const fetchMemorySessions = (limit = 20) =>
+  get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
+export const fetchMemorySession = (sessionId: string) =>
+  get<MemorySession>(`/api/memory/sessions/${encodeURIComponent(sessionId)}`);
+export const fetchMemoryStats = () =>
+  get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>

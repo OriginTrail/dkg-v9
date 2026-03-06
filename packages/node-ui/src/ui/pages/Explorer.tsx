@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
@@ -672,12 +672,15 @@ const TEMPLATES: Record<string, string> = {
 };
 
 function SparqlTab() {
-  const [sparql, setSparql] = useState(TEMPLATES['All triples (limit 100)']);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialQuery = searchParams.get('q') || TEMPLATES['All triples (limit 100)'];
+  const [sparql, setSparql] = useState(initialQuery);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'table' | 'json' | 'graph'>('table');
   const [execTime, setExecTime] = useState<number | null>(null);
+  const [autoRan, setAutoRan] = useState(false);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -703,6 +706,14 @@ function SparqlTab() {
       run();
     }
   }, [run]);
+
+  useEffect(() => {
+    if (searchParams.has('q') && !autoRan) {
+      setAutoRan(true);
+      setSearchParams((prev) => { prev.delete('q'); return prev; }, { replace: true });
+      run();
+    }
+  }, [searchParams, autoRan, run, setSearchParams]);
 
   return (
     <div>

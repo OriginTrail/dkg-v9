@@ -36,6 +36,15 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
+/** Health status of a peer from the last ping round. */
+export interface PeerHealth {
+  peerId: string;
+  alive: boolean;
+  latencyMs: number | null;
+  lastSeen: number | null;
+  lastChecked: number;
+}
+
 /** Tracks the subscription and sync state of a paranet. */
 export interface ParanetSub {
   name?: string;
@@ -128,6 +137,7 @@ export class DKGAgent {
   private started = false;
   private readonly subscribedParanets = new Map<string, ParanetSub>();
   private readonly gossipRegistered = new Set<string>();
+  private readonly peerHealth = new Map<string, PeerHealth>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -1735,6 +1745,63 @@ export class DKGAgent {
     return this.subscribedParanets;
   }
 
+  /** Returns the latest health snapshot for all known peers. */
+  getPeerHealth(): ReadonlyMap<string, PeerHealth> {
+    return this.peerHealth;
+  }
+
+  /**
+   * Ping all known peers to check liveness. Updates the peerHealth map with
+   * latency and last-seen timestamps. Returns the number of peers that responded.
+   */
+  async pingPeers(): Promise<number> {
+    const ctx = createOperationContext('system');
+    const peers = this.node.libp2p.getPeers();
+    if (peers.length === 0) return 0;
+
+    const PING_TIMEOUT_MS = 10_000;
+    let alive = 0;
+    const now = Date.now();
+
+    const results = await Promise.allSettled(
+      peers.map(async (peerId) => {
+        const id = peerId.toString();
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
+        try {
+          const latency = await this.node.libp2p.services.ping.ping(peerId, { signal: ac.signal });
+          clearTimeout(timer);
+          this.peerHealth.set(id, {
+            peerId: id,
+            alive: true,
+            latencyMs: latency,
+            lastSeen: now,
+            lastChecked: now,
+          });
+          return true;
+        } catch {
+          clearTimeout(timer);
+          const prev = this.peerHealth.get(id);
+          this.peerHealth.set(id, {
+            peerId: id,
+            alive: false,
+            latencyMs: null,
+            lastSeen: prev?.lastSeen ?? null,
+            lastChecked: now,
+          });
+          return false;
+        }
+      }),
+    );
+
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) alive++;
+    }
+
+    this.log.info(ctx, `Peer health ping: ${alive}/${peers.length} peers alive`);
+    return alive;
+  }
+
   /**
    * Scan the local ONTOLOGY graph for paranet definitions and auto-subscribe
    * to any that aren't yet in the subscription registry. Called after
@@ -1821,17 +1888,22 @@ export class DKGAgent {
     for (const p of onChainParanets) {
       if (knownOnChainIds.has(p.paranetId)) continue;
 
-      const name = p.name ?? `chain:${p.paranetId.slice(0, 12)}`;
-      const id = p.name ?? p.paranetId;
+      if (!p.name) {
+        // Hash-only entry (metadata not revealed) — record for dedup but don't
+        // subscribe to gossip topics since hash-keyed topics are unusable.
+        this.log.info(ctx, `Noted unresolved on-chain paranet ${p.paranetId.slice(0, 16)}… (no metadata)`);
+        knownOnChainIds.add(p.paranetId);
+        continue;
+      }
 
-      this.subscribedParanets.set(id, {
-        name,
+      this.subscribedParanets.set(p.name, {
+        name: p.name,
         subscribed: true,
         synced: false,
         onChainId: p.paranetId,
       });
-      this.subscribeToParanet(id);
-      this.log.info(ctx, `Discovered on-chain paranet "${name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      this.subscribeToParanet(p.name);
+      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }
 

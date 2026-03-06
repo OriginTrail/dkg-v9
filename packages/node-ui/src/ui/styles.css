@@ -40,9 +40,7 @@ input::placeholder{color:#475569}
 .page-section{padding:28px 32px;overflow:auto;height:100%}
 
 /* Sidebar */
-.sidebar-logo{padding:20px 18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-.logo-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--green-dark),#1a4a2a);display:flex;align-items:center;justify-content:center;border:1px solid rgba(74,222,128,.2);box-shadow:0 0 20px rgba(74,222,128,.08)}
-.logo-text{font-size:14px;font-weight:700;color:var(--text);letter-spacing:-.02em}
+.sidebar-logo{padding:18px 18px 16px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px}
 .logo-version{font-size:10px;color:var(--green);font-weight:600}
 .sidebar-nav{padding:12px 10px;flex:1;display:flex;flex-direction:column;gap:2px}
 .nav-btn{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border-radius:8px;border:none;background:transparent;font-size:13px;font-weight:500;color:var(--text-muted);text-align:left;position:relative;text-decoration:none}
@@ -334,7 +332,7 @@ input::placeholder{color:#475569}
 
 @media(max-width:900px){
   .sidebar{width:60px}
-  .sidebar-logo>div:last-child,.nav-btn span,.sidebar-footer>div:last-child,.apps-dropdown{display:none!important}
+  .sidebar-logo svg,.sidebar-logo .logo-version,.nav-btn span,.sidebar-footer>div:last-child,.apps-dropdown{display:none!important}
   .nav-badge{display:none}
   .page-section{padding:20px 16px}
   .feed-row{grid-template-columns:50px 100px 1fr auto}

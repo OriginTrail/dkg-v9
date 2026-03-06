@@ -262,7 +262,10 @@ export function SettingsPage() {
     setShuttingDown(true);
     try {
       await shutdownNode();
-    } catch { /* node will be gone */ }
+    } catch {
+      setShuttingDown(false);
+      setShutdownConfirm(false);
+    }
   }, [shutdownConfirm]);
 
   return (

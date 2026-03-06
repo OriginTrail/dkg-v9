@@ -222,6 +222,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
 
+  // Periodic peer health ping (every 2 minutes)
+  const PING_INTERVAL_MS = 2 * 60 * 1000;
+  setTimeout(async () => {
+    try { await agent.pingPeers(); } catch { /* non-critical */ }
+  }, 30_000);
+  const pingTimer = setInterval(async () => {
+    try { await agent.pingPeers(); } catch { /* non-critical */ }
+  }, PING_INTERVAL_MS);
+  if (pingTimer.unref) pingTimer.unref();
+
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   if (config.autoUpdate?.enabled) {
@@ -460,6 +470,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
+    clearInterval(pingTimer);
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();
@@ -554,15 +565,19 @@ async function handleRequest(
       }
     }
     const myPeerId = agent.peerId;
+    const healthMap = agent.getPeerHealth();
     const enriched = agents.map((a: any) => {
       const isSelf = a.peerId === myPeerId;
       const conn = connByPeer.get(a.peerId);
+      const health = healthMap.get(a.peerId);
       return {
         ...a,
         connectionStatus: isSelf ? 'self' : conn ? 'connected' : 'disconnected',
         connectionTransport: conn?.transport ?? null,
         connectionDirection: conn?.direction ?? null,
         connectedSinceMs: conn?.sinceMs ?? null,
+        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
+        latencyMs: health?.latencyMs ?? null,
       };
     });
     return jsonResponse(res, 200, { agents: enriched });

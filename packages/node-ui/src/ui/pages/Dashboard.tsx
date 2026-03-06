@@ -50,7 +50,7 @@ const GLOW_R = 8;
 const PARTICLE_R = 2;
 const PARTICLE_GLOW_R = 6;
 
-interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; color: string; role?: string; }
+interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; color: string; }
 interface Particle { id: number; from: number; to: number; progress: number; speed: number; type: OpType; }
 
 function getPositions(count: number, cx: number, cy: number, radius: number) {
@@ -114,15 +114,10 @@ function drawNodeCircle(ctx: CanvasRenderingContext2D, x: number, y: number, nod
   ctx.fillStyle = '#94a3b8';
   ctx.fillText(node.sublabel, x, y + NODE_R + 7);
 
-  if (node.role) {
-    ctx.font = '600 6px JetBrains Mono, monospace';
-    ctx.fillStyle = node.role === 'RELAY' ? '#818cf8' : '#64748b';
-    ctx.fillText(node.role, x, y + NODE_R + 15);
-  }
   if (isYou) {
     ctx.font = '600 6px JetBrains Mono, monospace';
     ctx.fillStyle = '#4ade80';
-    ctx.fillText('YOUR NODE', x, y + NODE_R + (node.role ? 23 : 15));
+    ctx.fillText('YOUR NODE', x, y + NODE_R + 15);
   }
   ctx.globalAlpha = 1;
   ctx.restore();
@@ -158,7 +153,7 @@ function drawLegend(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.restore();
 }
 
-interface AgentInfo { name: string; peerId: string; nodeRole?: string; connectionStatus?: string; }
+interface AgentInfo { name: string; peerId: string; nodeRole?: string; connectionStatus?: string; lastSeen?: number | null; latencyMs?: number | null; }
 
 const OP_NAME_MAP: Record<string, OpType> = {
   publish: 'publish', query: 'query', workspace: 'update',
@@ -174,14 +169,16 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
   const seenOpsRef = useRef<Set<string>>(new Set());
   const lastPollRef = useRef(0);
 
+  const ALIVE_THRESHOLD_MS = 5 * 60 * 1000;
   const nodes: DashNode[] = agents.length > 0
     ? agents.map((a, i) => {
         const isSelf = a.connectionStatus === 'self';
+        const recentlySeen = a.lastSeen != null && (Date.now() - a.lastSeen) < ALIVE_THRESHOLD_MS;
+        const online = isSelf || recentlySeen || a.connectionStatus === 'connected';
         return {
-          id: i, isYou: isSelf, online: a.connectionStatus === 'connected' || isSelf,
+          id: i, isYou: isSelf, online,
           label: isSelf ? 'YOU' : a.name?.replace(/^devnet-/, '') || `P${i}`,
           sublabel: a.name || a.peerId?.slice(0, 10) || `peer-${i}`,
-          role: a.nodeRole === 'core' ? 'RELAY' : a.nodeRole === 'edge' ? 'EDGE' : undefined,
           color: isSelf ? '#4ade80' : PEER_COLORS[i % PEER_COLORS.length],
         };
       })

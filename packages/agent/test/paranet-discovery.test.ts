@@ -253,10 +253,37 @@ describe('discoverParanetsFromChain', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('discovers on-chain paranets and auto-subscribes', async () => {
+  it('discovers on-chain paranets with cleartext name and auto-subscribes', async () => {
     const chain = new MockChainWithParanets([
       {
         paranetId: '0xdeadbeef00000000000000000000000000000000000000000000000000000001',
+        name: 'test-revealed',
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+    ]);
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    const discovered = await agent.discoverParanetsFromChain();
+    expect(discovered).toBe(1);
+
+    const subs = agent.getSubscribedParanets();
+    const entry = subs.get('test-revealed');
+    expect(entry).toBeDefined();
+    expect(entry!.subscribed).toBe(true);
+    expect(entry!.synced).toBe(false);
+    expect(entry!.onChainId).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000001');
+  }, 15000);
+
+  it('skips hash-only on-chain paranets without metadata', async () => {
+    const chain = new MockChainWithParanets([
+      {
+        paranetId: '0xdeadbeef00000000000000000000000000000000000000000000000000000002',
         creator: '0x1234',
         accessPolicy: 0,
         blockNumber: 100,
@@ -269,15 +296,12 @@ describe('discoverParanetsFromChain', () => {
     await agent.start();
 
     const discovered = await agent.discoverParanetsFromChain();
-    expect(discovered).toBe(1);
+    expect(discovered).toBe(0);
 
+    // Should NOT have created a hash-keyed entry in the registry
     const subs = agent.getSubscribedParanets();
-    const found = [...subs.entries()].find(([, s]) =>
-      s.onChainId === '0xdeadbeef00000000000000000000000000000000000000000000000000000001',
-    );
-    expect(found).toBeDefined();
-    expect(found![1].subscribed).toBe(true);
-    expect(found![1].synced).toBe(false);
+    const ghost = [...subs.entries()].find(([id]) => id.startsWith('0x'));
+    expect(ghost).toBeUndefined();
   }, 15000);
 
   it('skips already known on-chain paranets', async () => {
@@ -352,5 +376,62 @@ describe('getSubscribedParanets', () => {
     expect(entry!.subscribed).toBe(true);
     expect(entry!.synced).toBe(true);
     expect(entry!.name).toBe('Created');
+  }, 15000);
+});
+
+describe('hash-vs-name duplication regression', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('chain discovery then ontology sync produces one merged entry, no ghost 0x paranet', async () => {
+    const { ethers } = await import('ethers');
+    const localName = 'merged-paranet';
+    const expectedHash = ethers.keccak256(ethers.toUtf8Bytes(localName));
+
+    const chain = new MockChainWithParanets([
+      {
+        paranetId: expectedHash,
+        name: localName,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+    ]);
+
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ chainAdapter: chain, store });
+    agent = result.agent;
+    await agent.start();
+
+    // Step 1: chain discovery finds the paranet
+    const chainDiscovered = await agent.discoverParanetsFromChain();
+    expect(chainDiscovered).toBe(1);
+
+    // Step 2: simulate ontology sync delivering the same paranet's triples
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = paranetDataGraphUri(localName);
+    await store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${localName}"`, graph: ontologyGraph },
+    ]);
+    const storeDiscovered = await agent.discoverParanetsFromStore();
+    // Should update the existing entry to synced, not create a new one
+    expect(storeDiscovered).toBeLessThanOrEqual(1);
+
+    // Final check: listParanets should contain exactly one entry for this paranet
+    const paranets = await agent.listParanets();
+    const matches = paranets.filter(p => p.id === localName || p.id === expectedHash);
+    expect(matches.length).toBe(1);
+    expect(matches[0].id).toBe(localName);
+    expect(matches[0].subscribed).toBe(true);
+    expect(matches[0].synced).toBe(true);
+
+    // No ghost 0x entries
+    const ghosts = paranets.filter(p => p.id.startsWith('0x'));
+    expect(ghosts.length).toBe(0);
   }, 15000);
 });

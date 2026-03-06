@@ -316,18 +316,13 @@ export class DKGAgent {
         onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 
-          // Auto-subscribe if not already known
+          // Only record the hash for dedup — don't subscribe to gossip with the
+          // hash because topics are keyed by cleartext name, not the on-chain hash.
+          // The paranet will be fully subscribed once ontology sync or
+          // discoverParanetsFromChain resolves the cleartext name.
           const alreadyKnown = [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
           if (!alreadyKnown) {
-            const id = paranetId;
-            this.subscribedParanets.set(id, {
-              name: `chain:${paranetId.slice(0, 12)}`,
-              subscribed: true,
-              synced: false,
-              onChainId: paranetId,
-            });
-            this.subscribeToParanet(id);
-            this.log.info(ctx, `Auto-subscribed to new on-chain paranet ${paranetId.slice(0, 16)}…`);
+            this.log.info(ctx, `Noted on-chain paranet ${paranetId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
           }
         },
       });

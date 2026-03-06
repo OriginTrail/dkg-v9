@@ -731,8 +731,10 @@ export class EVMChainAdapter implements ChainAdapter {
     const registry = this.contracts.paranetV9Registry;
     if (!registry) return [];
     const filter = registry.filters.ParanetCreated();
-    const start = fromBlock ?? 0;
-    const logs = await registry.queryFilter(filter, start);
+    const head = await this.provider.getBlockNumber();
+    const MAX_RANGE = 9_000;
+    const start = fromBlock ?? Math.max(0, head - MAX_RANGE);
+    const logs = await registry.queryFilter(filter, start, head);
     return logs.map((log) => {
       const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
       if (!parsed || parsed.name !== 'ParanetCreated') return null;
@@ -752,6 +754,10 @@ export class EVMChainAdapter implements ChainAdapter {
 
   getSignerAddress(): string {
     return this.signer.address;
+  }
+
+  async getBlockNumber(): Promise<number> {
+    return this.provider.getBlockNumber();
   }
 
   getProvider(): JsonRpcProvider {

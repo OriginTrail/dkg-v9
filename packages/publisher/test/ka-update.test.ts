@@ -4,7 +4,7 @@ import { GraphManager } from '@dkg/storage';
 import { MockChainAdapter } from '@dkg/chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@dkg/core';
 import { generateEd25519Keypair } from '@dkg/core';
-import { DKGPublisher, UpdateHandler } from '../src/index.js';
+import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -24,19 +24,32 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
+/** Compute merkle root for a set of quads + manifest so test gossip messages pass verification. */
+function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
+  const partitioned = autoPartition(quads);
+  const kaRoots: Uint8Array[] = [];
+  for (const m of manifest) {
+    const entityQuads = partitioned.get(m.rootEntity) ?? [];
+    const pubRoot = computePublicRoot(entityQuads);
+    const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
+    kaRoots.push(computeKARoot(pubRoot, privRoot));
+  }
+  return computeKCRoot(kaRoots);
+}
+
 describe('KAUpdateRequest encode/decode', () => {
   it('round-trips a KAUpdateRequest message', () => {
     const original = {
       paranetId: PARANET,
-      batchId: 42,
+      batchId: 42n,
       nquads: new TextEncoder().encode('<urn:a> <urn:b> "c" .'),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWTest',
       publisherAddress: '0xABCDEF',
       txHash: '0x1234',
-      blockNumber: 100,
+      blockNumber: 100n,
       newMerkleRoot: new Uint8Array([1, 2, 3]),
-      timestampMs: Date.now(),
+      timestampMs: BigInt(Date.now()),
     };
 
     const encoded = encodeKAUpdateRequest(original);
@@ -44,13 +57,34 @@ describe('KAUpdateRequest encode/decode', () => {
 
     const decoded = decodeKAUpdateRequest(encoded);
     expect(decoded.paranetId).toBe(PARANET);
-    expect(decoded.batchId).toBe(42);
+    expect(decoded.batchId).toBe(42n);
     expect(decoded.publisherPeerId).toBe('12D3KooWTest');
     expect(decoded.publisherAddress).toBe('0xABCDEF');
     expect(decoded.txHash).toBe('0x1234');
-    expect(decoded.blockNumber).toBe(100);
+    expect(decoded.blockNumber).toBe(100n);
     expect(decoded.manifest.length).toBe(1);
     expect(decoded.manifest[0].rootEntity).toBe(ENTITY_A);
+  });
+
+  it('preserves precision for large uint64 values above 2^53', () => {
+    const largeBatchId = (1n << 53n) + 7n;
+    const largeBlock = (1n << 60n) + 42n;
+    const original = {
+      paranetId: PARANET,
+      batchId: largeBatchId,
+      nquads: new Uint8Array(),
+      manifest: [],
+      publisherPeerId: 'peer',
+      publisherAddress: '0x1',
+      txHash: '0xabc',
+      blockNumber: largeBlock,
+      newMerkleRoot: new Uint8Array(),
+      timestampMs: 0n,
+    };
+
+    const decoded = decodeKAUpdateRequest(encodeKAUpdateRequest(original));
+    expect(decoded.batchId).toBe(largeBatchId);
+    expect(decoded.blockNumber).toBe(largeBlock);
   });
 });
 
@@ -89,24 +123,25 @@ describe('UpdateHandler', () => {
 
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [
-        q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"'),
-      ],
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"')],
     });
     expect(updateResult.onChainResult).toBeDefined();
 
     const newQuads = [q(ENTITY_A, 'http://schema.org/name', '"From gossip update"')];
+    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
+    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
+
     const message = encodeKAUpdateRequest({
       paranetId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(newQuads, DATA_GRAPH),
-      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      manifest: gossipManifest,
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: updateResult.onChainResult!.blockNumber,
-      newMerkleRoot: updateResult.merkleRoot,
-      timestampMs: Date.now(),
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: gossipRoot,
+      timestampMs: BigInt(Date.now()),
     });
 
     await handler.handle(message, '12D3KooWPeerA');
@@ -141,17 +176,20 @@ describe('UpdateHandler', () => {
     });
 
     const attackerQuads = [q(ENTITY_A, 'http://schema.org/name', '"Attacker override"')];
+    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
+    const gossipRoot = computeGossipMerkleRoot(attackerQuads, gossipManifest);
+
     const message = encodeKAUpdateRequest({
       paranetId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(attackerQuads, DATA_GRAPH),
-      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      manifest: gossipManifest,
       publisherPeerId: '12D3KooWAttacker',
       publisherAddress: '0xWrongAddress',
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: updateResult.onChainResult!.blockNumber,
-      newMerkleRoot: updateResult.merkleRoot,
-      timestampMs: Date.now(),
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: gossipRoot,
+      timestampMs: BigInt(Date.now()),
     });
 
     await handler.handle(message, '12D3KooWAttacker');
@@ -162,6 +200,100 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings[0]['o']).toContain('Updated');
+    }
+  });
+
+  it('rejects update with tampered merkle root', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+    });
+
+    const tamperedQuads = [q(ENTITY_A, 'http://schema.org/name', '"Tampered content"')];
+    const message = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(tamperedQuads, DATA_GRAPH),
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]),
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await handler.handle(message, '12D3KooWPeerA');
+
+    const nameResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(nameResult.type).toBe('bindings');
+    if (nameResult.type === 'bindings') {
+      expect(nameResult.bindings[0]['o']).toContain('Updated');
+    }
+  });
+
+  it('rejects replayed update (same batchId + txHash)', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+    });
+
+    const newQuads = [q(ENTITY_A, 'http://schema.org/name', '"From gossip"')];
+    const gossipManifest = [{ rootEntity: ENTITY_A, privateTripleCount: 0 }];
+    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
+
+    const message = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(newQuads, DATA_GRAPH),
+      manifest: gossipManifest,
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: gossipRoot,
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await handler.handle(message, '12D3KooWPeerA');
+
+    const secondQuads = [q(ENTITY_A, 'http://schema.org/name', '"Should be ignored"')];
+    const secondRoot = computeGossipMerkleRoot(secondQuads, gossipManifest);
+
+    const replayMessage = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(secondQuads, DATA_GRAPH),
+      manifest: gossipManifest,
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: secondRoot,
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await handler.handle(replayMessage, '12D3KooWPeerA');
+
+    const nameResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(nameResult.type).toBe('bindings');
+    if (nameResult.type === 'bindings') {
+      expect(nameResult.bindings.length).toBe(1);
+      expect(nameResult.bindings[0]['o']).toContain('From gossip');
     }
   });
 
@@ -195,9 +327,7 @@ describe('UpdateHandler', () => {
 
     await publisher.update(original.kcId, {
       paranetId: PARANET,
-      quads: [
-        q(ENTITY_A, 'http://schema.org/name', '"Updated"'),
-      ],
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
     const nameResult = await store.query(
@@ -239,20 +369,23 @@ describe('UpdateHandler', () => {
       q(ENTITY_A, 'http://schema.org/name', '"A-gossip"'),
       q(ENTITY_B, 'http://schema.org/name', '"B-gossip"'),
     ];
+    const gossipManifest = [
+      { rootEntity: ENTITY_A, privateTripleCount: 0 },
+      { rootEntity: ENTITY_B, privateTripleCount: 0 },
+    ];
+    const gossipRoot = computeGossipMerkleRoot(newQuads, gossipManifest);
+
     const message = encodeKAUpdateRequest({
       paranetId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(newQuads, DATA_GRAPH),
-      manifest: [
-        { rootEntity: ENTITY_A, privateTripleCount: 0 },
-        { rootEntity: ENTITY_B, privateTripleCount: 0 },
-      ],
+      manifest: gossipManifest,
       publisherPeerId: '12D3KooWPeerA',
       publisherAddress: wallet.address,
       txHash: updateResult.onChainResult!.txHash,
-      blockNumber: updateResult.onChainResult!.blockNumber,
-      newMerkleRoot: updateResult.merkleRoot,
-      timestampMs: Date.now(),
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: gossipRoot,
+      timestampMs: BigInt(Date.now()),
     });
 
     await handler.handle(message, '12D3KooWPeerA');

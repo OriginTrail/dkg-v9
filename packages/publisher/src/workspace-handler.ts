@@ -91,10 +91,12 @@ export class WorkspaceHandler {
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
-      // Delete-then-insert for upserted entities
+      // Delete-then-insert for upserted entities.
+      // Delete exact root + skolemized children only to avoid prefix collisions.
       for (const m of manifestForValidation) {
         if (wsOwned.has(m.rootEntity)) {
-          await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity);
+          await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+          await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
         }
       }
 

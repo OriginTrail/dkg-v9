@@ -245,10 +245,12 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    const txHash = `0x${this.nextBlock.toString(16).padStart(64, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
       publisherAddress: this.signerAddress,
+      txHash,
     });
 
     return this.txResult(true);
@@ -258,6 +260,7 @@ export class MockChainAdapter implements ChainAdapter {
     return this.events.some(
       (e) =>
         e.type === 'KnowledgeBatchUpdated' &&
+        e.data.txHash === txHash &&
         e.data.batchId === batchId.toString() &&
         e.data.publisherAddress === publisherAddress,
     );

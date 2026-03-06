@@ -148,10 +148,12 @@ export class DKGPublisher implements Publisher {
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
     const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
-    // Delete-then-insert for upserted entities (replace old triples)
+    // Delete-then-insert for upserted entities (replace old triples).
+    // Delete exact root + skolemized children only to avoid prefix collisions.
     for (const m of manifestEntries) {
       if (wsOwned.has(m.rootEntity)) {
-        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity);
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
       }
     }
 
@@ -246,7 +248,8 @@ export class DKGPublisher implements Publisher {
     if (options?.clearWorkspaceAfter) {
       const kaMap = autoPartition(quads);
       for (const rootEntity of kaMap.keys()) {
-        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity);
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
       }
     }
@@ -537,7 +540,8 @@ export class DKGPublisher implements Publisher {
 
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
-      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity);
+      await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
       await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
 
       const entityPrivateQuads = privateQuads.filter(

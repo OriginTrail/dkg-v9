@@ -1,6 +1,10 @@
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
+const PbLong = protobuf.util.Long as unknown as {
+  fromBigInt(val: bigint, unsigned?: boolean): { low: number; high: number; unsigned: boolean };
+  fromNumber(val: number, unsigned?: boolean): { low: number; high: number; unsigned: boolean };
+};
 
 export const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
   .add(new Field('rootEntity', 1, 'string'))
@@ -20,12 +24,15 @@ export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('timestampMs', 10, 'uint64'))
   .add(KAUpdateManifestEntrySchema);
 
+type Long = { low: number; high: number; unsigned: boolean };
+
 export interface KAUpdateManifestEntryMsg {
   rootEntity: string;
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
 }
 
+/** Input type for encoding — accepts number, bigint, or protobuf Long. */
 export interface KAUpdateRequestMsg {
   paranetId: string;
   batchId: number | bigint;
@@ -39,30 +46,39 @@ export interface KAUpdateRequestMsg {
   timestampMs: number | bigint;
 }
 
+function toBigInt(v: number | bigint | Long | unknown): bigint {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return BigInt(v);
+  if (v && typeof v === 'object' && 'low' in v && 'high' in v) {
+    const long = v as Long;
+    return BigInt(long.high >>> 0) * 0x100000000n + BigInt(long.low >>> 0);
+  }
+  return BigInt(Number(v));
+}
+
+function toLong(v: number | bigint): { low: number; high: number; unsigned: boolean } {
+  if (typeof v === 'bigint') return PbLong.fromBigInt(v, true);
+  return PbLong.fromNumber(v, true);
+}
+
 export function encodeKAUpdateRequest(msg: KAUpdateRequestMsg): Uint8Array {
-  const toNum = (v: number | bigint) => typeof v === 'bigint' ? Number(v) : v;
   return KAUpdateRequestSchema.encode(
     KAUpdateRequestSchema.create({
       ...msg,
-      batchId: toNum(msg.batchId),
-      blockNumber: toNum(msg.blockNumber),
-      timestampMs: toNum(msg.timestampMs),
+      batchId: toLong(msg.batchId),
+      blockNumber: toLong(msg.blockNumber),
+      timestampMs: toLong(msg.timestampMs),
     }),
   ).finish();
 }
 
+/** Decode returns bigint for uint64 fields (safe from protobuf Long precision issues). */
 export function decodeKAUpdateRequest(buf: Uint8Array): KAUpdateRequestMsg {
   const decoded = KAUpdateRequestSchema.decode(buf) as unknown as Record<string, unknown>;
-  const toNum = (v: unknown): number => {
-    if (typeof v === 'bigint') return Number(v);
-    if (typeof v === 'number') return v;
-    if (v && typeof v === 'object' && 'toNumber' in v) return (v as { toNumber(): number }).toNumber();
-    return Number(v);
-  };
   return {
     ...(decoded as unknown as KAUpdateRequestMsg),
-    batchId: toNum(decoded.batchId),
-    blockNumber: toNum(decoded.blockNumber),
-    timestampMs: toNum(decoded.timestampMs),
+    batchId: toBigInt(decoded.batchId),
+    blockNumber: toBigInt(decoded.blockNumber),
+    timestampMs: toBigInt(decoded.timestampMs),
   };
 }

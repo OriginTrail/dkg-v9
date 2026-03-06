@@ -640,41 +640,53 @@ export class DKGAgent {
         const wsQuads = allQuads.filter(q => q.graph === wsGraph);
         const wsMetaQuads = allQuads.filter(q => q.graph === wsMetaGraph);
 
+        // Build allowed root set from meta only (do not trust workspace subject URIs from remote).
+        const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
+        const allowedRoots = new Set<string>();
+        for (const q of wsMetaQuads) {
+          if (q.predicate === DKG_ROOT_ENTITY) {
+            const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
+            allowedRoots.add(entity);
+          }
+        }
+
+        // Validate workspace quads: subject must be an allowed root or skolemized child (root + /.well-known/genid/).
+        const SKOLEM_PREFIX = '/.well-known/genid/';
+        const isValidSubject = (s: string): boolean => {
+          if (allowedRoots.has(s)) return true;
+          for (const root of allowedRoots) {
+            if (s.startsWith(root + SKOLEM_PREFIX)) return true;
+          }
+          return false;
+        };
+        const validWsQuads = wsQuads.filter(q => isValidSubject(q.subject));
+        const dropped = wsQuads.length - validWsQuads.length;
+        if (dropped > 0) {
+          this.log.warn(ctx, `Workspace sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
+        }
+
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureParanet(pid);
 
-        if (wsQuads.length > 0) {
-          await this.store.insert(wsQuads);
-          totalSynced += wsQuads.length;
+        if (validWsQuads.length > 0) {
+          await this.store.insert(validWsQuads);
+          totalSynced += validWsQuads.length;
         }
         if (wsMetaQuads.length > 0) {
           await this.store.insert(wsMetaQuads);
           totalSynced += wsMetaQuads.length;
         }
 
-        // Update workspaceOwnedEntities for Rule 4 consistency.
-        // Extract rootEntities from the workspace meta quads.
-        const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
+        // Update workspaceOwnedEntities only from validated meta (rootEntity); never from workspace subjects.
         if (!this.workspaceOwnedEntities.has(pid)) {
           this.workspaceOwnedEntities.set(pid, new Set());
         }
         const ownedSet = this.workspaceOwnedEntities.get(pid)!;
-        for (const q of wsMetaQuads) {
-          if (q.predicate === DKG_ROOT_ENTITY) {
-            const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
-            ownedSet.add(entity);
-          }
+        for (const root of allowedRoots) {
+          ownedSet.add(root);
         }
 
-        // Also discover root entities from workspace quads directly
-        // (subjects that are not blank nodes or skolemized URIs).
-        for (const q of wsQuads) {
-          if (!q.subject.startsWith('_:') && !q.subject.includes('/.well-known/genid/')) {
-            ownedSet.add(q.subject);
-          }
-        }
-
-        this.log.info(ctx, `Workspace sync for "${pid}": ${wsQuads.length} data + ${wsMetaQuads.length} meta triples`);
+        this.log.info(ctx, `Workspace sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
       }
       if (totalSynced > 0) {
         this.log.info(ctx, `Workspace sync complete: ${totalSynced} triples from ${remotePeerId}`);

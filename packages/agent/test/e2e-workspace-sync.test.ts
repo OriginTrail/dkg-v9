@@ -77,16 +77,21 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await nodeC.connectTo(addrA);
 
-    // Wait for sync-on-connect (3s delay + sync time)
-    await sleep(8000);
+    // Poll until sync-on-connect has populated workspace (avoids flaky fixed sleep on slow CI)
+    const deadline = Date.now() + 15000;
+    let result: { bindings: Array<Record<string, string>> } | undefined;
+    while (Date.now() < deadline) {
+      result = await nodeC.query(
+        'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
+        { paranetId: PARANET, graphSuffix: '_workspace' },
+      );
+      if (result.bindings.length >= 2) break;
+      await sleep(500);
+    }
+    expect(result).toBeDefined();
+    expect(result!.bindings.length).toBe(2);
 
-    const result = await nodeC.query(
-      'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
-    );
-    expect(result.bindings.length).toBe(2);
-
-    const names = result.bindings.map((b: any) => String(b['name']));
+    const names = result!.bindings.map((b: any) => String(b['name']));
     expect(names).toContain('"Entity One"');
     expect(names).toContain('"Entity Two"');
   }, 20000);

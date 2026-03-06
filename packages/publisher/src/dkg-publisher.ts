@@ -611,8 +611,6 @@ export class DKGPublisher implements Publisher {
       publicQuads: allSkolemizedQuads,
       onChainResult: {
         batchId: kcId,
-        startKAId: 0n,
-        endKAId: 0n,
         txHash: txResult.hash,
         blockNumber: txResult.blockNumber,
         blockTimestamp: Math.floor(Date.now() / 1000),
@@ -667,10 +665,23 @@ export class DKGPublisher implements Publisher {
       const remaining = await this.store.query(
         `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
       );
-      const count = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
-      if (count === '"0"' || count === '0' || count === '"0"^^<http://www.w3.org/2001/XMLSchema#integer>') {
+      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      const countVal = parseCountLiteral(rawCount);
+      if (countVal === 0) {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }
   }
+}
+
+/**
+ * Parse a SPARQL COUNT result that may be a bare number string, a quoted
+ * string, or a typed literal (e.g. `"0"^^<xsd:integer>`, `"0"^^<xsd:long>`).
+ * Returns the numeric value, or NaN if unparseable.
+ */
+function parseCountLiteral(val: string | false | undefined): number {
+  if (!val) return NaN;
+  const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+  const n = Number(stripped);
+  return Number.isFinite(n) ? n : NaN;
 }

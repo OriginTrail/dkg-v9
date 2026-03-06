@@ -117,6 +117,7 @@ export class MockChainAdapter implements ChainAdapter {
       startKAId: params.startKAId.toString(),
       endKAId: params.endKAId.toString(),
       kaCount,
+      txHash: this.peekTxHash(),
     });
 
     return {
@@ -134,6 +135,7 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.kaCount,
     });
 
+    const txHash = this.peekTxHash();
     this.pushEvent('KnowledgeBatchCreated', {
       batchId: batchId.toString(),
       publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
@@ -142,6 +144,7 @@ export class MockChainAdapter implements ChainAdapter {
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,
+      txHash,
     });
 
     const result = this.txResult(true);
@@ -169,6 +172,7 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.kaCount,
     });
 
+    const txHash = this.peekTxHash();
     this.pushEvent('KnowledgeBatchCreated', {
       batchId: batchId.toString(),
       publisherAddress: this.signerAddress,
@@ -177,6 +181,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endId.toString(),
       kaCount: params.kaCount,
       isPermanent: true,
+      txHash,
     });
 
     const result = this.txResult(true);
@@ -553,6 +558,11 @@ export class MockChainAdapter implements ChainAdapter {
    * each txResult call advances the block. When false, multiple events
    * share a block until advanceBlock() is called explicitly.
    */
+  /** Preview the txHash that the next txResult() call will produce (read-only). */
+  private peekTxHash(): string {
+    return `0x${this.nextBlock.toString(16).padStart(64, '0')}${this.txIndexInBlock.toString(16).padStart(4, '0')}`;
+  }
+
   private pushEvent(type: string, data: Record<string, unknown>): void {
     this.events.push({ type, blockNumber: this.nextBlock, data });
   }

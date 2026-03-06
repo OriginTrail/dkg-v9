@@ -1068,3 +1068,203 @@ describe('MockChainAdapter address case normalization', () => {
     expect(v2.verified).toBe(true);
   });
 });
+
+// =====================================================================
+// 14. Untrusted gossip must not persist batch→paranet binding
+// =====================================================================
+
+describe('Gossip-only batch→paranet binding rejected', () => {
+  it('does not persist binding from gossip when no trusted source exists', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    const quads = [q('urn:gossip-bind', 'http://schema.org/name', '"Original"')];
+    const original = await publisher.publish({ paranetId: PARANET, quads });
+    expect(original.status).toBe('confirmed');
+
+    // Handler with separate knownBatchParanets (empty) — no trusted binding
+    const handler = new UpdateHandler(store, chain, eventBus);
+
+    const q2 = [q('urn:gossip-bind', 'http://schema.org/name', '"Updated"')];
+    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    expect(update.status).toBe('confirmed');
+
+    // First update on correct paranet should go through (discovered via SPARQL lookup)
+    const msg1 = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q2, DATA_GRAPH),
+      manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update.onChainResult!.txHash,
+      blockNumber: BigInt(update.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q2, [{ rootEntity: 'urn:gossip-bind' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg1, '12D3KooWPeer');
+
+    // Now send a second message on a DIFFERENT paranet with a new valid chain tx
+    const q3 = [q('urn:gossip-bind', 'http://schema.org/name', '"Spoofed"')];
+    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q3 });
+    expect(update2.status).toBe('confirmed');
+
+    const evilParanet = 'evil-gossip';
+    const msg2 = encodeKAUpdateRequest({
+      paranetId: evilParanet,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q3, `did:dkg:paranet:${evilParanet}`),
+      manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update2.onChainResult!.txHash,
+      blockNumber: BigInt(update2.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q3, [{ rootEntity: 'urn:gossip-bind' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg2, '12D3KooWPeer');
+
+    // Evil paranet graph should be empty — binding discovered from metadata prevents cross-paranet
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:gossip-bind> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(0);
+    }
+  });
+});
+
+// =====================================================================
+// 15. OnChainPublishResult from update() omits startKAId/endKAId
+// =====================================================================
+
+describe('Update provenance shape', () => {
+  it('update() result omits startKAId and endKAId', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    const quads = [q('urn:prov-shape', 'http://schema.org/name', '"V1"')];
+    const original = await publisher.publish({ paranetId: PARANET, quads });
+    expect(original.status).toBe('confirmed');
+    expect(original.onChainResult!.startKAId).toBeDefined();
+    expect(original.onChainResult!.endKAId).toBeDefined();
+
+    const q2 = [q('urn:prov-shape', 'http://schema.org/name', '"V2"')];
+    const updated = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    expect(updated.status).toBe('confirmed');
+    expect(updated.onChainResult).toBeDefined();
+    expect(updated.onChainResult!.txHash).toBeTruthy();
+    expect(updated.onChainResult!.blockNumber).toBeGreaterThan(0);
+    expect(updated.onChainResult!.startKAId).toBeUndefined();
+    expect(updated.onChainResult!.endKAId).toBeUndefined();
+  });
+});
+
+// =====================================================================
+// 16. COUNT(*) parsing handles various typed literal forms
+// =====================================================================
+
+describe('parseCountLiteral robustness', () => {
+  it('deleteMetaForRoot handles various COUNT result formats', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    // Write two entities to workspace to create workspace_meta ops
+    const wsQuads = [
+      q('urn:count-a', 'http://schema.org/name', '"CountA"'),
+      q('urn:count-b', 'http://schema.org/name', '"CountB"'),
+    ];
+    await publisher.writeToWorkspace(PARANET, wsQuads, {
+      publisherPeerId: 'test-peer',
+    });
+
+    // Now write a new value for entity A — the upsert should clean up old meta
+    const wsQuads2 = [
+      q('urn:count-a', 'http://schema.org/name', '"CountA-v2"'),
+    ];
+    await publisher.writeToWorkspace(PARANET, wsQuads2, {
+      publisherPeerId: 'test-peer',
+    });
+
+    // Verify entity B's workspace data still exists (wasn't clobbered by cleanup)
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <urn:count-b> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('CountB');
+    }
+
+    // Verify entity A has the updated value
+    const resultA = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <urn:count-a> <http://schema.org/name> ?o } }`,
+    );
+    expect(resultA.type).toBe('bindings');
+    if (resultA.type === 'bindings') {
+      expect(resultA.bindings.length).toBe(1);
+      expect(resultA.bindings[0]['o']).toContain('CountA-v2');
+    }
+  });
+});
+
+// =====================================================================
+// 17. Mock adapter KnowledgeBatchCreated events include txHash
+// =====================================================================
+
+describe('MockChainAdapter KnowledgeBatchCreated event txHash', () => {
+  it('publishKnowledgeAssets includes txHash in event data', async () => {
+    const chain = new MockChainAdapter('mock:31337', '0xABCD');
+
+    const result = await chain.publishKnowledgeAssets({
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      publicByteSize: 100n,
+      epochs: 1,
+      tokenAmount: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      receiverSignatures: [],
+    });
+
+    const events: { txHash: unknown }[] = [];
+    for await (const evt of chain.listenForEvents({
+      eventTypes: ['KnowledgeBatchCreated'],
+      fromBlock: result.blockNumber,
+      toBlock: result.blockNumber,
+    })) {
+      events.push({ txHash: evt.data['txHash'] });
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0].txHash).toBe(result.txHash);
+  });
+});

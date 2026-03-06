@@ -160,10 +160,18 @@ export class WorkspaceHandler {
       const remaining = await this.store.query(
         `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
       );
-      const count = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
-      if (count === '"0"' || count === '0' || count === '"0"^^<http://www.w3.org/2001/XMLSchema#integer>') {
+      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      const countVal = parseCountLiteral(rawCount);
+      if (countVal === 0) {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }
   }
+}
+
+function parseCountLiteral(val: string | false | undefined): number {
+  if (!val) return NaN;
+  const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+  const n = Number(stripped);
+  return Number.isFinite(n) ? n : NaN;
 }

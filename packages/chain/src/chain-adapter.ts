@@ -37,8 +37,10 @@ export interface PublishParams {
 
 export interface OnChainPublishResult {
   batchId: bigint;
-  startKAId: bigint;
-  endKAId: bigint;
+  /** Absent for updates (no new KAs minted). */
+  startKAId?: bigint;
+  /** Absent for updates (no new KAs minted). */
+  endKAId?: bigint;
   txHash: string;
   blockNumber: number;
   blockTimestamp: number;

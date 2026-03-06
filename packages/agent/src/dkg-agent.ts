@@ -703,8 +703,8 @@ export class DKGAgent {
         for (const q of wsMetaQuads) {
           if (q.predicate === DKG_ROOT_ENTITY && validOps.has(q.subject)) {
             const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
-            const creator = opCreators.get(q.subject) ?? 'unknown';
-            if (!entityCreators.has(entity)) {
+            const creator = opCreators.get(q.subject);
+            if (creator && !entityCreators.has(entity)) {
               entityCreators.set(entity, creator);
             }
           }

@@ -129,6 +129,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     framework: 'DKG',
     listenPort: config.listenPort,
     dataDir: dkgDir(),
+    bootstrapPeers: config.bootstrapPeers,
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,

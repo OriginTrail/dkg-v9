@@ -63,6 +63,8 @@ export interface DkgConfig {
   nodeRole: 'core' | 'edge';
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
+  /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
+  bootstrapPeers?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
   chain?: ChainConfig;

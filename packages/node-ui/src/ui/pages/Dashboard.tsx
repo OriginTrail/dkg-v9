@@ -1,36 +1,166 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations } from '../api.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, type ImportMemoryResult } from '../api.js';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────
 
+type ImportSource = 'claude' | 'chatgpt' | 'gemini' | 'other';
+
+const SOURCE_OPTIONS: { value: ImportSource; label: string; icon: string }[] = [
+  { value: 'claude', label: 'Claude', icon: '🟣' },
+  { value: 'chatgpt', label: 'ChatGPT', icon: '🟢' },
+  { value: 'gemini', label: 'Gemini', icon: '🔵' },
+  { value: 'other', label: 'Other', icon: '⚪' },
+];
+
 function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [text, setText] = useState('');
+  const [source, setSource] = useState<ImportSource>('claude');
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState<ImportMemoryResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = useCallback(() => {
+    setText('');
+    setSource('claude');
+    setImporting(false);
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    reset();
+    onClose();
+  }, [onClose, reset]);
+
+  const handleImport = useCallback(async () => {
+    if (!text.trim() || importing) return;
+    setImporting(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await importMemories(text.trim(), source);
+      setResult(res);
+    } catch (err: any) {
+      setError(err.message ?? 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  }, [text, source, importing]);
+
   if (!open) return null;
   return (
-    <div className="import-modal-overlay open" onClick={onClose}>
+    <div className="import-modal-overlay open" onClick={handleClose}>
       <div className="import-modal" onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <h3 className="serif" style={{ fontSize: 18, fontWeight: 700 }}>Import Memories</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18 }}>×</button>
+          <button onClick={handleClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18 }}>×</button>
         </div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
-          Paste exported memories from Claude, ChatGPT, Gemini, or any other AI assistant. They'll be published as verified Knowledge Assets on your DKG node — owned by you, queryable by any agent.
-        </p>
-        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--blue-dim)', border: '1px solid rgba(96,165,250,.2)', marginBottom: 16 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--blue)', marginBottom: 4 }}>💡 TIP</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            Paste this into your old AI assistant to export your memories:<br />
-            <code className="mono" style={{ fontSize: 10, color: 'var(--text)', background: 'rgba(255,255,255,.05)', padding: '2px 6px', borderRadius: 4 }}>
-              "List every memory you have stored about me in a single code block."
-            </code>
+
+        {result ? (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>✓</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--green)', marginBottom: 8 }}>
+              {result.memoryCount} memories imported
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.8 }}>
+              <span>{result.tripleCount} knowledge triples created</span><br />
+              {result.entityCount > 0 && <span>{result.entityCount} entities extracted</span>}
+            </div>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 12, padding: '6px 12px', background: 'var(--surface)', borderRadius: 6, display: 'inline-block' }}>
+              Batch: {result.batchId} · Source: {result.source}
+            </div>
+            <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+              Your memories are stored as private Knowledge Assets in the <code className="mono" style={{ fontSize: 10, background: 'var(--surface)', padding: '1px 4px', borderRadius: 3 }}>agent-memory</code> paranet. They're queryable by your agent and will never be shared with other nodes.
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 20, justifyContent: 'center' }}>
+              <button onClick={reset} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Import More</button>
+              <button onClick={handleClose} style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700 }}>Done</button>
+            </div>
           </div>
-        </div>
-        <textarea placeholder="Paste your exported memories here..." />
-        <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
-          <button disabled style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700, opacity: 0.5, cursor: 'default' }} title="Coming soon">Publish as Knowledge Assets (coming soon)</button>
-        </div>
+        ) : (
+          <>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
+              Paste exported memories from Claude, ChatGPT, Gemini, or any other AI assistant. They'll be stored as private Knowledge Assets on your DKG node — owned by you, queryable by your agent.
+            </p>
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+              {SOURCE_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  onClick={() => setSource(opt.value)}
+                  style={{
+                    padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                    border: source === opt.value ? '1px solid rgba(74,222,128,.4)' : '1px solid var(--border)',
+                    background: source === opt.value ? 'var(--green-dim)' : 'transparent',
+                    color: source === opt.value ? 'var(--green)' : 'var(--text-muted)',
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+                  }}
+                >
+                  <span style={{ fontSize: 12 }}>{opt.icon}</span>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--blue-dim)', border: '1px solid rgba(96,165,250,.2)', marginBottom: 16 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--blue)', marginBottom: 4 }}>HOW TO EXPORT</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                Paste this into {source === 'claude' ? 'Claude' : source === 'chatgpt' ? 'ChatGPT' : source === 'gemini' ? 'Gemini' : 'your AI assistant'} to export your memories:<br />
+                <code className="mono" style={{ fontSize: 10, color: 'var(--text)', background: 'rgba(255,255,255,.05)', padding: '2px 6px', borderRadius: 4, display: 'inline-block', marginTop: 4 }}>
+                  "List every memory you have stored about me in a single code block."
+                </code>
+              </div>
+            </div>
+
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              placeholder="Paste your exported memories here..."
+              disabled={importing}
+            />
+
+            {text.trim() && (
+              <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+                {text.trim().split('\n').filter(l => l.trim().length > 3).length} lines detected
+              </div>
+            )}
+
+            {error && (
+              <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 6, background: 'var(--red-dim)', border: '1px solid rgba(248,113,113,.2)', color: 'var(--red)', fontSize: 12 }}>
+                {error}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
+              <button onClick={handleClose} disabled={importing} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
+              <button
+                onClick={handleImport}
+                disabled={importing || !text.trim()}
+                style={{
+                  padding: '8px 20px', borderRadius: 8, border: 'none',
+                  background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700,
+                  opacity: importing || !text.trim() ? 0.5 : 1,
+                  cursor: importing || !text.trim() ? 'default' : 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {importing ? (
+                  <>
+                    <span style={{ width: 12, height: 12, border: '2px solid rgba(10,15,26,.3)', borderTopColor: 'var(--bg)', borderRadius: '50%', animation: 'spin .6s linear infinite', display: 'inline-block' }} />
+                    Importing…
+                  </>
+                ) : (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Import as Private Knowledge
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

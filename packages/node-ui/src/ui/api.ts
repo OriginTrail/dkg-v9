@@ -137,6 +137,16 @@ export const fetchMemorySession = (sessionId: string) =>
 export const fetchMemoryStats = () =>
   get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
+export interface ImportMemoryResult {
+  batchId: string;
+  source: string;
+  memoryCount: number;
+  tripleCount: number;
+  entityCount: number;
+}
+export const importMemories = (text: string, source?: string) =>
+  post<ImportMemoryResult>('/api/memory/import', { text, source });
+
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>
   post<{ delivered: boolean; error?: string }>('/api/chat', { to, text });

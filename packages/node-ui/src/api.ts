@@ -238,6 +238,22 @@ export async function handleNodeUIRequest(
     }
   }
 
+  if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
+    const body = await readBody(req);
+    const { text, source } = JSON.parse(body);
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return json(res, 400, { error: 'Missing or empty "text" field' });
+    }
+    const validSources = ['claude', 'chatgpt', 'gemini', 'other'];
+    const importSource = validSources.includes(source) ? source : 'other';
+    try {
+      const result = await memoryManager.importMemories(text.trim(), importSource);
+      return json(res, 200, result);
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to import memories' });
+    }
+  }
+
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
     try {
       const stats = await memoryManager.getStats();

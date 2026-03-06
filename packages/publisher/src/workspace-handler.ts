@@ -134,9 +134,9 @@ export class WorkspaceHandler {
   }
 
   /**
-   * Delete workspace_meta operation entries that reference a given rootEntity.
-   * This prevents stale metadata from triggering incorrect cleanup when the
-   * expired operation is garbage-collected.
+   * Remove the workspace_meta link for a specific rootEntity.
+   * Only deletes the entire operation subject when no rootEntity links remain,
+   * preserving metadata for other roots written in the same operation.
    */
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const DKG = 'urn:dkg:';
@@ -146,7 +146,17 @@ export class WorkspaceHandler {
     if (result.type !== 'bindings') return;
     for (const row of result.bindings) {
       const op = row['op'];
-      if (op) {
+      if (!op) continue;
+
+      await this.store.delete([{
+        subject: op, predicate: `${DKG}rootEntity`, object: rootEntity, graph: metaGraph,
+      }]);
+
+      const remaining = await this.store.query(
+        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
+      );
+      const count = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      if (count === '"0"' || count === '0' || count === '"0"^^<http://www.w3.org/2001/XMLSchema#integer>') {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }

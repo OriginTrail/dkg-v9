@@ -11,6 +11,11 @@ import { computePublicRoot, computeKARoot, computeKCRoot } from './merkle.js';
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
 
+interface AppliedUpdate {
+  blockNumber: number;
+  txHashes: Set<string>;
+}
+
 /**
  * Handles incoming KA update gossip messages.
  * Verifies the on-chain transaction and merkle root integrity,
@@ -23,12 +28,16 @@ export class UpdateHandler {
   private readonly chain: ChainAdapter;
   private readonly eventBus: EventBus;
   private readonly log = new Logger('UpdateHandler');
+
   /**
-   * Track the highest applied block number per (paranetId:batchId).
-   * Only updates from a strictly higher chain-verified block are accepted,
-   * preventing both duplicate and rollback replays.
+   * Track the highest applied (blockNumber, txHashes) per (paranetId:batchId).
+   * Accepts if block is strictly higher, or same block with a new txHash
+   * (two updates can land in the same block with different tx indices).
    */
-  private readonly appliedBlockHeight = new Map<string, number>();
+  private readonly appliedUpdates = new Map<string, AppliedUpdate>();
+
+  /** Batch-to-paranet binding: once a batch is seen on a paranet, reject cross-paranet replays. */
+  private readonly batchParanet = new Map<string, string>();
 
   constructor(store: TripleStore, chain: ChainAdapter, eventBus: EventBus) {
     this.store = store;
@@ -55,16 +64,24 @@ export class UpdateHandler {
         `KA update from ${fromPeerId} for paranet ${paranetId} batchId=${batchId} tx=${txHash}`,
       );
 
+      // Paranet binding: once a batch is associated with a paranet, reject cross-paranet replays.
+      const batchKey = String(batchId);
+      const knownParanet = this.batchParanet.get(batchKey);
+      if (knownParanet && knownParanet !== paranetId) {
+        this.log.warn(ctx, `KA update rejected: batchId=${batchId} is bound to paranet "${knownParanet}", not "${paranetId}"`);
+        return;
+      }
+
       // --- Chain verification (returns chain-sourced merkle root + block number) ---
       let verifiedMerkleRoot: Uint8Array | undefined;
       let verifiedBlockNumber: number | undefined;
+      let verifiedTxHash: string | undefined;
 
       if (!this.chain.verifyKAUpdate) {
         if (this.chain.chainId !== 'none') {
           this.log.warn(ctx, `KA update rejected: chain adapter does not implement verifyKAUpdate (chainId=${this.chain.chainId})`);
           return;
         }
-        // chainId=none (local/dev): no chain to verify against — skip verification
       } else {
         const verification: KAUpdateVerification = await this.chain.verifyKAUpdate(txHash, BigInt(batchId), publisherAddress);
         if (!verification.verified) {
@@ -73,15 +90,22 @@ export class UpdateHandler {
         }
         verifiedMerkleRoot = verification.onChainMerkleRoot;
         verifiedBlockNumber = verification.blockNumber;
+        verifiedTxHash = txHash;
       }
 
-      // Monotonic ordering using chain-verified block number (not gossip-supplied)
-      if (verifiedBlockNumber !== undefined) {
+      // Ordering: reject if already applied at a higher block, or same block with same txHash
+      if (verifiedBlockNumber !== undefined && verifiedTxHash !== undefined) {
         const orderKey = `${paranetId}:${batchId}`;
-        const lastApplied = this.appliedBlockHeight.get(orderKey);
-        if (lastApplied !== undefined && verifiedBlockNumber <= lastApplied) {
-          this.log.info(ctx, `KA update skipped: chain block ${verifiedBlockNumber} <= last applied ${lastApplied} for batchId=${batchId}`);
-          return;
+        const last = this.appliedUpdates.get(orderKey);
+        if (last) {
+          if (verifiedBlockNumber < last.blockNumber) {
+            this.log.info(ctx, `KA update skipped: chain block ${verifiedBlockNumber} < last applied ${last.blockNumber} for batchId=${batchId}`);
+            return;
+          }
+          if (verifiedBlockNumber === last.blockNumber && last.txHashes.has(verifiedTxHash)) {
+            this.log.info(ctx, `KA update skipped: tx ${verifiedTxHash} already applied at block ${verifiedBlockNumber} for batchId=${batchId}`);
+            return;
+          }
         }
       }
 
@@ -109,8 +133,6 @@ export class UpdateHandler {
       }
       const computedRoot = computeKCRoot(kaRoots);
 
-      // Compare computed root against chain-verified on-chain root (preferred)
-      // or gossip-supplied root (only on chainId=none where no chain exists).
       const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
       if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {
         this.log.warn(ctx, `KA update rejected: merkle root missing or wrong length (got ${referenceRoot?.length ?? 0}, expected ${EXPECTED_MERKLE_ROOT_LEN})`);
@@ -135,10 +157,17 @@ export class UpdateHandler {
       }
       await this.store.insert(authenticatedQuads);
 
-      if (verifiedBlockNumber !== undefined) {
+      // Record applied update for ordering + paranet binding
+      if (verifiedBlockNumber !== undefined && verifiedTxHash !== undefined) {
         const orderKey = `${paranetId}:${batchId}`;
-        this.appliedBlockHeight.set(orderKey, verifiedBlockNumber);
+        const last = this.appliedUpdates.get(orderKey);
+        if (!last || verifiedBlockNumber > last.blockNumber) {
+          this.appliedUpdates.set(orderKey, { blockNumber: verifiedBlockNumber, txHashes: new Set([verifiedTxHash]) });
+        } else if (verifiedBlockNumber === last.blockNumber) {
+          last.txHashes.add(verifiedTxHash);
+        }
       }
+      this.batchParanet.set(batchKey, paranetId);
 
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 

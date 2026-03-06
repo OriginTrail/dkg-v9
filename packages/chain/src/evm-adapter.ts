@@ -494,16 +494,18 @@ export class EVMChainAdapter implements ChainAdapter {
       if (!receipt || receipt.status !== 1) return { verified: false };
 
       const storage = this.contracts.knowledgeAssetsStorage;
+      const storageAddress = (await storage.getAddress()).toLowerCase();
 
       let onChainMerkleRoot: Uint8Array | undefined;
       for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== storageAddress) continue;
         try {
           const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
             onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
             break;
           }
-        } catch { /* not this contract */ }
+        } catch { /* parse failure — skip */ }
       }
 
       if (!onChainMerkleRoot) return { verified: false };

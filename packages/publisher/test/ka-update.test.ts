@@ -606,4 +606,64 @@ describe('UpdateHandler', () => {
     expect(verification.verified).toBe(false);
     expect(verification.onChainMerkleRoot).toBeUndefined();
   });
+
+  it('rejects cross-paranet replay (batch bound to different paranet)', async () => {
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: updateQuads,
+    });
+
+    // First, apply on the correct paranet to bind the batch
+    const legitMsg = buildGossipMessage({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: updateResult.onChainResult!.blockNumber,
+    });
+    await handler.handle(legitMsg, '12D3KooWPeerA');
+
+    // Now attempt to replay the same batch on a different paranet
+    const crossParanetMsg = buildGossipMessage({
+      paranetId: 'other-paranet',
+      batchId: original.kcId,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: updateResult.onChainResult!.blockNumber,
+    });
+    await handler.handle(crossParanetMsg, '12D3KooWPeerA');
+
+    // The other paranet's graph should be empty
+    const otherGraph = 'did:dkg:paranet:other-paranet';
+    const result = await store.query(
+      `ASK { GRAPH <${otherGraph}> { <${ENTITY_A}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') {
+      expect(result.value).toBe(false);
+    }
+  });
+
+  it('publisher.update() returns failed status when chain tx fails', async () => {
+    // Attempt to update a non-existent batch (batchId=999 doesn't exist in mock)
+    const result = await publisher.update(999n, {
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Should fail"')],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.onChainResult).toBeUndefined();
+  });
 });

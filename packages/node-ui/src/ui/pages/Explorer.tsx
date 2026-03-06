@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
@@ -262,8 +262,15 @@ function GraphTab() {
   const [realTripleCount, setRealTripleCount] = useState(0);
 
   const location = useLocation();
-  const initialParanet = useRef(new URLSearchParams(location.search).get('paranet') ?? '');
-  const [paranetFilter, setParanetFilter] = useState(initialParanet.current);
+  const [paranetFilter, setParanetFilter] = useState(
+    () => new URLSearchParams(location.search).get('paranet') ?? '',
+  );
+
+  // Keep paranetFilter in sync when ?paranet= changes while component stays mounted
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(location.search).get('paranet') ?? '';
+    setParanetFilter(fromUrl);
+  }, [location.search]);
   const [showLiterals, setShowLiterals] = useState(true);
   const [selectedNode, setSelectedNode] = useState<NodeDetails | null>(null);
 

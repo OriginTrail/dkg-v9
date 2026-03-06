@@ -127,6 +127,7 @@ export class DKGAgent {
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedParanets = new Map<string, ParanetSub>();
+  private readonly gossipRegistered = new Set<string>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -1152,6 +1153,16 @@ export class DKGAgent {
   }
 
   subscribeToParanet(paranetId: string): void {
+    // Idempotent: skip if gossip handlers already installed for this paranet
+    if (this.gossipRegistered.has(paranetId)) {
+      const existing = this.subscribedParanets.get(paranetId);
+      if (!existing?.subscribed) {
+        this.subscribedParanets.set(paranetId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+      }
+      return;
+    }
+    this.gossipRegistered.add(paranetId);
+
     const publishTopic = paranetPublishTopic(paranetId);
     const workspaceTopic = paranetWorkspaceTopic(paranetId);
     const appTopic = paranetAppTopic(paranetId);
@@ -1521,7 +1532,8 @@ export class DKGAgent {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           alreadyOnChain = true;
-          this.log.info(ctx, `Paranet "${opts.id}" already on-chain — creating local definition`);
+          onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
+          this.log.info(ctx, `Paranet "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
         } else {
           this.log.warn(ctx, `On-chain registration for "${opts.id}" failed: ${msg}`);
         }
@@ -1605,13 +1617,11 @@ export class DKGAgent {
   }
 
   /**
-   * Check whether a paranet is registered (definition triples exist
-   * in the ontology paranet, or it is in the subscription registry).
+   * Check whether a paranet is registered (definition triples exist in the
+   * ontology graph). Always store-backed to avoid false positives from
+   * in-memory state that may not have been persisted yet.
    */
   async paranetExists(paranetId: string): Promise<boolean> {
-    const sub = this.subscribedParanets.get(paranetId);
-    if (sub?.synced) return true;
-
     const paranetUri = paranetDataGraphUri(paranetId);
     const result = await this.store.query(
       `SELECT ?p WHERE {
@@ -1799,12 +1809,17 @@ export class DKGAgent {
       return 0;
     }
 
+    // Build a set of all known on-chain IDs (stored and computed) for fast dedup
+    const knownOnChainIds = new Set<string>();
+    for (const [localId, sub] of this.subscribedParanets) {
+      if (sub.onChainId) knownOnChainIds.add(sub.onChainId);
+      // Also compute expected hash for locally-known paranet IDs
+      knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
+    }
+
     let discovered = 0;
     for (const p of onChainParanets) {
-      const existing = [...this.subscribedParanets.entries()].find(
-        ([, sub]) => sub.onChainId === p.paranetId,
-      );
-      if (existing) continue;
+      if (knownOnChainIds.has(p.paranetId)) continue;
 
       const name = p.name ?? `chain:${p.paranetId.slice(0, 12)}`;
       const id = p.name ?? p.paranetId;

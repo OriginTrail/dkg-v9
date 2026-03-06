@@ -36,14 +36,18 @@ function GameTab() {
   const [swarm, setSwarm] = useState<any>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [appInstalled, setAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
-    gameApi.info().then((data: any) => {
-      setInfo(data);
-      if (data?.nodeName) setPlayerName(data.nodeName);
-    }).catch(() => {
-      // API unavailable — playerName stays empty, manual input required
-    });
+    gameApi.info()
+      .then((data: any) => {
+        setInfo(data);
+        setAppInstalled(true);
+        if (data?.nodeName) setPlayerName(data.nodeName);
+      })
+      .catch((err: any) => {
+        setAppInstalled(err?.status === 404 ? false : null);
+      });
   }, []);
 
   const refreshLobby = useCallback(async () => {
@@ -74,6 +78,22 @@ function GameTab() {
     finally { setLoading(false); }
   };
 
+  if (appInstalled === false) {
+    return (
+      <div className="card" style={{ maxWidth: 480, margin: '24px auto', padding: 24 }}>
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>OriginTrail Game not installed</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5, marginBottom: 16 }}>
+          The swarm game requires the <code className="mono" style={{ fontSize: 11 }}>dkg-app-origin-trail-game</code> package.
+          The app is linked to <code className="mono" style={{ fontSize: 11 }}>oregon-trail-dkg</code> in the dkg-v9 repo.
+        </p>
+        <p style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.5 }}>
+          To install: clone the <code className="mono" style={{ fontSize: 11 }}>oregon-trail-dkg</code> repo to the path in dkg-v9&apos;s <code className="mono" style={{ fontSize: 11 }}>package.json</code>, run{' '}
+          <code className="mono" style={{ fontSize: 11 }}>pnpm install</code>, then restart the node.
+        </p>
+      </div>
+    );
+  }
+
   if (view === 'lobby') {
     return (
       <div>
@@ -88,13 +108,7 @@ function GameTab() {
           ) : (
             <>
               <span>Name:</span>
-              <input
-                type="text"
-                placeholder="Enter your name"
-                value={playerName}
-                onChange={e => setPlayerName(e.target.value)}
-                style={{ padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }}
-              />
+              <input type="text" placeholder="Enter your name" value={playerName} onChange={e => setPlayerName(e.target.value)} style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }} />
             </>
           )}
         </div>
@@ -196,46 +210,115 @@ function GameTab() {
 
 /* ─── Sub-components ──────────────────────────────── */
 
+function PixelArtScene() {
+  return (
+    <svg viewBox="0 0 600 180" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto', display: 'block' }}>
+      <rect width="600" height="180" fill="#000" />
+      <polygon points="0,100 40,60 80,80 130,40 180,70 220,50 260,75 300,35 340,65 380,45 420,70 460,55 500,80 540,50 580,65 600,55 600,180 0,180" fill="#0a2a0a" opacity="0.8" />
+      <polygon points="0,120 60,90 100,100 160,75 200,95 260,70 300,85 340,65 400,90 440,75 500,95 540,80 600,90 600,180 0,180" fill="#0d3a0d" opacity="0.6" />
+      <rect y="140" width="600" height="40" fill="#1a5a1a" opacity="0.3" />
+      <g opacity="0.4">
+        <rect x="0" y="142" width="600" height="2" fill="#2a7a2a" />
+        <rect x="0" y="148" width="600" height="1" fill="#1a5a1a" />
+        <rect x="0" y="154" width="600" height="2" fill="#2a7a2a" />
+        <rect x="0" y="160" width="600" height="1" fill="#1a5a1a" />
+        <rect x="0" y="166" width="600" height="2" fill="#2a7a2a" />
+      </g>
+      {/* Lead Agent */}
+      <g transform="translate(280,95)">
+        <rect x="0" y="0" width="4" height="4" fill="#4ade80" /><rect x="4" y="0" width="4" height="4" fill="#4ade80" /><rect x="8" y="0" width="4" height="4" fill="#4ade80" />
+        <rect x="-2" y="4" width="4" height="4" fill="#4ade80" /><rect x="2" y="4" width="4" height="4" fill="#4ade80" /><rect x="6" y="4" width="4" height="4" fill="#4ade80" /><rect x="10" y="4" width="4" height="4" fill="#4ade80" />
+        <rect x="0" y="8" width="4" height="4" fill="#4ade80" /><rect x="4" y="8" width="4" height="4" fill="#22c55e" /><rect x="8" y="8" width="4" height="4" fill="#4ade80" />
+        <rect x="0" y="12" width="4" height="4" fill="#4ade80" /><rect x="8" y="12" width="4" height="4" fill="#4ade80" />
+        <rect x="2" y="-4" width="4" height="4" fill="#4ade80" /><rect x="6" y="-4" width="4" height="4" fill="#4ade80" />
+        <rect x="2" y="-8" width="8" height="4" fill="#4ade80" />
+        <rect x="6" y="-6" width="2" height="2" fill="#000" />
+        <rect x="14" y="-2" width="4" height="2" fill="#4ade80" opacity="0.6" />
+        <rect x="20" y="-4" width="4" height="2" fill="#4ade80" opacity="0.3" />
+        <rect x="14" y="4" width="4" height="2" fill="#4ade80" opacity="0.4" />
+      </g>
+      {/* Agent 2 */}
+      <g transform="translate(240,102)">
+        <rect x="0" y="0" width="4" height="4" fill="#60a5fa" /><rect x="4" y="0" width="4" height="4" fill="#60a5fa" />
+        <rect x="-2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="6" y="4" width="4" height="4" fill="#60a5fa" />
+        <rect x="0" y="8" width="4" height="4" fill="#60a5fa" /><rect x="4" y="8" width="4" height="4" fill="#60a5fa" />
+        <rect x="0" y="12" width="4" height="4" fill="#60a5fa" /><rect x="4" y="12" width="4" height="4" fill="#60a5fa" />
+        <rect x="0" y="-4" width="8" height="4" fill="#60a5fa" />
+        <rect x="4" y="-2" width="2" height="2" fill="#000" />
+      </g>
+      {/* Agent 3 */}
+      <g transform="translate(325,102)">
+        <rect x="0" y="0" width="4" height="4" fill="#a78bfa" /><rect x="4" y="0" width="4" height="4" fill="#a78bfa" />
+        <rect x="-2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="6" y="4" width="4" height="4" fill="#a78bfa" />
+        <rect x="0" y="8" width="4" height="4" fill="#a78bfa" /><rect x="4" y="8" width="4" height="4" fill="#a78bfa" />
+        <rect x="0" y="12" width="4" height="4" fill="#a78bfa" /><rect x="4" y="12" width="4" height="4" fill="#a78bfa" />
+        <rect x="0" y="-4" width="8" height="4" fill="#a78bfa" />
+        <rect x="4" y="-2" width="2" height="2" fill="#000" />
+      </g>
+      {/* Agent 4 */}
+      <g transform="translate(218,112)">
+        <rect x="0" y="0" width="4" height="4" fill="#fbbf24" /><rect x="4" y="0" width="4" height="4" fill="#fbbf24" />
+        <rect x="0" y="4" width="4" height="4" fill="#fbbf24" /><rect x="4" y="4" width="4" height="4" fill="#fbbf24" />
+        <rect x="0" y="8" width="4" height="4" fill="#fbbf24" /><rect x="4" y="8" width="4" height="4" fill="#fbbf24" />
+        <rect x="0" y="-4" width="8" height="4" fill="#fbbf24" />
+        <rect x="4" y="-2" width="2" height="2" fill="#000" />
+      </g>
+      {/* Agent 5 */}
+      <g transform="translate(348,112)">
+        <rect x="0" y="0" width="4" height="4" fill="#22d3ee" /><rect x="4" y="0" width="4" height="4" fill="#22d3ee" />
+        <rect x="0" y="4" width="4" height="4" fill="#22d3ee" /><rect x="4" y="4" width="4" height="4" fill="#22d3ee" />
+        <rect x="0" y="8" width="4" height="4" fill="#22d3ee" /><rect x="4" y="8" width="4" height="4" fill="#22d3ee" />
+        <rect x="0" y="-4" width="8" height="4" fill="#22d3ee" />
+        <rect x="4" y="-2" width="2" height="2" fill="#000" />
+      </g>
+      {/* Connection lines */}
+      <line x1="252" y1="106" x2="280" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
+      <line x1="333" y1="106" x2="310" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
+      <line x1="230" y1="116" x2="250" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
+      <line x1="356" y1="116" x2="337" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
+      <line x1="252" y1="108" x2="325" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.15" strokeDasharray="2,4" />
+      {/* Animated particles */}
+      <circle cx="265" cy="102" r="1.5" fill="#4ade80" opacity="0.7">
+        <animate attributeName="cx" values="252;280;252" dur="2s" repeatCount="indefinite" />
+      </circle>
+      <circle cx="318" cy="102" r="1.5" fill="#a78bfa" opacity="0.7">
+        <animate attributeName="cx" values="310;333;310" dur="2.5s" repeatCount="indefinite" />
+      </circle>
+      <circle cx="290" cy="108" r="1" fill="#fbbf24" opacity="0.5">
+        <animate attributeName="cx" values="252;348;252" dur="4s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  );
+}
+
 function HeroBanner({ compact }: { compact?: boolean }) {
   return (
-    <div className="trail-hero" style={compact ? { padding: '16px 20px' } : {}}>
+    <div className="trail-hero" style={compact ? { padding: 0, overflow: 'hidden' } : { padding: 0, overflow: 'hidden' }}>
       <div className="trail-hero-glow" />
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', position: 'relative', zIndex: 1 }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: compact ? 0 : 8 }}>
-            <span style={{ fontSize: compact ? 20 : 28 }}>🚀</span>
-            <div>
-              <h1 className="serif" style={{ fontSize: compact ? 18 : 26, fontWeight: 700, lineHeight: 1 }}>OriginTrail</h1>
-              {!compact && <div className="mono" style={{ fontSize: 10, color: 'var(--green)', marginTop: 3 }}>THE FRONTIER AWAITS YOUR SWARM</div>}
-            </div>
-          </div>
-          {!compact && (
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 480, lineHeight: 1.7 }}>
-              Guide your swarm of AI agents across 9 phases of the intelligence frontier.
-              Every decision publishes Knowledge Assets to the DKG — your progress is
-              verifiable, your memories are permanent.
-            </p>
-          )}
+      {/* Pixel art scene with scanline overlay */}
+      <div style={{ position: 'relative', background: '#000', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.15) 2px, rgba(0,0,0,.15) 4px)', pointerEvents: 'none', zIndex: 3 }} />
+        <PixelArtScene />
+        <div style={{ marginTop: 6, marginBottom: 10, textAlign: 'center' }}>
+          <span className="mono" style={{ display: 'inline-block', background: '#0a2a0a', border: '2px solid #2a7a2a', borderRadius: 4, padding: '4px 24px', fontSize: 13, fontWeight: 700, color: '#4ade80', letterSpacing: '.15em' }}>
+            ORIGINTRAIL GAME
+          </span>
         </div>
-        {!compact && (
-          <div className="mono" style={{ fontSize: 10, lineHeight: 1.5, color: 'var(--green)', opacity: .7, textAlign: 'right', userSelect: 'none' }}>
-            <div>{'  ◆ ◆ ◆  '}</div>
-            <div>{'◆ ◆ ◆ ◆ ◆'}</div>
-            <div>{'  ◆ ◆ ◆  '}</div>
-            <div style={{ color: 'var(--text-dim)', fontSize: 9, marginTop: 4 }}>AGENT SWARM</div>
-          </div>
-        )}
       </div>
+      {/* Text content below pixel art */}
       {!compact && (
-        <div style={{ marginTop: 20, display: 'flex', gap: 3, position: 'relative', zIndex: 1 }}>
-          {PHASES.map((p, i) => (
-            <div key={p.name} style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ height: 4, borderRadius: 2, background: i < 5 ? 'var(--green)' : 'var(--border)', marginBottom: 5, opacity: i < 5 ? 1 : 0.5 }} />
-              <div className="mono" style={{ fontSize: 7, color: i < 5 ? 'var(--text-muted)' : 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {p.name.split(' ').slice(-1)[0]}
-              </div>
-            </div>
-          ))}
+        <div style={{ padding: '16px 24px 20px', position: 'relative', zIndex: 1 }}>
+          <div className="mono" style={{ fontSize: 10, fontWeight: 700, color: 'var(--green)', letterSpacing: '.15em', textTransform: 'uppercase', marginBottom: 4 }}>
+            AI Frontier Journey on DKG v9
+          </div>
+          <h3 className="serif" style={{ fontSize: 20, fontWeight: 700, margin: '0 0 6px' }}>Lead your agent swarm to Singularity Harbor</h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6, maxWidth: 560, margin: 0 }}>
+            2,000 epochs across the AI Frontier. Every decision is a Knowledge Asset.
+            Every outcome is verified by the <strong style={{ color: '#4ade80' }}>Context Oracle</strong>.
+          </p>
+          <p style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+            Your swarm will not die of dysentery. But it might die of hallucinations.
+          </p>
         </div>
       )}
     </div>
@@ -317,7 +400,7 @@ function CreateSwarmForm({ playerName, loading, onSubmit }: { playerName: string
         ))}
       </div>
       <button
-        disabled={!name.trim() || !playerName.trim() || loading}
+        disabled={!name.trim() || !playerName || loading}
         onClick={() => onSubmit(name.trim(), max)}
         style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
       >

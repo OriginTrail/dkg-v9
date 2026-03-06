@@ -737,8 +737,8 @@ export class EVMChainAdapter implements ChainAdapter {
     const results: ParanetOnChain[] = [];
 
     // Paginate in PAGE-sized chunks to stay within RPC range limits.
-    for (let lo = start; lo <= head; lo += PAGE + 1) {
-      const hi = Math.min(lo + PAGE, head);
+    for (let lo = start; lo <= head; lo += PAGE) {
+      const hi = Math.min(lo + PAGE - 1, head);
       const logs = await registry.queryFilter(eventFilter, lo, hi);
       for (const log of logs) {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });

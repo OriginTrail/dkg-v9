@@ -35,7 +35,6 @@ export class ChainEventPoller {
   private readonly onParanetCreated?: OnParanetCreated;
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
-  private seeded = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -85,26 +84,11 @@ export class ChainEventPoller {
 
     const ctx = createOperationContext('publish');
 
-    // On first poll, seed the cursor from the chain head so we don't scan
-    // the entire history (which exceeds typical RPC range limits).
-    if (!this.seeded) {
-      this.seeded = true;
-      if (this.chain.getBlockNumber) {
-        try {
-          const head = await this.chain.getBlockNumber();
-          this.lastBlock = Math.max(0, head - 500);
-          this.log.info(ctx, `Seeded lastBlock from chain head: ${head} → scanning from ${this.lastBlock}`);
-        } catch (err) {
-          this.log.warn(ctx, `Could not seed lastBlock from chain: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
-
     const eventTypes = ['KnowledgeBatchCreated'];
     if (watchParanets) eventTypes.push('ParanetCreated');
 
     const fromBlock = this.lastBlock + 1;
-    let upperBound = fromBlock + ChainEventPoller.MAX_RANGE;
+    let upperBound = fromBlock + ChainEventPoller.MAX_RANGE - 1;
 
     // Cap to the actual chain head so we know the true scanned range.
     if (this.chain.getBlockNumber) {

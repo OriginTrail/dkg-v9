@@ -519,6 +519,7 @@ export class EVMChainAdapter implements ChainAdapter {
         verified: true,
         onChainMerkleRoot,
         blockNumber: receipt.blockNumber,
+        txIndex: receipt.index,
       };
     } catch {
       return { verified: false };

@@ -536,19 +536,18 @@ export class DKGPublisher implements Publisher {
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
 
+    // Phase 1: compute merkle roots and manifest without mutating the store
     const kaMap = autoPartition(quads);
     const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
+    const entityPrivateMap = new Map<string, Quad[]>();
 
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
-      await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
-      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
-      await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
-
       const entityPrivateQuads = privateQuads.filter(
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
+      entityPrivateMap.set(rootEntity, entityPrivateQuads);
 
       const pubRoot = computePublicRoot(publicQuads);
       const privRoot = entityPrivateQuads.length > 0 ? computePrivateRoot(entityPrivateQuads) : undefined;
@@ -560,18 +559,12 @@ export class DKGPublisher implements Publisher {
         privateMerkleRoot: privRoot,
         privateTripleCount: entityPrivateQuads.length,
       });
-
-      const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
-      await this.store.insert(normalized);
-
-      if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
-      }
     }
 
     const kcMerkleRoot = computeKCRoot(kaRoots);
-
     const allSkolemizedQuads = [...kaMap.values()].flat();
+
+    // Phase 2: submit chain tx — local store is still untouched
     const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
@@ -587,6 +580,21 @@ export class DKGPublisher implements Publisher {
         status: 'failed',
         publicQuads: allSkolemizedQuads,
       };
+    }
+
+    // Phase 3: chain succeeded — now apply local mutations
+    for (const [rootEntity, publicQuads] of kaMap) {
+      await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+      await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
+
+      const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
+      await this.store.insert(normalized);
+
+      const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
+      if (entityPrivateQuads.length > 0) {
+        await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
+      }
     }
 
     const result: PublishResult = {

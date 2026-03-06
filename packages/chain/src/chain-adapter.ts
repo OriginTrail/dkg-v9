@@ -75,6 +75,8 @@ export interface KAUpdateVerification {
   onChainMerkleRoot?: Uint8Array;
   /** The block number of the on-chain update transaction. */
   blockNumber?: number;
+  /** The transaction index within the block (for deterministic same-block ordering). */
+  txIndex?: number;
 }
 
 export interface ChainEvent {

@@ -13,7 +13,7 @@ const EXPECTED_MERKLE_ROOT_LEN = 32;
 
 interface AppliedUpdate {
   blockNumber: number;
-  txHashes: Set<string>;
+  txIndex: number;
 }
 
 /**
@@ -30,9 +30,9 @@ export class UpdateHandler {
   private readonly log = new Logger('UpdateHandler');
 
   /**
-   * Track the highest applied (blockNumber, txHashes) per (paranetId:batchId).
-   * Accepts if block is strictly higher, or same block with a new txHash
-   * (two updates can land in the same block with different tx indices).
+   * Track the highest applied (blockNumber, txIndex) per (paranetId:batchId).
+   * Uses canonical chain ordering: accepts if (blockNumber, txIndex) is strictly
+   * higher than the last applied update, ensuring deterministic state across nodes.
    */
   private readonly appliedUpdates = new Map<string, AppliedUpdate>();
 
@@ -72,10 +72,10 @@ export class UpdateHandler {
         return;
       }
 
-      // --- Chain verification (returns chain-sourced merkle root + block number) ---
+      // --- Chain verification (returns chain-sourced merkle root + block number + txIndex) ---
       let verifiedMerkleRoot: Uint8Array | undefined;
       let verifiedBlockNumber: number | undefined;
-      let verifiedTxHash: string | undefined;
+      let verifiedTxIndex: number | undefined;
 
       if (!this.chain.verifyKAUpdate) {
         if (this.chain.chainId !== 'none') {
@@ -90,11 +90,12 @@ export class UpdateHandler {
         }
         verifiedMerkleRoot = verification.onChainMerkleRoot;
         verifiedBlockNumber = verification.blockNumber;
-        verifiedTxHash = txHash;
+        verifiedTxIndex = verification.txIndex ?? 0;
       }
 
-      // Ordering: reject if already applied at a higher block, or same block with same txHash
-      if (verifiedBlockNumber !== undefined && verifiedTxHash !== undefined) {
+      // Ordering: use canonical (blockNumber, txIndex) for deterministic state across nodes.
+      if (verifiedBlockNumber !== undefined) {
+        const txIdx = verifiedTxIndex ?? 0;
         const orderKey = `${paranetId}:${batchId}`;
         const last = this.appliedUpdates.get(orderKey);
         if (last) {
@@ -102,8 +103,8 @@ export class UpdateHandler {
             this.log.info(ctx, `KA update skipped: chain block ${verifiedBlockNumber} < last applied ${last.blockNumber} for batchId=${batchId}`);
             return;
           }
-          if (verifiedBlockNumber === last.blockNumber && last.txHashes.has(verifiedTxHash)) {
-            this.log.info(ctx, `KA update skipped: tx ${verifiedTxHash} already applied at block ${verifiedBlockNumber} for batchId=${batchId}`);
+          if (verifiedBlockNumber === last.blockNumber && txIdx <= last.txIndex) {
+            this.log.info(ctx, `KA update skipped: (block=${verifiedBlockNumber}, txIndex=${txIdx}) <= last applied (block=${last.blockNumber}, txIndex=${last.txIndex}) for batchId=${batchId}`);
             return;
           }
         }
@@ -158,14 +159,12 @@ export class UpdateHandler {
       await this.store.insert(authenticatedQuads);
 
       // Record applied update for ordering + paranet binding
-      if (verifiedBlockNumber !== undefined && verifiedTxHash !== undefined) {
+      if (verifiedBlockNumber !== undefined) {
         const orderKey = `${paranetId}:${batchId}`;
-        const last = this.appliedUpdates.get(orderKey);
-        if (!last || verifiedBlockNumber > last.blockNumber) {
-          this.appliedUpdates.set(orderKey, { blockNumber: verifiedBlockNumber, txHashes: new Set([verifiedTxHash]) });
-        } else if (verifiedBlockNumber === last.blockNumber) {
-          last.txHashes.add(verifiedTxHash);
-        }
+        this.appliedUpdates.set(orderKey, {
+          blockNumber: verifiedBlockNumber,
+          txIndex: verifiedTxIndex ?? 0,
+        });
       }
       this.batchParanet.set(batchKey, paranetId);
 

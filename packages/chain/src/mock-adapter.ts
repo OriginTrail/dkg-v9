@@ -34,6 +34,7 @@ export class MockChainAdapter implements ChainAdapter {
   private nextIdentityId = 1n;
   private nextBatchId = 1n;
   private nextBlock = 1;
+  private txIndexInBlock = 0;
   private identities = new Map<string, bigint>();
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
@@ -247,11 +248,13 @@ export class MockChainAdapter implements ChainAdapter {
 
     existing.merkleRoot = params.newMerkleRoot;
     const txHash = `0x${this.nextBlock.toString(16).padStart(64, '0')}`;
+    const txIndex = this.txIndexInBlock++;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
       publisherAddress: this.signerAddress,
       txHash,
+      txIndex,
     });
 
     return this.txResult(true);
@@ -270,6 +273,7 @@ export class MockChainAdapter implements ChainAdapter {
       verified: true,
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
+      txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
     };
   }
 
@@ -560,6 +564,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   private pushEvent(type: string, data: Record<string, unknown>): void {
     this.events.push({ type, blockNumber: this.nextBlock++, data });
+    this.txIndexInBlock = 0;
   }
 
   private txResult(success: boolean): TxResult {

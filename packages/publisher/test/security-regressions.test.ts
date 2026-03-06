@@ -477,11 +477,11 @@ describe('MockChainAdapter.verifyKAUpdate', () => {
 });
 
 // =====================================================================
-// 5. Same-block different-tx acceptance
+// 5. Same-block ordering (deterministic via txIndex)
 // =====================================================================
 
 describe('Same-block ordering', () => {
-  it('accepts two updates with same chain block but different txHashes', async () => {
+  it('accepts two updates with increasing chain blocks', async () => {
     const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', wallet.address);
@@ -493,15 +493,11 @@ describe('Same-block ordering', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    // Publish initial
     const original = await publisher.publish({
       paranetId: PARANET,
       quads: [q('urn:same:block', 'http://schema.org/name', '"Original"')],
     });
 
-    // Do two updates — they'll have different blocks in the mock,
-    // so we simulate same-block by creating a custom handler with
-    // a mock chain that returns the same block for both verifications.
     const update1Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 1"')];
     const update1 = await publisher.update(original.kcId, {
       paranetId: PARANET,
@@ -514,8 +510,6 @@ describe('Same-block ordering', () => {
       quads: update2Quads,
     });
 
-    // Both have different txHashes and different blocks in mock,
-    // so both should be accepted (higher block wins).
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const buildMsg = (quads: Quad[], txHash: string, blockNumber: number) =>
@@ -532,13 +526,11 @@ describe('Same-block ordering', () => {
         timestampMs: BigInt(Date.now()),
       });
 
-    // Apply update1 first
     await handler.handle(
       buildMsg(update1Quads, update1.onChainResult!.txHash, update1.onChainResult!.blockNumber),
       '12D3KooWPeer',
     );
 
-    // Apply update2 (higher block) — should succeed
     await handler.handle(
       buildMsg(update2Quads, update2.onChainResult!.txHash, update2.onChainResult!.blockNumber),
       '12D3KooWPeer',
@@ -554,7 +546,7 @@ describe('Same-block ordering', () => {
     }
   });
 
-  it('rejects duplicate txHash at same block (replay)', async () => {
+  it('rejects replay of same (block, txIndex)', async () => {
     const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', wallet.address);
@@ -592,7 +584,7 @@ describe('Same-block ordering', () => {
     });
 
     await handler.handle(msg, '12D3KooWPeer');
-    await handler.handle(msg, '12D3KooWPeer'); // replay — should be rejected
+    await handler.handle(msg, '12D3KooWPeer'); // replay — same (block, txIndex) → rejected
 
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:replay> <http://schema.org/name> ?o } }`,
@@ -602,5 +594,77 @@ describe('Same-block ordering', () => {
       expect(result.bindings.length).toBe(1);
       expect(result.bindings[0]['o']).toContain('Updated');
     }
+  });
+});
+
+// =====================================================================
+// 6. publisher.update() does not mutate local store on chain failure
+// =====================================================================
+
+describe('publisher.update() atomicity', () => {
+  it('does not mutate local graph when chain tx fails', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
+    });
+
+    // Attempt to update a non-existent batch — chain tx will fail
+    const result = await publisher.update(999n, {
+      paranetId: PARANET,
+      quads: [q('urn:atomic', 'http://schema.org/name', '"Should not appear"')],
+    });
+    expect(result.status).toBe('failed');
+
+    // Original data must be untouched
+    const nameResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:atomic> <http://schema.org/name> ?o } }`,
+    );
+    expect(nameResult.type).toBe('bindings');
+    if (nameResult.type === 'bindings') {
+      expect(nameResult.bindings.length).toBe(1);
+      expect(nameResult.bindings[0]['o']).toContain('Original');
+    }
+  });
+});
+
+// =====================================================================
+// 7. verifyKAUpdate returns txIndex for deterministic ordering
+// =====================================================================
+
+describe('MockChainAdapter.verifyKAUpdate txIndex', () => {
+  it('returns txIndex from chain verification', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await chain.publishKnowledgeAssets({
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const updateResult = await chain.updateKnowledgeAssets({
+      batchId: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0xAB),
+      newPublicByteSize: 200n,
+    });
+
+    const verification = await chain.verifyKAUpdate(updateResult.hash, 1n, wallet.address);
+    expect(verification.verified).toBe(true);
+    expect(verification.txIndex).toBeDefined();
+    expect(typeof verification.txIndex).toBe('number');
   });
 });

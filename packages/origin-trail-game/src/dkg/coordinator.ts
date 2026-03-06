@@ -131,12 +131,11 @@ export class OriginTrailGameCoordinator {
     const entity = `did:dkg:game:player:${this.myPeerId}`;
     try {
       const result = await this.agent.query(
-        `ASK WHERE { <${entity}> a <${rdf.OT}Player> }`,
+        `SELECT (1 AS ?exists) WHERE { <${entity}> a <${rdf.OT}Player> } LIMIT 1`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
-      const exists = bindings[0]?.result === true || bindings[0]?.result === 'true';
-      if (exists) {
+      if (bindings.length > 0) {
         this.log(`Player profile for "${displayName}" already exists, skipping publish`);
         return;
       }
@@ -584,15 +583,51 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
-    if (swarm.leaderPeerId !== this.myPeerId) {
-      if (swarm.turnDeadline && Date.now() < swarm.turnDeadline) {
+
+    const isLeader = swarm.leaderPeerId === this.myPeerId;
+    if (!isLeader) {
+      if (!swarm.turnDeadline || Date.now() < swarm.turnDeadline) {
         throw new Error('Only leader can force resolve before deadline');
       }
     }
+
     if (swarm.votes.length === 0) {
-      swarm.votes = [{ peerId: swarm.leaderPeerId, action: 'rest', turn: swarm.currentTurn, timestamp: Date.now() }];
+      swarm.votes = [{ peerId: this.myPeerId, action: 'rest', turn: swarm.currentTurn, timestamp: Date.now() }];
     }
-    await this.proposeTurnResolution(swarm);
+
+    // Any member may propose after deadline; leader may propose anytime
+    if (!swarm.gameState) throw new Error('No active game state');
+    const { winningAction, params, tieBreaker } = this.tallyVotes(swarm);
+    const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
+
+    const newStateJson = JSON.stringify(result.newState);
+    const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
+
+    swarm.pendingProposal = {
+      turn: swarm.currentTurn,
+      hash,
+      winningAction,
+      newStateJson,
+      resultMessage: result.message,
+      approvals: new Set([this.myPeerId]),
+    };
+
+    const msg: proto.TurnProposalMsg = {
+      app: proto.APP_ID,
+      type: 'turn:proposal',
+      swarmId: swarm.id,
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      turn: swarm.currentTurn,
+      proposalHash: hash,
+      winningAction,
+      newStateJson,
+      resultMessage: result.message,
+    };
+    await this.broadcast(msg);
+    this.log(`Force-resolve: turn ${swarm.currentTurn} proposal broadcast for ${swarm.id}`);
+
+    await this.checkProposalThreshold(swarm);
     return swarm;
   }
 
@@ -648,6 +683,12 @@ export class OriginTrailGameCoordinator {
     if (from === this.myPeerId) return;
     const msg = proto.decode(data);
     if (!msg) return;
+
+    // Reject messages where payload peerId doesn't match actual sender
+    if (msg.peerId !== from) {
+      this.log(`Rejected spoofed message: payload peerId=${msg.peerId} but from=${from}`);
+      return;
+    }
 
     this.msgQueue = this.msgQueue.then(async () => {
       try {
@@ -728,6 +769,7 @@ export class OriginTrailGameCoordinator {
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm || swarm.currentTurn !== msg.turn) return;
+    if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
     swarm.votes = swarm.votes.filter(v => v.peerId !== msg.peerId);
     swarm.votes.push({
       peerId: msg.peerId,
@@ -747,10 +789,36 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm || swarm.currentTurn !== msg.turn) return;
 
+    // Only the leader may propose before the deadline; any member may propose after
+    const pastDeadline = swarm.turnDeadline != null && Date.now() >= swarm.turnDeadline;
+    if (msg.peerId !== swarm.leaderPeerId && !pastDeadline) {
+      this.log(`Rejected proposal from non-leader ${msg.peerId.slice(0, 8)} for ${msg.swarmId} (deadline not passed)`);
+      return;
+    }
+    if (!swarm.players.some(p => p.peerId === msg.peerId)) {
+      this.log(`Rejected proposal from non-member ${msg.peerId.slice(0, 8)} for ${msg.swarmId}`);
+      return;
+    }
+
     const expectedHash = hashProposal(swarm.id, msg.turn, msg.newStateJson);
     if (expectedHash !== msg.proposalHash) {
       this.log(`Proposal hash mismatch for ${msg.swarmId} turn ${msg.turn} — rejecting`);
       return;
+    }
+
+    // Verify proposal by replaying local votes through the game engine
+    if (swarm.gameState && swarm.votes.length > 0) {
+      const { winningAction, params } = this.tallyVotes(swarm);
+      if (winningAction !== msg.winningAction) {
+        this.log(`Proposal winning action mismatch: local=${winningAction} proposed=${msg.winningAction} — rejecting`);
+        return;
+      }
+      const localResult = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
+      const localStateJson = JSON.stringify(localResult.newState);
+      if (localStateJson !== msg.newStateJson) {
+        this.log(`Proposal state mismatch for ${msg.swarmId} turn ${msg.turn} — rejecting`);
+        return;
+      }
     }
 
     const newState: GameState = JSON.parse(msg.newStateJson);
@@ -787,6 +855,7 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm?.pendingProposal) return;
     if (swarm.pendingProposal.hash !== msg.proposalHash) return;
+    if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
 
     swarm.pendingProposal.approvals.add(msg.peerId);
     this.log(`Approval from ${msg.peerId.slice(0, 8)} for turn ${msg.turn} (${swarm.pendingProposal.approvals.size}/${signatureThreshold(swarm.players.length)} needed)`);
@@ -797,7 +866,32 @@ export class OriginTrailGameCoordinator {
   private onRemoteTurnResolved(msg: proto.TurnResolvedMsg): void {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
-    if (!swarm.pendingProposal || swarm.pendingProposal.hash !== msg.proposalHash) return;
+
+    // If we have a matching pending proposal but haven't resolved yet, apply it
+    if (swarm.pendingProposal && swarm.pendingProposal.hash === msg.proposalHash) {
+      const proposal = swarm.pendingProposal;
+      swarm.pendingProposal = null;
+      this.stopVoteHeartbeat(swarm.id);
+
+      const newState: GameState = JSON.parse(proposal.newStateJson);
+      swarm.gameState = newState;
+      swarm.turnHistory.push({
+        turn: proposal.turn,
+        winningAction: proposal.winningAction,
+        resultMessage: proposal.resultMessage,
+        approvers: [...proposal.approvals],
+        timestamp: Date.now(),
+      });
+
+      if (newState.status !== 'active') {
+        swarm.status = 'finished';
+      } else {
+        swarm.currentTurn++;
+        swarm.votes = [];
+        swarm.turnDeadline = Date.now() + 120_000;
+      }
+      this.log(`Applied resolved turn ${proposal.turn} for ${swarm.id} (via turn:resolved)`);
+    }
   }
 
   // ── Query helpers ─────────────────────────────────────────────────

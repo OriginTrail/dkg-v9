@@ -12,7 +12,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DKG_V9_ROOT="$(cd "$OT_ROOT/../dkg-v9" && pwd)"
+# Resolve monorepo root: scripts -> origin-trail-game -> packages -> dkg-v9
+DKG_V9_ROOT="$(cd "$OT_ROOT/../.." && pwd)"
 CLI_JS="$DKG_V9_ROOT/packages/cli/dist/cli.js"
 PLAY_DIR="$OT_ROOT/.play-nodes"
 AUTH_TOKEN="origin-trail-game-local-play"

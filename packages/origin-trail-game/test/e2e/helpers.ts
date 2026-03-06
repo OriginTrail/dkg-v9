@@ -11,7 +11,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DKG_V9_ROOT = join(__dirname, '..', '..', '..', 'dkg-v9');
+// Resolve to monorepo root: test/e2e -> origin-trail-game -> packages -> dkg-v9
+const DKG_V9_ROOT = join(__dirname, '..', '..', '..', '..');
 const CLI_JS = join(DKG_V9_ROOT, 'packages', 'cli', 'dist', 'cli.js');
 const TEST_DIR = join(__dirname, '..', '..', '.test-nodes');
 

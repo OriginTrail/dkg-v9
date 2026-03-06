@@ -260,8 +260,8 @@ describe('Entity exclusivity — no duplicate root entities', () => {
     let queryCallCount = 0;
     profileAgent.query = async (sparql: string) => {
       queryCallCount++;
-      if (sparql.includes('ASK')) {
-        return { bindings: [{ result: 'true' }] };
+      if (sparql.includes('SELECT') && sparql.includes('Player')) {
+        return { bindings: [{ exists: '1' }] };
       }
       return { bindings: [] };
     };
@@ -282,10 +282,7 @@ describe('Entity exclusivity — no duplicate root entities', () => {
 
   it('publishPlayerProfile publishes when profile does not exist', async () => {
     const freshAgent = makeMockAgent('new-peer');
-    freshAgent.query = async (sparql: string) => {
-      if (sparql.includes('ASK')) {
-        return { bindings: [{ result: 'false' }] };
-      }
+    freshAgent.query = async () => {
       return { bindings: [] };
     };
     freshAgent.publish = async (_paranetId: string, quads: any[]) => {

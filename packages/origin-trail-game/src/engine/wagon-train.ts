@@ -5,7 +5,7 @@ import type { GameState, ActionResult } from '../game/types.js';
 export const MIN_PLAYERS = 3;
 
 export function signatureThreshold(n: number): number {
-  return Math.floor((2 / 3) * n);
+  return Math.ceil((2 * n) / 3);
 }
 
 export interface SwarmMember {

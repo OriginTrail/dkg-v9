@@ -69,13 +69,13 @@ describe('OriginTrail Game: 3 player game', () => {
     const lobbyB = await apiB.lobby();
     const lobbyC = await apiC.lobby();
 
-    expect(lobbyB.openWagons.length).toBeGreaterThanOrEqual(1);
-    const wagonInB = lobbyB.openWagons.find((w: any) => w.id === swarmId);
-    expect(wagonInB).toBeTruthy();
-    expect(wagonInB.name).toBe('Pioneer Express');
+    expect(lobbyB.openSwarms.length).toBeGreaterThanOrEqual(1);
+    const swarmInB = lobbyB.openSwarms.find((w: any) => w.id === swarmId);
+    expect(swarmInB).toBeTruthy();
+    expect(swarmInB.name).toBe('Pioneer Express');
 
-    const wagonInC = lobbyC.openWagons.find((w: any) => w.id === swarmId);
-    expect(wagonInC).toBeTruthy();
+    const swarmInC = lobbyC.openSwarms.find((w: any) => w.id === swarmId);
+    expect(swarmInC).toBeTruthy();
   });
 
   it('Nodes B and C join the swarm', async () => {
@@ -129,7 +129,7 @@ describe('OriginTrail Game: 3 player game', () => {
     expect(wagonA.lastTurn.winningAction).toBe('advance');
     expect(wagonA.lastTurn.approvers.length).toBeGreaterThanOrEqual(2);
 
-    expect(wagonA.gameState.miles).toBeGreaterThan(0);
+    expect(wagonA.gameState.epochs).toBeGreaterThan(0);
   });
 
   it('game state is consistent across all 3 nodes', async () => {
@@ -142,11 +142,11 @@ describe('OriginTrail Game: 3 player game', () => {
     expect(wA.currentTurn).toBe(wB.currentTurn);
     expect(wB.currentTurn).toBe(wC.currentTurn);
 
-    expect(wA.gameState.miles).toBe(wB.gameState.miles);
-    expect(wB.gameState.miles).toBe(wC.gameState.miles);
+    expect(wA.gameState.epochs).toBe(wB.gameState.epochs);
+    expect(wB.gameState.epochs).toBe(wC.gameState.epochs);
 
-    expect(wA.gameState.food).toBe(wB.gameState.food);
-    expect(wB.gameState.food).toBe(wC.gameState.food);
+    expect(wA.gameState.trainingTokens).toBe(wB.gameState.trainingTokens);
+    expect(wB.gameState.trainingTokens).toBe(wC.gameState.trainingTokens);
   });
 
   it('can play a second turn', async () => {

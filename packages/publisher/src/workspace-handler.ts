@@ -93,10 +93,12 @@ export class WorkspaceHandler {
 
       // Delete-then-insert for upserted entities.
       // Delete exact root + skolemized children only to avoid prefix collisions.
+      // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
       for (const m of manifestForValidation) {
         if (wsOwned.has(m.rootEntity)) {
           await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
           await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+          await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
         }
       }
 
@@ -128,6 +130,25 @@ export class WorkspaceHandler {
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
     } catch (err) {
       this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Delete workspace_meta operation entries that reference a given rootEntity.
+   * This prevents stale metadata from triggering incorrect cleanup when the
+   * expired operation is garbage-collected.
+   */
+  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
+    const DKG = 'urn:dkg:';
+    const result = await this.store.query(
+      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+    );
+    if (result.type !== 'bindings') return;
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (op) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+      }
     }
   }
 }

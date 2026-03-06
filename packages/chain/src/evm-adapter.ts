@@ -481,6 +481,37 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
+  // V9: Update Verification (for gossip receivers)
+  // =====================================================================
+
+  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<boolean> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetsStorage) return false;
+
+    try {
+      const receipt = await this.provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) return false;
+
+      const storage = this.contracts.knowledgeAssetsStorage;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (
+            parsed?.name === 'KnowledgeBatchUpdated' &&
+            BigInt(parsed.args.batchId) === batchId &&
+            parsed.args.publisher?.toLowerCase() === publisherAddress.toLowerCase()
+          ) {
+            return true;
+          }
+        } catch { /* not this contract */ }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  // =====================================================================
   // V9: Storage Extension
   // =====================================================================
 

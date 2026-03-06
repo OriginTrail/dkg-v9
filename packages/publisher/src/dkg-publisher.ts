@@ -150,10 +150,12 @@ export class DKGPublisher implements Publisher {
 
     // Delete-then-insert for upserted entities (replace old triples).
     // Delete exact root + skolemized children only to avoid prefix collisions.
+    // Also remove prior workspace_meta ops referencing these roots.
     for (const m of manifestEntries) {
       if (wsOwned.has(m.rootEntity)) {
         await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
         await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+        await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
       }
     }
 
@@ -617,5 +619,23 @@ export class DKGPublisher implements Publisher {
 
   skolemize(rootEntity: string, quads: Quad[]): Quad[] {
     return skolemize(rootEntity, quads);
+  }
+
+  /**
+   * Delete workspace_meta operation entries that reference a given rootEntity,
+   * preventing stale metadata from triggering incorrect cleanup.
+   */
+  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
+    const DKG = 'urn:dkg:';
+    const result = await this.store.query(
+      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+    );
+    if (result.type !== 'bindings') return;
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (op) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+      }
+    }
   }
 }

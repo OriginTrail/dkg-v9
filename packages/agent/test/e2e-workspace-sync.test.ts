@@ -96,7 +96,12 @@ describe('Workspace Sync E2E (2 nodes)', () => {
       nodeA.peerId,
       [PARANET],
     );
-    expect(synced).toBeGreaterThanOrEqual(0);
+    expect(synced).toBeGreaterThan(0);
+    const result = await nodeC.query(
+      'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
+      { paranetId: PARANET, graphSuffix: '_workspace' },
+    );
+    expect(result.bindings.length).toBeGreaterThanOrEqual(2);
   }, 10000);
 
   it('synced workspace data is queryable via includeWorkspace', async () => {

@@ -342,8 +342,9 @@ export class DKGAgent {
         const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
 
         // Apply TTL/root-entity filter inside SPARQL before pagination so that
-        // we return the first N non-expired triples; include triples whose subject
-        // is an allowed root or a skolemized child (e.g. <root>/.well-known/genid/...).
+        // we return the first N non-expired triples. Only include exact root subject
+        // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
+        // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
         const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
         const wsQuery =
           cutoff != null
@@ -355,7 +356,7 @@ export class DKGAgent {
     FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
   }
   GRAPH <${wsGraph}> { ?s ?p ?o }
-  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/")))
+  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
 } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
             : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
@@ -739,8 +740,12 @@ export class DKGAgent {
           }
 
           for (const re of rootEntities) {
-            const deleted = await this.store.deleteBySubjectPrefix(wsGraph, re);
-            paranetDeleted += deleted;
+            // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
+            const exactDeleted = await this.store.deleteByPattern({ graph: wsGraph, subject: re });
+            paranetDeleted += exactDeleted;
+            const childPrefix = `${re}/.well-known/genid/`;
+            const childDeleted = await this.store.deleteBySubjectPrefix(wsGraph, childPrefix);
+            paranetDeleted += childDeleted;
           }
 
           // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)

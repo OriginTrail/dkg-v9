@@ -55,5 +55,6 @@
     }
   },
   "dependencies": {
+    "dkg-app-origin-trail-game": "workspace:*"
   }
 }

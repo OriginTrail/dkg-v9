@@ -25,6 +25,10 @@ patchedDependencies:
 importers:
 
   .:
+    dependencies:
+      dkg-app-origin-trail-game:
+        specifier: workspace:*
+        version: link:../oregon-trail-dkg
     devDependencies:
       '@types/node':
         specifier: ^22
@@ -41,6 +45,49 @@ importers:
       typescript:
         specifier: ^5.7
         version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.4(@types/node@22.19.11)(tsx@4.21.0)
+
+  ../oregon-trail-dkg:
+    dependencies:
+      uuid:
+        specifier: ^9.0.0
+        version: 9.0.1
+    devDependencies:
+      '@dkg/agent':
+        specifier: workspace:*
+        version: link:../dkg-v9/packages/agent
+      '@dkg/core':
+        specifier: workspace:*
+        version: link:../dkg-v9/packages/core
+      '@dkg/storage':
+        specifier: workspace:*
+        version: link:../dkg-v9/packages/storage
+      '@types/node':
+        specifier: ^22
+        version: 22.19.11
+      '@types/uuid':
+        specifier: ^9
+        version: 9.0.8
+      '@vitejs/plugin-react':
+        specifier: ^4
+        version: 4.7.0(vite@6.4.1(@types/node@22.19.11)(tsx@4.21.0))
+      react:
+        specifier: ^19
+        version: 19.2.4
+      react-dom:
+        specifier: ^19
+        version: 19.2.4(react@19.2.4)
+      react-router-dom:
+        specifier: ^7
+        version: 7.13.1(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vite:
+        specifier: ^6
+        version: 6.4.1(@types/node@22.19.11)(tsx@4.21.0)
       vitest:
         specifier: ^3
         version: 3.2.4(@types/node@22.19.11)(tsx@4.21.0)
@@ -1849,6 +1896,9 @@ packages:
 
   '@types/three@0.183.1':
     resolution: {integrity: sha512-f2Pu5Hrepfgavttdye3PsH5RWyY/AvdZQwIVhrc4uNtvF7nOWJacQKcoVJn0S4f0yYbmAE6AR+ve7xDcuYtMGw==}
+
+  '@types/uuid@9.0.8':
+    resolution: {integrity: sha512-jg+97EGIcY9AGHJJRaaPVgetKDsrTgbRjQ5Msgjh/DQKEFl0DtyRr/VCOyD1T2R1MNeWPK/u7JoGhlDZnKBAfA==}
 
   '@types/webxr@0.5.24':
     resolution: {integrity: sha512-h8fgEd/DpoS9CBrjEQXR+dIDraopAEfu4wYVNY2tEPwk60stPWhvZMf4Foo5FakuQ7HFZoa8WceaWFervK2Ovg==}
@@ -4702,6 +4752,10 @@ packages:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
     hasBin: true
 
+  uuid@9.0.1:
+    resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
+    hasBin: true
+
   v8-compile-cache-lib@3.0.1:
     resolution: {integrity: sha512-wa7YjyUGfNZngI/vtK0UHAN+lgDCxBPCylVXGp0zu59Fz5aiGtNXaq3DhIov063MorB+VfufLh3JlF2KdTK3xg==}
 
@@ -6584,6 +6638,8 @@ snapshots:
       '@webgpu/types': 0.1.69
       fflate: 0.8.2
       meshoptimizer: 1.0.1
+
+  '@types/uuid@9.0.8': {}
 
   '@types/webxr@0.5.24': {}
 
@@ -9803,6 +9859,8 @@ snapshots:
   util-deprecate@1.0.2: {}
 
   uuid@8.3.2: {}
+
+  uuid@9.0.1: {}
 
   v8-compile-cache-lib@3.0.1: {}
 

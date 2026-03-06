@@ -79,8 +79,8 @@ export const fetchLogs = (params: Record<string, string> = {}) => {
 export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
 
 // --- Query ---
-export const executeQuery = (sparql: string, paranetId?: string) =>
-  post<{ result: any }>('/api/query', { sparql, paranetId });
+export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean) =>
+  post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace });
 
 // --- Publish ---
 export const publishTriples = (paranetId: string, quads: any[]) =>
@@ -100,10 +100,10 @@ export const deleteSavedQuery = (id: number) =>
   del<{ ok: boolean }>(`/api/saved-queries/${id}`);
 
 // --- Chat assistant ---
-export const sendChatMessage = (message: string) =>
-  post<{ reply: string; data?: unknown; sparql?: string }>('/api/chat-assistant', { message });
+export const sendChatMessage = (message: string, sessionId?: string) =>
+  post<{ reply: string; data?: unknown; sparql?: string; sessionId?: string }>('/api/chat-assistant', { message, sessionId });
 
-// --- Memory ---
+// --- Memory (private chat memories in DKG) ---
 export interface MemorySession {
   session: string;
   messages: Array<{ author: string; text: string; ts: string }>;
@@ -111,7 +111,7 @@ export interface MemorySession {
 export const fetchMemorySessions = (limit = 20) =>
   get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
 export const fetchMemoryStats = () =>
-  get<{ paranetId: string; initialized: boolean; messageCount: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
+  get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>

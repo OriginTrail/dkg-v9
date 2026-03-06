@@ -298,21 +298,23 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     tracker.complete(ctx, { tripleCount: data.tripleCount });
   });
 
-  const chatAssistant = new ChatAssistant(dashDb, async (sparql: string) => agent.query(sparql), config.llm);
-  if (config.llm) log('Chat assistant ready (LLM enabled)');
-  else log('Chat assistant ready');
-
-  const memoryManager = new ChatMemoryManager(
-    {
-      query: (sparql, opts) => agent.query(sparql, opts),
-      writeToWorkspace: (paranetId, quads) => agent.writeToWorkspace(paranetId, quads),
-      enshrineFromWorkspace: (paranetId, selection, opts) => agent.enshrineFromWorkspace(paranetId, selection, opts),
-      createParanet: (opts) => agent.createParanet(opts),
-      listParanets: () => agent.listParanets(),
-    },
-    config.llm ?? { apiKey: '' },
+  const agentToolsContext = {
+    query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
+    writeToWorkspace: (paranetId: string, quads: any[]) => agent.writeToWorkspace(paranetId, quads),
+    enshrineFromWorkspace: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.enshrineFromWorkspace(paranetId, selection, opts),
+    createParanet: (opts: { id: string; name: string; description?: string }) => agent.createParanet(opts),
+    listParanets: () => agent.listParanets(),
+  };
+  const chatAssistant = new ChatAssistant(
+    dashDb,
+    async (sparql: string) => agent.query(sparql),
+    config.llm,
+    agentToolsContext,
   );
+  const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
   log('Memory manager ready');
+  if (config.llm) log('Chat assistant ready (LLM + DKG tools enabled)');
+  else log('Chat assistant ready');
 
   // Resolve the static UI directory (built by @dkg/node-ui)
   let nodeUiStaticDir: string;

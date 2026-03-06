@@ -4,8 +4,8 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
-import type { MetricsCollector } from './metrics-collector.js';
 import type { ChatMemoryManager } from './chat-memory.js';
+import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -184,14 +184,39 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
     const body = await readBody(req);
-    const { message, sessionId } = JSON.parse(body);
+    const { message, sessionId: rawSessionId } = JSON.parse(body);
     if (!message) return json(res, 400, { error: 'Missing "message"' });
     try {
       const reply = await chatAssistant.answer({ message });
-      if (memoryManager && sessionId) {
-        memoryManager.storeChatExchange(sessionId, message, reply.reply).catch(() => {});
+      const sessionId = typeof rawSessionId === 'string' && rawSessionId ? rawSessionId : crypto.randomUUID();
+      if (memoryManager) {
+        try {
+          await memoryManager.storeChatExchange(sessionId, message, reply.reply, reply.toolCalls);
+        } catch (storeErr: any) {
+          console.error('[chat-assistant] Failed to store conversation:', storeErr?.message ?? storeErr);
+        }
       }
-      return json(res, 200, reply);
+      return json(res, 200, { ...reply, sessionId });
+    } catch (err: any) {
+      return json(res, 500, { error: err.message });
+    }
+  }
+
+  // --- Memory (private chat memories in DKG) ---
+
+  if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
+    try {
+      const limit = parseInt(String(url.searchParams.get('limit') || '20'), 10);
+      const sessions = await memoryManager.getRecentChats(Math.min(limit, 100));
+      return json(res, 200, { sessions });
+    } catch (err: any) {
+      return json(res, 500, { error: err.message });
+    }
+  }
+  if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
+    try {
+      const stats = await memoryManager.getStats();
+      return json(res, 200, stats);
     } catch (err: any) {
       return json(res, 500, { error: err.message });
     }

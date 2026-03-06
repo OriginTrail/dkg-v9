@@ -199,7 +199,7 @@ describe('ChatAssistant', () => {
   describe('help / fallback', () => {
     it('returns help text for unrecognized messages', async () => {
       const res = await assistant.answer({ message: 'hello there' });
-      expect(res.reply).toContain('I can answer questions');
+      expect(res.reply).toContain('assistant');
       expect(res.reply).toContain('uptime');
     });
   });

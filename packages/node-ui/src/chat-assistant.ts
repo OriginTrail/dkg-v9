@@ -1,4 +1,5 @@
 import type { DashboardDB } from './db.js';
+import type { MemoryToolContext } from './chat-memory.js';
 
 export interface ChatRequest {
   message: string;
@@ -8,6 +9,7 @@ export interface ChatResponse {
   reply: string;
   data?: unknown;
   sparql?: string;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }
 
 /** OpenAI-compatible LLM config for natural language answers and NL→SPARQL. */
@@ -20,69 +22,257 @@ export interface LlmConfig {
 
 type QueryFn = (sparql: string) => Promise<{ bindings: Array<Record<string, string>> }>;
 
-const HELP_REPLY = `I can answer questions about your node. Try:
+const HELP_REPLY = `I'm your node assistant. You can ask me about this node (uptime, peers, triples, operations, logs) or just chat. When you ask me to save or add information to the DKG, I can write it to the knowledge graph (workspace) and optionally finalize it on-chain. Our conversation is stored privately in your DKG.`;
 
-- "What's my uptime?"
-- "How many peers am I connected to?"
-- "How many triples are in my graph?"
-- "Show me CPU and memory usage"
-- "Any failed operations?"
-- "How many operations did I process?"
-- "Which agents are on the network?"
-- "Show me recent logs"
-- "How big is my store?"
-- Or paste a SPARQL query directly`;
+/** OpenAI function tool definition for LLM tool calling */
+interface OpenAITool {
+  type: 'function';
+  function: { name: string; description: string; parameters: { type: 'object'; properties: Record<string, { type: string; description?: string }>; required?: string[] } };
+}
+
+const DKG_TOOLS: OpenAITool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'dkg_query',
+      description: 'Run a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE) against the node\'s knowledge graph. Use to read data. Add LIMIT for safety.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sparql: { type: 'string', description: 'The SPARQL query' },
+          paranetId: { type: 'string', description: 'Optional paranet id; omit for "all"' },
+        },
+        required: ['sparql'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dkg_write_to_workspace',
+      description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. Pass quads as array of { subject, predicate, object, graph } (graph can be "").',
+      parameters: {
+        type: 'object',
+        properties: {
+          paranetId: { type: 'string', description: 'Paranet id (e.g. agent-memory)' },
+          quads: { type: 'string', description: 'JSON array of { subject, predicate, object, graph }' },
+        },
+        required: ['paranetId', 'quads'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dkg_list_paranets',
+      description: 'List paranets this node knows about.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dkg_create_paranet',
+      description: 'Create a new paranet (knowledge graph namespace). Use when the user wants to create a new graph/paranet.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Paranet id (e.g. my-data)' },
+          name: { type: 'string', description: 'Human-readable name' },
+          description: { type: 'string', description: 'Optional description' },
+        },
+        required: ['id', 'name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dkg_enshrine',
+      description: 'Promote workspace content to the chain (finalize). Use when the user asks to finalize, publish to chain, or make data permanent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paranetId: { type: 'string' },
+          selection: { type: 'string', description: '"all" or comma-separated root entity URIs' },
+        },
+        required: ['paranetId', 'selection'],
+      },
+    },
+  },
+];
 
 /**
- * Chat assistant: rule-based answers plus optional LLM for natural language
- * and NL→SPARQL. When LLM is configured, unmatched questions are sent to
- * the LLM; if the response contains a SPARQL code block it is executed and
- * results are appended.
+ * Chat assistant: rule-based answers plus optional LLM for natural language,
+ * NL→SPARQL, and DKG API tools (query, write to workspace, list/create paranets, enshrine).
  */
 export class ChatAssistant {
   constructor(
     private readonly db: DashboardDB,
     private readonly queryFn: QueryFn,
     private readonly llmConfig?: LlmConfig,
+    private readonly agentTools?: MemoryToolContext,
   ) {}
 
-  private async callLlm(userMessage: string): Promise<string> {
-    if (!this.llmConfig) throw new Error('LLM not configured');
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    const systemPrompt = this.llmConfig.systemPrompt ?? `You are a DKG (Decentralized Knowledge Graph) node assistant. The user operates a node that stores RDF triples and can run SPARQL queries.
+  private systemPrompt(): string {
+    let p = this.llmConfig?.systemPrompt ?? `You are a friendly DKG node assistant. Chat naturally and helpfully. The user's conversations with you are stored privately as memories in their DKG.
 
-Answer briefly and helpfully. For questions about the node (uptime, peers, triples, CPU, memory, operations, logs), give a short direct answer if you can infer it, or suggest they try the built-in commands.
-
-For natural language questions about the knowledge graph (e.g. "what agents are there?", "show me all KCs"), you may output a SPARQL query in a markdown code block so it can be executed. Use this format exactly:
+- Prefer normal, conversational replies. Do not suggest SPARQL or ask if they want to run a query unless they explicitly ask to query the graph or run SPARQL.
+- For questions about the node (uptime, peers, triples, CPU, memory, operations, logs), give a short direct answer.
+- Only output a SPARQL query in a markdown code block when the user clearly asks to query the knowledge graph or to "run a query" or "show data". Use this format exactly:
 \`\`\`sparql
 SELECT ...
 \`\`\`
-Keep queries read-only (SELECT, CONSTRUCT, ASK, DESCRIBE) and add LIMIT 50 or similar.`;
+Otherwise, just answer in plain language. Keep any queries read-only (SELECT, CONSTRUCT, ASK, DESCRIBE) and add LIMIT 50 or similar.`;
+    if (this.agentTools) {
+      p += `
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
-        ],
-        max_tokens: 1024,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`LLM API ${res.status}: ${err.slice(0, 200)}`);
+You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".`;
     }
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) throw new Error('Empty LLM response');
-    return content;
+    return p;
+  }
+
+  private async executeTool(name: string, args: Record<string, unknown>): Promise<{ result: unknown; summary: string }> {
+    if (!this.agentTools) return { result: null, summary: 'Tools not available' };
+    try {
+      switch (name) {
+        case 'dkg_query': {
+          const sparql = String(args.sparql ?? '');
+          const paranetId = args.paranetId != null ? String(args.paranetId) : undefined;
+          const res = await this.agentTools.query(sparql, { paranetId, includeWorkspace: paranetId === 'agent-memory' });
+          const bindings = res?.result?.bindings ?? res?.bindings ?? [];
+          return { result: bindings, summary: `Query returned ${bindings.length} result(s).` };
+        }
+        case 'dkg_write_to_workspace': {
+          const paranetId = String(args.paranetId ?? '');
+          let raw = args.quads;
+          if (typeof raw === 'string') {
+            try {
+              raw = JSON.parse(raw) as any[];
+            } catch {
+              raw = [];
+            }
+          }
+          const quads = Array.isArray(raw) ? raw.map((q: any) => ({
+            subject: String(q.subject ?? ''),
+            predicate: String(q.predicate ?? ''),
+            object: String(q.object ?? ''),
+            graph: typeof q.graph === 'string' ? q.graph : '',
+          })) : [];
+          const { workspaceOperationId } = await this.agentTools.writeToWorkspace(paranetId, quads);
+          return { result: { workspaceOperationId }, summary: `Wrote ${quads.length} triple(s) to workspace (paranet: ${paranetId}).` };
+        }
+        case 'dkg_list_paranets': {
+          const list = await this.agentTools.listParanets();
+          const arr = Array.isArray(list) ? list : [];
+          return { result: arr, summary: `Found ${arr.length} paranet(s).` };
+        }
+        case 'dkg_create_paranet': {
+          await this.agentTools.createParanet({
+            id: String(args.id ?? ''),
+            name: String(args.name ?? ''),
+            description: args.description != null ? String(args.description) : undefined,
+          });
+          return { result: { id: args.id, name: args.name }, summary: `Created paranet "${args.name}" (${args.id}).` };
+        }
+        case 'dkg_enshrine': {
+          const paranetId = String(args.paranetId ?? '');
+          const sel = String(args.selection ?? 'all');
+          const selection = sel === 'all' ? 'all' as const : { rootEntities: sel.split(',').map(s => s.trim()).filter(Boolean) };
+          const res = await this.agentTools.enshrineFromWorkspace(paranetId, selection);
+          return { result: res, summary: `Enshrined workspace content for paranet ${paranetId}.` };
+        }
+        default:
+          return { result: null, summary: `Unknown tool: ${name}` };
+      }
+    } catch (err: any) {
+      return { result: null, summary: `Error: ${err?.message ?? String(err)}` };
+    }
+  }
+
+  private async callLlm(userMessage: string, toolCallsCollector?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>): Promise<string> {
+    if (!this.llmConfig) throw new Error('LLM not configured');
+    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+
+    type Message = { role: 'system' | 'user' | 'assistant'; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string; function?: { name: string; arguments: string } };
+    const messages: Message[] = [
+      { role: 'system', content: this.systemPrompt() },
+      { role: 'user', content: userMessage },
+    ];
+
+    const maxToolRounds = 3;
+    let round = 0;
+    let lastContent = '';
+
+    while (round < maxToolRounds) {
+      const body: Record<string, unknown> = {
+        model,
+        messages,
+        max_tokens: 1024,
+      };
+      if (this.agentTools) {
+        body.tools = DKG_TOOLS;
+        body.tool_choice = 'auto';
+      }
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`LLM API ${res.status}: ${err.slice(0, 200)}`);
+      }
+      const data = await res.json() as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+            tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+          };
+        }>;
+      };
+      const msg = data.choices?.[0]?.message;
+      if (!msg) throw new Error('Empty LLM response');
+
+      lastContent = (msg.content ?? '').trim();
+
+      const toolCalls = msg.tool_calls;
+      if (!toolCalls || toolCalls.length === 0) {
+        if (lastContent) return lastContent;
+        continue;
+      }
+
+      messages.push({
+        role: 'assistant',
+        content: msg.content ?? undefined,
+        tool_calls: toolCalls.map((tc: any) => ({ id: tc.id, type: 'function', function: tc.function })),
+      });
+
+      for (const tc of toolCalls) {
+        const name = tc.function?.name ?? '';
+        let args: Record<string, unknown> = {};
+        try {
+          args = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : {};
+        } catch {
+          args = {};
+        }
+        const { result, summary } = await this.executeTool(name, args);
+        if (toolCallsCollector) toolCallsCollector.push({ name, args, result });
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: typeof summary === 'string' ? summary : JSON.stringify(result ?? summary),
+        } as any);
+      }
+      round++;
+    }
+
+    return lastContent || 'I used the available tools but could not produce a final reply. Please try rephrasing.';
   }
 
   private extractSparql(text: string): string | null {
@@ -238,20 +428,24 @@ Keep queries read-only (SELECT, CONSTRUCT, ASK, DESCRIBE) and add LIMIT 50 or si
     // --- Help or LLM ---
     if (this.llmConfig) {
       try {
-        let reply = await this.callLlm(req.message);
+        const toolCallsCollector: Array<{ name: string; args: Record<string, unknown>; result: unknown }> = [];
+        let reply = await this.callLlm(req.message, toolCallsCollector);
         const sparql = this.extractSparql(reply);
         if (sparql) {
           try {
             const result = await this.queryFn(sparql);
             const count = result.bindings?.length ?? 0;
             reply += `\n\n**Executed query** (${count} result(s)):`;
-            return { reply, data: result.bindings, sparql };
+            return { reply, data: result.bindings, sparql, toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined };
           } catch (err: any) {
             reply += `\n\nSPARQL execution failed: ${err.message}`;
             return { reply, sparql };
           }
         }
-        return { reply };
+        return {
+          reply,
+          toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined,
+        };
       } catch (err: any) {
         return { reply: `LLM error: ${err.message}. ${HELP_REPLY}` };
       }

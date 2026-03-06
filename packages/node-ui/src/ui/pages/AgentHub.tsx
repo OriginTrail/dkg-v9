@@ -6,7 +6,6 @@ interface Message {
   id: number;
   role: 'user' | 'assistant';
   content: string;
-  tool?: string;
   ts: string;
   data?: unknown;
   sparql?: string;
@@ -27,6 +26,15 @@ const AGENT_TOOLS = [
 ];
 
 let _mid = 10;
+
+/** Format a date string for display; return original string or '—' if invalid. */
+function formatDate(ts: string | undefined, options?: Intl.DateTimeFormatOptions): string {
+  if (!ts || typeof ts !== 'string') return '—';
+  const trimmed = ts.replace(/\^\^<[^>]+>$/, '').trim().replace(/^"|"$/g, '');
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return trimmed || '—';
+  return date.toLocaleDateString(undefined, options ?? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
 
 export function AgentHubPage() {
   const navigate = useNavigate();
@@ -86,7 +94,7 @@ export function AgentHubPage() {
   }, []);
 
   const loadSession = useCallback((session: MemorySession) => {
-    const restored: Message[] = session.messages.map((m, i) => ({
+    const restored: Message[] = session.messages.map((m) => ({
       id: _mid++,
       role: m.author === 'user' ? 'user' as const : 'assistant' as const,
       content: m.text,
@@ -103,11 +111,65 @@ export function AgentHubPage() {
     navigate(`/explorer/sparql?q=${encodeURIComponent(sparql)}`);
   }, [navigate]);
 
+  const rightPanel = (
+    <div style={{ overflowY: 'auto', padding: '20px 18px' }}>
+      {!showMemories ? (
+        <button
+          onClick={loadMemories}
+          style={{
+            width: '100%',
+            padding: '10px 14px',
+            borderRadius: 10,
+            border: '1px solid var(--border)',
+            background: 'var(--surface)',
+            color: 'var(--text)',
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          View Memories
+        </button>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+            <button onClick={() => setShowMemories(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 0 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Previous conversations</span>
+          </div>
+          {sessionsLoading && <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>Loading…</div>}
+          {!sessionsLoading && sessions.length === 0 && (
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: 12 }}>No conversations yet. Chats with your agent are stored here.</div>
+          )}
+          {sessions.map((s, i) => {
+            const first = s.messages.find(m => m.author === 'user');
+            const preview = first?.text?.slice(0, 50) || 'Empty';
+            const lastTs = s.messages[s.messages.length - 1]?.ts;
+            const dateLabel = formatDate(lastTs);
+            return (
+              <div key={s.session || i} style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border)', marginBottom: 8, background: 'var(--surface)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preview}{preview.length >= 50 ? '…' : ''}</div>
+                <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 8 }}>{s.messages.length} msg{dateLabel && ` · ${dateLabel}`}</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => loadSession(s)} style={{ flex: 1, padding: '5px 8px', fontSize: 10, fontWeight: 600, borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer' }}>Load</button>
+                  <button onClick={() => visualizeSession(s)} style={{ flex: 1, padding: '5px 8px', fontSize: 10, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(74,222,128,.3)', background: 'var(--green-dim)', color: 'var(--green)', cursor: 'pointer' }}>Visualize</button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="page-section" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 0 }}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', height: '100%', overflow: 'hidden' }}>
-
-        {/* Chat panel */}
         <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', overflow: 'hidden' }}>
           <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--green-dim)', border: '1px solid rgba(74,222,128,.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>🤖</div>
@@ -128,12 +190,6 @@ export function AgentHubPage() {
           <div className="chat-area" style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
             {messages.map(m => (
               <div key={m.id} className={`chat-msg ${m.role}`}>
-                {m.tool && (
-                  <div className="chat-tool">
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                    {m.tool}
-                  </div>
-                )}
                 <div className={`chat-bubble ${m.role}`}>{m.content}</div>
                 {m.sparql && (
                   <details style={{ marginTop: 4 }}>
@@ -168,125 +224,7 @@ export function AgentHubPage() {
           </div>
         </div>
 
-        {/* Right panel */}
-        <div style={{ overflowY: 'auto', padding: '20px 18px' }}>
-          {!showMemories ? (
-            <>
-              <button
-                onClick={loadMemories}
-                style={{
-                  width: '100%',
-                  padding: '10px 14px',
-                  borderRadius: 10,
-                  border: '1px solid var(--border)',
-                  background: 'var(--surface)',
-                  color: 'var(--text)',
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  marginBottom: 16,
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                View Memories
-              </button>
-
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 14 }}>Available Tools</div>
-              {AGENT_TOOLS.map(t => (
-                <div key={t} className="mono" style={{ fontSize: 10, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', marginBottom: 4, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ color: 'var(--green)' }}>⚡</span>{t}
-                </div>
-              ))}
-            </>
-          ) : (
-            <>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                <button
-                  onClick={() => setShowMemories(false)}
-                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, display: 'flex' }}
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
-                </button>
-                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.07em' }}>Chat Memories</div>
-              </div>
-
-              {sessionsLoading && (
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>Loading sessions…</div>
-              )}
-
-              {!sessionsLoading && sessions.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: 12 }}>
-                  No chat sessions stored yet. Chat with the agent and memories will be saved automatically.
-                </div>
-              )}
-
-              {sessions.map((s, i) => {
-                const firstUserMsg = s.messages.find(m => m.author === 'user');
-                const preview = firstUserMsg?.text?.slice(0, 60) || 'Empty session';
-                const msgCount = s.messages.length;
-                const lastTs = s.messages[s.messages.length - 1]?.ts;
-                const dateLabel = lastTs ? new Date(lastTs).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-
-                return (
-                  <div
-                    key={s.session || i}
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: 10,
-                      border: '1px solid var(--border)',
-                      marginBottom: 8,
-                      background: 'var(--surface)',
-                    }}
-                  >
-                    <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {preview}{preview.length >= 60 ? '…' : ''}
-                    </div>
-                    <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 8 }}>
-                      {msgCount} message{msgCount !== 1 ? 's' : ''}{dateLabel && ` · ${dateLabel}`}
-                    </div>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button
-                        onClick={() => loadSession(s)}
-                        style={{
-                          flex: 1,
-                          padding: '5px 8px',
-                          fontSize: 10,
-                          fontWeight: 600,
-                          borderRadius: 6,
-                          border: '1px solid var(--border)',
-                          background: 'var(--bg)',
-                          color: 'var(--text)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Load
-                      </button>
-                      <button
-                        onClick={() => visualizeSession(s)}
-                        style={{
-                          flex: 1,
-                          padding: '5px 8px',
-                          fontSize: 10,
-                          fontWeight: 600,
-                          borderRadius: 6,
-                          border: '1px solid rgba(74,222,128,.3)',
-                          background: 'var(--green-dim)',
-                          color: 'var(--green)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Visualize
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </>
-          )}
-        </div>
+        {rightPanel}
       </div>
     </div>
   );

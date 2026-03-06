@@ -284,3 +284,49 @@ describe('x-forwarded-proto allowlist', () => {
     expect(loader).toContain('ALLOWED_PROTOS');
   });
 });
+
+describe('Agent Hub merged with messages and private memories', () => {
+  const app = readFile('App.tsx');
+  const agentHub = readFile('pages/AgentHub.tsx');
+  const api = readFile('api.ts');
+
+  it('App has no floating ChatPanel', () => {
+    expect(app).not.toContain('ChatPanel');
+    expect(app).not.toContain('chat-fab');
+  });
+
+  it('App redirects /messages to /agent', () => {
+    expect(app).toContain('path="/messages"');
+    expect(app).toContain('Navigate to="/agent"');
+  });
+
+  it('AgentHub has no mocked agents or tools', () => {
+    expect(agentHub).not.toMatch(/AGENTS\s*=\s*\[/);
+    expect(agentHub).not.toMatch(/CANNED\s*[:=]/);
+    expect(agentHub).not.toMatch(/AGENT_TOOLS\s*=\s*\[/);
+    expect(agentHub).not.toMatch(/pickResponses/);
+  });
+
+  it('AgentHub uses real APIs for agent and peers', () => {
+    expect(agentHub).toContain('fetchAgents');
+    expect(agentHub).toContain('fetchMemorySessions');
+    expect(agentHub).toContain('sendChatMessage');
+    expect(agentHub).toContain('sendPeerMessage');
+    expect(agentHub).toContain('sessionIdRef');
+    expect(agentHub).toContain('View Memories');
+    expect(agentHub).toContain('Previous conversations');
+    expect(agentHub).toContain('Visualize');
+  });
+
+  it('AgentHub has My agent and Other nodes modes', () => {
+    expect(agentHub).toContain("My agent");
+    expect(agentHub).toContain("Other nodes");
+  });
+
+  it('frontend api has memory sessions and sendChatMessage with sessionId', () => {
+    expect(api).toContain('fetchMemorySessions');
+    expect(api).toContain('sendChatMessage');
+    expect(api).toContain('sessionId');
+    expect(api).toContain('/api/memory/sessions');
+  });
+});

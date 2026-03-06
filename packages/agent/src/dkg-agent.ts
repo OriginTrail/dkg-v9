@@ -341,33 +341,29 @@ export class DKGAgent {
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
         const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
 
-        // Build a set of non-expired root entities so we only serve fresh data.
-        let allowedEntities: Set<string> | null = null;
-        if (wsTtl > 0) {
-          const cutoff = new Date(Date.now() - wsTtl).toISOString();
-          const liveOps = await this.store.query(
-            `SELECT ?re WHERE {
-              GRAPH <${wsMetaGraph}> {
-                ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-                ?op <http://dkg.io/ontology/publishedAt> ?ts .
-                ?op <http://dkg.io/ontology/rootEntity> ?re .
-                FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-              }
-            }`,
-          );
-          if (liveOps.type === 'bindings') {
-            allowedEntities = new Set(liveOps.bindings.map((b: any) => b['re']).filter(Boolean));
-          }
-        }
+        // Apply TTL/root-entity filter inside SPARQL before pagination so that
+        // we return the first N non-expired triples; include triples whose subject
+        // is an allowed root or a skolemized child (e.g. <root>/.well-known/genid/...).
+        const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
+        const wsQuery =
+          cutoff != null
+            ? `SELECT DISTINCT ?s ?p ?o WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+    ?op <http://dkg.io/ontology/publishedAt> ?ts .
+    ?op <http://dkg.io/ontology/rootEntity> ?re .
+    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+  }
+  GRAPH <${wsGraph}> { ?s ?p ?o }
+  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/")))
+} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
+            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
-        const wsResult = await this.store.query(
-          `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-        );
+        const wsResult = await this.store.query(wsQuery);
         if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
           return new TextEncoder().encode('');
         }
         for (const b of wsResult.bindings) {
-          if (allowedEntities && !allowedEntities.has(b['s'])) continue;
           const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
           nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
         }
@@ -709,6 +705,7 @@ export class DKGAgent {
       for (const pid of paranets) {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+        let paranetDeleted = 0;
 
         const expiredOps = await this.store.query(
           `SELECT ?op WHERE {
@@ -743,11 +740,12 @@ export class DKGAgent {
 
           for (const re of rootEntities) {
             const deleted = await this.store.deleteBySubjectPrefix(wsGraph, re);
-            totalDeleted += deleted;
+            paranetDeleted += deleted;
           }
 
-          const metaDeleted = await this.store.deleteBySubjectPrefix(wsMetaGraph, opUri);
-          totalDeleted += metaDeleted;
+          // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
+          const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
+          paranetDeleted += metaDeleted;
 
           const ownedSet = this.workspaceOwnedEntities.get(pid);
           if (ownedSet) {
@@ -757,8 +755,9 @@ export class DKGAgent {
           }
         }
 
+        totalDeleted += paranetDeleted;
         if (expiredOps.bindings.length > 0) {
-          this.log.info(ctx, `Workspace cleanup for "${pid}": evicted ${expiredOps.bindings.length} expired operation(s), ${totalDeleted} triples`);
+          this.log.info(ctx, `Workspace cleanup for "${pid}": evicted ${expiredOps.bindings.length} expired operation(s), ${paranetDeleted} triples`);
         }
       }
     } catch (err) {

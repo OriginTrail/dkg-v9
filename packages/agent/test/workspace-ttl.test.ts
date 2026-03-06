@@ -134,6 +134,10 @@ describe('Workspace TTL sync filtering', () => {
     nodeB.subscribeToParanet('ttl-sync-test');
     await sleep(200);
 
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
+    if (addrA) await nodeB.connectTo(addrA);
+    await sleep(1000);
+
     const synced = await nodeB.syncWorkspaceFromPeer(nodeA.peerId, ['ttl-sync-test']);
     expect(synced).toBeGreaterThan(0);
 

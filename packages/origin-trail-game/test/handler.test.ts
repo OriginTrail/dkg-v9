@@ -402,3 +402,178 @@ describe('Graph-based lobby sync', () => {
     expect(queryCount).toBeGreaterThanOrEqual(3);
   }, 10_000);
 });
+
+describe('Turn proposal accepts non-deterministic state', () => {
+  it('follower accepts proposal when winning action matches but state differs due to engine randomness', async () => {
+    const leaderPeerId = 'leader-peer-id';
+    const followerPeerId = 'follower-peer-id';
+    const thirdPeerId = 'third-peer-id';
+
+    const logs: string[] = [];
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test' }, (msg) => logs.push(msg));
+
+    // Simulate: leader creates swarm, follower + third player join
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const createMsg = encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-test',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Test', playerName: 'Leader', maxPlayers: 4,
+    });
+    // Trigger handleMessage from the leader
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test/app');
+    expect(handlers).toBeDefined();
+    const handle = handlers![0];
+
+    handle('dkg/paranet/test/app', createMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Follower joins
+    const joinMsg = encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    });
+    handle('dkg/paranet/test/app', joinMsg, followerPeerId);
+
+    // Third player joins
+    const join3Msg = encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test',
+      peerId: thirdPeerId, timestamp: Date.now(), playerName: 'Third',
+    });
+    handle('dkg/paranet/test/app', join3Msg, thirdPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Leader launches the expedition with a known game state
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Follower', 'Third'], leaderPeerId);
+    const gameStateJson = JSON.stringify(gameState);
+
+    const launchMsg = encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-test',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson,
+    });
+    handle('dkg/paranet/test/app', launchMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // All three players vote 'advance'
+    const voteLeader = encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
+    });
+    handle('dkg/paranet/test/app', voteLeader, leaderPeerId);
+
+    const voteThird = encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test',
+      peerId: thirdPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
+    });
+    handle('dkg/paranet/test/app', voteThird, thirdPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Leader proposes a result — the state will differ from what the
+    // follower's engine.executeAction would produce because of Math.random()
+    // in random events, loot, etc. The fix ensures this is accepted as long
+    // as the winning action matches.
+    const leaderResult = engine.executeAction(gameState, { type: 'advance' });
+    const leaderStateJson = JSON.stringify(leaderResult.newState);
+
+    const { createHash } = await import('node:crypto');
+    const proposalHash = createHash('sha256').update(`swarm-test:1:${leaderStateJson}`).digest('hex');
+
+    const proposalMsg = encode({
+      app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-test',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash, winningAction: 'advance', newStateJson: leaderStateJson,
+      resultMessage: leaderResult.message,
+    });
+    handle('dkg/paranet/test/app', proposalMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    // The proposal should NOT be rejected with "Proposal state mismatch"
+    const mismatchLogs = logs.filter(l => l.includes('state mismatch'));
+    expect(mismatchLogs).toHaveLength(0);
+
+    // It should also not be rejected for action mismatch (all voted 'advance')
+    const actionMismatchLogs = logs.filter(l => l.includes('action mismatch'));
+    expect(actionMismatchLogs).toHaveLength(0);
+  });
+
+  it('follower rejects proposal when winning action does not match local tally', async () => {
+    const leaderPeerId = 'leader-peer-2';
+    const followerPeerId = 'follower-peer-2';
+    const thirdPeerId = 'third-peer-2';
+    const fourthPeerId = 'fourth-peer-2';
+
+    const logs: string[] = [];
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test2' }, (msg) => logs.push(msg));
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test2/app');
+    const handle = handlers![0];
+
+    // Create swarm with 4 players
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-test2',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Test2', playerName: 'Leader', maxPlayers: 5,
+    }), leaderPeerId);
+
+    for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third'], [fourthPeerId, 'Fourth']] as const) {
+      handle('dkg/paranet/test2/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test2',
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    // Launch
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Follower', 'Third', 'Fourth'], leaderPeerId);
+
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-test2',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Leader votes 'advance'; third and fourth vote 'rest'
+    // (follower's own gossip is skipped by handleMessage, so follower
+    // sees 1 advance vs 2 rest → 'rest' wins the tally)
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
+    }), leaderPeerId);
+
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
+      peerId: thirdPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
+    }), thirdPeerId);
+
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
+      peerId: fourthPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
+    }), fourthPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Leader proposes 'advance' but follower's local tally says 'rest' (2 vs 1)
+    const result = engine.executeAction(gameState, { type: 'advance' });
+    const stateJson = JSON.stringify(result.newState);
+    const { createHash } = await import('node:crypto');
+    const hash = createHash('sha256').update(`swarm-test2:1:${stateJson}`).digest('hex');
+
+    handle('dkg/paranet/test2/app', encode({
+      app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-test2',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
+      resultMessage: result.message,
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Should be rejected: local tally says 'rest' but proposal says 'advance'
+    const actionMismatchLogs = logs.filter(l => l.includes('action mismatch'));
+    expect(actionMismatchLogs).toHaveLength(1);
+  });
+});

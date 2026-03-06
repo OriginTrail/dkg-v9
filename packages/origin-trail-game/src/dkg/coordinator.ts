@@ -806,17 +806,14 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
-    // Verify proposal by replaying local votes through the game engine
+    // Verify the winning action matches our local vote tally.
+    // We do NOT replay through the game engine because it contains
+    // non-deterministic elements (Math.random for events, loot, etc.)
+    // that would produce different state on each node.
     if (swarm.gameState && swarm.votes.length > 0) {
-      const { winningAction, params } = this.tallyVotes(swarm);
+      const { winningAction } = this.tallyVotes(swarm);
       if (winningAction !== msg.winningAction) {
         this.log(`Proposal winning action mismatch: local=${winningAction} proposed=${msg.winningAction} — rejecting`);
-        return;
-      }
-      const localResult = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
-      const localStateJson = JSON.stringify(localResult.newState);
-      if (localStateJson !== msg.newStateJson) {
-        this.log(`Proposal state mismatch for ${msg.swarmId} turn ${msg.turn} — rejecting`);
         return;
       }
     }

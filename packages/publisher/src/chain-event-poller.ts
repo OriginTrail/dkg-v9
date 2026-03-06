@@ -92,13 +92,12 @@ export class ChainEventPoller {
       try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
     }
 
-    // On first successful head fetch, seed cursor near the tip. Full-history
-    // paranet discovery is handled by discoverParanetsFromChain(); the poller
-    // only needs real-time monitoring for KnowledgeBatchCreated confirmations
-    // and new ParanetCreated events.
+    // On first successful head fetch, seed cursor near the tip — but only
+    // when there are no pending publishes whose confirmations we might skip.
+    // Full-history paranet discovery is handled by discoverParanetsFromChain().
     if (head != null && !this.headKnown) {
       this.headKnown = true;
-      if (this.lastBlock === 0) {
+      if (this.lastBlock === 0 && !hasPending) {
         this.lastBlock = Math.max(0, head - 500);
         this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
       }
@@ -120,7 +119,9 @@ export class ChainEventPoller {
       toBlock: upperBound,
     };
 
+    let maxEventBlock = this.lastBlock;
     for await (const event of this.chain.listenForEvents(filter)) {
+      if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
       if (event.type === 'KnowledgeBatchCreated') {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'ParanetCreated') {
@@ -128,10 +129,13 @@ export class ChainEventPoller {
       }
     }
 
-    // Only advance cursor when the upper bound is anchored to a real chain
-    // head. Without that guarantee we'd skip blocks that don't exist yet.
+    // Advance cursor: prefer chain-head-anchored upper bound; fall back to
+    // max observed event block so the window still progresses when
+    // getBlockNumber is temporarily unavailable.
     if (head != null) {
       this.lastBlock = upperBound;
+    } else if (maxEventBlock > this.lastBlock) {
+      this.lastBlock = maxEventBlock;
     }
   }
 

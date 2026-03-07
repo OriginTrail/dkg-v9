@@ -1,6 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from './api.js';
+import { RdfGraph } from '@dkg/graph-viz/react';
 import './styles.css';
+
+type Triple = { subject: string; predicate: string; object: string };
 
 function HeroBanner() {
   return (
@@ -10,10 +13,8 @@ function HeroBanner() {
         <div className="ot-hero-scanlines" />
         <svg viewBox="0 0 600 180" xmlns="http://www.w3.org/2000/svg">
           <rect width="600" height="180" fill="#000" />
-          {/* Mountains */}
           <polygon points="0,100 40,60 80,80 130,40 180,70 220,50 260,75 300,35 340,65 380,45 420,70 460,55 500,80 540,50 580,65 600,55 600,180 0,180" fill="#0a2a0a" opacity="0.8" />
           <polygon points="0,120 60,90 100,100 160,75 200,95 260,70 300,85 340,65 400,90 440,75 500,95 540,80 600,90 600,180 0,180" fill="#0d3a0d" opacity="0.6" />
-          {/* Ground */}
           <rect y="140" width="600" height="40" fill="#1a5a1a" opacity="0.3" />
           <g opacity="0.4">
             <rect x="0" y="142" width="600" height="2" fill="#2a7a2a" />
@@ -22,7 +23,6 @@ function HeroBanner() {
             <rect x="0" y="160" width="600" height="1" fill="#1a5a1a" />
             <rect x="0" y="166" width="600" height="2" fill="#2a7a2a" />
           </g>
-          {/* Lead Agent (Orchestrator) */}
           <g transform="translate(280,95)">
             <rect x="0" y="0" width="4" height="4" fill="#4ade80" /><rect x="4" y="0" width="4" height="4" fill="#4ade80" /><rect x="8" y="0" width="4" height="4" fill="#4ade80" />
             <rect x="-2" y="4" width="4" height="4" fill="#4ade80" /><rect x="2" y="4" width="4" height="4" fill="#4ade80" /><rect x="6" y="4" width="4" height="4" fill="#4ade80" /><rect x="10" y="4" width="4" height="4" fill="#4ade80" />
@@ -35,7 +35,6 @@ function HeroBanner() {
             <rect x="20" y="-4" width="4" height="2" fill="#4ade80" opacity="0.3" />
             <rect x="14" y="4" width="4" height="2" fill="#4ade80" opacity="0.4" />
           </g>
-          {/* Agent 2 (Safety) */}
           <g transform="translate(240,102)">
             <rect x="0" y="0" width="4" height="4" fill="#60a5fa" /><rect x="4" y="0" width="4" height="4" fill="#60a5fa" />
             <rect x="-2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="6" y="4" width="4" height="4" fill="#60a5fa" />
@@ -44,7 +43,6 @@ function HeroBanner() {
             <rect x="0" y="-4" width="8" height="4" fill="#60a5fa" />
             <rect x="4" y="-2" width="2" height="2" fill="#000" />
           </g>
-          {/* Agent 3 (Infrastructure) */}
           <g transform="translate(325,102)">
             <rect x="0" y="0" width="4" height="4" fill="#a78bfa" /><rect x="4" y="0" width="4" height="4" fill="#a78bfa" />
             <rect x="-2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="6" y="4" width="4" height="4" fill="#a78bfa" />
@@ -53,7 +51,6 @@ function HeroBanner() {
             <rect x="0" y="-4" width="8" height="4" fill="#a78bfa" />
             <rect x="4" y="-2" width="2" height="2" fill="#000" />
           </g>
-          {/* Agent 4 (Data Curator) */}
           <g transform="translate(218,112)">
             <rect x="0" y="0" width="4" height="4" fill="#fbbf24" /><rect x="4" y="0" width="4" height="4" fill="#fbbf24" />
             <rect x="0" y="4" width="4" height="4" fill="#fbbf24" /><rect x="4" y="4" width="4" height="4" fill="#fbbf24" />
@@ -61,7 +58,6 @@ function HeroBanner() {
             <rect x="0" y="-4" width="8" height="4" fill="#fbbf24" />
             <rect x="4" y="-2" width="2" height="2" fill="#000" />
           </g>
-          {/* Agent 5 (Retrieval) */}
           <g transform="translate(348,112)">
             <rect x="0" y="0" width="4" height="4" fill="#22d3ee" /><rect x="4" y="0" width="4" height="4" fill="#22d3ee" />
             <rect x="0" y="4" width="4" height="4" fill="#22d3ee" /><rect x="4" y="4" width="4" height="4" fill="#22d3ee" />
@@ -69,13 +65,11 @@ function HeroBanner() {
             <rect x="0" y="-4" width="8" height="4" fill="#22d3ee" />
             <rect x="4" y="-2" width="2" height="2" fill="#000" />
           </g>
-          {/* Connection lines */}
           <line x1="252" y1="106" x2="280" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
           <line x1="333" y1="106" x2="310" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
           <line x1="230" y1="116" x2="250" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
           <line x1="356" y1="116" x2="337" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
           <line x1="252" y1="108" x2="325" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.15" strokeDasharray="2,4" />
-          {/* Data particles */}
           <circle cx="265" cy="102" r="1.5" fill="#4ade80" opacity="0.7">
             <animate attributeName="cx" values="252;280;252" dur="2s" repeatCount="indefinite" />
           </circle>
@@ -98,6 +92,113 @@ function HeroBanner() {
         <p className="ot-hero-tagline">Your swarm will not die of dysentery. But it might die of hallucinations.</p>
       </div>
     </div>
+  );
+}
+
+/** Build RDF triples from the turn history and game state for the graph visualizer. */
+function buildGameTriples(swarm: any): Triple[] {
+  const triples: Triple[] = [];
+  const history: any[] = swarm.turnHistory ?? [];
+  const gs = swarm.gameState;
+  if (!gs) return triples;
+
+  const swarmNode = `game:${swarm.name ?? 'Swarm'}`;
+  triples.push({ subject: swarmNode, predicate: 'rdf:type', object: 'game:Swarm' });
+  triples.push({ subject: swarmNode, predicate: 'game:status', object: `status:${gs.status}` });
+  triples.push({ subject: swarmNode, predicate: 'game:epochs', object: `"${gs.epochs}/2000"` });
+
+  if (gs.party) {
+    for (const m of gs.party) {
+      const memberNode = `agent:${m.name}`;
+      triples.push({ subject: swarmNode, predicate: 'game:hasMember', object: memberNode });
+      triples.push({ subject: memberNode, predicate: 'rdf:type', object: m.alive ? 'game:Agent' : 'game:DeadAgent' });
+      triples.push({ subject: memberNode, predicate: 'game:health', object: `"${m.health} HP"` });
+    }
+  }
+
+  let prevTurnNode: string | null = null;
+  for (const turn of history) {
+    const turnNode = `turn:${turn.turn}`;
+    triples.push({ subject: turnNode, predicate: 'rdf:type', object: 'game:Turn' });
+
+    const actionNode = `action:${turn.winningAction}`;
+    triples.push({ subject: turnNode, predicate: 'game:action', object: actionNode });
+    triples.push({ subject: actionNode, predicate: 'rdf:type', object: 'game:Action' });
+
+    if (turn.resultMessage) {
+      const msgShort = turn.resultMessage.length > 40
+        ? turn.resultMessage.slice(0, 37) + '…'
+        : turn.resultMessage;
+      const resultNode = `result:T${turn.turn}`;
+      triples.push({ subject: turnNode, predicate: 'game:result', object: resultNode });
+      triples.push({ subject: resultNode, predicate: 'rdfs:label', object: `"${msgShort}"` });
+    }
+
+    if (turn.approvers?.length) {
+      for (const a of turn.approvers) {
+        const short = typeof a === 'string' ? a.slice(-8) : String(a);
+        triples.push({ subject: turnNode, predicate: 'game:approvedBy', object: `peer:${short}` });
+      }
+    }
+
+    if (prevTurnNode) {
+      triples.push({ subject: prevTurnNode, predicate: 'game:nextTurn', object: turnNode });
+    }
+    prevTurnNode = turnNode;
+  }
+
+  if (prevTurnNode) {
+    triples.push({ subject: swarmNode, predicate: 'game:currentTurn', object: prevTurnNode });
+  }
+
+  const resourceNode = 'resources:Current';
+  triples.push({ subject: swarmNode, predicate: 'game:resources', object: resourceNode });
+  triples.push({ subject: resourceNode, predicate: 'rdf:type', object: 'game:Resources' });
+  triples.push({ subject: resourceNode, predicate: 'game:tokens', object: `"${gs.trainingTokens}"` });
+  triples.push({ subject: resourceNode, predicate: 'game:apiCredits', object: `"${gs.apiCredits}"` });
+  triples.push({ subject: resourceNode, predicate: 'game:gpus', object: `"${gs.computeUnits}"` });
+  triples.push({ subject: resourceNode, predicate: 'game:trac', object: `"${gs.trac}"` });
+
+  return triples;
+}
+
+const GRAPH_VIEW_CONFIG = {
+  name: 'Game',
+  palette: 'dark' as const,
+  paletteOverrides: {
+    background: '#0e1117',
+    nodeDefault: '#3fb950',
+    edgeDefault: 'rgba(88,166,255,0.3)',
+    text: '#e6edf3',
+  },
+};
+
+function GameGraphPanel({ swarm }: { swarm: any }) {
+  const triples = useMemo(() => buildGameTriples(swarm), [swarm]);
+
+  if (triples.length === 0) {
+    return (
+      <div className="ot-graph-empty">
+        <div className="ot-muted">Game graph will appear as turns are played</div>
+      </div>
+    );
+  }
+
+  return (
+    <RdfGraph
+      data={triples}
+      format="triples"
+      options={{
+        renderer: '2d',
+        physics: { enabled: true, solver: 'forceAtlas2', gravity: -20, springLength: 80 },
+        node: { label: true, size: 6 },
+        edge: { label: false },
+        hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+        focus: { maxNodes: 500, hops: 999 },
+      }}
+      viewConfig={GRAPH_VIEW_CONFIG}
+      style={{ width: '100%', height: '100%' }}
+    />
   );
 }
 
@@ -181,9 +282,10 @@ export function App() {
   }
 
   if (view === 'swarm' && swarm) {
+    const isPlaying = swarm.status === 'traveling' || swarm.status === 'finished';
+
     return (
-      <div className="ot-container">
-        <HeroBanner />
+      <div className={isPlaying ? 'ot-container ot-container--wide' : 'ot-container'}>
         <div className="ot-header">
           <h1>{swarm.name}</h1>
           <button className="ot-secondary" onClick={() => setView('lobby')}>Back to Lobby</button>
@@ -215,25 +317,36 @@ export function App() {
           </div>
         )}
 
-        {swarm.status === 'traveling' && swarm.gameState && (
-          <>
-            <GameStateDisplay state={swarm.gameState} />
-            <VotePanel swarm={swarm} peerId={nodeInfo?.peerId} onVoted={(w) => setSwarm(w)} onError={setError} />
-            {swarm.lastTurn && (
-              <div className="ot-card">
-                <h3>Last Turn</h3>
-                <p><strong>Action:</strong> {swarm.lastTurn.winningAction}</p>
-                <p>{swarm.lastTurn.resultMessage}</p>
-                <p className="ot-muted">Approved by {swarm.lastTurn.approvers?.length ?? 0} nodes</p>
+        {isPlaying && swarm.gameState && (
+          <div className="ot-play-split">
+            <div className="ot-play-left">
+              {swarm.status === 'finished' && (
+                <div className="ot-card" style={{ borderColor: swarm.gameState.status === 'won' ? 'var(--green)' : 'var(--red)' }}>
+                  <h2>{swarm.gameState.status === 'won' ? 'AGI Achieved — Singularity Harbor!' : 'Your expedition has ended.'}</h2>
+                </div>
+              )}
+              <GameStateDisplay state={swarm.gameState} />
+              {swarm.status === 'traveling' && (
+                <VotePanel swarm={swarm} peerId={nodeInfo?.peerId} onVoted={(w) => setSwarm(w)} onError={setError} />
+              )}
+              {swarm.lastTurn && (
+                <div className="ot-card">
+                  <h3>Last Turn</h3>
+                  <p><strong>Action:</strong> {swarm.lastTurn.winningAction}</p>
+                  <p>{swarm.lastTurn.resultMessage}</p>
+                  <p className="ot-muted">Approved by {swarm.lastTurn.approvers?.length ?? 0} nodes</p>
+                </div>
+              )}
+            </div>
+            <div className="ot-play-right">
+              <div className="ot-graph-header">
+                <h4>Game Knowledge Graph</h4>
+                <span className="ot-muted">{(swarm.turnHistory?.length ?? 0)} turns recorded</span>
               </div>
-            )}
-          </>
-        )}
-
-        {swarm.status === 'finished' && swarm.gameState && (
-          <div className="ot-card">
-            <h2>{swarm.gameState.status === 'won' ? 'AGI Achieved — Singularity Harbor!' : 'Your expedition has ended.'}</h2>
-            <GameStateDisplay state={swarm.gameState} />
+              <div className="ot-graph-viewport">
+                <GameGraphPanel swarm={swarm} />
+              </div>
+            </div>
           </div>
         )}
 
@@ -311,13 +424,24 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
 
 function CreateSwarmForm({ playerName, onCreated, onError }: { playerName: string; onCreated: (w: any) => void; onError: (e: string) => void }) {
   const [name, setName] = useState('');
+  const [maxPlayers, setMaxPlayers] = useState(3);
   const [loading, setLoading] = useState(false);
 
   return (
     <div className="ot-card">
       <input value={name} onChange={e => setName(e.target.value)} placeholder="Swarm name..." />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
+        <label style={{ margin: 0, whiteSpace: 'nowrap' }}>Max players:</label>
+        <select
+          value={maxPlayers}
+          onChange={e => setMaxPlayers(Number(e.target.value))}
+          style={{ padding: '0.4rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: '0.9rem' }}
+        >
+          {[3, 4, 5, 6, 7, 8].map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </div>
       <button disabled={!name.trim() || loading} onClick={async () => {
-        try { setLoading(true); onCreated(await api.create(playerName, name)); }
+        try { setLoading(true); onCreated(await api.create(playerName, name, maxPlayers)); }
         catch (e: any) { onError(e.message); } finally { setLoading(false); }
       }}>Launch Swarm</button>
     </div>

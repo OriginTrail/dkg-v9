@@ -14,7 +14,7 @@
 import { createHash } from 'node:crypto';
 import { gameEngine } from '../engine/game-engine.js';
 import type { GameState, ActionResult } from '../game/types.js';
-import { signatureThreshold, MIN_PLAYERS } from '../engine/wagon-train.js';
+import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-train.js';
 import * as proto from './protocol.js';
 import * as rdf from './rdf.js';
 
@@ -227,7 +227,7 @@ export class OriginTrailGameCoordinator {
           id: swarmId,
           name: swarmName,
           leaderPeerId: orchestratorId,
-          maxPlayers: 8,
+          maxPlayers: 3,
           players,
           status: 'recruiting',
           gameState: null,
@@ -270,7 +270,7 @@ export class OriginTrailGameCoordinator {
 
   // ── Lobby operations ──────────────────────────────────────────────
 
-  async createSwarm(playerName: string, swarmName: string, maxPlayers = 8): Promise<SwarmState> {
+  async createSwarm(playerName: string, swarmName: string, maxPlayers = 3): Promise<SwarmState> {
     const existing = this.findMySwarm();
     if (existing && existing.status !== 'finished') {
       throw new Error('You already have an active swarm. Leave it first.');
@@ -283,7 +283,7 @@ export class OriginTrailGameCoordinator {
       id: swarmId,
       name: swarmName,
       leaderPeerId: this.myPeerId,
-      maxPlayers: Math.min(Math.max(MIN_PLAYERS, maxPlayers), 8),
+      maxPlayers: Math.min(Math.max(MIN_PLAYERS, maxPlayers), MAX_PLAYERS),
       players: [{
         peerId: this.myPeerId,
         displayName: playerName,
@@ -597,7 +597,7 @@ export class OriginTrailGameCoordinator {
     }
 
     if (swarm.votes.length === 0) {
-      swarm.votes = [{ peerId: this.myPeerId, action: 'rest', turn: swarm.currentTurn, timestamp: Date.now() }];
+      swarm.votes = [{ peerId: this.myPeerId, action: 'syncMemory', turn: swarm.currentTurn, timestamp: Date.now() }];
     }
 
     // Any member may propose after deadline; leader may propose anytime
@@ -647,7 +647,7 @@ export class OriginTrailGameCoordinator {
       counts.set(vote.action, entry);
     }
 
-    let winningAction = 'rest';
+    let winningAction = 'syncMemory';
     let maxVotes = 0;
     const tiedActions: string[] = [];
 

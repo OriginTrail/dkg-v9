@@ -26,6 +26,7 @@
     "@dkg/storage": "workspace:*"
   },
   "dependencies": {
+    "@dkg/graph-viz": "workspace:*",
     "uuid": "^9.0.0"
   },
   "devDependencies": {

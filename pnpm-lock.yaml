@@ -540,6 +540,9 @@ importers:
       '@dkg/core':
         specifier: workspace:*
         version: link:../core
+      '@dkg/graph-viz':
+        specifier: workspace:*
+        version: link:../graph-viz
       '@dkg/storage':
         specifier: workspace:*
         version: link:../storage

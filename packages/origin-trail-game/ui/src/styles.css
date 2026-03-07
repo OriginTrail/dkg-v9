@@ -24,6 +24,9 @@ body {
   margin: 0 auto;
   padding: 2rem 1.5rem;
 }
+.ot-container--wide {
+  max-width: 1400px;
+}
 
 h1 { font-size: 1.75rem; font-weight: 700; }
 h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.75rem; }
@@ -241,4 +244,60 @@ ul li { padding: 0.2rem 0; }
   font-size: 11px;
   color: #475569;
   margin-top: 4px;
+}
+
+/* Split play layout */
+.ot-play-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  min-height: 500px;
+}
+.ot-play-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.ot-play-right {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  min-width: 0;
+}
+.ot-graph-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.ot-graph-header h4 { margin: 0; }
+.ot-graph-viewport {
+  flex: 1;
+  min-height: 400px;
+  position: relative;
+}
+.ot-graph-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .ot-play-split {
+    grid-template-columns: 1fr;
+  }
+  .ot-container--wide {
+    max-width: 800px;
+  }
+  .ot-graph-viewport {
+    min-height: 300px;
+  }
 }

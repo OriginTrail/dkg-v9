@@ -33,6 +33,7 @@ export class Canvas2DRenderer implements RendererBackend {
   private _fadeInDuration = 1500;
   private _animFrameId: number | null = null;
   private _initialFitDone = false;
+  private _lastTopologyKey = '';
 
   /** force-graph version compatibility guard */
   private _setAlphaTarget(value: number): void {
@@ -240,8 +241,10 @@ export class Canvas2DRenderer implements RendererBackend {
   ): void {
     if (!this._graph) this.init();
 
-    // Reset auto-fit when the graph topology changes
-    if (nodes.size !== this._currentNodes.size) {
+    // Reset auto-fit when the graph topology changes (node IDs + edge count)
+    const topoKey = `${[...nodes.keys()].sort().join(',')}|${edges.size}`;
+    if (topoKey !== this._lastTopologyKey) {
+      this._lastTopologyKey = topoKey;
       this._initialFitDone = false;
     }
 
@@ -380,11 +383,12 @@ export class Canvas2DRenderer implements RendererBackend {
       this._repaintPending = false;
       if (!this._graph) return;
 
-      this._graph.cooldownTicks(3);
-      try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
-      this._setAlphaTarget(0);
-
-      if (!this._riskPulseEnabled) {
+      if (this._riskPulseEnabled) {
+        try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
+      } else {
+        this._graph.cooldownTicks(3);
+        try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
+        this._setAlphaTarget(0);
         setTimeout(() => {
           if (this._graph && !this._riskPulseEnabled) {
             this._graph.cooldownTicks(0);

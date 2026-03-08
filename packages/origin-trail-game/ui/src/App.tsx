@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from './api.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 import './styles.css';
 
 type Triple = { subject: string; predicate: string; object: string };
+
+const OT = 'https://origintrail-game.dkg.io/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SCHEMA_NAME = 'https://schema.org/name';
+const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
 
 function HeroBanner() {
   return (
@@ -95,91 +100,126 @@ function HeroBanner() {
   );
 }
 
-/** Build RDF triples from the turn history and game state for the graph visualizer. */
-function buildGameTriples(swarm: any): Triple[] {
+const ACTION_LABELS: Record<string, string> = {
+  advance: 'Advance',
+  upgradeSkills: 'Upgrade Skills',
+  syncMemory: 'Sync Memory',
+  forceBottleneck: 'Force Bottleneck',
+  payToll: 'Pay Toll',
+  trade: 'Trade',
+};
+const ACTION_ICONS: Record<string, string> = {
+  advance: '→',
+  upgradeSkills: '⬆',
+  syncMemory: '♻',
+  forceBottleneck: '⚡',
+  payToll: '💰',
+  trade: '🔄',
+};
+
+/**
+ * Build rich RDF triples from the game's own ontology. Uses the same URIs
+ * as rdf.ts so the graph is consistent with what the DKG stores.
+ */
+function buildContextTriples(swarm: any): Triple[] {
   const triples: Triple[] = [];
-  const history: any[] = swarm.turnHistory ?? [];
   const gs = swarm.gameState;
   if (!gs) return triples;
 
-  const swarmNode = `game:${swarm.name ?? 'Swarm'}`;
-  triples.push({ subject: swarmNode, predicate: 'rdf:type', object: 'game:Swarm' });
-  triples.push({ subject: swarmNode, predicate: 'game:status', object: `status:${gs.status}` });
-  triples.push({ subject: swarmNode, predicate: 'game:epochs', object: `"${gs.epochs}/2000"` });
+  const swarmUri = `${OT}swarm/${swarm.id}`;
 
-  if (gs.party) {
-    for (const m of gs.party) {
-      const memberNode = `agent:${m.name}`;
-      triples.push({ subject: swarmNode, predicate: 'game:hasMember', object: memberNode });
-      triples.push({ subject: memberNode, predicate: 'rdf:type', object: m.alive ? 'game:Agent' : 'game:DeadAgent' });
-      triples.push({ subject: memberNode, predicate: 'game:health', object: `"${m.health} HP"` });
-    }
+  triples.push({ subject: swarmUri, predicate: RDF_TYPE, object: `${OT}AgentSwarm` });
+  triples.push({ subject: swarmUri, predicate: SCHEMA_NAME, object: `"${swarm.name}"` });
+  triples.push({ subject: swarmUri, predicate: `${OT}status`, object: `"${gs.status}"` });
+  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: `"${gs.epochs}/2000"` });
+
+  // Party members
+  for (const m of gs.party ?? []) {
+    const agentUri = `${OT}agent/${m.name.replace(/\s+/g, '-')}`;
+    triples.push({ subject: swarmUri, predicate: `${OT}hasMember`, object: agentUri });
+    triples.push({ subject: agentUri, predicate: RDF_TYPE, object: m.alive ? `${OT}Agent` : `${OT}DeadAgent` });
+    triples.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${m.name}"` });
+    triples.push({ subject: agentUri, predicate: `${OT}health`, object: `"${m.health} HP"` });
   }
 
-  let prevTurnNode: string | null = null;
+  // Current resources
+  const resUri = `${OT}swarm/${swarm.id}/resources`;
+  triples.push({ subject: swarmUri, predicate: `${OT}resources`, object: resUri });
+  triples.push({ subject: resUri, predicate: RDF_TYPE, object: `${OT}ResourceState` });
+  triples.push({ subject: resUri, predicate: `${OT}trainingTokens`, object: `"${gs.trainingTokens}"` });
+  triples.push({ subject: resUri, predicate: `${OT}apiCredits`, object: `"${gs.apiCredits}"` });
+  triples.push({ subject: resUri, predicate: `${OT}computeUnits`, object: `"${gs.computeUnits}"` });
+  triples.push({ subject: resUri, predicate: `${OT}trac`, object: `"${gs.trac}"` });
+
+  // Turn history — decision trace as linked knowledge graph
+  const history: any[] = swarm.turnHistory ?? [];
+  let prevTurnUri: string | null = null;
+
   for (const turn of history) {
-    const turnNode = `turn:${turn.turn}`;
-    triples.push({ subject: turnNode, predicate: 'rdf:type', object: 'game:Turn' });
+    const turnUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}`;
+    triples.push({ subject: turnUri, predicate: RDF_TYPE, object: `${OT}TurnResult` });
+    triples.push({ subject: turnUri, predicate: `${OT}turn`, object: `"Turn ${turn.turn}"` });
+    triples.push({ subject: turnUri, predicate: `${OT}swarm`, object: swarmUri });
 
-    const actionNode = `action:${turn.winningAction}`;
-    triples.push({ subject: turnNode, predicate: 'game:action', object: actionNode });
-    triples.push({ subject: actionNode, predicate: 'rdf:type', object: 'game:Action' });
+    // Action decided
+    const actionUri = `${OT}action/${turn.winningAction}`;
+    triples.push({ subject: turnUri, predicate: `${OT}winningAction`, object: actionUri });
+    triples.push({ subject: actionUri, predicate: RDF_TYPE, object: `${OT}Action` });
+    triples.push({ subject: actionUri, predicate: RDFS_LABEL, object: `"${ACTION_LABELS[turn.winningAction] ?? turn.winningAction}"` });
 
+    // Result
     if (turn.resultMessage) {
-      const msgShort = turn.resultMessage.length > 40
-        ? turn.resultMessage.slice(0, 37) + '…'
-        : turn.resultMessage;
-      const resultNode = `result:T${turn.turn}`;
-      triples.push({ subject: turnNode, predicate: 'game:result', object: resultNode });
-      triples.push({ subject: resultNode, predicate: 'rdfs:label', object: `"${msgShort}"` });
+      const resultUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/result`;
+      triples.push({ subject: turnUri, predicate: `${OT}result`, object: resultUri });
+      triples.push({ subject: resultUri, predicate: RDF_TYPE, object: `${OT}Outcome` });
+      triples.push({ subject: resultUri, predicate: RDFS_LABEL, object: `"${turn.resultMessage}"` });
     }
 
-    if (turn.approvers?.length) {
-      for (const a of turn.approvers) {
-        const short = typeof a === 'string' ? a.slice(-8) : String(a);
-        triples.push({ subject: turnNode, predicate: 'game:approvedBy', object: `peer:${short}` });
-      }
+    // Approvers
+    for (const a of turn.approvers ?? []) {
+      const peerId = typeof a === 'string' ? a : String(a);
+      const peerUri = `${OT}player/${peerId.slice(-12)}`;
+      triples.push({ subject: turnUri, predicate: `${OT}approvedBy`, object: peerUri });
+      triples.push({ subject: peerUri, predicate: RDF_TYPE, object: `${OT}Player` });
     }
 
-    if (prevTurnNode) {
-      triples.push({ subject: prevTurnNode, predicate: 'game:nextTurn', object: turnNode });
+    // Temporal chain
+    if (prevTurnUri) {
+      triples.push({ subject: prevTurnUri, predicate: `${OT}nextTurn`, object: turnUri });
     }
-    prevTurnNode = turnNode;
+    prevTurnUri = turnUri;
   }
 
-  if (prevTurnNode) {
-    triples.push({ subject: swarmNode, predicate: 'game:currentTurn', object: prevTurnNode });
+  if (prevTurnUri) {
+    triples.push({ subject: swarmUri, predicate: `${OT}currentTurn`, object: prevTurnUri });
   }
-
-  const resourceNode = 'resources:Current';
-  triples.push({ subject: swarmNode, predicate: 'game:resources', object: resourceNode });
-  triples.push({ subject: resourceNode, predicate: 'rdf:type', object: 'game:Resources' });
-  triples.push({ subject: resourceNode, predicate: 'game:tokens', object: `"${gs.trainingTokens}"` });
-  triples.push({ subject: resourceNode, predicate: 'game:apiCredits', object: `"${gs.apiCredits}"` });
-  triples.push({ subject: resourceNode, predicate: 'game:gpus', object: `"${gs.computeUnits}"` });
-  triples.push({ subject: resourceNode, predicate: 'game:trac', object: `"${gs.trac}"` });
 
   return triples;
 }
 
 const GRAPH_VIEW_CONFIG = {
-  name: 'Game',
+  name: 'OriginTrail Game',
   palette: 'dark' as const,
   paletteOverrides: {
     background: '#0e1117',
     nodeDefault: '#3fb950',
-    edgeDefault: 'rgba(88,166,255,0.3)',
-    text: '#e6edf3',
+    edgeDefault: 'rgba(88,166,255,0.25)',
+    text: '#c9d1d9',
   },
 };
 
-function GameGraphPanel({ swarm }: { swarm: any }) {
-  const triples = useMemo(() => buildGameTriples(swarm), [swarm]);
+/** The live knowledge graph visualization */
+function ContextGraphPanel({ swarm }: { swarm: any }) {
+  const triples = useMemo(() => buildContextTriples(swarm), [
+    swarm?.turnHistory?.length,
+    swarm?.gameState?.epochs,
+    swarm?.gameState?.status,
+  ]);
 
   if (triples.length === 0) {
     return (
       <div className="ot-graph-empty">
-        <div className="ot-muted">Game graph will appear as turns are played</div>
+        <span className="ot-muted">Context graph will appear once the journey begins</span>
       </div>
     );
   }
@@ -189,16 +229,118 @@ function GameGraphPanel({ swarm }: { swarm: any }) {
       data={triples}
       format="triples"
       options={{
+        labelMode: 'humanized' as any,
         renderer: '2d',
-        physics: { enabled: true, solver: 'forceAtlas2', gravity: -20, springLength: 80 },
-        node: { label: true, size: 6 },
+        labels: {
+          predicates: [
+            SCHEMA_NAME,
+            RDFS_LABEL,
+            `${OT}health`,
+            `${OT}turn`,
+            `${OT}epochs`,
+            `${OT}status`,
+          ],
+        },
+        style: {
+          classColors: {
+            [`${OT}AgentSwarm`]: '#4ade80',
+            [`${OT}Agent`]: '#60a5fa',
+            [`${OT}DeadAgent`]: '#f85149',
+            [`${OT}TurnResult`]: '#a78bfa',
+            [`${OT}Action`]: '#fbbf24',
+            [`${OT}Outcome`]: '#22d3ee',
+            [`${OT}ResourceState`]: '#d29922',
+            [`${OT}Player`]: '#8b949e',
+          },
+        },
+        physics: { enabled: true, solver: 'forceAtlas2', gravity: -25, springLength: 90 },
+        node: { label: true, size: 5 },
         edge: { label: false },
         hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
         focus: { maxNodes: 500, hops: 999 },
       }}
       viewConfig={GRAPH_VIEW_CONFIG}
-      style={{ width: '100%', height: '100%' }}
+      style={{ position: 'absolute', inset: 0 }}
     />
+  );
+}
+
+/** Decision trace — scrollable timeline of resolved turns */
+function DecisionTrace({ swarm }: { swarm: any }) {
+  const history: any[] = swarm.turnHistory ?? [];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const prevLen = useRef(0);
+
+  useEffect(() => {
+    if (history.length > prevLen.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+    prevLen.current = history.length;
+  }, [history.length]);
+
+  if (history.length === 0) {
+    return (
+      <div className="ot-trace-empty">
+        <span className="ot-muted">Decision trace will appear as turns resolve…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="ot-trace-scroll" ref={scrollRef}>
+      {history.map((turn: any, idx: number) => (
+        <div key={turn.turn} className="ot-trace-entry">
+          <div className="ot-trace-dot" />
+          <div className="ot-trace-body">
+            <div className="ot-trace-header">
+              <span className="ot-trace-turn">Turn {turn.turn}</span>
+              <span className="ot-trace-action">
+                {ACTION_ICONS[turn.winningAction] ?? '?'}{' '}
+                {ACTION_LABELS[turn.winningAction] ?? turn.winningAction}
+              </span>
+            </div>
+            <div className="ot-trace-result">{turn.resultMessage}</div>
+            <div className="ot-trace-meta">
+              {turn.approvers?.length ?? 0} approvers
+              {turn.timestamp ? ` · ${new Date(turn.timestamp).toLocaleTimeString()}` : ''}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Right panel: tabs for Decision Trace and Context Graph */
+function JourneyPanel({ swarm }: { swarm: any }) {
+  const [tab, setTab] = useState<'trace' | 'graph'>('trace');
+  const turnCount = swarm.turnHistory?.length ?? 0;
+
+  return (
+    <div className="ot-journey-panel">
+      <div className="ot-journey-tabs">
+        <button
+          className={`ot-journey-tab ${tab === 'trace' ? 'ot-journey-tab--active' : ''}`}
+          onClick={() => setTab('trace')}
+        >
+          Decision Trace {turnCount > 0 && <span className="ot-badge">{turnCount}</span>}
+        </button>
+        <button
+          className={`ot-journey-tab ${tab === 'graph' ? 'ot-journey-tab--active' : ''}`}
+          onClick={() => setTab('graph')}
+        >
+          Context Graph
+        </button>
+      </div>
+      <div className="ot-journey-content">
+        {tab === 'trace' && <DecisionTrace swarm={swarm} />}
+        {tab === 'graph' && (
+          <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+            <ContextGraphPanel swarm={swarm} />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -332,20 +474,14 @@ export function App() {
               {swarm.lastTurn && (
                 <div className="ot-card">
                   <h3>Last Turn</h3>
-                  <p><strong>Action:</strong> {swarm.lastTurn.winningAction}</p>
+                  <p><strong>Action:</strong> {ACTION_LABELS[swarm.lastTurn.winningAction] ?? swarm.lastTurn.winningAction}</p>
                   <p>{swarm.lastTurn.resultMessage}</p>
                   <p className="ot-muted">Approved by {swarm.lastTurn.approvers?.length ?? 0} nodes</p>
                 </div>
               )}
             </div>
             <div className="ot-play-right">
-              <div className="ot-graph-header">
-                <h4>Game Knowledge Graph</h4>
-                <span className="ot-muted">{(swarm.turnHistory?.length ?? 0)} turns recorded</span>
-              </div>
-              <div className="ot-graph-viewport">
-                <GameGraphPanel swarm={swarm} />
-              </div>
+              <JourneyPanel swarm={swarm} />
             </div>
           </div>
         )}
@@ -398,13 +534,13 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
       <h3>Vote for Turn {swarm.currentTurn}</h3>
       {hasVoted && <p className="ot-muted">You have voted. Waiting for others...</p>}
       <div className="ot-vote-grid">
-        <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>Advance (Conservative)</button>
-        <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>Advance (Standard)</button>
-        <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>Advance (Max Throughput)</button>
-        <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>Upgrade Skills</button>
-        <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>Sync Memory</button>
-        <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>Force Bottleneck</button>
-        <button onClick={() => doVote('payToll')} disabled={hasVoted}>Pay Toll</button>
+        <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>→ Conservative</button>
+        <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Standard</button>
+        <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Max Throughput</button>
+        <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>⬆ Upgrade Skills</button>
+        <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>♻ Sync Memory</button>
+        <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>⚡ Force Bottleneck</button>
+        <button onClick={() => doVote('payToll')} disabled={hasVoted}>💰 Pay Toll</button>
       </div>
       <div className="ot-vote-status">
         <h4>Votes ({swarm.voteStatus?.votes?.filter((v: any) => v.hasVoted).length}/{swarm.playerCount})</h4>

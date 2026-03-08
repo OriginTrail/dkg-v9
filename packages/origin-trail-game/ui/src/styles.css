@@ -251,36 +251,137 @@ ul li { padding: 0.2rem 0; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1.25rem;
-  min-height: 500px;
+  height: calc(100vh - 160px);
+  min-height: 520px;
 }
 .ot-play-left {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   min-width: 0;
+  overflow-y: auto;
 }
 .ot-play-right {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Journey panel — right side (tabs + content) */
+.ot-journey-panel {
   display: flex;
   flex-direction: column;
+  height: 100%;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  min-width: 0;
 }
-.ot-graph-header {
+.ot-journey-tabs {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
-.ot-graph-header h4 { margin: 0; }
-.ot-graph-viewport {
+.ot-journey-tab {
   flex: 1;
-  min-height: 400px;
+  padding: 0.5rem 0.75rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.ot-journey-tab:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.ot-journey-tab--active {
+  color: var(--green);
+  border-bottom: 2px solid var(--green);
+}
+.ot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--green);
+  color: #000;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.ot-journey-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   position: relative;
 }
+
+/* Decision trace timeline */
+.ot-trace-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem 1rem 0.75rem 1.5rem;
+}
+.ot-trace-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+.ot-trace-entry {
+  position: relative;
+  padding: 0 0 1rem 1.25rem;
+  border-left: 2px solid var(--border);
+}
+.ot-trace-entry:last-child { border-left-color: var(--green); }
+.ot-trace-dot {
+  position: absolute;
+  left: -5px;
+  top: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  border: 2px solid var(--surface);
+}
+.ot-trace-body { font-size: 0.85rem; }
+.ot-trace-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.ot-trace-turn {
+  font-weight: 700;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.ot-trace-action {
+  font-weight: 500;
+  color: var(--green);
+  font-size: 0.8rem;
+}
+.ot-trace-result {
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin-bottom: 2px;
+}
+.ot-trace-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* Context graph */
 .ot-graph-empty {
   display: flex;
   align-items: center;
@@ -293,11 +394,12 @@ ul li { padding: 0.2rem 0; }
 @media (max-width: 900px) {
   .ot-play-split {
     grid-template-columns: 1fr;
+    height: auto;
   }
   .ot-container--wide {
     max-width: 800px;
   }
-  .ot-graph-viewport {
-    min-height: 300px;
+  .ot-play-right {
+    height: 500px;
   }
 }

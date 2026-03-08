@@ -46,12 +46,13 @@ export interface ImportResultQuad {
 }
 
 export interface ImportResult {
-  batchId: string;
+  batchId: string | null;
   source: ImportSource;
   memoryCount: number;
   tripleCount: number;
   entityCount: number;
   quads: ImportResultQuad[];
+  warnings?: string[];
 }
 
 const MEMORY_PARANET = 'agent-memory';
@@ -623,7 +624,7 @@ export class ChatMemoryManager {
     }
 
     if (memories.length === 0) {
-      return { batchId, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
+      return { batchId: null, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
     }
 
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
@@ -651,13 +652,18 @@ export class ChatMemoryManager {
     await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
 
     let entityCount = 0;
+    const warnings: string[] = [];
     if (llmEnabled) {
       try {
         entityCount = await this.extractKnowledgeFromImport(batchUri, memories);
-      } catch { /* best-effort knowledge extraction */ }
+      } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        console.warn(`[ChatMemoryManager] Knowledge extraction failed for batch ${batchId}: ${msg}`);
+        warnings.push(`Knowledge extraction failed: ${msg}`);
+      }
     }
 
-    return {
+    const result: ImportResult = {
       batchId,
       source,
       memoryCount: memories.length,
@@ -665,6 +671,8 @@ export class ChatMemoryManager {
       entityCount,
       quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
     };
+    if (warnings.length > 0) result.warnings = warnings;
+    return result;
   }
 
   private async parseMemoriesWithLlm(

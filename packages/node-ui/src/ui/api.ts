@@ -144,12 +144,13 @@ export interface ImportMemoryQuad {
 }
 
 export interface ImportMemoryResult {
-  batchId: string;
+  batchId: string | null;
   source: string;
   memoryCount: number;
   tripleCount: number;
   entityCount: number;
   quads: ImportMemoryQuad[];
+  warnings?: string[];
 }
 export const importMemories = (text: string, source?: string, useLlm?: boolean) =>
   post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });

@@ -219,10 +219,11 @@ describe('Import Memory — importMemories integration', () => {
     expect(dateTriples.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('returns zero counts for empty input after trimming', async () => {
+  it('returns zero counts and null batchId for empty input', async () => {
     const result = await manager.importMemories('\n\n  \n', 'claude');
     expect(result.memoryCount).toBe(0);
     expect(result.tripleCount).toBe(0);
+    expect(result.batchId).toBeNull();
     expect(mocks.mockWriteToWorkspace).not.toHaveBeenCalled();
   });
 
@@ -261,6 +262,7 @@ describe('Import Memory — importMemories integration', () => {
   it('returns empty quads array when input is blank', async () => {
     const result = await manager.importMemories('  \n  ', 'claude');
     expect(result.quads).toEqual([]);
+    expect(result.batchId).toBeNull();
   });
 });
 
@@ -366,6 +368,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
   it('falls back to heuristic when LLM call fails', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce({ ok: false } as any);
 
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
       model: 'gpt-4o-mini',
@@ -379,6 +382,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
     expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
+    warnSpy.mockRestore();
   });
 
   it('handles LLM using alternate key names like "memory" instead of "text"', async () => {
@@ -510,6 +514,42 @@ describe('Import Memory — LLM-assisted parsing', () => {
       expect(call[2]).toEqual({ localOnly: true });
     }
   });
+
+  it('surfaces warnings when entity extraction fails', async () => {
+    const parseResponse = JSON.stringify([
+      { text: 'Works at Acme Corp', category: 'fact' },
+    ]);
+
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            choices: [{ message: { content: parseResponse } }],
+          }),
+        });
+      }
+      return Promise.reject(new Error('LLM service unavailable'));
+    });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const manager = new ChatMemoryManager(mocks.tools, {
+      apiKey: 'test-key',
+      model: 'gpt-4o-mini',
+      baseURL: 'https://api.openai.com/v1',
+    });
+    const result = await manager.importMemories('Works at Acme Corp', 'claude', { useLlm: true });
+
+    expect(result.memoryCount).toBe(1);
+    expect(result.entityCount).toBe(0);
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.length).toBe(1);
+    expect(result.warnings![0]).toContain('Knowledge extraction failed');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Knowledge extraction failed'));
+    warnSpy.mockRestore();
+  });
 });
 
 // ── API handler tests ────────────────────────────────────────────────────────
@@ -636,5 +676,18 @@ describe('POST /api/memory/import — route handler', () => {
       expect(res._status).toBe(200);
       expect(JSON.parse(res._body).source).toBe(source);
     }
+  });
+
+  it('returns 413 for oversized payload', async () => {
+    const oversized = 'x'.repeat(3 * 1024 * 1024);
+    const req = mockReq('POST', '/api/memory/import', oversized);
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(413);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Payload too large' });
   });
 });

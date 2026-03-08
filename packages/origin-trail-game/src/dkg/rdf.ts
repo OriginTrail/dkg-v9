@@ -204,6 +204,40 @@ export function consensusAttestationQuads(
     );
   }
   return quads;
+}
+
+export interface PublishProvenance {
+  rootEntity: string;
+  ual: string;
+  txHash: string;
+  blockNumber: number;
+  publisherPeerId: string;
+  publishedAt: number;
+  knowledgeCollectionId?: string;
+  knowledgeAssetId?: string;
+}
+
+export function publishProvenanceChainQuads(paranetId: string, provenance: PublishProvenance): Quad[] {
+  const g = contextGraph(paranetId, 'provenance');
+  const s = provenance.rootEntity;
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('PublishedEntity'), g),
+    quad(s, otUri('ual'), literal(provenance.ual), g),
+    quad(s, otUri('transactionHash'), literal(provenance.txHash), g),
+    quad(s, otUri('blockNumber'), literal(provenance.blockNumber), g),
+    quad(s, otUri('publisherDID'), literal(provenance.publisherPeerId), g),
+    quad(s, otUri('publishedAt'), literal(provenance.publishedAt), g),
+  ];
+  if (provenance.knowledgeCollectionId) {
+    quad(s, otUri('knowledgeCollection'), literal(provenance.knowledgeCollectionId), g);
+    quads.push(quad(s, otUri('knowledgeCollection'), literal(provenance.knowledgeCollectionId), g));
+  }
+  if (provenance.knowledgeAssetId) {
+    quads.push(quad(s, otUri('knowledgeAsset'), literal(provenance.knowledgeAssetId), g));
+  }
+  return quads;
+}
+
 
 export function playerProfileQuads(paranetId: string, peerId: string, displayName: string): Quad[] {
   const g = `did:dkg:paranet:${paranetId}`;

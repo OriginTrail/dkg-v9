@@ -4,35 +4,51 @@ import React, { useEffect, useRef, useCallback } from 'react';
  * Renders the OriginTrail Game inside the Node Dashboard by embedding
  * its standalone UI in an iframe. This avoids duplicating game code
  * and ensures the dashboard always shows the latest game UI.
+ *
+ * Token handoff uses a one-time nonce: on load, the parent sends a random
+ * nonce to the iframe. The iframe echoes it back in its token request.
+ * The parent delivers the token only when the nonce matches, and
+ * invalidates the nonce immediately so a navigated-away iframe cannot
+ * replay the handshake.
  */
 export function AppsPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const nonceRef = useRef<string | null>(null);
 
-  const sendToken = useCallback(() => {
-    const token = (window as any).__DKG_TOKEN__;
-    if (token && iframeRef.current?.contentWindow) {
-      iframeRef.current.contentWindow.postMessage(
-        { type: 'dkg-token', token, apiOrigin: window.location.origin },
-        window.location.origin,
-      );
-    }
+  const sendNonce = useCallback(() => {
+    if (!iframeRef.current?.contentWindow) return;
+    const nonce = crypto.randomUUID();
+    nonceRef.current = nonce;
+    iframeRef.current.contentWindow.postMessage({ type: 'dkg-nonce', nonce }, '*');
   }, []);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (e.data?.type === 'dkg-token-request' && iframeRef.current?.contentWindow === e.source) {
-        sendToken();
+      if (
+        e.data?.type === 'dkg-token-request' &&
+        iframeRef.current?.contentWindow === e.source &&
+        typeof e.data.nonce === 'string' &&
+        e.data.nonce === nonceRef.current
+      ) {
+        nonceRef.current = null;
+        const token = (window as any).__DKG_TOKEN__;
+        if (token) {
+          iframeRef.current.contentWindow!.postMessage(
+            { type: 'dkg-token', token, apiOrigin: window.location.origin },
+            '*',
+          );
+        }
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [sendToken]);
+  }, []);
 
   return (
     <iframe
       ref={iframeRef}
       src="/apps/origin-trail-game/"
-      onLoad={sendToken}
+      onLoad={sendNonce}
       sandbox="allow-scripts allow-forms allow-popups"
       allow="clipboard-write"
       style={{

@@ -227,15 +227,17 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toContain('sandbox="allow-scripts allow-forms allow-popups"');
   });
 
-  it('sends token via postMessage with strict origin', () => {
+  it('uses one-time nonce handshake before sending token', () => {
     expect(apps).toContain('postMessage');
-    expect(apps).toContain('window.location.origin');
-    expect(apps).not.toMatch(/postMessage\([^)]+,\s*['"]\*['"]\s*\)/);
+    expect(apps).toContain('dkg-nonce');
+    expect(apps).toContain('randomUUID');
+    expect(apps).toMatch(/nonceRef\.current\s*=\s*null/);
   });
 
-  it('listens for dkg-token-request from iframe', () => {
+  it('listens for dkg-token-request with nonce from iframe', () => {
     expect(apps).toContain('dkg-token-request');
     expect(apps).toContain('addEventListener');
+    expect(apps).toMatch(/e\.data\.nonce.*===.*nonceRef/);
   });
 });
 
@@ -250,6 +252,27 @@ describe('iframe app hosting', () => {
   it('still handles onError as secondary fallback', () => {
     expect(appHost).toContain('onError');
     expect(appHost).toContain('handleError');
+  });
+});
+
+describe('daemon.ts localhost token fallback', () => {
+  const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
+
+  it('checks server bind host, not req.socket.remoteAddress, for localhost detection', () => {
+    expect(daemon).not.toContain('req.socket.remoteAddress');
+    expect(daemon).toContain('config.apiHost');
+    expect(daemon).toMatch(/boundToLoopback/);
+  });
+
+  it('only falls back to token for loopback-bound servers (127.0.0.1 or ::1)', () => {
+    expect(daemon).toMatch(/boundHost\s*===\s*'127\.0\.0\.1'\s*\|\|\s*boundHost\s*===\s*'::1'/);
+  });
+});
+
+describe('app-loader token-injected HTML CORS', () => {
+  it('omits Access-Control-Allow-Origin when authToken is present', () => {
+    const loader = readFileSync(resolve(CLI_DIR, 'app-loader.ts'), 'utf-8');
+    expect(loader).toMatch(/if\s*\(\s*!authToken\s*\)\s*headers\[['"]Access-Control-Allow-Origin['"]\]/);
   });
 });
 

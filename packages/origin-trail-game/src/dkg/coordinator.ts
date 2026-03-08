@@ -724,6 +724,17 @@ export class OriginTrailGameCoordinator {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
     }
 
+    const resolvedMsg: proto.TurnResolvedMsg = {
+      app: proto.APP_ID,
+      type: 'turn:resolved',
+      swarmId: swarm.id,
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      turn: turnNumber,
+      proposalHash: hash,
+    };
+    await this.broadcast(resolvedMsg);
+
     this.log(`Force-resolve: turn ${turnNumber} resolved immediately for ${swarm.id}`);
     return swarm;
   }
@@ -903,6 +914,47 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    const resolution = msg.resolution ?? 'consensus';
+    const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
+    const deaths = msg.deaths ?? [];
+
+    // Leader force-resolved proposals bypass both tally validation and quorum.
+    // Followers may have partial/lagging vote state, so comparing the local
+    // tally against the leader's winning action would cause false rejections
+    // and state divergence. Only the leader may use this fast path.
+    if (resolution === 'force-resolved' && msg.peerId === swarm.leaderPeerId) {
+      const newState: GameState = JSON.parse(msg.newStateJson);
+      if (!newState.sessionId) {
+        this.log(`Invalid game state in force-resolved proposal for ${msg.swarmId} turn ${msg.turn} — rejecting`);
+        return;
+      }
+      swarm.pendingProposal = null;
+      this.stopVoteHeartbeat(swarm.id);
+      swarm.gameState = newState;
+
+      swarm.turnHistory.push({
+        turn: msg.turn,
+        winningAction: msg.winningAction,
+        resultMessage: msg.resultMessage,
+        approvers: [msg.peerId],
+        votes,
+        resolution,
+        deaths,
+        event: msg.event,
+        timestamp: Date.now(),
+      });
+
+      if (newState.status !== 'active') {
+        swarm.status = 'finished';
+      } else {
+        swarm.currentTurn++;
+        swarm.votes = [];
+        swarm.turnDeadline = Date.now() + 30_000;
+      }
+      this.log(`Applied force-resolved turn ${msg.turn} for ${msg.swarmId}`);
+      return;
+    }
+
     // Verify the winning action matches our local vote tally.
     // We do NOT replay through the game engine because it contains
     // non-deterministic elements (Math.random for events, loot, etc.)
@@ -928,9 +980,9 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
-      votes: msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action })),
-      resolution: msg.resolution ?? 'consensus',
-      deaths: msg.deaths ?? [],
+      votes,
+      resolution,
+      deaths,
       event: msg.event,
     };
 

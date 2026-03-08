@@ -178,6 +178,99 @@ describe('OriginTrail Game API handler', () => {
     expect(profileQuads.some((q: any) => q.object.includes('Player'))).toBe(true);
   });
 
+  it('expeditionLaunchedQuads generates correct RDF triples (C3)', async () => {
+    const { expeditionLaunchedQuads } = await import('../src/dkg/rdf.js');
+    const quads = expeditionLaunchedQuads('test-paranet', 'swarm-1', '{"status":"active"}', 1700000000000);
+    expect(quads.length).toBe(3);
+
+    const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
+    expect(statusQuad?.object).toContain('traveling');
+
+    const gameStateQuad = quads.find((q: any) => q.predicate.includes('gameState'));
+    expect(gameStateQuad?.object).toContain('active');
+
+    const launchedAtQuad = quads.find((q: any) => q.predicate.includes('launchedAt'));
+    expect(launchedAtQuad?.object).toContain('1700000000000');
+
+    expect(quads.every((q: any) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+  });
+
+  it('launchExpedition writes game state to workspace (C3)', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const testAgent = makeMockAgent('launch-test-peer');
+    testAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-launch' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'Launch Test');
+    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-launch/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['p2', 'P2'], ['p3', 'P3']]) {
+      handle('dkg/paranet/test-launch/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      if (swarm.players.length >= 3) break;
+    }
+    expect(swarm.players.length).toBe(3);
+
+    const beforeWrites = testAgent._workspaceWrites.length;
+    await coordinator.launchExpedition(swarm.id);
+
+    const wsWritesAfter = testAgent._workspaceWrites.slice(beforeWrites);
+    expect(wsWritesAfter.length).toBeGreaterThanOrEqual(1);
+    const launchQuads = wsWritesAfter.find((batch: any[]) =>
+      batch.some((q: any) => q.predicate.includes('gameState')),
+    );
+    expect(launchQuads).toBeDefined();
+  });
+
+  it('onRemoteExpeditionLaunched persists game state to workspace (C3)', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const leaderPeerId = 'remote-leader-c3';
+    const followerAgent = makeMockAgent('follower-c3');
+    followerAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch' });
+
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/test-remote-launch/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-c3',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Remote Test', playerName: 'Leader', maxPlayers: 3,
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gs = engine.createGame(['Leader', 'P2', 'P3'], leaderPeerId);
+    const launchMsg = encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-c3',
+      peerId: leaderPeerId, timestamp: Date.now(),
+      gameStateJson: JSON.stringify(gs),
+    });
+
+    const beforeWrites = followerAgent._workspaceWrites.length;
+    handle('dkg/paranet/test-remote-launch/app', launchMsg, leaderPeerId);
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      if (followerAgent._workspaceWrites.length > beforeWrites) break;
+    }
+
+    const wsWritesAfter = followerAgent._workspaceWrites.slice(beforeWrites);
+    expect(wsWritesAfter.length).toBeGreaterThanOrEqual(1);
+    const launchQuads = wsWritesAfter.find((batch: any[]) =>
+      batch.some((q: any) => q.predicate.includes('gameState')),
+    );
+    expect(launchQuads).toBeDefined();
+  });
+
   it('GET /players returns registered players from the graph', async () => {
     const playerAgent = makeMockAgent('player-peer');
     playerAgent.query = async () => ({

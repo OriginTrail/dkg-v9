@@ -168,6 +168,39 @@ export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: nu
   return quads;
 }
 
+export interface ConsensusAttestation {
+  peerId: string;
+  proposalHash: string;
+  approved: boolean;
+  timestamp: number;
+}
+
+export function consensusAttestationQuads(
+  paranetId: string,
+  swarmId: string,
+  turn: number,
+  attestations: ConsensusAttestation[],
+  resolution: string,
+): Quad[] {
+  const g = contextGraph(paranetId, swarmId);
+  const t = turnUri(swarmId, turn);
+  const quads: Quad[] = [
+    quad(t, otUri('resolution'), literal(resolution), g),
+  ];
+  for (const att of attestations) {
+    const attUri = otUri(`swarm/${swarmId}/turn/${turn}/attestation/${att.peerId}`);
+    quads.push(
+      quad(attUri, `${RDF}type`, otUri('ConsensusAttestation'), g),
+      quad(attUri, otUri('turn'), literal(turn), g),
+      quad(attUri, otUri('signer'), playerUri(att.peerId), g),
+      quad(attUri, otUri('proposalHash'), literal(att.proposalHash), g),
+      quad(attUri, otUri('approved'), literal(att.approved), g),
+      quad(attUri, otUri('attestedAt'), literal(att.timestamp), g),
+      quad(t, otUri('hasAttestation'), attUri, g),
+    );
+  }
+  return quads;
+
 export function playerProfileQuads(paranetId: string, peerId: string, displayName: string): Quad[] {
   const g = `did:dkg:paranet:${paranetId}`;
   const entity = `did:dkg:game:player:${peerId}`;

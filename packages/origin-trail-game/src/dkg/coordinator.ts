@@ -692,6 +692,21 @@ export class OriginTrailGameCoordinator {
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
       }
 
+      try {
+        const attestations: rdf.ConsensusAttestation[] = [...proposal.approvals].map(pid => ({
+          peerId: pid,
+          proposalHash: proposal.hash,
+          approved: true,
+          timestamp: Date.now(),
+        }));
+        await this.agent.publish(this.paranetId, rdf.consensusAttestationQuads(
+          this.paranetId, swarm.id, proposal.turn, attestations, proposal.resolution,
+        ));
+        this.log(`Consensus attestations published for turn ${proposal.turn}`);
+      } catch (err: any) {
+        this.log(`Failed to publish attestations for turn ${proposal.turn}: ${err.message}`);
+      }
+
       const resolvedMsg: proto.TurnResolvedMsg = {
         app: proto.APP_ID,
         type: 'turn:resolved',
@@ -807,6 +822,21 @@ export class OriginTrailGameCoordinator {
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
+    }
+
+    try {
+      const attestations: rdf.ConsensusAttestation[] = [{
+        peerId: this.myPeerId,
+        proposalHash: hash,
+        approved: true,
+        timestamp: Date.now(),
+      }];
+      await this.agent.publish(this.paranetId, rdf.consensusAttestationQuads(
+        this.paranetId, swarm.id, turnNumber, attestations, 'force-resolved',
+      ));
+      this.log(`Force-resolve: attestation published for turn ${turnNumber}`);
+    } catch (err: any) {
+      this.log(`Failed to publish force-resolve attestation for turn ${turnNumber}: ${err.message}`);
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {

@@ -846,6 +846,88 @@ describe('Chain provenance in turn results (C4)', () => {
   });
 });
 
+
+describe('Consensus attestation triples (V1)', () => {
+  it('consensusAttestationQuads generates correct RDF structure', async () => {
+    const { consensusAttestationQuads } = await import('../src/dkg/rdf.js');
+    const quads = consensusAttestationQuads('test-paranet', 'swarm-1', 1, [
+      { peerId: 'peer-a', proposalHash: '0xhash1', approved: true, timestamp: 1000 },
+      { peerId: 'peer-b', proposalHash: '0xhash1', approved: true, timestamp: 1001 },
+    ], 'consensus');
+
+    // Resolution triple on the turn
+    const resQuad = quads.find(q => q.predicate.includes('resolution'));
+    expect(resQuad).toBeDefined();
+    expect(resQuad!.object).toContain('consensus');
+
+    // Two attestation entities
+    const attQuads = quads.filter(q => q.object.includes('ConsensusAttestation'));
+    expect(attQuads).toHaveLength(2);
+
+    // Each has signer, proposalHash, approved, attestedAt, plus hasAttestation link
+    const signerQuads = quads.filter(q => q.predicate.includes('/signer'));
+    expect(signerQuads).toHaveLength(2);
+    expect(signerQuads[0].object).toContain('peer-a');
+    expect(signerQuads[1].object).toContain('peer-b');
+
+    const hashQuads = quads.filter(q => q.predicate.includes('proposalHash'));
+    expect(hashQuads).toHaveLength(2);
+    expect(hashQuads[0].object).toContain('0xhash1');
+
+    const approvedQuads = quads.filter(q => q.predicate.includes('/approved'));
+    expect(approvedQuads).toHaveLength(2);
+
+    const linkQuads = quads.filter(q => q.predicate.includes('hasAttestation'));
+    expect(linkQuads).toHaveLength(2);
+  });
+
+  it('forceResolveTurn publishes attestation triples', async () => {
+    const leaderPeerId = 'leader-att-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {};
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'att-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'AttestSwarm', 4);
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/att-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['att-p2', 'P2'], ['att-p3', 'P3']] as const) {
+      handle('dkg/paranet/att-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+    await coordinator.forceResolveTurn(swarm.id);
+
+    // Should have published: player profile, turn result quads, and attestation quads
+    const attestationPublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('ConsensusAttestation')),
+    );
+    expect(attestationPublish).toBeDefined();
+
+    const signerQuad = attestationPublish.find((q: any) => q.predicate?.includes('/signer'));
+    expect(signerQuad).toBeDefined();
+    expect(signerQuad.object).toContain(leaderPeerId);
+
+    const attLogs = logs.filter(l => l.includes('attestation published'));
+    expect(attLogs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe('Player profile RDF quads', () => {
   it('playerProfileQuads generates correct triples', async () => {
     const { playerProfileQuads } = await import('../src/dkg/rdf.js');

@@ -430,7 +430,7 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
   const draggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  const ALIVE_THRESHOLD_MS = 5 * 60 * 1000;
+  const ALIVE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
   const nodes: DashNode[] = agents.length > 0
     ? agents.map((a, i) => {
         const isSelf = a.connectionStatus === 'self';
@@ -439,7 +439,7 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
         return {
           id: i, isYou: isSelf, online,
           label: isSelf ? 'YOU' : a.name?.replace(/^devnet-/, '') || `P${i}`,
-          sublabel: a.name || a.peerId?.slice(0, 10) || `peer-${i}`,
+          sublabel: isSelf ? (nodeName || a.name || 'my-node') : (a.name || a.peerId?.slice(0, 10) || `peer-${i}`),
           color: isSelf ? '#4ade80' : PEER_COLORS[i % PEER_COLORS.length],
         };
       })

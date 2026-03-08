@@ -657,6 +657,21 @@ export class OriginTrailGameCoordinator {
           [...proposal.approvals],
         ));
         this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
+
+        const onChain = publishResult?.onChainResult;
+        if (onChain?.txHash && publishResult?.ual) {
+          try {
+            await this.agent.writeToWorkspace(this.paranetId, rdf.turnResolvedQuads(
+              this.paranetId, swarm.id, proposal.turn,
+              proposal.winningAction, proposal.newStateJson,
+              [...proposal.approvals],
+              { txHash: onChain.txHash, blockNumber: onChain.blockNumber, ual: publishResult.ual },
+            ));
+            this.log(`Turn ${proposal.turn} provenance written: tx=${onChain.txHash}`);
+          } catch (err: any) {
+            this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
+          }
+        }
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
       }
@@ -763,7 +778,7 @@ export class OriginTrailGameCoordinator {
           ual: publishResult.ual,
         };
         try {
-          await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+          await this.agent.writeToWorkspace(this.paranetId, rdf.turnResolvedQuads(
             this.paranetId, swarm.id, turnNumber,
             winningAction, newStateJson, [this.myPeerId],
             provenance,

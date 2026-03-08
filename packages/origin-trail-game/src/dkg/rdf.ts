@@ -132,9 +132,11 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
   if (provenance) {
     quads.push(
       quad(t, otUri('transactionHash'), literal(provenance.txHash), g),
-      quad(t, otUri('blockNumber'), literal(provenance.blockNumber), g),
       quad(t, otUri('ual'), literal(provenance.ual), g),
     );
+    if (typeof provenance.blockNumber === 'number') {
+      quads.push(quad(t, otUri('blockNumber'), literal(provenance.blockNumber), g));
+    }
   }
   return quads;
 }

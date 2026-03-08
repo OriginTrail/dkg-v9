@@ -508,14 +508,26 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeUndefined();
   });
 
-  it('forceResolveTurn publishes provenance when on-chain result is available', async () => {
+  it('turnResolvedQuads omits blockNumber triple when blockNumber is undefined', async () => {
+    const { turnResolvedQuads } = await import('../src/dkg/rdf.js');
+    const quads = turnResolvedQuads('test-paranet', 'swarm-1', 1, 'advance', '{}', ['peer-a'], {
+      txHash: '0xabc123',
+      blockNumber: undefined,
+      ual: 'did:dkg:test/ual/1',
+    });
+
+    expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeDefined();
+    expect(quads.find(q => q.predicate.includes('/ual'))).toBeDefined();
+    expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
+  });
+
+  it('forceResolveTurn writes provenance to workspace (not a second publish) when on-chain result is available', async () => {
     const leaderPeerId = 'leader-prov-1';
     const logs: string[] = [];
-    const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
     leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
-      publishCalls.push(quads);
+      leaderAgent._published.push(quads);
       return {
         ual: 'did:dkg:test/ual/turn-1',
         onChainResult: { txHash: '0xdeadbeef', blockNumber: 100 },
@@ -542,14 +554,22 @@ describe('Chain provenance in turn results (C4)', () => {
     await coordinator.launchExpedition(swarm.id);
     await coordinator.castVote(swarm.id, 'advance');
 
+    const publishCountBefore = leaderAgent._published.length;
     await coordinator.forceResolveTurn(swarm.id);
 
-    const provenancePublish = publishCalls.find((quads: any[]) =>
+    // Only ONE publish call for the turn data — provenance goes to workspace
+    expect(leaderAgent._published.length).toBe(publishCountBefore + 1);
+
+    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
-    expect(provenancePublish).toBeDefined();
-    expect(provenancePublish.some((q: any) => q.object?.includes('0xdeadbeef'))).toBe(true);
-    expect(provenancePublish.some((q: any) => q.object?.includes('did:dkg:test/ual/turn-1'))).toBe(true);
+    expect(provenanceWrite).toBeDefined();
+    expect(provenanceWrite.some((q: any) => q.object?.includes('0xdeadbeef'))).toBe(true);
+    expect(provenanceWrite.some((q: any) => q.object?.includes('did:dkg:test/ual/turn-1'))).toBe(true);
+
+    const blockQuad = provenanceWrite.find((q: any) => q.predicate?.includes('blockNumber'));
+    expect(blockQuad).toBeDefined();
+    expect(blockQuad.object).toContain('100');
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs.length).toBeGreaterThanOrEqual(1);
@@ -558,11 +578,10 @@ describe('Chain provenance in turn results (C4)', () => {
   it('forceResolveTurn skips provenance when no on-chain result', async () => {
     const leaderPeerId = 'leader-prov-2';
     const logs: string[] = [];
-    const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
     leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
-      publishCalls.push(quads);
+      leaderAgent._published.push(quads);
       return {};
     };
     leaderAgent.query = async () => ({ bindings: [] });
@@ -588,13 +607,164 @@ describe('Chain provenance in turn results (C4)', () => {
 
     await coordinator.forceResolveTurn(swarm.id);
 
-    const provenancePublish = publishCalls.find((quads: any[]) =>
+    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
-    expect(provenancePublish).toBeUndefined();
+    expect(provenanceWrite).toBeUndefined();
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs).toHaveLength(0);
+  });
+
+  it('checkProposalThreshold (consensus path) writes provenance to workspace, not a second publish', async () => {
+    const leaderPeerId = 'leader-consensus-1';
+    const logs: string[] = [];
+    const broadcasts: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.gossip.publish = async (_topic: string, data: Uint8Array) => {
+      broadcasts.push(JSON.parse(new TextDecoder().decode(data)));
+    };
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      leaderAgent._published.push(quads);
+      return {
+        ual: 'did:dkg:test/ual/consensus-1',
+        onChainResult: { txHash: '0xcafe', blockNumber: 200 },
+      };
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'consensus-prov' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm', 3);
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/consensus-prov/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['cons-p2', 'P2'], ['cons-p3', 'P3']] as const) {
+      handle('dkg/paranet/consensus-prov/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Remote peers vote, then leader votes — triggers proposeTurnResolution
+    handle('dkg/paranet/consensus-prov/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+      peerId: 'cons-p2', timestamp: Date.now(), turn: 1, action: 'advance',
+    }), 'cons-p2');
+    handle('dkg/paranet/consensus-prov/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+      peerId: 'cons-p3', timestamp: Date.now(), turn: 1, action: 'advance',
+    }), 'cons-p3');
+    await new Promise(r => setTimeout(r, 50));
+
+    const publishCountBefore = leaderAgent._published.length;
+    await coordinator.castVote(swarm.id, 'advance');
+    await new Promise(r => setTimeout(r, 100));
+
+    // Leader proposed — now simulate a remote approval to reach threshold (2 of 3)
+    const proposalBroadcast = broadcasts.find((b: any) => b.type === 'turn:proposal');
+    expect(proposalBroadcast).toBeDefined();
+
+    handle('dkg/paranet/consensus-prov/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: 'cons-p2', timestamp: Date.now(), turn: 1,
+      proposalHash: proposalBroadcast.proposalHash,
+    }), 'cons-p2');
+    await new Promise(r => setTimeout(r, 200));
+
+    // Exactly one publish for the turn data (not two)
+    expect(leaderAgent._published.length).toBe(publishCountBefore + 1);
+
+    // Provenance should be in workspace writes
+    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+      quads.some((q: any) => q.predicate?.includes('transactionHash')),
+    );
+    expect(provenanceWrite).toBeDefined();
+    expect(provenanceWrite.some((q: any) => q.object?.includes('0xcafe'))).toBe(true);
+    expect(provenanceWrite.some((q: any) => q.object?.includes('did:dkg:test/ual/consensus-1'))).toBe(true);
+
+    const blockQuad = provenanceWrite.find((q: any) => q.predicate?.includes('blockNumber'));
+    expect(blockQuad).toBeDefined();
+    expect(blockQuad.object).toContain('200');
+
+    const provLogs = logs.filter(l => l.includes('provenance written'));
+    expect(provLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consensus path skips blockNumber triple when blockNumber is undefined', async () => {
+    const leaderPeerId = 'leader-consensus-2';
+    const logs: string[] = [];
+    const broadcasts: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.gossip.publish = async (_topic: string, data: Uint8Array) => {
+      broadcasts.push(JSON.parse(new TextDecoder().decode(data)));
+    };
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      leaderAgent._published.push(quads);
+      return {
+        ual: 'did:dkg:test/ual/consensus-2',
+        onChainResult: { txHash: '0xbeef', blockNumber: undefined },
+      };
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'consensus-noblock' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'NoBlockSwarm', 3);
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/consensus-noblock/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['nb-p2', 'P2'], ['nb-p3', 'P3']] as const) {
+      handle('dkg/paranet/consensus-noblock/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    handle('dkg/paranet/consensus-noblock/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+      peerId: 'nb-p2', timestamp: Date.now(), turn: 1, action: 'advance',
+    }), 'nb-p2');
+    handle('dkg/paranet/consensus-noblock/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+      peerId: 'nb-p3', timestamp: Date.now(), turn: 1, action: 'advance',
+    }), 'nb-p3');
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.castVote(swarm.id, 'advance');
+    await new Promise(r => setTimeout(r, 100));
+
+    // Simulate remote approval to reach threshold
+    const proposalBroadcast = broadcasts.find((b: any) => b.type === 'turn:proposal');
+    expect(proposalBroadcast).toBeDefined();
+
+    handle('dkg/paranet/consensus-noblock/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: 'nb-p2', timestamp: Date.now(), turn: 1,
+      proposalHash: proposalBroadcast.proposalHash,
+    }), 'nb-p2');
+    await new Promise(r => setTimeout(r, 200));
+
+    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+      quads.some((q: any) => q.predicate?.includes('transactionHash')),
+    );
+    expect(provenanceWrite).toBeDefined();
+    expect(provenanceWrite.some((q: any) => q.object?.includes('0xbeef'))).toBe(true);
+
+    const blockQuad = provenanceWrite.find((q: any) => q.predicate?.includes('blockNumber'));
+    expect(blockQuad).toBeUndefined();
   });
 });
 

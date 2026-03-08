@@ -307,7 +307,8 @@ const GLOW_R = 8;
 const PARTICLE_R = 2;
 const PARTICLE_GLOW_R = 6;
 
-interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; color: string; }
+type PeerStatus = 'online' | 'recent' | 'offline';
+interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; status: PeerStatus; color: string; }
 interface Particle { id: number; from: number; to: number; progress: number; speed: number; type: OpType; }
 
 function getPositions(count: number, cx: number, cy: number, radius: number) {
@@ -347,20 +348,22 @@ function drawNodeCircle(ctx: CanvasRenderingContext2D, x: number, y: number, nod
     ctx.fillStyle = glow;
     ctx.beginPath(); ctx.arc(x, y, GLOW_R, 0, Math.PI * 2); ctx.fill();
   }
-  const dim = !node.online && !isYou;
-  ctx.globalAlpha = dim ? 0.3 : 1;
+  const dim = node.status === 'offline' && !isYou;
+  ctx.globalAlpha = dim ? 0.3 : node.status === 'recent' && !isYou ? 0.6 : 1;
   ctx.beginPath(); ctx.arc(x, y, NODE_R, 0, Math.PI * 2);
   ctx.fillStyle = isYou ? '#0a1a0a' : '#0f0f23';
   ctx.fill();
   ctx.strokeStyle = isYou ? '#4ade80' : node.color;
   ctx.lineWidth = isYou ? 1.5 : 1;
+  if (node.status === 'recent' && !isYou) ctx.setLineDash([2, 2]);
   ctx.stroke();
+  ctx.setLineDash([]);
 
-  const dotColor = node.online ? '#10b981' : '#ef4444';
+  const dotColor = node.status === 'online' ? '#10b981' : node.status === 'recent' ? '#f59e0b' : '#ef4444';
   ctx.beginPath(); ctx.arc(x + 4, y - 4, 1.5, 0, Math.PI * 2);
   ctx.fillStyle = dotColor; ctx.fill();
   ctx.strokeStyle = '#0a0f1a'; ctx.lineWidth = 0.8; ctx.stroke();
-  if (node.online) {
+  if (node.status === 'online') {
     const pulse = ctx.createRadialGradient(x + 4, y - 4, 1.5, x + 4, y - 4, 4);
     pulse.addColorStop(0, 'rgba(16,185,129,0.3)'); pulse.addColorStop(1, 'transparent');
     ctx.fillStyle = pulse; ctx.beginPath(); ctx.arc(x + 4, y - 4, 4, 0, Math.PI * 2); ctx.fill();
@@ -430,20 +433,30 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
   const draggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  const ALIVE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+  const ONLINE_THRESHOLD_MS = 5 * 60 * 1000;
+  const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+  function peerStatus(a: AgentInfo): PeerStatus {
+    if (a.connectionStatus === 'self' || a.connectionStatus === 'connected') return 'online';
+    if (a.lastSeen == null) return 'offline';
+    const age = Date.now() - a.lastSeen;
+    if (age < ONLINE_THRESHOLD_MS) return 'online';
+    if (age < RECENT_THRESHOLD_MS) return 'recent';
+    return 'offline';
+  }
+
   const nodes: DashNode[] = agents.length > 0
     ? agents.map((a, i) => {
         const isSelf = a.connectionStatus === 'self';
-        const recentlySeen = a.lastSeen != null && (Date.now() - a.lastSeen) < ALIVE_THRESHOLD_MS;
-        const online = isSelf || recentlySeen || a.connectionStatus === 'connected';
+        const st = peerStatus(a);
         return {
-          id: i, isYou: isSelf, online,
+          id: i, isYou: isSelf, online: st !== 'offline', status: st,
           label: isSelf ? 'YOU' : a.name?.replace(/^devnet-/, '') || `P${i}`,
           sublabel: isSelf ? (nodeName || a.name || 'my-node') : (a.name || a.peerId?.slice(0, 10) || `peer-${i}`),
           color: isSelf ? '#4ade80' : PEER_COLORS[i % PEER_COLORS.length],
         };
       })
-    : [{ id: 0, isYou: true, online: true, label: 'YOU', sublabel: nodeName || 'my-node', color: '#4ade80' }];
+    : [{ id: 0, isYou: true, online: true, status: 'online' as PeerStatus, label: 'YOU', sublabel: nodeName || 'my-node', color: '#4ade80' }];
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -461,6 +474,8 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
     ctx.fillStyle = '#0a0f1a'; ctx.fillRect(0, 0, w, h);
     drawGrid(ctx, w, h);
 
+    // Graph layer — transformed by zoom/pan
+    ctx.save();
     const zoom = zoomRef.current;
     const pan = panRef.current;
     ctx.translate(w / 2 + pan.x, h / 2 + pan.y);
@@ -508,7 +523,9 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
     for (let i = 0; i < nodes.length; i++) {
       drawNodeCircle(ctx, positions[i].x, positions[i].y, nodes[i], nodes[i].isYou);
     }
+    ctx.restore();
 
+    // Overlay layer — fixed to viewport, not affected by zoom/pan
     drawLegend(ctx, w, h);
     ctx.restore();
   }, [agents, nodeName]);

@@ -1,28 +1,40 @@
 import React, { useEffect, useRef, useCallback } from 'react';
 
+const TRUSTED_APP_PATH = '/apps/origin-trail-game/';
+
 /**
  * Renders the OriginTrail Game inside the Node Dashboard by embedding
- * its standalone UI in an iframe. This avoids duplicating game code
- * and ensures the dashboard always shows the latest game UI.
+ * its standalone UI in an iframe.
  *
- * Token handoff uses a one-time nonce: on first load the parent sends a
- * random nonce to the iframe. The iframe echoes it back in its token
- * request. The parent delivers the token only when the nonce matches,
- * then marks the handshake complete. Subsequent iframe loads (e.g. from
- * navigation to untrusted content) are refused — no new nonce is issued.
+ * Token handoff uses a nonce handshake: on iframe load the parent checks
+ * that the iframe is still on the trusted app path, issues a random nonce,
+ * and waits for the iframe to echo it back. Only matching nonces receive
+ * the token. Re-auth is allowed on legitimate reloads of the trusted app
+ * (the nonce changes each time so replayed requests are rejected).
+ *
+ * Security note: `allow-same-origin` is required because the app makes
+ * fetch() calls to the node API on the same origin. The apps are
+ * operator-installed trusted code served from loopback. The nonce
+ * handshake provides defence-in-depth for token delivery.
  */
 export function AppsPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const nonceRef = useRef<string | null>(null);
-  const handshakeCompleteRef = useRef(false);
+
+  const isTrustedOrigin = useCallback(() => {
+    try {
+      const loc = iframeRef.current?.contentWindow?.location;
+      return loc?.pathname?.startsWith(TRUSTED_APP_PATH) ?? false;
+    } catch { return false; }
+  }, []);
 
   const sendNonce = useCallback(() => {
-    if (handshakeCompleteRef.current) return;
     if (!iframeRef.current?.contentWindow) return;
+    if (!isTrustedOrigin()) return;
     const nonce = crypto.randomUUID();
     nonceRef.current = nonce;
     iframeRef.current.contentWindow.postMessage({ type: 'dkg-nonce', nonce }, '*');
-  }, []);
+  }, [isTrustedOrigin]);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -34,23 +46,22 @@ export function AppsPage() {
       ) {
         nonceRef.current = null;
         const token = (window as any).__DKG_TOKEN__;
-        if (token) {
+        if (token && isTrustedOrigin()) {
           iframeRef.current.contentWindow!.postMessage(
             { type: 'dkg-token', token, apiOrigin: window.location.origin },
             '*',
           );
-          handshakeCompleteRef.current = true;
         }
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, []);
+  }, [isTrustedOrigin]);
 
   return (
     <iframe
       ref={iframeRef}
-      src="/apps/origin-trail-game/"
+      src={TRUSTED_APP_PATH}
       onLoad={sendNonce}
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       allow="clipboard-write"

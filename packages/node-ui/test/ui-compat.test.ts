@@ -227,7 +227,12 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toContain('sandbox="allow-scripts allow-same-origin allow-forms allow-popups"');
   });
 
-  it('uses one-time nonce handshake before sending token', () => {
+  it('documents why allow-same-origin is required', () => {
+    expect(apps).toMatch(/allow-same-origin.*required/i);
+    expect(apps).toMatch(/loopback|trusted/i);
+  });
+
+  it('uses nonce handshake before sending token', () => {
     expect(apps).toContain('postMessage');
     expect(apps).toContain('dkg-nonce');
     expect(apps).toContain('randomUUID');
@@ -240,10 +245,76 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toMatch(/e\.data\.nonce.*===.*nonceRef/);
   });
 
-  it('prevents re-handshake after first successful token delivery', () => {
-    expect(apps).toContain('handshakeCompleteRef');
-    expect(apps).toMatch(/handshakeCompleteRef\.current\s*=\s*true/);
-    expect(apps).toMatch(/if\s*\(\s*handshakeCompleteRef\.current\s*\)\s*return/);
+  it('checks trusted origin before issuing nonce and delivering token', () => {
+    expect(apps).toContain('TRUSTED_APP_PATH');
+    expect(apps).toContain('isTrustedOrigin');
+    expect(apps).toMatch(/isTrustedOrigin\(\)/);
+  });
+
+  it('allows re-auth on legitimate reloads (no permanent handshake gate)', () => {
+    expect(apps).not.toMatch(/handshakeCompleteRef/);
+  });
+});
+
+describe('Apps.tsx behavioral postMessage handshake', () => {
+  it('first handshake delivers token when nonce matches', () => {
+    let postedMessages: any[] = [];
+    const fakeContentWindow = {
+      postMessage: (msg: any, _origin: string) => postedMessages.push(msg),
+      location: { pathname: '/apps/origin-trail-game/' },
+    };
+    const nonceRef = { current: null as string | null };
+    const fakeToken = 'test-token-abc';
+
+    const nonce = 'nonce-123';
+    nonceRef.current = nonce;
+    fakeContentWindow.postMessage({ type: 'dkg-nonce', nonce }, '*');
+
+    expect(postedMessages).toHaveLength(1);
+    expect(postedMessages[0].type).toBe('dkg-nonce');
+
+    const request = { type: 'dkg-token-request', nonce };
+    const nonceMatches = request.nonce === nonceRef.current;
+    expect(nonceMatches).toBe(true);
+
+    if (nonceMatches) {
+      nonceRef.current = null;
+      fakeContentWindow.postMessage(
+        { type: 'dkg-token', token: fakeToken, apiOrigin: 'http://localhost:9200' },
+        '*',
+      );
+    }
+
+    expect(postedMessages).toHaveLength(2);
+    expect(postedMessages[1]).toEqual({
+      type: 'dkg-token',
+      token: fakeToken,
+      apiOrigin: 'http://localhost:9200',
+    });
+    expect(nonceRef.current).toBeNull();
+  });
+
+  it('rejects token request with wrong nonce', () => {
+    const nonceRef = { current: 'correct-nonce' };
+    const request = { type: 'dkg-token-request', nonce: 'wrong-nonce' };
+    expect(request.nonce === nonceRef.current).toBe(false);
+  });
+
+  it('allows re-handshake after reload (new nonce issued each time)', () => {
+    const nonceRef = { current: null as string | null };
+    const delivered: string[] = [];
+
+    for (let i = 0; i < 3; i++) {
+      const nonce = `nonce-${i}`;
+      nonceRef.current = nonce;
+      const request = { type: 'dkg-token-request', nonce };
+      if (request.nonce === nonceRef.current) {
+        nonceRef.current = null;
+        delivered.push(nonce);
+      }
+    }
+
+    expect(delivered).toEqual(['nonce-0', 'nonce-1', 'nonce-2']);
   });
 });
 

@@ -144,6 +144,7 @@ export class OriginTrailGameCoordinator {
   private subscribed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private topologyTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -152,6 +153,7 @@ export class OriginTrailGameCoordinator {
     this.log = log ?? (() => {});
     this.subscribe();
     this.scheduleGraphSync();
+    this.scheduleTopologySnapshots();
   }
 
   get myPeerId(): string {
@@ -1215,7 +1217,50 @@ export class OriginTrailGameCoordinator {
     }
   }
 
+  // ── Network topology snapshots ──────────────────────────────────
+
+  private scheduleTopologySnapshots(): void {
+    this.topologyTimer = setInterval(() => {
+      this.publishNetworkTopology().catch(err =>
+        this.log(`Topology snapshot failed: ${err.message}`),
+      );
+    }, 5 * 60_000);
+  }
+
+  async publishNetworkTopology(): Promise<void> {
+    const now = Date.now();
+    const peers: rdf.TopologyPeer[] = [];
+
+    for (const swarm of this.swarms.values()) {
+      for (const member of swarm.players) {
+        if (member.peerId === this.myPeerId) continue;
+        if (peers.some(p => p.peerId === member.peerId)) continue;
+
+        const lastVote = swarm.votes
+          .filter(v => v.peerId === member.peerId)
+          .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+        peers.push({
+          peerId: member.peerId,
+          connectionType: 'relay',
+          latencyMs: lastVote ? now - lastVote.timestamp : 0,
+          lastSeen: lastVote?.timestamp ?? member.joinedAt,
+        });
+      }
+    }
+
+    if (peers.length === 0) return;
+
+    const quads = rdf.networkTopologyQuads(this.paranetId, peers);
+    await this.agent.writeToWorkspace(this.paranetId, quads);
+    this.log(`Topology snapshot written: ${peers.length} peers`);
+  }
+
   destroy(): void {
+    if (this.topologyTimer) {
+      clearInterval(this.topologyTimer);
+      this.topologyTimer = null;
+    }
     for (const swarmId of this.voteHeartbeatTimers.keys()) {
       this.stopVoteHeartbeat(swarmId);
     }

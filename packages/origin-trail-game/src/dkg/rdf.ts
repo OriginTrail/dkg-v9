@@ -179,6 +179,35 @@ export function playerProfileQuads(paranetId: string, peerId: string, displayNam
   ];
 }
 
+export interface TopologyPeer {
+  peerId: string;
+  connectionType: 'relay' | 'direct';
+  latencyMs: number;
+  lastSeen: number;
+}
+
+export function networkTopologyQuads(paranetId: string, peers: TopologyPeer[]): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const snapshotId = `snapshot-${Date.now().toString(36)}`;
+  const s = otUri(`topology/${snapshotId}`);
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('NetworkSnapshot'), g),
+    quad(s, otUri('capturedAt'), literal(Date.now()), g),
+  ];
+  for (const peer of peers) {
+    const peerNode = otUri(`topology/${snapshotId}/peer/${peer.peerId}`);
+    quads.push(
+      quad(peerNode, `${RDF}type`, otUri('TopologyPeer'), g),
+      quad(peerNode, otUri('peerId'), literal(peer.peerId), g),
+      quad(peerNode, otUri('connectionType'), literal(peer.connectionType), g),
+      quad(peerNode, otUri('latencyMs'), literal(peer.latencyMs), g),
+      quad(peerNode, otUri('lastSeen'), literal(peer.lastSeen), g),
+      quad(s, otUri('hasPeer'), peerNode, g),
+    );
+  }
+  return quads;
+}
+
 export const SPARQL_PREFIXES = {
   OT,
   RDF,

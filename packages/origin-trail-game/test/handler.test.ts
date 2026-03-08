@@ -912,6 +912,120 @@ describe('Graph-based lobby sync', () => {
   }, 10_000);
 });
 
+describe('Network topology hints (V3)', () => {
+  it('networkTopologyQuads generates correct RDF structure', async () => {
+    const { networkTopologyQuads, OT } = await import('../src/dkg/rdf.js');
+    const peers = [
+      { peerId: 'peer-a', connectionType: 'relay' as const, latencyMs: 120, lastSeen: 1700000000000 },
+      { peerId: 'peer-b', connectionType: 'direct' as const, latencyMs: 30, lastSeen: 1700000001000 },
+    ];
+    const quads = networkTopologyQuads('test-paranet', peers);
+
+    const snapshotQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type') && q.object.includes('NetworkSnapshot'));
+    expect(snapshotQuad).toBeDefined();
+    expect(snapshotQuad!.subject).toContain('topology/snapshot-');
+    expect(snapshotQuad!.graph).toBe('did:dkg:paranet:test-paranet');
+
+    const capturedAt = quads.find(q => q.predicate.includes('capturedAt'));
+    expect(capturedAt).toBeDefined();
+
+    const peerTypeQuads = quads.filter(q => q.predicate.includes('rdf-syntax-ns#type') && q.object.includes('TopologyPeer'));
+    expect(peerTypeQuads).toHaveLength(2);
+
+    const connTypeQuads = quads.filter(q => q.predicate.includes('connectionType'));
+    expect(connTypeQuads).toHaveLength(2);
+    expect(connTypeQuads.some(q => q.object.includes('relay'))).toBe(true);
+    expect(connTypeQuads.some(q => q.object.includes('direct'))).toBe(true);
+
+    const latencyQuads = quads.filter(q => q.predicate.includes('latencyMs'));
+    expect(latencyQuads).toHaveLength(2);
+    expect(latencyQuads.some(q => q.object.includes('120'))).toBe(true);
+    expect(latencyQuads.some(q => q.object.includes('30'))).toBe(true);
+
+    const lastSeenQuads = quads.filter(q => q.predicate.includes('lastSeen'));
+    expect(lastSeenQuads).toHaveLength(2);
+
+    const hasPeerQuads = quads.filter(q => q.predicate.includes('hasPeer'));
+    expect(hasPeerQuads).toHaveLength(2);
+
+    const peerIdQuads = quads.filter(q => q.predicate.includes('/peerId'));
+    expect(peerIdQuads).toHaveLength(2);
+    expect(peerIdQuads.some(q => q.object.includes('peer-a'))).toBe(true);
+    expect(peerIdQuads.some(q => q.object.includes('peer-b'))).toBe(true);
+  });
+
+  it('networkTopologyQuads returns empty array for no peers', async () => {
+    const { networkTopologyQuads } = await import('../src/dkg/rdf.js');
+    const quads = networkTopologyQuads('test-paranet', []);
+    expect(quads).toHaveLength(2);
+    expect(quads[0].object).toContain('NetworkSnapshot');
+  });
+
+  it('coordinator publishNetworkTopology writes topology quads to workspace', async () => {
+    const topoAgent = makeMockAgent('topo-peer');
+    topoAgent.query = async () => ({ bindings: [] });
+
+    const logs: string[] = [];
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(topoAgent as any, { paranetId: 'topo-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'TopoSwarm');
+
+    const handlers = topoAgent._messageHandlers.get('dkg/paranet/topo-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['topo-p2', 'P2'], ['topo-p3', 'P3']]) {
+      handle('dkg/paranet/topo-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    const writesBefore = topoAgent._workspaceWrites.length;
+    await coordinator.publishNetworkTopology();
+
+    expect(topoAgent._workspaceWrites.length).toBeGreaterThan(writesBefore);
+    const lastWrite = topoAgent._workspaceWrites[topoAgent._workspaceWrites.length - 1];
+    expect(lastWrite.some((q: any) => q.object?.includes('NetworkSnapshot'))).toBe(true);
+    expect(lastWrite.some((q: any) => q.predicate?.includes('connectionType'))).toBe(true);
+
+    const topoLogs = logs.filter(l => l.includes('Topology snapshot written'));
+    expect(topoLogs).toHaveLength(1);
+    expect(topoLogs[0]).toContain('2 peers');
+
+    coordinator.destroy();
+  });
+
+  it('coordinator publishNetworkTopology skips when no peers are known', async () => {
+    const emptyAgent = makeMockAgent('empty-topo-peer');
+    emptyAgent.query = async () => ({ bindings: [] });
+
+    const logs: string[] = [];
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(emptyAgent as any, { paranetId: 'empty-topo' }, (msg) => logs.push(msg));
+
+    const writesBefore = emptyAgent._workspaceWrites.length;
+    await coordinator.publishNetworkTopology();
+
+    expect(emptyAgent._workspaceWrites.length).toBe(writesBefore);
+    expect(logs.filter(l => l.includes('Topology snapshot'))).toHaveLength(0);
+
+    coordinator.destroy();
+  });
+
+  it('coordinator destroy clears topology timer', async () => {
+    const timerAgent = makeMockAgent('timer-peer');
+    timerAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(timerAgent as any, { paranetId: 'timer-test' });
+
+    coordinator.destroy();
+    // No error thrown, timer cleaned up
+  });
+});
+
 describe('Turn proposal accepts non-deterministic state', () => {
   it('follower accepts proposal when winning action matches but state differs due to engine randomness', async () => {
     const leaderPeerId = 'leader-peer-id';

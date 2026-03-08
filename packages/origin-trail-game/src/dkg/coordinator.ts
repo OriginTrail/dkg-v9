@@ -728,11 +728,30 @@ export class OriginTrailGameCoordinator {
     await this.broadcast(msg);
 
     try {
-      await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+      const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
         this.paranetId, swarm.id, turnNumber,
         winningAction, newStateJson, [this.myPeerId],
       ));
       this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
+
+      const onChain = publishResult?.onChainResult;
+      if (onChain?.txHash && publishResult?.ual) {
+        const provenance: rdf.ChainProvenance = {
+          txHash: onChain.txHash,
+          blockNumber: onChain.blockNumber,
+          ual: publishResult.ual,
+        };
+        try {
+          await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+            this.paranetId, swarm.id, turnNumber,
+            winningAction, newStateJson, [this.myPeerId],
+            provenance,
+          ));
+          this.log(`Force-resolve: turn ${turnNumber} provenance written: tx=${onChain.txHash}`);
+        } catch (err: any) {
+          this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
+        }
+      }
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
     }

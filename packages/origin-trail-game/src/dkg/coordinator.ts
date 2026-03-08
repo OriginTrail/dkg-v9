@@ -936,9 +936,10 @@ export class OriginTrailGameCoordinator {
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];
 
-    // Force-resolved turns bypass quorum — the leader already applied the turn
-    // and published to the context graph, so receivers apply it directly.
-    if (resolution === 'force-resolved') {
+    // Only the leader's force-resolved proposals bypass quorum — the leader
+    // already applied the turn and published to the context graph. Non-leader
+    // force-resolved proposals still go through the normal approval threshold.
+    if (resolution === 'force-resolved' && msg.peerId === swarm.leaderPeerId) {
       const newState: GameState = JSON.parse(msg.newStateJson);
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);

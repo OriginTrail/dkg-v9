@@ -434,17 +434,18 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Installable DKG apps (API handlers + static UI)
       // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
-      // Inject the caller's verified token if present; for localhost requests to /apps/*
-      // paths, fall back to the first stored token (same trust model as the Node UI).
+      // Inject the caller's verified token if present; when the server is bound to
+      // loopback only, fall back to the first stored token for /apps/* requests
+      // (TCP guarantees all connections are local — no proxy spoofing possible).
       let appInjectToken: string | undefined;
       if (installedApps.length > 0 && authEnabled && validTokens.size > 0) {
         const reqToken = extractBearerToken(req.headers.authorization);
         if (reqToken && validTokens.has(reqToken)) {
           appInjectToken = reqToken;
         } else if (reqUrl.pathname.startsWith('/apps/')) {
-          const remoteIp = req.socket.remoteAddress ?? '';
-          const isLocalhost = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
-          if (isLocalhost) {
+          const boundHost = config.apiHost || '127.0.0.1';
+          const boundToLoopback = boundHost === '127.0.0.1' || boundHost === '::1';
+          if (boundToLoopback) {
             appInjectToken = validTokens.values().next().value as string;
           }
         }

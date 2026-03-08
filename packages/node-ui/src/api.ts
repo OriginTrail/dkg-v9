@@ -240,7 +240,13 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
     const body = await readBody(req);
-    const { text, source } = JSON.parse(body);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON body' });
+    }
+    const { text, source } = parsed;
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return json(res, 400, { error: 'Missing or empty "text" field' });
     }

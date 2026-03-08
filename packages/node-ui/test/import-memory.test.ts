@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Readable } from 'node:stream';
+import { type ServerResponse, type IncomingMessage } from 'node:http';
 import { ChatMemoryManager } from '../src/chat-memory.js';
+import { handleNodeUIRequest } from '../src/api.js';
 
 function createMocks() {
   const mockQuery = vi.fn();
@@ -87,6 +90,39 @@ Last updated: 2026`;
   it('returns empty array for blank input', () => {
     expect(manager.parseMemoriesHeuristic('')).toHaveLength(0);
     expect(manager.parseMemoriesHeuristic('   \n  \n  ')).toHaveLength(0);
+  });
+
+  it('preserves leading numbers that are not list markers', () => {
+    const input = `- Born in 1990 in Berlin
+- Uses Node 22 for development
+- 3D printing is a hobby`;
+
+    const items = manager.parseMemoriesHeuristic(input);
+    expect(items[0].text).toBe('Born in 1990 in Berlin');
+    expect(items[1].text).toBe('Uses Node 22 for development');
+    expect(items[2].text).toBe('3D printing is a hobby');
+  });
+
+  it('filters out code-fence markers', () => {
+    const input = `\`\`\`
+- Prefers dark mode
+- Works at Acme Corp
+\`\`\``;
+
+    const items = manager.parseMemoriesHeuristic(input);
+    expect(items).toHaveLength(2);
+    expect(items[0].text).toBe('Prefers dark mode');
+    expect(items[1].text).toBe('Works at Acme Corp');
+  });
+
+  it('filters out code-fence markers with language tags', () => {
+    const input = `\`\`\`json
+- Likes TypeScript
+\`\`\``;
+
+    const items = manager.parseMemoriesHeuristic(input);
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe('Likes TypeScript');
   });
 });
 
@@ -391,6 +427,97 @@ describe('Import Memory — LLM-assisted parsing', () => {
     for (const call of mocks.mockWriteToWorkspace.mock.calls) {
       expect(call[0]).toBe('agent-memory');
       expect(call[2]).toEqual({ localOnly: true });
+    }
+  });
+});
+
+// ── API handler tests ────────────────────────────────────────────────────────
+
+function mockReq(method: string, path: string, body?: string): IncomingMessage {
+  const readable = new Readable();
+  readable.push(body ?? null);
+  readable.push(null);
+  Object.assign(readable, { method, url: path, headers: {} });
+  return readable as unknown as IncomingMessage;
+}
+
+function mockRes(): ServerResponse & { _status: number; _body: string } {
+  const res: any = {
+    _status: 0,
+    _body: '',
+    writeHead(status: number) { res._status = status; },
+    end(data?: string) { res._body = data ?? ''; },
+  };
+  return res;
+}
+
+function createMemoryManager() {
+  const mocks = createMocks();
+  mocks.mockQuery.mockResolvedValue({ bindings: [] });
+  return new ChatMemoryManager(mocks.tools, { apiKey: '' });
+}
+
+describe('POST /api/memory/import — route handler', () => {
+  it('returns 400 for malformed JSON body', async () => {
+    const req = mockReq('POST', '/api/memory/import', 'not json');
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Invalid JSON body' });
+  });
+
+  it('returns 400 for missing text field', async () => {
+    const req = mockReq('POST', '/api/memory/import', JSON.stringify({ source: 'claude' }));
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Missing or empty "text" field' });
+  });
+
+  it('returns 400 for empty text field', async () => {
+    const req = mockReq('POST', '/api/memory/import', JSON.stringify({ text: '   \n  ', source: 'claude' }));
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Missing or empty "text" field' });
+  });
+
+  it('normalizes unknown source to "other"', async () => {
+    const req = mockReq('POST', '/api/memory/import', JSON.stringify({ text: '- A memory item', source: 'unknown-ai' }));
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body.source).toBe('other');
+    expect(body.memoryCount).toBeGreaterThan(0);
+  });
+
+  it('accepts valid known sources', async () => {
+    for (const source of ['claude', 'chatgpt', 'gemini', 'other']) {
+      const req = mockReq('POST', '/api/memory/import', JSON.stringify({ text: '- Test memory', source }));
+      const res = mockRes();
+      const url = new URL('http://localhost/api/memory/import');
+
+      await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+      expect(res._status).toBe(200);
+      expect(JSON.parse(res._body).source).toBe(source);
     }
   });
 });

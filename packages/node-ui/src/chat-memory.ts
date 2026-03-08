@@ -711,8 +711,12 @@ export class ChatMemoryManager {
   parseMemoriesHeuristic(rawText: string): Array<{ text: string; category: string }> {
     const lines = rawText
       .split(/\n/)
-      .map(l => l.replace(/^[\s]*[-•*\d.)\]]+[\s]*/, '').trim())
-      .filter(l => l.length > 3 && !l.match(/^(here are|last updated|memories|---)/i));
+      .map(l => l.replace(/^\s*(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+      .filter(l =>
+        l.length > 3 &&
+        !l.match(/^(here are|last updated|memories|---)/i) &&
+        !l.match(/^```/),
+      );
     return lines.map(text => ({ text, category: 'fact' }));
   }
 

@@ -182,9 +182,10 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
   }, []);
 
   const handleClose = useCallback(() => {
+    if (importing) return;
     reset();
     onClose();
-  }, [onClose, reset]);
+  }, [onClose, reset, importing]);
 
   const handleImport = useCallback(async () => {
     if (!text.trim() || importing) return;
@@ -207,7 +208,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
       <div className="import-modal" style={result ? { maxWidth: 680 } : undefined} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <h3 className="serif" style={{ fontSize: 18, fontWeight: 700 }}>{result ? 'Import Complete' : 'Import Memories'}</h3>
-          <button onClick={handleClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18 }}>×</button>
+          <button onClick={handleClose} disabled={importing} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, opacity: importing ? 0.3 : 1 }}>×</button>
         </div>
 
         {result ? (

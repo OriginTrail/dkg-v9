@@ -980,11 +980,20 @@ function normalizeRepo(repo: string): string {
   return t;
 }
 
-async function checkForUpdate(
+export async function checkForUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<void> {
   try {
+    const cwd = process.cwd();
+
+    // Bail out if worktree has uncommitted changes
+    const status = execSync('git status --porcelain', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (status) {
+      log('Auto-update: skipping — worktree has uncommitted changes');
+      return;
+    }
+
     const commitFile = join(dkgDir(), '.current-commit');
 
     // Get current running commit
@@ -994,7 +1003,7 @@ async function checkForUpdate(
     } catch {
       // First run — record current commit
       try {
-        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: process.cwd() }).trim();
+        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd }).trim();
         await writeFile(commitFile, currentCommit);
       } catch {
         return;
@@ -1027,12 +1036,20 @@ async function checkForUpdate(
 
     log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
 
-    // Pull and rebuild
-    const cwd = process.cwd();
+    // Fetch and attempt fast-forward only merge
     try {
-      execSync(`git fetch origin ${branch} && git reset --hard origin/${branch}`, {
+      execSync(`git fetch origin ${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
+      execSync(`git merge --ff-only origin/${branch}`, {
+        cwd, encoding: 'utf-8', stdio: 'pipe',
+      });
+    } catch {
+      log('Auto-update: skipping — fast-forward merge not possible (history has diverged)');
+      return;
+    }
+
+    try {
       execSync('pnpm install --frozen-lockfile', {
         cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
       });
@@ -1040,14 +1057,7 @@ async function checkForUpdate(
         cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
       });
     } catch (err: any) {
-      log(`Auto-update: build failed, rolling back to ${currentCommit.slice(0, 8)}`);
-      try {
-        execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
-        execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-      } catch {
-        log('Auto-update: rollback also failed — manual intervention needed');
-      }
+      log(`Auto-update: build failed after merge — ${err.message}`);
       return;
     }
 

@@ -196,7 +196,6 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         id: p,
         name: p,
         description: `Default paranet: ${p}`,
-        revealOnChain: true,
       });
       log(`Ensured paranet: ${p}`);
     } catch (err) {

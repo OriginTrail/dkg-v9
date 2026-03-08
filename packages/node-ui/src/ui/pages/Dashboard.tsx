@@ -673,58 +673,54 @@ export function DashboardPage() {
         ))}
       </div>
 
-      {/* Network + right panel */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-        {/* Network viz */}
-        <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: '#0a0f1a', border: '1px solid var(--border)' }}>
-          <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 700 }}>{status?.networkName ?? 'DKG Network'}</span>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{peerCount != null ? `${peerCount} PEERS` : '… PEERS'}</span>
-          </div>
-          <DashboardNetworkViz agents={agentData?.agents ?? []} nodeName={status?.name ?? ''} />
+      {/* Network viz — full width */}
+      <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: '#0a0f1a', border: '1px solid var(--border)', marginBottom: 16 }}>
+        <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
+          <span style={{ fontSize: 12, fontWeight: 700 }}>{status?.networkName ?? 'DKG Network'}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{peerCount != null ? `${peerCount} PEERS` : '… PEERS'}</span>
         </div>
+        <DashboardNetworkViz agents={agentData?.agents ?? []} nodeName={status?.name ?? ''} />
+      </div>
 
-        {/* Paranets + quick actions */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div className="card" style={{ padding: '16px 18px', flex: 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
-              Paranets
-              {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
-            </div>
-            {displayParanets.map((p: any, i: number) => (
-              <div key={p.id ?? `fallback-${i}`} onClick={() => p.id && navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`)} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer', transition: 'border-color .15s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
-                    <span style={{ fontSize: 11, fontWeight: 600 }}>{p.name}</span>
-                  </div>
-                  <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-                </div>
-                <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 9, color: 'var(--text-muted)' }}>
-                  <span>{p.assets.toLocaleString()} assets</span>
-                  <span>{p.agents} agents</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="card" style={{ padding: '16px 18px' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Quick Actions</div>
-            {[
-              { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘' },
-              { label: 'Import Memories', desc: 'From Claude / ChatGPT', icon: '📥', onClick: () => setImportOpen(true) },
-              { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮' },
-            ].map(a => (
-              <button key={a.label} onClick={a.onClick} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', marginBottom: 4, textAlign: 'left' }}>
-                <span style={{ fontSize: 14 }}>{a.icon}</span>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>{a.label}</div>
-                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{a.desc}</div>
-                </div>
-              </button>
-            ))}
-          </div>
+      {/* Paranets — horizontal card grid */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+          Paranets
+          {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
         </div>
+        <div className="paranet-list">
+          {displayParanets.map((p: any, i: number) => (
+            <div key={p.id ?? `fallback-${i}`} className="paranet-card" onClick={() => p.id && navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
+                <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>{p.name}</h3>
+                <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', marginLeft: 'auto' }} />
+              </div>
+              <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 10, color: 'var(--text-muted)' }}>
+                <span>{p.assets.toLocaleString()} assets</span>
+                <span>{p.agents} agents</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Quick actions */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘' },
+          { label: 'Import Memories', desc: 'From Claude / ChatGPT', icon: '📥', onClick: () => setImportOpen(true) },
+          { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮' },
+        ].map(a => (
+          <button key={a.label} onClick={a.onClick} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', flex: 1, minWidth: 160, textAlign: 'left' }}>
+            <span style={{ fontSize: 16 }}>{a.icon}</span>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>{a.label}</div>
+              <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{a.desc}</div>
+            </div>
+          </button>
+        ))}
       </div>
 
     </div>

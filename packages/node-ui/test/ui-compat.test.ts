@@ -239,6 +239,12 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toContain('addEventListener');
     expect(apps).toMatch(/e\.data\.nonce.*===.*nonceRef/);
   });
+
+  it('prevents re-handshake after first successful token delivery', () => {
+    expect(apps).toContain('handshakeCompleteRef');
+    expect(apps).toMatch(/handshakeCompleteRef\.current\s*=\s*true/);
+    expect(apps).toMatch(/if\s*\(\s*handshakeCompleteRef\.current\s*\)\s*return/);
+  });
 });
 
 describe('iframe app hosting', () => {
@@ -255,17 +261,21 @@ describe('iframe app hosting', () => {
   });
 });
 
-describe('daemon.ts localhost token fallback', () => {
+describe('daemon.ts app token injection', () => {
   const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
 
-  it('checks server bind host, not req.socket.remoteAddress, for localhost detection', () => {
+  it('does not use req.socket.remoteAddress for localhost detection', () => {
     expect(daemon).not.toContain('req.socket.remoteAddress');
-    expect(daemon).toContain('config.apiHost');
-    expect(daemon).toMatch(/boundToLoopback/);
   });
 
-  it('only falls back to token for loopback-bound servers (127.0.0.1 or ::1)', () => {
-    expect(daemon).toMatch(/boundHost\s*===\s*'127\.0\.0\.1'\s*\|\|\s*boundHost\s*===\s*'::1'/);
+  it('does not fall back to injecting a token without verified Authorization', () => {
+    expect(daemon).not.toMatch(/boundToLoopback/);
+    expect(daemon).not.toMatch(/boundHost/);
+  });
+
+  it('only injects token when the request carries a verified bearer token', () => {
+    expect(daemon).toMatch(/extractBearerToken/);
+    expect(daemon).toMatch(/validTokens\.has\(reqToken\)/);
   });
 });
 

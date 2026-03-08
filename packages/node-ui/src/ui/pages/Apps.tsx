@@ -5,17 +5,19 @@ import React, { useEffect, useRef, useCallback } from 'react';
  * its standalone UI in an iframe. This avoids duplicating game code
  * and ensures the dashboard always shows the latest game UI.
  *
- * Token handoff uses a one-time nonce: on load, the parent sends a random
- * nonce to the iframe. The iframe echoes it back in its token request.
- * The parent delivers the token only when the nonce matches, and
- * invalidates the nonce immediately so a navigated-away iframe cannot
- * replay the handshake.
+ * Token handoff uses a one-time nonce: on first load the parent sends a
+ * random nonce to the iframe. The iframe echoes it back in its token
+ * request. The parent delivers the token only when the nonce matches,
+ * then marks the handshake complete. Subsequent iframe loads (e.g. from
+ * navigation to untrusted content) are refused — no new nonce is issued.
  */
 export function AppsPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const nonceRef = useRef<string | null>(null);
+  const handshakeCompleteRef = useRef(false);
 
   const sendNonce = useCallback(() => {
+    if (handshakeCompleteRef.current) return;
     if (!iframeRef.current?.contentWindow) return;
     const nonce = crypto.randomUUID();
     nonceRef.current = nonce;
@@ -37,6 +39,7 @@ export function AppsPage() {
             { type: 'dkg-token', token, apiOrigin: window.location.origin },
             '*',
           );
+          handshakeCompleteRef.current = true;
         }
       }
     };

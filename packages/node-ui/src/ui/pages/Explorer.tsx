@@ -7,8 +7,8 @@ import type { ViewConfig } from '@dkg/graph-viz';
 
 export function ExplorerPage() {
   return (
-    <div>
-      <h1 className="page-title">Knowledge Explorer</h1>
+    <div style={{ padding: '28px 32px', height: '100%', overflow: 'auto' }}>
+      <h1 className="page-title">Memory Explorer</h1>
       <div className="tab-group">
         <NavLink to="/explorer" end className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Graph</NavLink>
         <NavLink to="/explorer/sparql" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>SPARQL</NavLink>

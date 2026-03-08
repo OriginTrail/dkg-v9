@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc && pnpm build:ui",
     "build:api": "tsc",
-    "build:ui": "vite build",
+    "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "dev:ui": "vite",
     "test": "vitest run",
     "test:ui": "vitest run --config vitest.ui.config.ts",
@@ -31,6 +31,7 @@
     "uuid": "^9.0.0"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^22",

@@ -502,7 +502,17 @@ describe('Import Memory — LLM-assisted parsing', () => {
     expect(result.entityCount).toBe(1);
     expect(mocks.mockWriteToWorkspace).toHaveBeenCalledTimes(2);
 
+    const importQuads = mocks.mockWriteToWorkspace.mock.calls[0][1];
     const entityQuads = mocks.mockWriteToWorkspace.mock.calls[1][1];
+    expect(result.tripleCount).toBe(importQuads.length + entityQuads.length);
+
+    expect(result.quads.length).toBe(result.tripleCount);
+    const extractedQuad = result.quads.find(
+      (q: any) => q.subject === 'urn:dkg:entity:acme-corp' &&
+        q.object === 'http://schema.org/Organization',
+    );
+    expect(extractedQuad).toBeDefined();
+
     const orgType = entityQuads.find(
       (q: any) => q.subject === 'urn:dkg:entity:acme-corp' &&
         q.object === 'http://schema.org/Organization',

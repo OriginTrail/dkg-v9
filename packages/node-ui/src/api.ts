@@ -241,7 +241,7 @@ export async function handleNodeUIRequest(
   if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
     let body: string;
     try {
-      body = await readBody(req);
+      body = await readBody(req, IMPORT_MAX_BYTES);
     } catch (err) {
       if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
       throw err;
@@ -344,25 +344,27 @@ function json(res: ServerResponse, status: number, data: unknown): true {
   return true;
 }
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
-
-function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
+    let rejected = false;
     req.on('data', (c: Buffer) => {
+      if (rejected) return;
       totalBytes += c.length;
-      if (totalBytes > maxBytes) {
-        req.destroy();
+      if (maxBytes != null && totalBytes > maxBytes) {
+        rejected = true;
         reject(new PayloadTooLargeError());
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
     req.on('error', reject);
   });
 }
+
+const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
 class PayloadTooLargeError extends Error {
   constructor() { super('Payload too large'); }

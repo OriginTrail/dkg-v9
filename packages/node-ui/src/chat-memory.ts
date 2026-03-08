@@ -652,10 +652,15 @@ export class ChatMemoryManager {
     await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
 
     let entityCount = 0;
+    let extractionTripleCount = 0;
+    const allQuads = quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
     const warnings: string[] = [];
     if (llmEnabled) {
       try {
-        entityCount = await this.extractKnowledgeFromImport(batchUri, memories);
+        const extraction = await this.extractKnowledgeFromImport(batchUri, memories);
+        entityCount = extraction.entityCount;
+        extractionTripleCount = extraction.tripleCount;
+        allQuads.push(...extraction.quads);
       } catch (err: any) {
         const msg = err?.message ?? String(err);
         console.warn(`[ChatMemoryManager] Knowledge extraction failed for batch ${batchId}: ${msg}`);
@@ -667,9 +672,9 @@ export class ChatMemoryManager {
       batchId,
       source,
       memoryCount: memories.length,
-      tripleCount: quads.length,
+      tripleCount: quads.length + extractionTripleCount,
       entityCount,
-      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
+      quads: allQuads,
     };
     if (warnings.length > 0) result.warnings = warnings;
     return result;
@@ -737,7 +742,8 @@ export class ChatMemoryManager {
   private async extractKnowledgeFromImport(
     batchUri: string,
     memories: Array<{ text: string; category: string }>,
-  ): Promise<number> {
+  ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
+    const empty = { entityCount: 0, tripleCount: 0, quads: [] };
     const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
     const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
@@ -756,13 +762,13 @@ export class ChatMemoryManager {
       }),
     });
 
-    if (!res.ok) return 0;
+    if (!res.ok) return empty;
     const data = (await res.json()) as any;
     const output = data.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!output || output === 'NONE') return 0;
+    if (!output || output === 'NONE') return empty;
 
     const triples = this.parseNTriples(output);
-    if (triples.length === 0) return 0;
+    if (triples.length === 0) return empty;
 
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
     for (const t of triples) {
@@ -775,7 +781,11 @@ export class ChatMemoryManager {
       );
     }
     await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
-    return rootEntities.size;
+    return {
+      entityCount: rootEntities.size,
+      tripleCount: quads.length,
+      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
+    };
   }
 
   async enshrine(

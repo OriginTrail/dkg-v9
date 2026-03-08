@@ -244,6 +244,106 @@ describe('Workspace: enshrineFromWorkspace', () => {
   });
 });
 
+describe('Workspace: ownership persistence and reconstruction', () => {
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+  const wallet = ethers.Wallet.createRandom();
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  it('persists ownership quads to workspace_meta on writeToWorkspace', async () => {
+    const quads: Quad[] = [
+      q(ENTITY, 'http://schema.org/name', '"Test"'),
+    ];
+    await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: '12D3KooWCreator' });
+
+    const result = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['creator']).toContain('12D3KooWCreator');
+    }
+  });
+
+  it('reconstructs workspaceOwnedEntities from persisted ownership triples', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://schema.org/name', '"First"'),
+    ], { publisherPeerId: 'peerA' });
+
+    const entity2 = 'urn:test:entity:2';
+    await publisher.writeToWorkspace(PARANET, [
+      q(entity2, 'http://schema.org/name', '"Second"'),
+    ], { publisherPeerId: 'peerB' });
+
+    // Create a fresh publisher with a new empty map
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const freshOwned = new Map<string, Map<string, string>>();
+    const freshPublisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+      workspaceOwnedEntities: freshOwned,
+    });
+
+    const count = await freshPublisher.reconstructWorkspaceOwnership();
+    expect(count).toBe(2);
+    expect(freshOwned.get(PARANET)?.get(ENTITY)).toBe('peerA');
+    expect(freshOwned.get(PARANET)?.get(entity2)).toBe('peerB');
+  });
+
+  it('clears ownership quads on enshrineFromWorkspace with clearWorkspaceAfter', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://schema.org/name', '"Enshrine"'),
+    ], { publisherPeerId: 'peer1' });
+
+    await publisher.enshrineFromWorkspace(PARANET, 'all', { clearWorkspaceAfter: true });
+
+    const result = await store.query(
+      `ASK { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') {
+      expect(result.value).toBe(false);
+    }
+  });
+
+  it('does not create duplicate ownership quads on upsert by same creator', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://schema.org/name', '"First"'),
+    ], { publisherPeerId: 'peer1' });
+
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://schema.org/name', '"Updated"'),
+    ], { publisherPeerId: 'peer1' });
+
+    const result = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+    }
+  });
+});
+
 describe('WorkspaceHandler', () => {
   let store: OxigraphStore;
   let handler: WorkspaceHandler;

@@ -239,6 +239,13 @@ export class DKGAgent {
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
     });
+
+    const restored = await publisher.reconstructWorkspaceOwnership();
+    if (restored > 0) {
+      const log = new Logger('DKGAgent');
+      log.info(createOperationContext('init'), `Restored ${restored} workspace ownership entries from store`);
+    }
+
     const queryEngine = new DKGQueryEngine(store);
 
     return new DKGAgent(
@@ -840,6 +847,9 @@ export class DKGAgent {
           if (ownedSet) {
             for (const re of rootEntities) {
               ownedSet.delete(re);
+              await this.store.deleteByPattern({
+                graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
+              });
             }
           }
         }

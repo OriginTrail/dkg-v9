@@ -12,6 +12,7 @@ import {
   generateTentativeMetadata,
   generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
+  generateOwnershipQuads,
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
@@ -182,10 +183,15 @@ export class DKGPublisher implements Publisher {
     if (!this.workspaceOwnedEntities.has(paranetId)) {
       this.workspaceOwnedEntities.set(paranetId, new Map());
     }
+    const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
     for (const r of rootEntities) {
       if (!wsOwned.has(r)) {
         this.workspaceOwnedEntities.get(paranetId)!.set(r, options.publisherPeerId);
+        newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
       }
+    }
+    if (newOwnershipEntries.length > 0) {
+      await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
     }
 
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
@@ -252,10 +258,14 @@ export class DKGPublisher implements Publisher {
     });
 
     if (options?.clearWorkspaceAfter) {
+      const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
       const kaMap = autoPartition(quads);
       for (const rootEntity of kaMap.keys()) {
         await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
         await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
+        await this.store.deleteByPattern({
+          graph: wsMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
       }
     }
@@ -648,6 +658,41 @@ export class DKGPublisher implements Publisher {
    * Only deletes the entire operation subject when no rootEntity links remain,
    * preserving metadata for other roots written in the same operation.
    */
+  /**
+   * Reconstruct the in-memory workspaceOwnedEntities map from persisted
+   * ownership triples in workspace_meta graphs. Call on startup.
+   */
+  async reconstructWorkspaceOwnership(): Promise<number> {
+    const DKG = 'http://dkg.io/ontology/';
+    const paranets = await this.graphManager.listParanets();
+    let total = 0;
+    for (const pid of paranets) {
+      const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(pid);
+      const result = await this.store.query(
+        `SELECT ?entity ?creator WHERE { GRAPH <${wsMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+      );
+      if (result.type !== 'bindings' || result.bindings.length === 0) continue;
+      if (!this.workspaceOwnedEntities.has(pid)) {
+        this.workspaceOwnedEntities.set(pid, new Map());
+      }
+      const ownedMap = this.workspaceOwnedEntities.get(pid)!;
+      for (const row of result.bindings) {
+        const entity = row['entity'];
+        const creator = row['creator'];
+        if (entity && creator) {
+          const creatorStr = creator.startsWith('"')
+            ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+            : creator;
+          if (!ownedMap.has(entity)) {
+            ownedMap.set(entity, creatorStr);
+            total++;
+          }
+        }
+      }
+    }
+    return total;
+  }
+
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const DKG = 'http://dkg.io/ontology/';
     const result = await this.store.query(

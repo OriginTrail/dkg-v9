@@ -38,12 +38,13 @@ describe('DkgNodePlugin', () => {
 
     const toolNames = registeredTools.map(t => t.name);
     expect(toolNames).toContain('dkg_status');
+    expect(toolNames).toContain('dkg_list_paranets');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(registeredTools.length).toBe(6);
+    expect(registeredTools.length).toBe(7);
   });
 
   it('all tools have name, description, parameters, and execute', () => {

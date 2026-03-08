@@ -128,6 +128,14 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, _params) => this.handleStatus(),
       },
       {
+        name: 'dkg_list_paranets',
+        description:
+          'List all paranets this node knows about. Returns paranet IDs, names, subscription status, ' +
+          'and sync status. Use this to discover available paranets before publishing or querying.',
+        parameters: { type: 'object', properties: {}, required: [] },
+        execute: async (_toolCallId, _params) => this.handleListParanets(),
+      },
+      {
         name: 'dkg_publish',
         description:
           'Publish RDF triples (N-Quads format) to a DKG paranet. ' +
@@ -235,6 +243,16 @@ export class DkgNodePlugin {
           hasChainKey: !!this.config.chainConfig?.privateKey,
         },
       });
+    }
+  }
+
+  private async handleListParanets(): Promise<OpenClawToolResult> {
+    try {
+      await this.start();
+      const paranets = await this.agent!.listParanets();
+      return this.json({ paranets, count: paranets.length });
+    } catch (err: any) {
+      return this.error(err.message ?? 'Failed to list paranets');
     }
   }
 

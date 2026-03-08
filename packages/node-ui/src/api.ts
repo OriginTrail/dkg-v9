@@ -4,7 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
-import type { ChatMemoryManager } from './chat-memory.js';
+import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
@@ -243,11 +243,7 @@ export async function handleNodeUIRequest(
     try {
       body = await readBody(req, IMPORT_MAX_BYTES);
     } catch (err) {
-      if (err instanceof PayloadTooLargeError) {
-        const handled = json(res, 413, { error: 'Payload too large' });
-        req.destroy();
-        return handled;
-      }
+      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
       throw err;
     }
     let parsed: any;
@@ -263,8 +259,7 @@ export async function handleNodeUIRequest(
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return json(res, 400, { error: 'Missing or empty "text" field' });
     }
-    const validSources = ['claude', 'chatgpt', 'gemini', 'other'];
-    const importSource = validSources.includes(source) ? source : 'other';
+    const importSource = IMPORT_SOURCES.includes(source) ? source : 'other';
     try {
       const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
       return json(res, 200, result);

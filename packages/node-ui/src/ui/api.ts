@@ -137,6 +137,9 @@ export const fetchMemorySession = (sessionId: string) =>
 export const fetchMemoryStats = () =>
   get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
+export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+export type ImportSource = (typeof IMPORT_SOURCES)[number];
+
 export interface ImportMemoryQuad {
   subject: string;
   predicate: string;

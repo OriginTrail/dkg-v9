@@ -37,7 +37,8 @@ export interface EnshrineResult {
   tripleCount: number;
 }
 
-export type ImportSource = 'claude' | 'chatgpt' | 'gemini' | 'other';
+export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+export type ImportSource = (typeof IMPORT_SOURCES)[number];
 
 export interface ImportResultQuad {
   subject: string;
@@ -609,7 +610,7 @@ export class ChatMemoryManager {
     opts: { useLlm?: boolean } = {},
   ): Promise<ImportResult> {
     await this.ensureInitialized();
-    const batchId = crypto.randomUUID().slice(0, 12);
+    const batchId = crypto.randomUUID();
     const batchUri = `${MEMORY_NS}import:${batchId}`;
     const now = new Date().toISOString();
 
@@ -644,8 +645,7 @@ export class ChatMemoryManager {
     );
 
     for (const mem of memories) {
-      const memId = crypto.randomUUID().slice(0, 8);
-      const memUri = `${MEMORY_NS}item:${memId}`;
+      const memUri = `${MEMORY_NS}item:${crypto.randomUUID()}`;
       quads.push(
         { subject: memUri, predicate: RDF_TYPE, object: `${DKG_ONT}ImportedMemory`, graph: '' },
         { subject: memUri, predicate: `${SCHEMA}text`, object: JSON.stringify(mem.text), graph: '' },

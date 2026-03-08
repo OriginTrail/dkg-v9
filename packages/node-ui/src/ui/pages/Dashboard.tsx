@@ -1,20 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────
 
-type ImportSource = 'claude' | 'chatgpt' | 'gemini' | 'other';
+const SOURCE_LABELS: Record<ImportSource, { label: string; icon: string }> = {
+  claude: { label: 'Claude', icon: '🟣' },
+  chatgpt: { label: 'ChatGPT', icon: '🟢' },
+  gemini: { label: 'Gemini', icon: '🔵' },
+  other: { label: 'Other', icon: '⚪' },
+};
 
-const SOURCE_OPTIONS: { value: ImportSource; label: string; icon: string }[] = [
-  { value: 'claude', label: 'Claude', icon: '🟣' },
-  { value: 'chatgpt', label: 'ChatGPT', icon: '🟢' },
-  { value: 'gemini', label: 'Gemini', icon: '🔵' },
-  { value: 'other', label: 'Other', icon: '⚪' },
-];
+const SOURCE_OPTIONS = IMPORT_SOURCES.map(value => ({
+  value,
+  ...SOURCE_LABELS[value],
+}));
 
 type ResultTab = 'graph' | 'triples';
 

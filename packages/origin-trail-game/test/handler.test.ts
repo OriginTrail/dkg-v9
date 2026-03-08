@@ -2060,3 +2060,164 @@ describe('Turn proposal accepts non-deterministic state', () => {
     expect(appliedLogs).toHaveLength(0);
   });
 });
+
+describe('V5: Strategy pattern RDF quads', () => {
+  it('strategyPatternQuads generates correct RDF structure', async () => {
+    const { strategyPatternQuads, contextGraph } = await import('../src/dkg/rdf.js');
+    const stats = {
+      totalVotes: 5,
+      actionCounts: { advance: 3, syncMemory: 1, upgradeSkills: 1 } as Record<string, number>,
+      favoriteAction: 'advance',
+      turnsSurvived: 4,
+    };
+    const quads = strategyPatternQuads('origin-trail-game', 'swarm-abc', 'peer-1', stats);
+
+    const expectedGraph = contextGraph('origin-trail-game', 'swarm-abc');
+    expect(quads.every(q => q.graph === expectedGraph)).toBe(true);
+
+    const subject = quads[0].subject;
+    expect(subject).toContain('strategy/swarm-abc/peer-1');
+
+    expect(quads.find(q => q.predicate.includes('rdf-syntax-ns#type'))?.object).toContain('StrategyPattern');
+    expect(quads.find(q => q.predicate.includes('player'))?.object).toContain('player/peer-1');
+    expect(quads.find(q => q.predicate.includes('swarm') && !q.predicate.includes('swarmId'))?.object).toContain('swarm/swarm-abc');
+    expect(quads.find(q => q.predicate.includes('totalVotes'))?.object).toContain('5');
+    expect(quads.find(q => q.predicate.includes('favoriteAction'))?.object).toContain('advance');
+    expect(quads.find(q => q.predicate.includes('turnsSurvived'))?.object).toContain('4');
+
+    expect(quads.find(q => q.predicate.includes('actionCount_advance'))?.object).toContain('3');
+    expect(quads.find(q => q.predicate.includes('actionCount_syncMemory'))?.object).toContain('1');
+    expect(quads.find(q => q.predicate.includes('actionCount_upgradeSkills'))?.object).toContain('1');
+
+    // 6 base triples + 3 actionCount triples
+    expect(quads.length).toBe(9);
+  });
+
+  it('strategyPatternQuads handles empty actionCounts', async () => {
+    const { strategyPatternQuads } = await import('../src/dkg/rdf.js');
+    const stats = {
+      totalVotes: 0,
+      actionCounts: {} as Record<string, number>,
+      favoriteAction: 'none',
+      turnsSurvived: 0,
+    };
+    const quads = strategyPatternQuads('origin-trail-game', 'swarm-x', 'peer-x', stats);
+    expect(quads.length).toBe(6);
+  });
+});
+
+describe('V5: Strategy computation from turn history', () => {
+  it('computePlayerStrategies aggregates voting history correctly', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const leaderPeerId = 'strat-leader';
+    const p2 = 'strat-p2';
+    const p3 = 'strat-p3';
+    const agent = makeMockAgent(leaderPeerId);
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'strat-test' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'StratSwarm');
+    const handlers = agent._messageHandlers.get('dkg/paranet/strat-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
+      handle('dkg/paranet/strat-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Run turns using only leader vote + forceResolve (avoids auto-proposal quorum issues)
+    for (let turn = 0; turn < 3; turn++) {
+      if (swarm.status !== 'traveling') break;
+
+      // Leader casts vote; remote votes come via gossip
+      await coordinator.castVote(swarm.id, 'advance');
+      handle('dkg/paranet/strat-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: p2, timestamp: Date.now(), turn: swarm.currentTurn, action: 'syncMemory',
+      }), p2);
+      handle('dkg/paranet/strat-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: p3, timestamp: Date.now(), turn: swarm.currentTurn, action: 'advance',
+      }), p3);
+      await new Promise(r => setTimeout(r, 50));
+
+      if (swarm.status !== 'traveling') break;
+      // Force-resolve bypasses quorum requirement
+      await coordinator.forceResolveTurn(swarm.id);
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    expect(swarm.turnHistory.length).toBeGreaterThanOrEqual(1);
+    const strategies = coordinator.computePlayerStrategies(swarm);
+    expect(strategies.length).toBe(3);
+
+    const leaderStrat = strategies.find(s => s.peerId === leaderPeerId);
+    expect(leaderStrat).toBeDefined();
+    expect(leaderStrat!.stats.totalVotes).toBeGreaterThanOrEqual(1);
+    expect(leaderStrat!.stats.favoriteAction).toBe('advance');
+    expect(leaderStrat!.stats.turnsSurvived).toBeGreaterThanOrEqual(1);
+
+    const p2Strat = strategies.find(s => s.peerId === p2);
+    expect(p2Strat).toBeDefined();
+    expect(p2Strat!.stats.favoriteAction).toBe('syncMemory');
+  });
+
+  it('getPlayerStrategies returns null for unknown swarm', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const agent = makeMockAgent('strat-null-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'strat-null' });
+    expect(coordinator.getPlayerStrategies('nonexistent')).toBeNull();
+  });
+});
+
+describe('V5: Strategy patterns published when game finishes', () => {
+  it('strategy patterns are published to context graph when game ends via forceResolveTurn', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const leaderPeerId = 'finish-leader';
+    const p2 = 'finish-p2';
+    const p3 = 'finish-p3';
+    const logs: string[] = [];
+    const agent = makeMockAgent(leaderPeerId);
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'finish-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'FinishSwarm');
+    const handlers = agent._messageHandlers.get('dkg/paranet/finish-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
+      handle('dkg/paranet/finish-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Force-resolve turns until game ends — only leader votes + forceResolve
+    let maxTurns = 300;
+    while (swarm.status === 'traveling' && maxTurns-- > 0) {
+      await coordinator.castVote(swarm.id, 'advance');
+      await new Promise(r => setTimeout(r, 5));
+      if (swarm.status !== 'traveling') break;
+      await coordinator.forceResolveTurn(swarm.id);
+      await new Promise(r => setTimeout(r, 5));
+    }
+
+    expect(swarm.status).toBe('finished');
+    const stratLogs = logs.filter(l => l.includes('strategy patterns'));
+    expect(stratLogs.length).toBeGreaterThanOrEqual(1);
+
+    const allPublished = agent._published.flat();
+    const strategyQuads = allPublished.filter((q: any) => q.predicate?.includes('type') && q.object?.includes('StrategyPattern'));
+    expect(strategyQuads.length).toBe(3);
+  }, 60_000);
+});

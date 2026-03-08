@@ -709,6 +709,10 @@ export class OriginTrailGameCoordinator {
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
       }
 
+      if (swarm.status === 'finished') {
+        await this.publishStrategyPatterns(swarm);
+      }
+
       const resolvedMsg: proto.TurnResolvedMsg = {
         app: proto.APP_ID,
         type: 'turn:resolved',
@@ -839,6 +843,10 @@ export class OriginTrailGameCoordinator {
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
+    }
+
+    if (swarm.status === 'finished') {
+      await this.publishStrategyPatterns(swarm);
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -1316,6 +1324,67 @@ export class OriginTrailGameCoordinator {
     })));
     await this.recordWorkspaceLineage(this.paranetId, entries);
     this.log(`Recorded ${entries.length} failed lineage entries`);
+  }
+
+  // ── Strategy pattern analysis ────────────────────────────────────
+
+  computePlayerStrategies(swarm: SwarmState): Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> {
+    const playerStats = new Map<string, { totalVotes: number; actionCounts: Record<string, number> }>();
+
+    for (const turn of swarm.turnHistory) {
+      for (const vote of turn.votes) {
+        let entry = playerStats.get(vote.peerId);
+        if (!entry) {
+          entry = { totalVotes: 0, actionCounts: {} };
+          playerStats.set(vote.peerId, entry);
+        }
+        entry.totalVotes++;
+        entry.actionCounts[vote.action] = (entry.actionCounts[vote.action] ?? 0) + 1;
+      }
+    }
+
+    const results: Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> = [];
+    for (const player of swarm.players) {
+      const entry = playerStats.get(player.peerId) ?? { totalVotes: 0, actionCounts: {} };
+      const favoriteAction = Object.entries(entry.actionCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'none';
+      const partyMember = swarm.gameState?.party.find(m => m.name === player.displayName);
+      const turnsSurvived = partyMember && !partyMember.alive
+        ? this.findDeathTurn(swarm, player.displayName)
+        : swarm.turnHistory.length;
+      results.push({
+        peerId: player.peerId,
+        stats: { totalVotes: entry.totalVotes, actionCounts: entry.actionCounts, favoriteAction, turnsSurvived },
+      });
+    }
+    return results;
+  }
+
+  private findDeathTurn(swarm: SwarmState, displayName: string): number {
+    for (const turn of swarm.turnHistory) {
+      if (turn.deaths.some(d => d.name === displayName)) return turn.turn;
+    }
+    return swarm.turnHistory.length;
+  }
+
+  getPlayerStrategies(swarmId: string): Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> | null {
+    const swarm = this.swarms.get(swarmId);
+    if (!swarm) return null;
+    return this.computePlayerStrategies(swarm);
+  }
+
+  private async publishStrategyPatterns(swarm: SwarmState): Promise<void> {
+    const strategies = this.computePlayerStrategies(swarm);
+    const allQuads = strategies.flatMap(s =>
+      rdf.strategyPatternQuads(this.paranetId, swarm.id, s.peerId, s.stats),
+    );
+    if (allQuads.length === 0) return;
+    try {
+      await this.agent.publish(this.paranetId, allQuads);
+      this.log(`Published ${strategies.length} strategy patterns for ${swarm.id}`);
+    } catch (err: any) {
+      this.log(`Failed to publish strategy patterns for ${swarm.id}: ${err.message}`);
+    }
   }
 
   // ── Utilities ─────────────────────────────────────────────────────

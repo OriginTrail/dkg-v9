@@ -432,10 +432,14 @@ export class OriginTrailGameCoordinator {
     const gameStateJson = JSON.stringify(newGameState);
     const now = Date.now();
 
-    await this.agent.writeToWorkspace(
-      this.paranetId,
-      rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
-    );
+    try {
+      await this.agent.writeToWorkspace(
+        this.paranetId,
+        rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
+      );
+    } catch (err) {
+      this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     swarm.gameState = newGameState;
     swarm.status = 'traveling';
@@ -915,6 +919,8 @@ export class OriginTrailGameCoordinator {
   private async onRemoteExpeditionLaunched(msg: proto.ExpeditionLaunchedMsg): Promise<void> {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
+    if (msg.peerId !== swarm.leaderPeerId) return;
+    if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
     swarm.status = 'traveling';
     swarm.currentTurn = 1;

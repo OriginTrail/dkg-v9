@@ -402,9 +402,6 @@ describe('Graph-based lobby sync', () => {
     let queryCount = 0;
     syncAgent.query = async (sparql: string) => {
       queryCount++;
-      if (sparql.includes('Player')) {
-        return { bindings: [{ name: '"GraphPlayer"', peerId: '"sync-peer"', registeredAt: '"2026-01-01"' }] };
-      }
       if (sparql.includes('AgentSwarm')) {
         return {
           bindings: [{
@@ -415,6 +412,9 @@ describe('Graph-based lobby sync', () => {
             createdAt: '"1700000000000"',
           }],
         };
+      }
+      if (sparql.includes('a <') && sparql.includes('Player')) {
+        return { bindings: [{ name: '"GraphPlayer"', peerId: '"sync-peer"', registeredAt: '"2026-01-01"' }] };
       }
       if (sparql.includes('displayName')) {
         return {
@@ -613,5 +613,124 @@ describe('Turn proposal accepts non-deterministic state', () => {
     // Should be rejected: local tally says 'rest' but proposal says 'advance'
     const actionMismatchLogs = logs.filter(l => l.includes('action mismatch'));
     expect(actionMismatchLogs).toHaveLength(1);
+  });
+
+  it('leader force-resolved proposal bypasses tally validation (no action mismatch rejection)', async () => {
+    const leaderPeerId = 'leader-force-1';
+    const followerPeerId = 'follower-force-1';
+
+    const logs: string[] = [];
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test' }, (msg) => logs.push(msg));
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/force-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/force-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-force',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'ForceTest', playerName: 'Leader', maxPlayers: 5,
+    }), leaderPeerId);
+
+    handle('dkg/paranet/force-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+
+    handle('dkg/paranet/force-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-force',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Follower votes 'rest', but leader force-resolves with 'advance'.
+    // Without the fix, the follower's local tally ('rest') would cause rejection.
+    handle('dkg/paranet/force-test/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-force',
+      peerId: followerPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const result = engine.executeAction(gameState, { type: 'advance' });
+    const stateJson = JSON.stringify(result.newState);
+    const { createHash } = await import('node:crypto');
+    const hash = createHash('sha256').update(`swarm-force:1:${stateJson}`).digest('hex');
+
+    handle('dkg/paranet/force-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-force',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
+      resultMessage: result.message, resolution: 'force-resolved',
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const mismatchLogs = logs.filter(l => l.includes('action mismatch'));
+    expect(mismatchLogs).toHaveLength(0);
+
+    const appliedLogs = logs.filter(l => l.includes('Applied force-resolved'));
+    expect(appliedLogs).toHaveLength(1);
+  });
+
+  it('non-leader force-resolved proposal does NOT bypass quorum', async () => {
+    const leaderPeerId = 'leader-force-2';
+    const nonLeaderPeerId = 'nonleader-force-2';
+
+    const logs: string[] = [];
+    const followerAgent = makeMockAgent('observer-force-2');
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test2' }, (msg) => logs.push(msg));
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/force-test2/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/force-test2/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-force2',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'ForceTest2', playerName: 'Leader', maxPlayers: 5,
+    }), leaderPeerId);
+
+    handle('dkg/paranet/force-test2/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force2',
+      peerId: nonLeaderPeerId, timestamp: Date.now(), playerName: 'NonLeader',
+    }), nonLeaderPeerId);
+
+    handle('dkg/paranet/force-test2/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force2',
+      peerId: 'observer-force-2', timestamp: Date.now(), playerName: 'Observer',
+    }), 'observer-force-2');
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'NonLeader', 'Observer'], leaderPeerId);
+
+    handle('dkg/paranet/force-test2/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-force2',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const result = engine.executeAction(gameState, { type: 'advance' });
+    const stateJson = JSON.stringify(result.newState);
+    const { createHash } = await import('node:crypto');
+    const hash = createHash('sha256').update(`swarm-force2:1:${stateJson}`).digest('hex');
+
+    // Non-leader sends force-resolved — should NOT be immediately applied
+    handle('dkg/paranet/force-test2/app', encode({
+      app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-force2',
+      peerId: nonLeaderPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
+      resultMessage: result.message, resolution: 'force-resolved',
+    }), nonLeaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const appliedLogs = logs.filter(l => l.includes('Applied force-resolved'));
+    expect(appliedLogs).toHaveLength(0);
   });
 });

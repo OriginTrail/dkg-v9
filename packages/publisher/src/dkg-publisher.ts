@@ -240,7 +240,12 @@ export class DKGPublisher implements Publisher {
           .filter((r) => isSafeIri(r)),
       )];
       if (roots.length === 0) {
-        throw new Error(`No quads in workspace for paranet ${paranetId} matching selection`);
+        const hadInput = selection.rootEntities.length > 0;
+        throw new Error(
+          hadInput
+            ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
+            : `No rootEntities provided for paranet ${paranetId}`,
+        );
       }
       const values = roots.map((r) => `<${r}>`).join(' ');
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE {

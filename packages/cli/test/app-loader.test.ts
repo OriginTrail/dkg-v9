@@ -147,6 +147,31 @@ describe('app-loader', () => {
       expect(res.body).toContain('App UI');
       expect(res.body).not.toContain('__DKG_TOKEN__');
     });
+
+    it('token-injected HTML omits Access-Control-Allow-Origin to prevent cross-origin exfiltration', async () => {
+      const tokenServer = createServer(async (req, res) => {
+        const url = new URL(req.url!, `http://${req.headers.host}`);
+        const handled = await handleAppRequest(req, res, url, apps, 'secret-token');
+        if (!handled) { res.writeHead(404); res.end('not handled'); }
+      });
+      await new Promise<void>((resolve) => tokenServer.listen(0, '127.0.0.1', resolve));
+      try {
+        const port = (tokenServer.address() as any).port;
+        const res = await httpGetPortFull(port, '/apps/test-app/');
+        expect(res.status).toBe(200);
+        expect(res.body).toContain('__DKG_TOKEN__');
+        expect(res.headers['access-control-allow-origin']).toBeUndefined();
+      } finally {
+        await new Promise<void>(r => tokenServer.close(() => r()));
+      }
+    });
+
+    it('non-token HTML still has Access-Control-Allow-Origin: *', async () => {
+      const res = await httpGetPortFull((server.address() as any).port, '/apps/test-app/');
+      expect(res.status).toBe(200);
+      expect(res.body).not.toContain('__DKG_TOKEN__');
+      expect(res.headers['access-control-allow-origin']).toBe('*');
+    });
   });
 
   describe('/api/apps staticUrl derived from request Host header', () => {

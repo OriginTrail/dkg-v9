@@ -4,7 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
-import type { ChatMemoryManager } from './chat-memory.js';
+import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
 import { ChatPersistenceQueue, type TurnPersistenceJobInput } from './chat-persistence-queue.js';
 
@@ -297,7 +297,8 @@ export async function handleNodeUIRequest(
     }
     const message = typeof payload.message === 'string' ? payload.message.trim() : '';
     const rawSessionId = payload.sessionId;
-    const streamRequested = payload.stream === true || (req.headers.accept ?? '').includes('text/event-stream');
+    const acceptHeader = Array.isArray(req.headers.accept) ? req.headers.accept.join(', ') : (req.headers.accept ?? '');
+    const streamRequested = payload.stream === true || acceptHeader.includes('text/event-stream');
     if (!message) return json(res, 400, { error: 'Missing "message"' });
     const providedSessionId = rawSessionId === undefined ? null : normalizeSessionId(rawSessionId);
     if (rawSessionId !== undefined && !providedSessionId) {
@@ -491,6 +492,37 @@ export async function handleNodeUIRequest(
     }
   }
 
+  if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
+    let body: string;
+    try {
+      body = await readBody(req, IMPORT_MAX_BYTES);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
+      throw err;
+    }
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON body' });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return json(res, 400, { error: 'Request body must be a JSON object' });
+    }
+    const { text, source, useLlm } = parsed;
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return json(res, 400, { error: 'Missing or empty "text" field' });
+    }
+    const importSource = IMPORT_SOURCES.includes(source) ? source : 'other';
+    try {
+      const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
+      return json(res, 200, result);
+    } catch (err: any) {
+      console.error('[node-ui] Import memories failed:', err);
+      return json(res, 500, { error: 'Failed to import memories' });
+    }
+  }
+
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
     try {
       const stats = await memoryManager.getStats();
@@ -602,11 +634,29 @@ function json(res: ServerResponse, status: number, data: unknown): true {
   return true;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    let totalBytes = 0;
+    let rejected = false;
+    req.on('data', (c: Buffer) => {
+      if (rejected) return;
+      totalBytes += c.length;
+      if (maxBytes != null && totalBytes > maxBytes) {
+        rejected = true;
+        reject(new PayloadTooLargeError());
+        req.resume();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
     req.on('error', reject);
   });
+}
+
+const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+
+class PayloadTooLargeError extends Error {
+  constructor() { super('Payload too large'); }
 }

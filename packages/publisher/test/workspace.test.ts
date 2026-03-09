@@ -233,14 +233,18 @@ describe('Workspace: enshrineFromWorkspace', () => {
   });
 
   it('escapes backslash and double-quote in rootEntity filter (SPARQL injection prevention)', async () => {
-    // rootEntity containing \" must not break SPARQL query construction
     const entityWithSpecialChars = 'urn:test:entity:with\\"backslash';
     await expect(
       publisher.enshrineFromWorkspace(PARANET, {
         rootEntities: [entityWithSpecialChars],
       }),
-    ).rejects.toThrow(/No quads in workspace/);
-    // If escaping were wrong, we would get a SPARQL parse error instead
+    ).rejects.toThrow(/No valid rootEntities provided/);
+  });
+
+  it('throws distinct error for empty rootEntities array', async () => {
+    await expect(
+      publisher.enshrineFromWorkspace(PARANET, { rootEntities: [] }),
+    ).rejects.toThrow(/No rootEntities provided/);
   });
 });
 

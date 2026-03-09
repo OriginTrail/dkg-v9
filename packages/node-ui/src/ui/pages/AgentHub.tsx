@@ -502,7 +502,7 @@ function PeerChatView() {
     setSending(true);
     setPeerMessages(prev => [...prev, { ts: Date.now(), direction: 'out', peer: selectedPeer.peerId, text }]);
     try {
-      await sendPeerMessage(selectedPeer.name || selectedPeer.peerId, text);
+      await sendPeerMessage(selectedPeer.peerId, text);
     } catch (err: any) {
       setPeerMessages(prev => [...prev, { ts: Date.now(), direction: 'in', peer: 'system', text: `Failed to deliver: ${err.message}` }]);
     } finally {

@@ -35,8 +35,12 @@ export class ChainEventPoller {
   private readonly onParanetCreated?: OnParanetCreated;
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
+  private headKnown = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+
+  /** Max blocks to scan per poll — stays within typical RPC range limits. */
+  private static readonly MAX_RANGE = 9_000;
 
   constructor(config: ChainEventPollerConfig) {
     this.chain = config.chain;
@@ -81,21 +85,43 @@ export class ChainEventPoller {
 
     const ctx = createOperationContext('publish');
 
+    // Resolve the actual chain head so we can bound the scan precisely.
+    // Without a known head we cannot safely advance the cursor.
+    let head: number | undefined;
+    if (this.chain.getBlockNumber) {
+      try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
+    }
+
+    // On first successful head fetch, seed cursor near the tip — but only
+    // when there are no pending publishes whose confirmations we might skip.
+    // Full-history paranet discovery is handled by discoverParanetsFromChain().
+    if (head != null && !this.headKnown) {
+      this.headKnown = true;
+      if (this.lastBlock === 0 && !hasPending) {
+        this.lastBlock = Math.max(0, head - 500);
+        this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
+      }
+    }
+
     const eventTypes = ['KnowledgeBatchCreated'];
     if (watchParanets) eventTypes.push('ParanetCreated');
 
+    const fromBlock = this.lastBlock + 1;
+    const upperBound = head != null
+      ? Math.min(fromBlock + ChainEventPoller.MAX_RANGE - 1, head)
+      : fromBlock + ChainEventPoller.MAX_RANGE - 1;
+
+    if (fromBlock > upperBound) return;
+
     const filter: EventFilter = {
       eventTypes,
-      fromBlock: this.lastBlock + 1,
+      fromBlock,
+      toBlock: upperBound,
     };
 
-    let maxBlock = this.lastBlock;
-
+    let maxEventBlock = this.lastBlock;
     for await (const event of this.chain.listenForEvents(filter)) {
-      if (event.blockNumber > maxBlock) {
-        maxBlock = event.blockNumber;
-      }
-
+      if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
       if (event.type === 'KnowledgeBatchCreated') {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'ParanetCreated') {
@@ -103,9 +129,11 @@ export class ChainEventPoller {
       }
     }
 
-    if (maxBlock > this.lastBlock) {
-      this.lastBlock = maxBlock;
-    }
+    // Always advance cursor to upperBound. When head is known, upperBound
+    // is capped to it. When head is unknown, upperBound is an estimate — but
+    // the RPC successfully returned results (or empty) for this range, so
+    // those blocks have been scanned and we must progress past them.
+    this.lastBlock = upperBound;
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {

@@ -117,14 +117,17 @@ export class ChatPersistenceQueue {
         queued_at: now,
         updated_at: now,
       });
-    } catch {
-      // Idempotent enqueue under races: if another writer inserted first, use that row.
-      const raced = this.db.getChatPersistenceJob(job.turnId);
-      if (raced) {
-        if (raced.status === 'pending') this.kick(0);
-        return this.rowToEvent(raced);
+    } catch (err: any) {
+      const msg = String(err?.message ?? err ?? '').toLowerCase();
+      const isConstraintViolation = msg.includes('unique') || msg.includes('constraint') || msg.includes('duplicate');
+      if (isConstraintViolation) {
+        const raced = this.db.getChatPersistenceJob(job.turnId);
+        if (raced) {
+          if (raced.status === 'pending') this.kick(0);
+          return this.rowToEvent(raced);
+        }
       }
-      throw new Error(`Failed to create persistence job for turn ${job.turnId}`);
+      throw err;
     }
 
     const created = this.db.getChatPersistenceJob(job.turnId);

@@ -250,8 +250,9 @@ export class WebGL3DRenderer implements RendererBackend {
     }
 
     this._currentNodes = newNodes;
+    const freshCache = new Map<string, { x?: number; y?: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null }>();
     for (const [id, node] of newNodes) {
-      this._positionCache.set(id, {
+      freshCache.set(id, {
         x: node.x,
         y: node.y,
         vx: node.vx,
@@ -260,6 +261,7 @@ export class WebGL3DRenderer implements RendererBackend {
         fy: typeof node.fy === 'number' ? node.fy : undefined,
       });
     }
+    this._positionCache = freshCache;
     this._labelSprites.clear();
 
     this._graph.graphData({

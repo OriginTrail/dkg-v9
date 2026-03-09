@@ -142,6 +142,25 @@ describe('ChatPersistenceQueue', () => {
     expect(health.failed).toBeGreaterThanOrEqual(1);
   });
 
+  it('propagates non-constraint DB errors from enqueue', () => {
+    const memory = {
+      storeChatExchange: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatMemoryManager;
+    queue = new ChatPersistenceQueue(db, memory, { maxAttempts: 3, retryBaseMs: 250, retryMaxMs: 250 });
+
+    const origInsert = db.insertChatPersistenceJob.bind(db);
+    vi.spyOn(db, 'insertChatPersistenceJob').mockImplementation(() => {
+      throw new Error('disk I/O error');
+    });
+
+    expect(() => queue!.enqueue({
+      turnId: 'turn-io-err',
+      sessionId: 'session-io-err',
+      userMessage: 'boom',
+      assistantReply: 'crash',
+    })).toThrow('disk I/O error');
+  });
+
   it('treats duplicate enqueue for the same turn as idempotent', async () => {
     const memory = {
       storeChatExchange: vi.fn().mockResolvedValue(undefined),

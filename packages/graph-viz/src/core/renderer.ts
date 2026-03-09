@@ -338,8 +338,9 @@ export class Canvas2DRenderer implements RendererBackend {
 
     this._currentNodes = newNodes;
     this._currentLinks = newLinks;
+    const freshCache = new Map<string, { x?: number; y?: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null }>();
     for (const [id, node] of newNodes) {
-      this._positionCache.set(id, {
+      freshCache.set(id, {
         x: node.x,
         y: node.y,
         vx: node.vx,
@@ -348,6 +349,7 @@ export class Canvas2DRenderer implements RendererBackend {
         fy: typeof node.fy === 'number' ? node.fy : undefined,
       });
     }
+    this._positionCache = freshCache;
 
     // Sort nodes so featured/high-risk nodes are last (painted on top)
     const sortedNodes = [...newNodes.values()].sort((a, b) => {

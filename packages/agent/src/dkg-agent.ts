@@ -137,6 +137,7 @@ export class DKGAgent {
   private started = false;
   private readonly subscribedParanets = new Map<string, ParanetSub>();
   private readonly gossipRegistered = new Set<string>();
+  private readonly seenOnChainIds = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
 
   private constructor(
@@ -316,18 +317,15 @@ export class DKGAgent {
         onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 
-          // Auto-subscribe if not already known
-          const alreadyKnown = [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
+          // Track the hash for dedup but don't pollute subscribedParanets.
+          // Gossip topics are keyed by cleartext name, not the on-chain hash.
+          // The paranet will be fully subscribed once ontology sync or
+          // discoverParanetsFromChain resolves the cleartext name.
+          const alreadyKnown = this.seenOnChainIds.has(paranetId)
+            || [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
           if (!alreadyKnown) {
-            const id = paranetId;
-            this.subscribedParanets.set(id, {
-              name: `chain:${paranetId.slice(0, 12)}`,
-              subscribed: true,
-              synced: false,
-              onChainId: paranetId,
-            });
-            this.subscribeToParanet(id);
-            this.log.info(ctx, `Auto-subscribed to new on-chain paranet ${paranetId.slice(0, 16)}…`);
+            this.seenOnChainIds.add(paranetId);
+            this.log.info(ctx, `Noted on-chain paranet ${paranetId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
           }
         },
       });

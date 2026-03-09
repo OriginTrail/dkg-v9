@@ -155,6 +155,20 @@ describe('dashboard uses runtime data', () => {
     expect(dashboard).toContain('agentCount');
   });
 
+  it('card is labeled Knowledge Collections, not Knowledge Assets', () => {
+    expect(dashboard).toContain("'Knowledge Collections'");
+    expect(dashboard).not.toMatch(/['"]Knowledge Assets['"]/);
+  });
+
+  it('KC breakdown only renders when both confirmed and tentative are present', () => {
+    expect(dashboard).toMatch(/confirmedKCs\s*!=\s*null\s*&&\s*tentativeKCs\s*!=\s*null/);
+  });
+
+  it('falls back to total_kcs, not total_triples, for KC count', () => {
+    expect(dashboard).toMatch(/total_kcs/);
+    expect(dashboard).not.toMatch(/total_triples/);
+  });
+
   it('agentCount preserves zero (does not use || null)', () => {
     expect(dashboard).not.toMatch(/agents.*\)\.length\s*\|\|\s*null/);
     expect(dashboard).toMatch(/agentData\?\.agents\s*!=\s*null/);

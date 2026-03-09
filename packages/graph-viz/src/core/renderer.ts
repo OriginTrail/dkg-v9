@@ -242,12 +242,16 @@ export class Canvas2DRenderer implements RendererBackend {
   ): void {
     if (!this._graph) this.init();
 
-    // Reset auto-fit when the graph topology changes (node IDs + edge pairs)
-    const sortedEdgeKeys = [...edges.values()]
-      .map(e => `${e.source}->${e.target}`)
-      .sort()
-      .join(',');
-    const topoKey = `${[...nodes.keys()].sort().join(',')}|${sortedEdgeKeys}`;
+    // Reset auto-fit when graph topology changes.
+    // Additive hash is O(N+E) with no sort or string allocation.
+    let topoHash = (nodes.size << 16) ^ edges.size;
+    for (const id of nodes.keys()) {
+      topoHash = (topoHash + simpleHash(id)) | 0;
+    }
+    for (const e of edges.values()) {
+      topoHash = (topoHash + simpleHash(e.source) * 31 + simpleHash(e.target)) | 0;
+    }
+    const topoKey = String(topoHash);
     if (topoKey !== this._lastTopologyKey) {
       this._lastTopologyKey = topoKey;
       this._initialFitDone = false;
@@ -564,9 +568,19 @@ export class Canvas2DRenderer implements RendererBackend {
     this._continuousSimulation = needsContinuousRender;
 
     if (needsContinuousRender) {
-      // Prevent the simulation from ever stopping on its own
       this._graph.cooldownTicks(Infinity);
       this._setAlphaTarget(config.driftAlpha ?? 0.008);
+
+      // render() runs before applyAnimation(), so the fallback in render() may
+      // not fire when _continuousSimulation wasn't set yet. Trigger here too.
+      if (!this._initialFitDone) {
+        setTimeout(() => {
+          if (this._graph && !this._initialFitDone) {
+            this._initialFitDone = true;
+            this._graph.zoomToFit(400, 40);
+          }
+        }, 300);
+      }
     } else {
       this._graph.cooldownTicks(120);
       this._setAlphaTarget(0);

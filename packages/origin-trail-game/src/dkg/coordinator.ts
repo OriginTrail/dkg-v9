@@ -63,6 +63,7 @@ export interface TurnProposal {
   newStateJson: string;
   resultMessage: string;
   approvals: Set<string>;
+  approvalTimestamps: Map<string, number>;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
   deaths: Array<{ name: string; cause: string }>;
@@ -600,6 +601,7 @@ export class OriginTrailGameCoordinator {
       newStateJson,
       resultMessage: result.message,
       approvals: new Set([this.myPeerId]),
+      approvalTimestamps: new Map([[this.myPeerId, Date.now()]]),
       votes,
       resolution,
       deaths,
@@ -671,7 +673,7 @@ export class OriginTrailGameCoordinator {
           peerId: pid,
           proposalHash: proposal.hash,
           approved: true,
-          timestamp: Date.now(),
+          timestamp: proposal.approvalTimestamps.get(pid) ?? Date.now(),
         }));
         const turnQuads = [
           ...rdf.turnResolvedQuads(
@@ -1103,6 +1105,7 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
+      approvalTimestamps: new Map([[msg.peerId, msg.timestamp], [this.myPeerId, Date.now()]]),
       votes,
       resolution,
       deaths,
@@ -1131,6 +1134,7 @@ export class OriginTrailGameCoordinator {
     if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
 
     swarm.pendingProposal.approvals.add(msg.peerId);
+    swarm.pendingProposal.approvalTimestamps.set(msg.peerId, msg.timestamp ?? Date.now());
     this.log(`Approval from ${msg.peerId.slice(0, 8)} for turn ${msg.turn} (${swarm.pendingProposal.approvals.size}/${signatureThreshold(swarm.players.length)} needed)`);
 
     await this.checkProposalThreshold(swarm);

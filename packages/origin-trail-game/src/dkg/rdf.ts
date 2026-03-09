@@ -188,7 +188,7 @@ export function consensusAttestationQuads(
     quad(t, otUri('resolution'), literal(resolution), g),
   ];
   for (const att of attestations) {
-    const attUri = otUri(`swarm/${swarmId}/turn/${turn}/attestation/${att.peerId}`);
+    const attUri = otUri(`swarm/${swarmId}/turn/${turn}/attestation/${att.peerId}/${att.proposalHash.slice(0, 8)}`);
     quads.push(
       quad(attUri, `${RDF}type`, otUri('ConsensusAttestation'), g),
       quad(attUri, otUri('turn'), literal(turn), g),

@@ -17,6 +17,8 @@ function stripType(v: string): string {
   return v;
 }
 
+const UNSAFE_IRI_RE = /[\s<>"{}|\\^`]/;
+
 function esc(s: string): string {
   return s
     .replace(/\\/g, '\\\\')
@@ -123,7 +125,10 @@ export function registerTools(
         platform: z.string().optional().describe('Hardware platform (e.g. H100, A100, M4-Max)'),
         agent_did: z.string().optional().describe('DID of the agent that ran this experiment'),
         run_tag: z.string().optional().describe('Run tag (e.g. mar8, mar8-gpu0)'),
-        parent_experiment: z.string().optional().describe('URI of the parent experiment this builds on'),
+        parent_experiment: z.string()
+          .refine((s) => !UNSAFE_IRI_RE.test(s), { message: 'Invalid IRI: contains unsafe characters (spaces, <, >, ", etc.)' })
+          .optional()
+          .describe('URI of the parent experiment this builds on'),
       },
     },
     async (params) => {

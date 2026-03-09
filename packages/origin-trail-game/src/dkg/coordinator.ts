@@ -1269,12 +1269,14 @@ export class OriginTrailGameCoordinator {
   }
 
   async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
-    if (!publishResult?.ual || !publishResult?.onChainResult?.txHash) return;
+    const ual = publishResult?.ual ?? (publishResult?.kcId != null ? String(publishResult.kcId) : '');
+    const txHash = publishResult?.onChainResult?.txHash ?? '';
+    if (!ual && !txHash) return;
     const provenance: rdf.PublishProvenance = {
       rootEntity,
-      ual: publishResult.ual,
-      txHash: publishResult.onChainResult.txHash,
-      blockNumber: publishResult.onChainResult.blockNumber ?? 0,
+      ual,
+      txHash,
+      blockNumber: publishResult?.onChainResult?.blockNumber || undefined,
       publisherPeerId: this.myPeerId,
       publishedAt: Date.now(),
     };

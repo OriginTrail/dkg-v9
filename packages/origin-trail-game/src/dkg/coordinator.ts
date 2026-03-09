@@ -428,7 +428,16 @@ export class OriginTrailGameCoordinator {
     if (swarm.players.length < MIN_PLAYERS) throw new Error(`Need at least ${MIN_PLAYERS} players to start`);
 
     const partyNames = swarm.players.map(p => p.displayName);
-    swarm.gameState = gameEngine.createGame(partyNames, this.myPeerId);
+    const newGameState = gameEngine.createGame(partyNames, this.myPeerId);
+    const gameStateJson = JSON.stringify(newGameState);
+    const now = Date.now();
+
+    await this.agent.writeToWorkspace(
+      this.paranetId,
+      rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
+    );
+
+    swarm.gameState = newGameState;
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -439,8 +448,8 @@ export class OriginTrailGameCoordinator {
       type: 'expedition:launched',
       swarmId,
       peerId: this.myPeerId,
-      timestamp: Date.now(),
-      gameStateJson: JSON.stringify(swarm.gameState),
+      timestamp: now,
+      gameStateJson,
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
@@ -844,7 +853,7 @@ export class OriginTrailGameCoordinator {
           case 'swarm:created': this.onRemoteSwarmCreated(msg as proto.SwarmCreatedMsg); break;
           case 'swarm:joined': this.onRemotePlayerJoined(msg as proto.SwarmJoinedMsg); break;
           case 'swarm:left': this.onRemotePlayerLeft(msg as proto.SwarmLeftMsg); break;
-          case 'expedition:launched': this.onRemoteExpeditionLaunched(msg as proto.ExpeditionLaunchedMsg); break;
+          case 'expedition:launched': await this.onRemoteExpeditionLaunched(msg as proto.ExpeditionLaunchedMsg); break;
           case 'vote:cast': this.onRemoteVoteCast(msg as proto.VoteCastMsg); break;
           case 'turn:proposal': await this.onRemoteTurnProposal(msg as proto.TurnProposalMsg); break;
           case 'turn:approve': await this.onRemoteTurnApproval(msg as proto.TurnApproveMsg); break;
@@ -903,7 +912,7 @@ export class OriginTrailGameCoordinator {
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
   }
 
-  private onRemoteExpeditionLaunched(msg: proto.ExpeditionLaunchedMsg): void {
+  private async onRemoteExpeditionLaunched(msg: proto.ExpeditionLaunchedMsg): Promise<void> {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
@@ -911,6 +920,10 @@ export class OriginTrailGameCoordinator {
     swarm.currentTurn = 1;
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
+
+    // Leader persists launch state via workspace write; followers receive it
+    // through workspace gossip replication (Rule 4: don't write to leader-owned root).
+
     this.log(`Journey started for ${msg.swarmId} (remote)`);
   }
 

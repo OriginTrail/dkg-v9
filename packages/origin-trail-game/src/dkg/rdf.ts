@@ -98,6 +98,18 @@ export function voteCastQuads(paranetId: string, swarmId: string, turn: number, 
   return quads;
 }
 
+export function expeditionLaunchedQuads(paranetId: string, swarmId: string, gameStateJson: string, launchedAt: number): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const s = `urn:dkg:expedition:${swarmId}:launched`;
+  return [
+    quad(s, `${RDF}type`, otUri('ExpeditionLaunch'), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
+    quad(s, otUri('status'), literal('traveling'), g),
+    quad(s, otUri('gameState'), literal(gameStateJson), g),
+    quad(s, otUri('launchedAt'), literal(launchedAt), g),
+  ];
+}
+
 export interface ChainProvenance {
   txHash: string;
   blockNumber?: number;

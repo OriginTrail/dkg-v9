@@ -42,7 +42,9 @@ export class GossipPublishHandler {
     try {
       const request = decodePublishRequest(data);
 
-      if (request.paranetId && request.paranetId !== paranetId) {
+      if (!request.paranetId) {
+        request.paranetId = paranetId;
+      } else if (request.paranetId !== paranetId) {
         this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
         return;
       }
@@ -113,6 +115,7 @@ export class GossipPublishHandler {
       // Structural validation (I-002): reject malformed gossip before inserting.
       // Only applies to real publishes with a manifest — ontology/paranet
       // broadcasts (no UAL or no KAs) bypass validation.
+      let isReplay = false;
       if (request.ual && request.kas?.length > 0) {
         const manifest = request.kas.map(ka => ({
           tokenId: 0n,
@@ -120,7 +123,7 @@ export class GossipPublishHandler {
           privateTripleCount: ka.privateTripleCount ?? 0,
         }));
 
-        const rootEntities = manifest.map(m => m.rootEntity).filter(isValidIri);
+        const rootEntities = manifest.map(m => m.rootEntity).filter(isSafeIri);
         if (rootEntities.length === 0) {
           this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: no valid root entities`);
           return;
@@ -138,12 +141,12 @@ export class GossipPublishHandler {
             this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: ${validation.errors.join('; ')}`);
             return;
           }
-          this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping insert but running verification`);
-          normalized = [];
+          this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping data insert but running verification`);
+          isReplay = true;
         }
       }
 
-      if (normalized.length > 0) {
+      if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
       }
 
@@ -370,9 +373,9 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
-function isValidIri(value: string): boolean {
+function isSafeIri(value: string): boolean {
   if (!value) return false;
-  return !/[><\s{}|^`"\\]/.test(value);
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]*$/.test(value);
 }
 
 function stripLiteral(s: string): string {

@@ -726,3 +726,11 @@ ul li { padding: 0.2rem 0; }
     height: 500px;
   }
 }
+
+.ot-notif-error {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  color: var(--red, #f85149);
+  background: rgba(248, 81, 73, 0.1);
+  border-bottom: 1px solid var(--border, #30363d);
+}

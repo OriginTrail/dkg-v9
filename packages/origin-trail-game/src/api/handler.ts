@@ -98,7 +98,10 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (req.method === 'POST' && subpath === '/notifications/read') {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
         const body = JSON.parse(await readBody(req));
-        const ids: string[] | undefined = Array.isArray(body.ids) ? body.ids : undefined;
+        if (body.ids !== undefined && !Array.isArray(body.ids)) {
+          return json(res, 400, { error: '"ids" must be an array of strings' });
+        }
+        const ids: string[] | undefined = body.ids;
         const count = coordinator.markNotificationsRead(ids);
         return json(res, 200, { markedRead: count });
       }

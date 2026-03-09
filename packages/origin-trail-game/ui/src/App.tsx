@@ -113,6 +113,7 @@ function NotificationBell() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [open, setOpen] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const bellRef = useRef<HTMLDivElement>(null);
 
   const fetchNotifications = useCallback(async () => {
@@ -120,7 +121,10 @@ function NotificationBell() {
       const data = await api.notifications();
       setNotifications(data.notifications ?? []);
       setUnreadCount(data.unreadCount ?? 0);
-    } catch {}
+      setFetchError(null);
+    } catch {
+      setFetchError('Failed to load notifications');
+    }
   }, []);
 
   useEffect(() => {
@@ -138,6 +142,12 @@ function NotificationBell() {
     return () => document.removeEventListener('mousedown', onClick);
   }, [open]);
 
+  useEffect(() => {
+    if (!fetchError) return;
+    const timer = setTimeout(() => setFetchError(null), 5000);
+    return () => clearTimeout(timer);
+  }, [fetchError]);
+
   const handleOpen = async () => {
     const wasOpen = open;
     setOpen(!wasOpen);
@@ -146,7 +156,9 @@ function NotificationBell() {
         await api.markNotificationsRead();
         setUnreadCount(0);
         setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-      } catch {}
+      } catch {
+        setFetchError('Failed to mark notifications read');
+      }
     }
   };
 
@@ -183,10 +195,13 @@ function NotificationBell() {
                   await api.markNotificationsRead();
                   setUnreadCount(0);
                   setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-                } catch {}
+                } catch {
+                  setFetchError('Failed to mark notifications read');
+                }
               }}>Mark all read</button>
             )}
           </div>
+          {fetchError && <div className="ot-notif-error">{fetchError}</div>}
           <div className="ot-notif-list">
             {notifications.length === 0 ? (
               <div className="ot-notif-empty">No notifications yet</div>

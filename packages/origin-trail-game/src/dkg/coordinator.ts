@@ -190,8 +190,8 @@ export class OriginTrailGameCoordinator {
     this.scheduleTopologySnapshots();
   }
 
-  private pushNotification(n: Omit<GameNotification, 'id' | 'read'>): void {
-    const notification: GameNotification = { ...n, id: nextNotifId(), read: false };
+  private pushNotification(n: Omit<GameNotification, 'id' | 'read' | 'timestamp'> & { timestamp?: number }): void {
+    const notification: GameNotification = { ...n, timestamp: n.timestamp ?? Date.now(), id: nextNotifId(), read: false };
     this.notifications.push(notification);
     if (this.notifications.length > OriginTrailGameCoordinator.MAX_NOTIFICATIONS) {
       this.notifications = this.notifications.slice(-OriginTrailGameCoordinator.MAX_NOTIFICATIONS);
@@ -199,8 +199,9 @@ export class OriginTrailGameCoordinator {
   }
 
   getNotifications(): { notifications: GameNotification[]; unreadCount: number } {
+    const sorted = [...this.notifications].sort((a, b) => b.timestamp - a.timestamp);
     return {
-      notifications: [...this.notifications].reverse(),
+      notifications: sorted,
       unreadCount: this.notifications.filter(n => !n.read).length,
     };
   }
@@ -1281,7 +1282,7 @@ export class OriginTrailGameCoordinator {
       }
       this.pushNotification({
         type: 'turn_resolved', swarmId: swarm.id, swarmName: swarm.name,
-        peerId: msg.peerId, timestamp: Date.now(), turn: proposal.turn,
+        peerId: msg.peerId, timestamp: msg.timestamp, turn: proposal.turn,
         action: proposal.winningAction,
         message: `Turn ${proposal.turn} resolved — ${proposal.winningAction}`,
       });

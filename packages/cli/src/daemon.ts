@@ -987,10 +987,22 @@ export async function checkForUpdate(
   try {
     const cwd = process.cwd();
 
-    // Bail out if worktree has uncommitted changes
+    // Bail out if not inside a git worktree
+    try {
+      const inWorktree = execSync('git rev-parse --is-inside-work-tree', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+      if (inWorktree !== 'true') {
+        log('Auto-update: skipping — not inside a git worktree');
+        return;
+      }
+    } catch {
+      log('Auto-update: skipping — not inside a git worktree');
+      return;
+    }
+
+    // Bail out if worktree has tracked uncommitted changes
     const status = execSync('git status --porcelain --untracked-files=no', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
     if (status) {
-      log('Auto-update: skipping — worktree has uncommitted changes');
+      log('Auto-update: skipping — worktree has tracked uncommitted changes');
       return;
     }
 

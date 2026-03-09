@@ -41,8 +41,24 @@ describe('checkForUpdate', () => {
     vi.resetAllMocks();
   });
 
-  it('skips update when worktree has uncommitted changes', async () => {
+  it('skips update when not inside a git worktree', async () => {
     mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --is-inside-work-tree')) throw new Error('not a git repo');
+      return '';
+    });
+
+    const log = vi.fn();
+    await checkForUpdate(AU, log);
+
+    expect(log).toHaveBeenCalledWith(
+      'Auto-update: skipping \u2014 not inside a git worktree',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('skips update when worktree has tracked uncommitted changes', async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
       if (cmd.startsWith('git status --porcelain')) return ' M dirty-file.ts\n';
       return '';
     });
@@ -51,7 +67,7 @@ describe('checkForUpdate', () => {
     await checkForUpdate(AU, log);
 
     expect(log).toHaveBeenCalledWith(
-      'Auto-update: skipping — worktree has uncommitted changes',
+      'Auto-update: skipping \u2014 worktree has tracked uncommitted changes',
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -61,6 +77,7 @@ describe('checkForUpdate', () => {
     const latestCommit = 'bbb222';
 
     mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
       if (cmd.startsWith('git status --porcelain')) return '';
       if (cmd.startsWith('git fetch')) return '';
       if (cmd.startsWith('git merge --ff-only')) throw new Error('Not possible to fast-forward');
@@ -78,6 +95,8 @@ describe('checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('fast-forward merge failed'),
     );
+    const allCmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
+    expect(allCmds.some(cmd => cmd.includes('git reset --hard'))).toBe(false);
     expect(mockedWriteFile).not.toHaveBeenCalled();
   });
 
@@ -86,6 +105,7 @@ describe('checkForUpdate', () => {
     const latestCommit = 'ccc333';
 
     mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
       if (cmd.startsWith('git status --porcelain')) return '';
       if (cmd.startsWith('git fetch')) return '';
       if (cmd.startsWith('git merge --ff-only')) return '';

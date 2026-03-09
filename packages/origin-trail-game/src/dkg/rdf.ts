@@ -204,6 +204,34 @@ export function consensusAttestationQuads(
     );
   }
   return quads;
+}
+
+export interface PublishProvenance {
+  rootEntity: string;
+  ual: string;
+  txHash: string;
+  blockNumber?: number;
+  publisherPeerId: string;
+  publishedAt: number;
+}
+
+export function publishProvenanceChainQuads(paranetId: string, provenance: PublishProvenance): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const s = `${provenance.rootEntity}/provenance/${provenance.txHash}`;
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('PublishedEntity'), g),
+    quad(s, otUri('sourceEntity'), provenance.rootEntity, g),
+    quad(s, otUri('ual'), literal(provenance.ual), g),
+    quad(s, otUri('transactionHash'), literal(provenance.txHash), g),
+    quad(s, otUri('publisherDID'), literal(provenance.publisherPeerId), g),
+    quad(s, otUri('publishedAt'), literal(provenance.publishedAt), g),
+  ];
+  if (provenance.blockNumber) {
+    quads.push(quad(s, otUri('blockNumber'), literal(provenance.blockNumber), g));
+  }
+  return quads;
+}
+
 
 export function playerProfileQuads(paranetId: string, peerId: string, displayName: string): Quad[] {
   const g = `did:dkg:paranet:${paranetId}`;

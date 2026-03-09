@@ -1057,6 +1057,208 @@ describe('Consensus attestation triples (V1)', () => {
   });
 });
 
+describe('Publish provenance chain (V2)', () => {
+  it('publishProvenanceChainQuads generates correct RDF structure', async () => {
+    const { publishProvenanceChainQuads } = await import('../src/dkg/rdf.js');
+    const quads = publishProvenanceChainQuads('test-paranet', {
+      rootEntity: 'did:dkg:entity:1',
+      ual: 'did:dkg:ual:123',
+      txHash: '0xabc',
+      blockNumber: 42,
+      publisherPeerId: 'peer-pub-1',
+      publishedAt: 1700000000000,
+    });
+
+    const typeQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type'));
+    expect(typeQuad).toBeDefined();
+    expect(typeQuad!.object).toContain('PublishedEntity');
+
+    expect(quads.find(q => q.predicate.includes('/ual'))).toBeDefined();
+    expect(quads.find(q => q.predicate.includes('transactionHash'))!.object).toContain('0xabc');
+    expect(quads.find(q => q.predicate.includes('blockNumber'))!.object).toContain('42');
+    expect(quads.find(q => q.predicate.includes('publisherDID'))!.object).toContain('peer-pub-1');
+    expect(quads.find(q => q.predicate.includes('publishedAt'))!.object).toContain('1700000000000');
+
+    expect(quads[0].subject).toContain('did:dkg:entity:1/provenance/0xabc');
+    expect(quads.find(q => q.predicate.includes('sourceEntity'))!.object).toBe('did:dkg:entity:1');
+    expect(quads.length).toBe(7);
+  });
+
+  it('publishProvenanceChainQuads omits blockNumber when zero', async () => {
+    const { publishProvenanceChainQuads } = await import('../src/dkg/rdf.js');
+    const quads = publishProvenanceChainQuads('test-paranet', {
+      rootEntity: 'did:dkg:entity:2',
+      ual: 'did:dkg:ual:456',
+      txHash: '0xdef',
+      blockNumber: 0,
+      publisherPeerId: 'peer-pub-2',
+      publishedAt: 1700000000000,
+    });
+
+    expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
+    expect(quads.length).toBe(6);
+  });
+
+  it('publishProvenanceChainQuads omits blockNumber when undefined', async () => {
+    const { publishProvenanceChainQuads } = await import('../src/dkg/rdf.js');
+    const quads = publishProvenanceChainQuads('test-paranet', {
+      rootEntity: 'did:dkg:entity:3',
+      ual: 'did:dkg:ual:789',
+      txHash: '0xghi',
+      publisherPeerId: 'peer-pub-3',
+      publishedAt: 1700000000000,
+    });
+
+    expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
+    expect(quads.length).toBe(6);
+  });
+
+  it('publishProvenanceChain handles kcId fallback when ual is missing', async () => {
+    const agentProv = makeMockAgent('prov-fallback-peer');
+    agentProv.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { paranetId: 'fb-test' }, (msg) => logs.push(msg));
+
+    await coordinator.publishProvenanceChain('did:dkg:entity:test', {
+      kcId: 42,
+      onChainResult: { txHash: '0xfallback', blockNumber: 5 },
+    });
+
+    const provQuads = agentProv._workspaceWrites.find((batch: any[]) =>
+      batch.some((q: any) => q.predicate?.includes('sourceEntity')),
+    );
+    expect(provQuads).toBeDefined();
+    expect(provQuads.find((q: any) => q.predicate?.includes('/ual'))?.object).toContain('42');
+  });
+
+  it('publishProvenanceChain skips when neither ual nor txHash is available', async () => {
+    const agentProv = makeMockAgent('prov-skip-peer');
+    agentProv.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { paranetId: 'skip-test' }, (msg) => logs.push(msg));
+
+    await coordinator.publishProvenanceChain('did:dkg:entity:skip', {});
+
+    expect(agentProv._workspaceWrites.length).toBe(0);
+  });
+
+  it('forceResolveTurn publishes provenance chain when on-chain data is available', async () => {
+    const leaderPeerId = 'leader-prov-chain-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {
+        ual: 'did:dkg:test/ual/turn-chain',
+        onChainResult: { txHash: '0xchain123', blockNumber: 200 },
+      };
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-chain-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ProvChainSwarm', 4);
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-chain-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['prov-chain-p2', 'P2'], ['prov-chain-p3', 'P3']] as const) {
+      handle('dkg/paranet/prov-chain-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const provenanceChainPublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('PublishedEntity')),
+    );
+    expect(provenanceChainPublish).toBeDefined();
+    expect(provenanceChainPublish.some((q: any) => q.predicate?.includes('publisherDID'))).toBe(true);
+
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
+    expect(chainLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consensus flow publishes provenance chain after threshold is met', async () => {
+    const leaderPeerId = 'leader-prov-cons-1';
+    const followerPeerId = 'follower-prov-cons-1';
+    const thirdPeerId = 'third-prov-cons-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {
+        ual: 'did:dkg:test/ual/consensus-chain',
+        onChainResult: { txHash: '0xconsensus', blockNumber: 300 },
+      };
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-cons-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ProvConsSwarm');
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-cons-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
+      handle('dkg/paranet/prov-cons-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    for (const pid of [followerPeerId, thirdPeerId]) {
+      handle('dkg/paranet/prov-cons-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 100));
+
+    const proposal = swarm.pendingProposal;
+    expect(proposal).not.toBeNull();
+
+    handle('dkg/paranet/prov-cons-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: followerPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: proposal!.hash,
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const provenancePublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('PublishedEntity')),
+    );
+    expect(provenancePublish).toBeDefined();
+
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
+    expect(chainLogs.length).toBeGreaterThanOrEqual(1);
+
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.turnHistory).toHaveLength(1);
+    expect(swarm.turnHistory[0].resolution).toBe('consensus');
+  });
+});
+
 describe('Player profile RDF quads', () => {
   it('playerProfileQuads generates correct triples', async () => {
     const { playerProfileQuads } = await import('../src/dkg/rdf.js');

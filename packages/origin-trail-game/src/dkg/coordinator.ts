@@ -702,6 +702,8 @@ export class OriginTrailGameCoordinator {
           }
         }
         await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
+        const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
+        await this.publishProvenanceChain(turnEntity, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -832,6 +834,8 @@ export class OriginTrailGameCoordinator {
         }
       }
       await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
+      const turnEntity = rdf.turnUri(swarm.id, turnNumber);
+      await this.publishProvenanceChain(turnEntity, publishResult);
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -1261,6 +1265,26 @@ export class OriginTrailGameCoordinator {
     if (quads.length > 0) {
       await this.agent.writeToWorkspace(paranetId, quads);
       this.log(`Recorded workspace lineage for ${entries.length} operation(s)`);
+    }
+  }
+
+  async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
+    const ual = publishResult?.ual ?? (publishResult?.kcId != null ? String(publishResult.kcId) : '');
+    const txHash = publishResult?.onChainResult?.txHash ?? '';
+    if (!ual && !txHash) return;
+    const provenance: rdf.PublishProvenance = {
+      rootEntity,
+      ual,
+      txHash,
+      blockNumber: publishResult?.onChainResult?.blockNumber || undefined,
+      publisherPeerId: this.myPeerId,
+      publishedAt: Date.now(),
+    };
+    try {
+      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
+      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
+    } catch (err: any) {
+      this.log(`Failed to publish provenance chain for ${rootEntity}: ${err.message}`);
     }
   }
 

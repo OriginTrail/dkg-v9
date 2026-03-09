@@ -144,6 +144,7 @@ export class OriginTrailGameCoordinator {
   private subscribed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private topologyTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -152,6 +153,7 @@ export class OriginTrailGameCoordinator {
     this.log = log ?? (() => {});
     this.subscribe();
     this.scheduleGraphSync();
+    this.scheduleTopologySnapshots();
   }
 
   get myPeerId(): string {
@@ -1215,7 +1217,53 @@ export class OriginTrailGameCoordinator {
     }
   }
 
+  // ── Network topology snapshots ──────────────────────────────────
+
+  private scheduleTopologySnapshots(): void {
+    this.topologyTimer = setInterval(() => {
+      this.publishNetworkTopology().catch(err =>
+        this.log(`Topology snapshot failed: ${err.message}`),
+      );
+    }, 5 * 60_000);
+    this.topologyTimer.unref?.();
+  }
+
+  async publishNetworkTopology(): Promise<void> {
+    const now = Date.now();
+    const peerMap = new Map<string, rdf.TopologyPeer>();
+
+    for (const swarm of this.swarms.values()) {
+      for (const member of swarm.players) {
+        if (member.peerId === this.myPeerId) continue;
+
+        const lastVote = swarm.votes
+          .filter(v => v.peerId === member.peerId)
+          .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+        const lastSeen = lastVote?.timestamp ?? member.joinedAt;
+        const existing = peerMap.get(member.peerId);
+        if (existing && existing.lastSeen >= lastSeen) continue;
+
+        peerMap.set(member.peerId, {
+          peerId: member.peerId,
+          connectionType: 'relay',
+          messageAgeMs: lastVote ? Math.max(0, now - lastVote.timestamp) : 0,
+          lastSeen,
+        });
+      }
+    }
+
+    const peers = [...peerMap.values()];
+    const quads = rdf.networkTopologyQuads(this.paranetId, this.myPeerId, peers);
+    await this.agent.writeToWorkspace(this.paranetId, quads);
+    this.log(`Topology snapshot written: ${peers.length} peers`);
+  }
+
   destroy(): void {
+    if (this.topologyTimer) {
+      clearInterval(this.topologyTimer);
+      this.topologyTimer = null;
+    }
     for (const swarmId of this.voteHeartbeatTimers.keys()) {
       this.stopVoteHeartbeat(swarmId);
     }

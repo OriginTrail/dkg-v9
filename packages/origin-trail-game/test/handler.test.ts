@@ -1268,6 +1268,78 @@ describe('Workspace lineage tracking', () => {
     expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace-only'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
   });
+
+  it('publish failure drops lineage ops instead of carrying them to the next turn', async () => {
+    const leaderPeerId = 'lineage-fail-leader';
+    const logs: string[] = [];
+    let publishCallCount = 0;
+    let wsOpCounter = 0;
+
+    const failAgent = makeMockAgent(leaderPeerId);
+    failAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      failAgent._workspaceWrites.push(quads);
+      wsOpCounter++;
+      return { workspaceOperationId: `ws-op-${wsOpCounter}` };
+    };
+    failAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCallCount++;
+      if (publishCallCount === 1) throw new Error('publish failed');
+      failAgent._published.push(quads);
+      return { ual: 'did:dkg:test/ual/retry', onChainResult: { txHash: '0xretry', blockNumber: 50 } };
+    };
+    failAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(failAgent as any, { paranetId: 'lineage-fail' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 4);
+    const handlers = failAgent._messageHandlers.get('dkg/paranet/lineage-fail/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['fail-p2', 'P2'], ['fail-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-fail/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    const firstTurnOpIds = new Set<string>();
+    for (let i = 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
+
+    const writesBeforeFail = failAgent._workspaceWrites.length;
+    await coordinator.forceResolveTurn(swarm.id);
+
+    for (let i = firstTurnOpIds.size + 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
+
+    const failLogs = logs.filter(l => l.includes('dropped') && l.includes('lineage'));
+    expect(failLogs.length).toBeGreaterThanOrEqual(1);
+
+    const lineageAfterFail = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('enshrined') || q.object?.includes?.('workspace-only')),
+    );
+    expect(lineageAfterFail).toHaveLength(0);
+
+    await coordinator.castVote(swarm.id, 'advance');
+    const secondTurnOpsStart = wsOpCounter + 1;
+    const writesBeforeSecond = failAgent._workspaceWrites.length;
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageAfterSecond = failAgent._workspaceWrites.slice(writesBeforeSecond).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('enshrined') || q.object?.includes?.('workspace-only')),
+    );
+    expect(lineageAfterSecond.length).toBeGreaterThanOrEqual(1);
+
+    const allLineageSubjects = lineageAfterSecond.flatMap((quads: any[]) =>
+      quads.map((q: any) => q.subject as string),
+    );
+    for (const opId of firstTurnOpIds) {
+      expect(allLineageSubjects.some(s => s.includes(opId))).toBe(false);
+    }
+  });
 });
 
 describe('Turn proposal accepts non-deterministic state', () => {

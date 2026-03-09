@@ -661,6 +661,8 @@ export class OriginTrailGameCoordinator {
     }
 
     if (swarm.leaderPeerId === this.myPeerId) {
+      const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
+      this.workspaceOps.delete(swarm.id);
       try {
         const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
           this.paranetId, swarm.id, proposal.turn,
@@ -681,9 +683,9 @@ export class OriginTrailGameCoordinator {
             this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
           }
         }
-        await this.writeLineageForSwarm(swarm.id, publishResult);
+        await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       } catch (err: any) {
-        this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
+        this.log(`Failed to publish turn ${proposal.turn} (dropped ${opsSnapshot.length} lineage ops): ${err.message}`);
       }
 
       const resolvedMsg: proto.TurnResolvedMsg = {
@@ -773,6 +775,8 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
 
+    const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
+    this.workspaceOps.delete(swarm.id);
     try {
       const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
         this.paranetId, swarm.id, turnNumber,
@@ -797,9 +801,9 @@ export class OriginTrailGameCoordinator {
           this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
         }
       }
-      await this.writeLineageForSwarm(swarm.id, publishResult);
+      await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
     } catch (err: any) {
-      this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
+      this.log(`Failed to publish force-resolved turn ${turnNumber} (dropped ${opsSnapshot.length} lineage ops): ${err.message}`);
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -1225,11 +1229,8 @@ export class OriginTrailGameCoordinator {
     }
   }
 
-  private async writeLineageForSwarm(swarmId: string, publishResult: any): Promise<void> {
-    const ops = this.workspaceOps.get(swarmId);
-    if (!ops || ops.length === 0) return;
-    const snapshot = [...ops];
-    this.workspaceOps.delete(swarmId);
+  private async writeLineageFromSnapshot(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>, publishResult: any): Promise<void> {
+    if (snapshot.length === 0) return;
     const now = Date.now();
     const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
       workspaceOperationId: op.workspaceOperationId,

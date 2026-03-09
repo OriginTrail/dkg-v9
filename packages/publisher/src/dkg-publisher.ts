@@ -47,6 +47,10 @@ export interface WriteToWorkspaceResult {
   message: Uint8Array;
 }
 
+function isSafeIri(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(value);
+}
+
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter;
@@ -246,10 +250,30 @@ export class DKGPublisher implements Publisher {
     if (selection === 'all') {
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o } }`;
     } else {
-      const filters = selection.rootEntities
-        .map((r) => `STRSTARTS(STR(?s), "${r.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}")`)
-        .join(' || ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o . FILTER(${filters}) } }`;
+      const roots = [...new Set(
+        selection.rootEntities
+          .map((r) => String(r).trim())
+          .filter((r) => isSafeIri(r)),
+      )];
+      if (roots.length === 0) {
+        const hadInput = selection.rootEntities.length > 0;
+        throw new Error(
+          hadInput
+            ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
+            : `No rootEntities provided for paranet ${paranetId}`,
+        );
+      }
+      const values = roots.map((r) => `<${r}>`).join(' ');
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        GRAPH <${workspaceGraph}> {
+          VALUES ?root { ${values} }
+          ?s ?p ?o .
+          FILTER(
+            ?s = ?root
+            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+          )
+        }
+      }`;
     }
 
     const result = await this.store.query(sparql);

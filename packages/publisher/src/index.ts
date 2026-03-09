@@ -17,6 +17,7 @@ export {
   type WriteToWorkspaceResult,
 } from './dkg-publisher.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
+export { PublishJournal, type JournalEntry } from './publish-journal.js';
 export { WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';

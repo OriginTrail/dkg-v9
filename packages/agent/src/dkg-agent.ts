@@ -13,6 +13,7 @@ import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConf
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
+  PublishJournal,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
@@ -276,8 +277,16 @@ export class DKGAgent {
     const accessHandler = new AccessHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_ACCESS, accessHandler.handler);
 
-    const publishHandler = new PublishHandler(this.store, this.eventBus);
+    const journal = this.config.dataDir ? new PublishJournal(this.config.dataDir) : undefined;
+    const publishHandler = new PublishHandler(this.store, this.eventBus, { journal });
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
+    if (journal) {
+      try {
+        await publishHandler.restorePendingPublishes();
+      } catch (err) {
+        this.log.warn(ctx, `Journal restore failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // Register cross-agent query handler (deny-by-default for security)
     const queryAccessConfig: QueryAccessConfig = this.config.queryAccess ?? {

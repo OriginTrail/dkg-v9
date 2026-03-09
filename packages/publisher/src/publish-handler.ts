@@ -33,6 +33,7 @@ interface PendingPublish {
   expectedStartKAId: bigint;
   expectedEndKAId: bigint;
   expectedChainId: string;
+  rootEntities: string[];
   createdAt: number;
 }
 
@@ -302,6 +303,7 @@ export class PublishHandler {
         expectedStartKAId: startKAId,
         expectedEndKAId: endKAId,
         expectedChainId: request.chainId ?? '',
+        rootEntities: manifest.map(m => m.rootEntity),
         createdAt: Date.now(),
       });
       this.persistJournal();
@@ -404,6 +406,7 @@ export class PublishHandler {
         expectedStartKAId: p.expectedStartKAId.toString(),
         expectedEndKAId: p.expectedEndKAId.toString(),
         expectedChainId: p.expectedChainId,
+        rootEntities: p.rootEntities,
         createdAt: p.createdAt,
       });
     }
@@ -459,6 +462,7 @@ export class PublishHandler {
         expectedStartKAId: BigInt(entry.expectedStartKAId),
         expectedEndKAId: BigInt(entry.expectedEndKAId),
         expectedChainId: entry.expectedChainId,
+        rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
       });
       restored++;
@@ -484,10 +488,13 @@ export class PublishHandler {
       try {
         const dataGraph = this.graphManager.dataGraphUri(pending.paranetId);
         const metaGraph = this.graphManager.metaGraphUri(pending.paranetId);
-        await this.store.deleteBySubjectPrefix(dataGraph, ual);
+        for (const rootEntity of pending.rootEntities) {
+          await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+          await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+        }
         await this.store.deleteBySubjectPrefix(metaGraph, ual);
         await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
-        this.log.info(ctx, `Restored tentative publish expired, data removed by UAL: ${ual}`);
+        this.log.info(ctx, `Restored tentative publish expired, data removed: ${ual} (${pending.rootEntities.length} root entities)`);
       } catch (err) {
         this.log.error(ctx, `Failed to clean up expired restored publish: ${ual} — ${err instanceof Error ? err.message : String(err)}`);
       }

@@ -13,6 +13,8 @@ export interface JournalEntry {
   /** Stringified bigint */
   expectedEndKAId: string;
   expectedChainId: string;
+  /** Root entity IRIs from the KA manifest, used for cleanup on expiry */
+  rootEntities?: string[];
   createdAt: number;
 }
 

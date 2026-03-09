@@ -103,7 +103,7 @@ function HeroBanner() {
 const ACTION_LABELS: Record<string, string> = {
   advance: 'Advance',
   upgradeSkills: 'Upgrade Skills',
-  syncMemory: 'Sync Memory',
+  syncMemory: 'Sync Memory via DKG',
   forceBottleneck: 'Force Bottleneck',
   payToll: 'Pay Toll',
   trade: 'Trade',
@@ -111,7 +111,7 @@ const ACTION_LABELS: Record<string, string> = {
 const ACTION_ICONS: Record<string, string> = {
   advance: '→',
   upgradeSkills: '⬆',
-  syncMemory: '♻',
+  syncMemory: '🔗',
   forceBottleneck: '⚡',
   payToll: '💰',
   trade: '🔄',
@@ -486,6 +486,9 @@ export function App() {
     return (
       <div className="ot-container">
         <HeroBanner />
+
+        <Leaderboard />
+
         <div className="ot-header">
           <h1>OriginTrail Game</h1>
           <span className="ot-player">Playing as: {playerName}</span>
@@ -586,8 +589,15 @@ export function App() {
           <div className="ot-play-split">
             <div className="ot-play-left">
               {swarm.status === 'finished' && (
-                <div className="ot-card" style={{ borderColor: swarm.gameState.status === 'won' ? 'var(--green)' : 'var(--red)' }}>
+                <div className="ot-card ot-finished-card" style={{ borderColor: swarm.gameState.status === 'won' ? 'var(--green)' : 'var(--red)' }}>
                   <h2>{swarm.gameState.status === 'won' ? 'AGI Achieved — Singularity Harbor!' : 'Your expedition has ended.'}</h2>
+                  {swarm.score > 0 && (
+                    <div className="ot-final-score">
+                      <span className="ot-final-score-label">Final Score</span>
+                      <span className="ot-final-score-value">{swarm.score.toLocaleString()}</span>
+                    </div>
+                  )}
+                  <p className="ot-muted">Scores have been published to the DKG leaderboard.</p>
                 </div>
               )}
               <GameStateDisplay state={swarm.gameState} leaderName={swarm.leaderName} />
@@ -672,7 +682,7 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
           <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Advance (Standard)</button>
           <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Advance (Max Throughput)</button>
           <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>⬆ Upgrade Skills</button>
-          <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>♻ Sync Memory</button>
+          <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>🔗 Sync Memory via DKG</button>
           <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>⚡ Force Bottleneck</button>
           <button onClick={() => doVote('payToll')} disabled={hasVoted}>💰 Pay Toll</button>
         </div>
@@ -690,6 +700,61 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
           try { onVoted(await api.forceResolve(swarm.id)); }
           catch (e: any) { onError(e.message); }
         }}>Force Resolve Turn</button>
+      )}
+    </div>
+  );
+}
+
+function Leaderboard() {
+  const [entries, setEntries] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.leaderboard()
+      .then((data: any) => setEntries(data?.entries ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="ot-leaderboard">
+      <h2 className="ot-leaderboard-title">
+        <span className="ot-leaderboard-trophy">🏆</span> Leaderboard
+      </h2>
+      {loading ? (
+        <p className="ot-muted">Loading scores from the DKG...</p>
+      ) : entries.length === 0 ? (
+        <div className="ot-leaderboard-empty">
+          <p className="ot-muted">No completed expeditions yet. Be the first to reach Singularity Harbor!</p>
+        </div>
+      ) : (
+        <div className="ot-leaderboard-table">
+          <div className="ot-leaderboard-header">
+            <span className="ot-lb-rank">#</span>
+            <span className="ot-lb-name">Player</span>
+            <span className="ot-lb-score">Score</span>
+            <span className="ot-lb-outcome">Outcome</span>
+            <span className="ot-lb-epochs">Epochs</span>
+            <span className="ot-lb-survivors">Survivors</span>
+          </div>
+          {entries.slice(0, 20).map((entry: any, i: number) => (
+            <div
+              key={`${entry.swarmId}-${entry.displayName}-${i}`}
+              className={`ot-leaderboard-row ${i === 0 ? 'ot-lb-gold' : i === 1 ? 'ot-lb-silver' : i === 2 ? 'ot-lb-bronze' : ''}`}
+            >
+              <span className="ot-lb-rank">
+                {i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}`}
+              </span>
+              <span className="ot-lb-name">{entry.displayName}</span>
+              <span className="ot-lb-score">{entry.score.toLocaleString()}</span>
+              <span className={`ot-lb-outcome ${entry.outcome === 'won' ? 'ot-lb-won' : 'ot-lb-lost'}`}>
+                {entry.outcome === 'won' ? 'AGI ✓' : 'Failed'}
+              </span>
+              <span className="ot-lb-epochs">{entry.epochs}/2000</span>
+              <span className="ot-lb-survivors">{entry.survivors}/{entry.partySize}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

@@ -24,6 +24,7 @@ export const api = {
   lobby: () => request('GET', '/lobby'),
   info: () => request('GET', '/info'),
   locations: () => request('GET', '/locations'),
+  leaderboard: () => request('GET', '/leaderboard'),
   swarm: (swarmId: string) => request('GET', `/swarm/${swarmId}`),
   create: (playerName: string, swarmName: string, maxPlayers?: number) =>
     request('POST', '/create', { playerName, swarmName, maxPlayers }),

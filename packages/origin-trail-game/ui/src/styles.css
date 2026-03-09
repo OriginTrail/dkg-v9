@@ -492,6 +492,106 @@ ul li { padding: 0.2rem 0; }
   text-align: center;
 }
 
+/* Leaderboard */
+.ot-leaderboard {
+  margin: 1.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  background: rgba(13, 17, 23, 0.8);
+}
+.ot-leaderboard-title {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.ot-leaderboard-trophy {
+  font-size: 1.3rem;
+}
+.ot-leaderboard-empty {
+  text-align: center;
+  padding: 1.5rem 0;
+}
+.ot-leaderboard-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ot-leaderboard-header {
+  display: grid;
+  grid-template-columns: 40px 1fr 80px 70px 80px 80px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.ot-leaderboard-row {
+  display: grid;
+  grid-template-columns: 40px 1fr 80px 70px 80px 80px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+.ot-leaderboard-row:hover {
+  background: rgba(56, 139, 253, 0.08);
+}
+.ot-lb-gold { background: rgba(251, 191, 36, 0.06); }
+.ot-lb-silver { background: rgba(192, 192, 192, 0.04); }
+.ot-lb-bronze { background: rgba(205, 127, 50, 0.04); }
+.ot-lb-rank {
+  font-weight: 700;
+  text-align: center;
+}
+.ot-lb-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ot-lb-score {
+  font-weight: 700;
+  color: var(--green);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.ot-lb-outcome { text-align: center; font-size: 0.78rem; }
+.ot-lb-won { color: var(--green); font-weight: 700; }
+.ot-lb-lost { color: var(--muted); }
+.ot-lb-epochs, .ot-lb-survivors {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* Final score card */
+.ot-finished-card {
+  text-align: center;
+}
+.ot-final-score {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 1rem 0 0.5rem;
+}
+.ot-final-score-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.ot-final-score-value {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
 @media (max-width: 900px) {
   .ot-play-split {
     grid-template-columns: 1fr;

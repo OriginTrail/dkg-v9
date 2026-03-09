@@ -302,6 +302,51 @@ export function strategyPatternQuads(
     quads.push(quad(acUri, otUri('count'), literal(count), g));
   }
   return quads;
+export function leaderboardEntryQuads(
+  paranetId: string,
+  swarmId: string,
+  peerId: string,
+  displayName: string,
+  score: number,
+  outcome: 'won' | 'lost',
+  epochs: number,
+  survivorsCount: number,
+  partySize: number,
+  finishedAt: number,
+): Quad[] {
+  const g = contextGraph(paranetId, swarmId);
+  const entry = otUri(`swarm/${swarmId}/leaderboard/${peerId}`);
+  return [
+    quad(entry, `${RDF}type`, otUri('LeaderboardEntry'), g),
+    quad(entry, otUri('player'), playerUri(peerId), g),
+    quad(entry, otUri('displayName'), literal(displayName), g),
+    quad(entry, otUri('swarm'), swarmUri(swarmId), g),
+    quad(entry, otUri('score'), literal(score), g),
+    quad(entry, otUri('outcome'), literal(outcome), g),
+    quad(entry, otUri('epochs'), literal(epochs), g),
+    quad(entry, otUri('survivors'), literal(survivorsCount), g),
+    quad(entry, otUri('partySize'), literal(partySize), g),
+    quad(entry, otUri('finishedAt'), literal(finishedAt), g),
+  ];
+}
+
+export function syncMemoryDkgQuads(
+  paranetId: string,
+  swarmId: string,
+  turn: number,
+  peerId: string,
+  tracSpent: number,
+): Quad[] {
+  const g = contextGraph(paranetId, swarmId);
+  const s = otUri(`swarm/${swarmId}/turn/${turn}/sync/${peerId}`);
+  return [
+    quad(s, `${RDF}type`, otUri('SyncMemoryViaDKG'), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
+    quad(s, otUri('turn'), literal(turn), g),
+    quad(s, otUri('agent'), playerUri(peerId), g),
+    quad(s, otUri('tracSpent'), literal(tracSpent), g),
+    quad(s, otUri('timestamp'), literal(new Date().toISOString()), g),
+  ];
 }
 
 export const SPARQL_PREFIXES = {

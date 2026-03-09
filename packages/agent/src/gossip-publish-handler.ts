@@ -42,7 +42,9 @@ export class GossipPublishHandler {
     try {
       const request = decodePublishRequest(data);
 
-      if (request.paranetId && request.paranetId !== paranetId) {
+      if (!request.paranetId) {
+        request.paranetId = paranetId;
+      } else if (request.paranetId !== paranetId) {
         this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
         return;
       }

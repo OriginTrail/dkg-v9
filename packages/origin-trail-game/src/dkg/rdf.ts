@@ -132,6 +132,26 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
   return quads;
 }
 
+function isIri(value: string): boolean {
+  return /^(did:|https?:\/\/)/.test(value);
+}
+
+export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance, timestamp = Date.now()): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const s = `urn:dkg:provenance:${swarmId}:turn${turn}:${timestamp}`;
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('TurnProvenance'), g),
+    quad(s, otUri('turn'), literal(turn), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
+    quad(s, otUri('transactionHash'), literal(provenance.txHash), g),
+    quad(s, otUri('ual'), isIri(provenance.ual) ? provenance.ual : literal(provenance.ual), g),
+  ];
+  if (provenance.blockNumber) {
+    quads.push(quad(s, otUri('blockNumber'), literal(provenance.blockNumber), g));
+  }
+  return quads;
+}
+
 export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance): Quad[] {
   const g = workspaceGraph(paranetId);
   const s = `${turnUri(swarmId, turn)}/provenance`;

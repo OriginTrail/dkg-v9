@@ -848,13 +848,18 @@ export class DKGAgent {
           const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
           paranetDeleted += metaDeleted;
 
+          // Delete persisted ownership triples regardless of in-memory map state
+          // so they are cleaned up even when reconstruction failed.
+          for (const re of rootEntities) {
+            await this.store.deleteByPattern({
+              graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
+            });
+          }
+
           const ownedSet = this.workspaceOwnedEntities.get(pid);
           if (ownedSet) {
             for (const re of rootEntities) {
               ownedSet.delete(re);
-              await this.store.deleteByPattern({
-                graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
-              });
             }
           }
         }

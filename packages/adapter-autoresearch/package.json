@@ -1,7 +1,7 @@
 {
   "name": "@dkg/adapter-autoresearch",
   "version": "0.0.1",
-  "description": "Autoresearch adapter — collaborative autonomous ML research over the Decentralized Knowledge Graph",
+  "description": "Autoresearch adapter \u2014 collaborative autonomous ML research over the Decentralized Knowledge Graph",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,6 +22,7 @@
     "zod": "^3.25"
   },
   "devDependencies": {
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@vitest/coverage-v8": "^4.0.18"
   }
 }

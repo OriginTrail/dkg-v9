@@ -1,0 +1,36 @@
+services:
+  node1:
+    build: .
+    container_name: dkg-node-1
+    ports:
+      - "9201:9201"
+    volumes:
+      - ./nodes/node1:/data
+    environment:
+      DKG_NODE_NAME: dkg-node-1
+      DKG_API_PORT: "9201"
+    restart: unless-stopped
+
+  node2:
+    build: .
+    container_name: dkg-node-2
+    ports:
+      - "9202:9202"
+    volumes:
+      - ./nodes/node2:/data
+    environment:
+      DKG_NODE_NAME: dkg-node-2
+      DKG_API_PORT: "9202"
+    restart: unless-stopped
+
+  node3:
+    build: .
+    container_name: dkg-node-3
+    ports:
+      - "9203:9203"
+    volumes:
+      - ./nodes/node3:/data
+    environment:
+      DKG_NODE_NAME: dkg-node-3
+      DKG_API_PORT: "9203"
+    restart: unless-stopped

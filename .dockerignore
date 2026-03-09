@@ -1,0 +1,14 @@
+.git
+.devnet
+.github
+.vscode
+.cursor
+nodes
+
+**/node_modules
+**/dist
+**/tsconfig.tsbuildinfo
+**/coverage
+
+*.log
+*.pid

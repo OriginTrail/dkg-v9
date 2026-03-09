@@ -186,16 +186,16 @@ export interface TopologyPeer {
   lastSeen: number;
 }
 
-export function networkTopologyQuads(paranetId: string, peers: TopologyPeer[]): Quad[] {
+export function networkTopologyQuads(paranetId: string, writerPeerId: string, peers: TopologyPeer[]): Quad[] {
   const g = workspaceGraph(paranetId);
-  const snapshotId = 'snapshot-latest';
-  const s = otUri(`topology/${snapshotId}`);
+  const s = otUri(`topology/snapshot-${writerPeerId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('NetworkSnapshot'), g),
     quad(s, otUri('capturedAt'), literal(Date.now()), g),
+    quad(s, otUri('writer'), literal(writerPeerId), g),
   ];
   for (const peer of peers) {
-    const peerNode = otUri(`topology/${snapshotId}/peer/${peer.peerId}`);
+    const peerNode = `${s}/.well-known/genid/${peer.peerId}`;
     quads.push(
       quad(peerNode, `${RDF}type`, otUri('TopologyPeer'), g),
       quad(peerNode, otUri('peerId'), literal(peer.peerId), g),

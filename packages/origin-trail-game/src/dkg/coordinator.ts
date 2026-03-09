@@ -1247,7 +1247,7 @@ export class OriginTrailGameCoordinator {
         peerMap.set(member.peerId, {
           peerId: member.peerId,
           connectionType: 'relay',
-          latencyMs: lastVote ? now - lastVote.timestamp : 0,
+          latencyMs: lastVote ? Math.max(0, now - lastVote.timestamp) : 0,
           lastSeen,
         });
       }
@@ -1256,7 +1256,7 @@ export class OriginTrailGameCoordinator {
     const peers = [...peerMap.values()];
     if (peers.length === 0) return;
 
-    const quads = rdf.networkTopologyQuads(this.paranetId, peers);
+    const quads = rdf.networkTopologyQuads(this.paranetId, this.myPeerId, peers);
     await this.agent.writeToWorkspace(this.paranetId, quads);
     this.log(`Topology snapshot written: ${peers.length} peers`);
   }

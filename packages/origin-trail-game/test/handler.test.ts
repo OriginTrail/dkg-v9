@@ -919,11 +919,11 @@ describe('Network topology hints (V3)', () => {
       { peerId: 'peer-a', connectionType: 'relay' as const, latencyMs: 120, lastSeen: 1700000000000 },
       { peerId: 'peer-b', connectionType: 'direct' as const, latencyMs: 30, lastSeen: 1700000001000 },
     ];
-    const quads = networkTopologyQuads('test-paranet', peers);
+    const quads = networkTopologyQuads('test-paranet', 'writer-1', peers);
 
     const snapshotQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type') && q.object.includes('NetworkSnapshot'));
     expect(snapshotQuad).toBeDefined();
-    expect(snapshotQuad!.subject).toContain('topology/snapshot-latest');
+    expect(snapshotQuad!.subject).toContain('topology/snapshot-writer-1');
     expect(snapshotQuad!.graph).toBe('did:dkg:paranet:test-paranet');
 
     const capturedAt = quads.find(q => q.predicate.includes('capturedAt'));
@@ -952,12 +952,24 @@ describe('Network topology hints (V3)', () => {
     expect(peerIdQuads).toHaveLength(2);
     expect(peerIdQuads.some(q => q.object.includes('peer-a'))).toBe(true);
     expect(peerIdQuads.some(q => q.object.includes('peer-b'))).toBe(true);
+
+    const peerSubjects = peerTypeQuads.map(q => q.subject);
+    for (const subj of peerSubjects) {
+      expect(subj).toContain('.well-known/genid/');
+      expect(subj).toContain(snapshotQuad!.subject);
+    }
+
+    const allRoots = new Set(quads.map(q => q.subject));
+    const snapshotRoot = snapshotQuad!.subject;
+    for (const root of allRoots) {
+      expect(root.startsWith(snapshotRoot)).toBe(true);
+    }
   });
 
   it('networkTopologyQuads returns only snapshot header quads when no peers given', async () => {
     const { networkTopologyQuads } = await import('../src/dkg/rdf.js');
-    const quads = networkTopologyQuads('test-paranet', []);
-    expect(quads).toHaveLength(2);
+    const quads = networkTopologyQuads('test-paranet', 'writer-1', []);
+    expect(quads).toHaveLength(3);
     expect(quads[0].object).toContain('NetworkSnapshot');
   });
 

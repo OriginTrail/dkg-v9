@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   encodePublishRequest,
-  TypedEventBus,
 } from '@dkg/core';
 import { OxigraphStore, type Quad } from '@dkg/storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
@@ -12,12 +11,13 @@ function makePublishMessage(opts: {
   ual?: string;
   paranetId?: string;
   nquads?: string;
+  kas?: Array<{ tokenId: number; rootEntity: string; privateMerkleRoot: Uint8Array; privateTripleCount: number }>;
 }): Uint8Array {
   return encodePublishRequest({
     ual: opts.ual ?? '',
     nquads: new TextEncoder().encode(opts.nquads ?? '<http://s> <http://p> <http://o> .'),
     paranetId: opts.paranetId ?? PARANET,
-    kas: [],
+    kas: opts.kas ?? [],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
     startKAId: 0,
@@ -28,22 +28,25 @@ function makePublishMessage(opts: {
   });
 }
 
+function createHandler(store?: OxigraphStore, callbacks?: Partial<{ paranetExists: (id: string) => Promise<boolean>; subscribeToParanet: (id: string) => void }>) {
+  const s = store ?? new OxigraphStore();
+  return {
+    store: s,
+    handler: new GossipPublishHandler(
+      s,
+      undefined,
+      new Map<string, any>(),
+      {
+        paranetExists: callbacks?.paranetExists ?? (async () => false),
+        subscribeToParanet: callbacks?.subscribeToParanet ?? (() => {}),
+      },
+    ),
+  };
+}
+
 describe('GossipPublishHandler', () => {
   it('processes a valid publish message and inserts quads into store', async () => {
-    const store = new OxigraphStore();
-    const eventBus = new TypedEventBus();
-    const subscribedParanets = new Map<string, any>();
-
-    const handler = new GossipPublishHandler(
-      store,
-      undefined,
-      eventBus,
-      subscribedParanets,
-      {
-        paranetExists: async () => false,
-        subscribeToParanet: () => {},
-      },
-    );
+    const { store, handler } = createHandler();
 
     const data = makePublishMessage({
       paranetId: PARANET,
@@ -64,22 +67,8 @@ describe('GossipPublishHandler', () => {
   });
 
   it('ignores empty broadcast with no UAL', async () => {
-    const store = new OxigraphStore();
-    const eventBus = new TypedEventBus();
-    const subscribedParanets = new Map<string, any>();
-
+    const { store, handler } = createHandler();
     const insertSpy = vi.spyOn(store, 'insert');
-
-    const handler = new GossipPublishHandler(
-      store,
-      undefined,
-      eventBus,
-      subscribedParanets,
-      {
-        paranetExists: async () => false,
-        subscribeToParanet: () => {},
-      },
-    );
 
     const data = encodePublishRequest({
       ual: '',
@@ -98,5 +87,64 @@ describe('GossipPublishHandler', () => {
     await handler.handlePublishMessage(data, PARANET);
 
     expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects gossip when paranetId mismatches topic', async () => {
+    const { store, handler } = createHandler();
+    const insertSpy = vi.spyOn(store, 'insert');
+
+    const data = makePublishMessage({
+      paranetId: 'wrong-paranet',
+      nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+    });
+
+    await handler.handlePublishMessage(data, PARANET);
+
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  it('handles duplicate gossip replay (same UAL) without breaking', async () => {
+    const { store, handler } = createHandler();
+
+    const entity = 'did:dkg:test:replay-entity';
+    const nquads = `<${entity}> <http://schema.org/name> "Replay" .`;
+    const kas = [{ tokenId: 1, rootEntity: entity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }];
+
+    const data = makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      paranetId: PARANET,
+      nquads,
+      kas,
+    });
+
+    await handler.handlePublishMessage(data, PARANET);
+
+    const firstResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s <http://schema.org/name> ?o } }`,
+    );
+    const firstBindings = firstResult.type === 'bindings' ? firstResult.bindings : [];
+    expect(firstBindings.length).toBeGreaterThan(0);
+
+    // Second identical message should not throw (replay detected, early return)
+    await expect(handler.handlePublishMessage(data, PARANET)).resolves.not.toThrow();
+  });
+
+  it('inserts quads for UAL with empty kas (no structural validation)', async () => {
+    const { store, handler } = createHandler();
+
+    const data = makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      paranetId: PARANET,
+      nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      kas: [],
+    });
+
+    await handler.handlePublishMessage(data, PARANET);
+
+    const result = await store.query(
+      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+    );
+    const bindings = result.type === 'bindings' ? result.bindings : [];
+    expect(bindings.length).toBeGreaterThan(0);
   });
 });

@@ -61,17 +61,6 @@ function ImportResultView({
       .map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
   }, [result.quads]);
 
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: '6px 16px',
-    borderRadius: 8,
-    fontSize: 11,
-    fontWeight: 600,
-    cursor: 'pointer',
-    border: active ? '1px solid rgba(74,222,128,.4)' : '1px solid var(--border)',
-    background: active ? 'var(--green-dim)' : 'transparent',
-    color: active ? 'var(--green)' : 'var(--text-muted)',
-  });
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {/* Header stats */}
@@ -79,10 +68,10 @@ function ImportResultView({
         <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--green)', marginBottom: 4 }}>
           {result.memoryCount} memories imported
         </div>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+        <p>
           {result.tripleCount} triples created
           {result.entityCount > 0 && <> · {result.entityCount} entities extracted</>}
-        </div>
+        </p>
         <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
           Batch: {result.batchId} · Source: {result.source}
         </div>
@@ -99,8 +88,8 @@ function ImportResultView({
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-        <button style={tabStyle(tab === 'graph')} onClick={() => setTab('graph')}>Graph</button>
-        <button style={tabStyle(tab === 'triples')} onClick={() => setTab('triples')}>Triples</button>
+        <button className={`dkg-btn ${tab === 'graph' ? '' : 'dkg-btn-secondary'}`} onClick={() => setTab('graph')} style={{ padding: '6px 16px', fontSize: 11 }}>Graph</button>
+        <button className={`dkg-btn ${tab === 'triples' ? '' : 'dkg-btn-secondary'}`} onClick={() => setTab('triples')} style={{ padding: '6px 16px', fontSize: 11 }}>Triples</button>
       </div>
 
       {/* Tab content */}
@@ -171,8 +160,8 @@ function ImportResultView({
         Stored as private Knowledge Assets in <code className="mono" style={{ fontSize: 10, background: 'var(--surface)', padding: '1px 4px', borderRadius: 3 }}>agent-memory</code>. Never shared with other nodes.
       </div>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-        <button onClick={onReset} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Import More</button>
-        <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700 }}>Done</button>
+        <button className="dkg-btn dkg-btn-secondary" onClick={onReset}>Import More</button>
+        <button className="dkg-btn dkg-btn-solid" onClick={onClose}>Done</button>
       </div>
     </div>
   );
@@ -221,7 +210,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
     <div className="import-modal-overlay open" onClick={handleClose}>
       <div className="import-modal" style={result ? { maxWidth: 680 } : undefined} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <h3 className="serif" style={{ fontSize: 18, fontWeight: 700 }}>{result ? 'Import Complete' : 'Import Memories'}</h3>
+          <h3 style={{ fontSize: 18, fontWeight: 700 }}>{result ? 'Import Complete' : 'Import Memories'}</h3>
           <button onClick={handleClose} disabled={importing} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, opacity: importing ? 0.3 : 1 }}>×</button>
         </div>
 
@@ -229,7 +218,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
           <ImportResultView result={result} onReset={reset} onClose={handleClose} />
         ) : (
           <>
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
+            <p style={{ marginBottom: 12 }}>
               Paste exported memories from Claude, ChatGPT, Gemini, or any other AI assistant. They'll be stored as private Knowledge Assets on your DKG node — owned by you, queryable by your agent.
             </p>
 
@@ -237,14 +226,9 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
               {SOURCE_OPTIONS.map(opt => (
                 <button
                   key={opt.value}
+                  className={`dkg-btn ${source === opt.value ? '' : 'dkg-btn-secondary'}`}
                   onClick={() => setSource(opt.value)}
-                  style={{
-                    padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600,
-                    border: source === opt.value ? '1px solid rgba(74,222,128,.4)' : '1px solid var(--border)',
-                    background: source === opt.value ? 'var(--green-dim)' : 'transparent',
-                    color: source === opt.value ? 'var(--green)' : 'var(--text-muted)',
-                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
-                  }}
+                  style={{ padding: '6px 12px', fontSize: 11 }}
                 >
                   <span style={{ fontSize: 12 }}>{opt.icon}</span>
                   {opt.label}
@@ -287,18 +271,8 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
             )}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-              <button onClick={handleClose} disabled={importing} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
-              <button
-                onClick={handleImport}
-                disabled={importing || !text.trim()}
-                style={{
-                  padding: '8px 20px', borderRadius: 8, border: 'none',
-                  background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700,
-                  opacity: importing || !text.trim() ? 0.5 : 1,
-                  cursor: importing || !text.trim() ? 'default' : 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 6,
-                }}
-              >
+              <button className="dkg-btn dkg-btn-secondary" onClick={handleClose} disabled={importing}>Cancel</button>
+              <button className="dkg-btn dkg-btn-solid" onClick={handleImport} disabled={importing || !text.trim()}>
                 {importing ? (
                   <>
                     <span style={{ width: 12, height: 12, border: '2px solid rgba(10,15,26,.3)', borderTopColor: 'var(--bg)', borderRadius: '50%', animation: 'spin .6s linear infinite', display: 'inline-block' }} />
@@ -333,7 +307,8 @@ const GLOW_R = 8;
 const PARTICLE_R = 2;
 const PARTICLE_GLOW_R = 6;
 
-interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; color: string; }
+type PeerStatus = 'online' | 'recent' | 'offline';
+interface DashNode { id: number; label: string; sublabel: string; isYou: boolean; online: boolean; status: PeerStatus; color: string; }
 interface Particle { id: number; from: number; to: number; progress: number; speed: number; type: OpType; }
 
 function getPositions(count: number, cx: number, cy: number, radius: number) {
@@ -373,20 +348,22 @@ function drawNodeCircle(ctx: CanvasRenderingContext2D, x: number, y: number, nod
     ctx.fillStyle = glow;
     ctx.beginPath(); ctx.arc(x, y, GLOW_R, 0, Math.PI * 2); ctx.fill();
   }
-  const dim = !node.online && !isYou;
-  ctx.globalAlpha = dim ? 0.3 : 1;
+  const dim = node.status === 'offline' && !isYou;
+  ctx.globalAlpha = dim ? 0.3 : node.status === 'recent' && !isYou ? 0.6 : 1;
   ctx.beginPath(); ctx.arc(x, y, NODE_R, 0, Math.PI * 2);
   ctx.fillStyle = isYou ? '#0a1a0a' : '#0f0f23';
   ctx.fill();
   ctx.strokeStyle = isYou ? '#4ade80' : node.color;
   ctx.lineWidth = isYou ? 1.5 : 1;
+  if (node.status === 'recent' && !isYou) ctx.setLineDash([2, 2]);
   ctx.stroke();
+  ctx.setLineDash([]);
 
-  const dotColor = node.online ? '#10b981' : '#ef4444';
+  const dotColor = node.status === 'online' ? '#10b981' : node.status === 'recent' ? '#f59e0b' : '#ef4444';
   ctx.beginPath(); ctx.arc(x + 4, y - 4, 1.5, 0, Math.PI * 2);
   ctx.fillStyle = dotColor; ctx.fill();
   ctx.strokeStyle = '#0a0f1a'; ctx.lineWidth = 0.8; ctx.stroke();
-  if (node.online) {
+  if (node.status === 'online') {
     const pulse = ctx.createRadialGradient(x + 4, y - 4, 1.5, x + 4, y - 4, 4);
     pulse.addColorStop(0, 'rgba(16,185,129,0.3)'); pulse.addColorStop(1, 'transparent');
     ctx.fillStyle = pulse; ctx.beginPath(); ctx.arc(x + 4, y - 4, 4, 0, Math.PI * 2); ctx.fill();
@@ -451,21 +428,35 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
   const pidRef = useRef(0);
   const seenOpsRef = useRef<Set<string>>(new Set());
   const lastPollRef = useRef(0);
+  const zoomRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
+  const draggingRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  const ALIVE_THRESHOLD_MS = 5 * 60 * 1000;
+  const ONLINE_THRESHOLD_MS = 5 * 60 * 1000;
+  const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+  function peerStatus(a: AgentInfo): PeerStatus {
+    if (a.connectionStatus === 'self' || a.connectionStatus === 'connected') return 'online';
+    if (a.lastSeen == null) return 'offline';
+    const age = Date.now() - a.lastSeen;
+    if (age < ONLINE_THRESHOLD_MS) return 'online';
+    if (age < RECENT_THRESHOLD_MS) return 'recent';
+    return 'offline';
+  }
+
   const nodes: DashNode[] = agents.length > 0
     ? agents.map((a, i) => {
         const isSelf = a.connectionStatus === 'self';
-        const recentlySeen = a.lastSeen != null && (Date.now() - a.lastSeen) < ALIVE_THRESHOLD_MS;
-        const online = isSelf || recentlySeen || a.connectionStatus === 'connected';
+        const st = peerStatus(a);
         return {
-          id: i, isYou: isSelf, online,
+          id: i, isYou: isSelf, online: st !== 'offline', status: st,
           label: isSelf ? 'YOU' : a.name?.replace(/^devnet-/, '') || `P${i}`,
-          sublabel: a.name || a.peerId?.slice(0, 10) || `peer-${i}`,
+          sublabel: isSelf ? (nodeName || a.name || 'my-node') : (a.name || a.peerId?.slice(0, 10) || `peer-${i}`),
           color: isSelf ? '#4ade80' : PEER_COLORS[i % PEER_COLORS.length],
         };
       })
-    : [{ id: 0, isYou: true, online: true, label: 'YOU', sublabel: nodeName || 'my-node', color: '#4ade80' }];
+    : [{ id: 0, isYou: true, online: true, status: 'online' as PeerStatus, label: 'YOU', sublabel: nodeName || 'my-node', color: '#4ade80' }];
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -482,6 +473,14 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#0a0f1a'; ctx.fillRect(0, 0, w, h);
     drawGrid(ctx, w, h);
+
+    // Graph layer — transformed by zoom/pan
+    ctx.save();
+    const zoom = zoomRef.current;
+    const pan = panRef.current;
+    ctx.translate(w / 2 + pan.x, h / 2 + pan.y);
+    ctx.scale(zoom, zoom);
+    ctx.translate(-w / 2, -h / 2);
 
     const positions = getPositions(nodes.length, cx, cy, graphR);
 
@@ -524,7 +523,9 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
     for (let i = 0; i < nodes.length; i++) {
       drawNodeCircle(ctx, positions[i].x, positions[i].y, nodes[i], nodes[i].isYou);
     }
+    ctx.restore();
 
+    // Overlay layer — fixed to viewport, not affected by zoom/pan
     drawLegend(ctx, w, h);
     ctx.restore();
   }, [agents, nodeName]);
@@ -598,6 +599,43 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
     return () => obs.disconnect();
   }, []);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      zoomRef.current = Math.max(0.3, Math.min(5, zoomRef.current * delta));
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      draggingRef.current = true;
+      dragStartRef.current = { x: e.clientX, y: e.clientY, panX: panRef.current.x, panY: panRef.current.y };
+      container.style.cursor = 'grabbing';
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (!draggingRef.current) return;
+      panRef.current = {
+        x: dragStartRef.current.panX + (e.clientX - dragStartRef.current.x),
+        y: dragStartRef.current.panY + (e.clientY - dragStartRef.current.y),
+      };
+    };
+    const onMouseUp = () => {
+      draggingRef.current = false;
+      container.style.cursor = 'grab';
+    };
+    container.style.cursor = 'grab';
+    container.addEventListener('wheel', onWheel, { passive: false });
+    container.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      container.removeEventListener('wheel', onWheel);
+      container.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ display: 'block' }} />
@@ -645,15 +683,12 @@ export function DashboardPage() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <div>
-          <h1 className="serif" style={{ fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
+          <p style={{ marginTop: 4 }}>
             {status ? `Your node is live${paranets.length ? ` and participating in ${paranets.length} paranet${paranets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
           </p>
         </div>
-        <button
-          onClick={() => setImportOpen(true)}
-          style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid rgba(96,165,250,.27)', background: 'var(--blue-dim)', color: 'var(--blue)', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}
-        >
+        <button className="dkg-btn" onClick={() => setImportOpen(true)}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Import Memories
         </button>
@@ -684,58 +719,55 @@ export function DashboardPage() {
         ))}
       </div>
 
-      {/* Network + right panel */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-        {/* Network viz */}
-        <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: '#0a0f1a', border: '1px solid var(--border)' }}>
-          <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 700 }}>{status?.networkName ?? 'DKG Network'}</span>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{peerCount != null ? `${peerCount} PEERS` : '… PEERS'}</span>
-          </div>
-          <DashboardNetworkViz agents={agentData?.agents ?? []} nodeName={status?.name ?? ''} />
+      {/* Network viz — full width */}
+      <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: '#0a0f1a', border: '1px solid var(--border)', marginBottom: 16 }}>
+        <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
+          <span className="mono" style={{ fontSize: 12, fontWeight: 700 }}>{status?.networkName ?? 'DKG Network'}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{peerCount != null ? `${peerCount} PEERS` : '… PEERS'}</span>
+          <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', marginLeft: 4 }}>scroll to zoom · drag to pan</span>
         </div>
+        <DashboardNetworkViz agents={agentData?.agents ?? []} nodeName={status?.name ?? ''} />
+      </div>
 
-        {/* Paranets + quick actions */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div className="card" style={{ padding: '16px 18px', flex: 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
-              Paranets
-              {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
-            </div>
-            {displayParanets.map((p: any, i: number) => (
-              <div key={p.id ?? `fallback-${i}`} onClick={() => p.id && navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`)} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer', transition: 'border-color .15s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
-                    <span style={{ fontSize: 11, fontWeight: 600 }}>{p.name}</span>
-                  </div>
-                  <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-                </div>
-                <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 9, color: 'var(--text-muted)' }}>
-                  <span>{p.assets.toLocaleString()} assets</span>
-                  <span>{p.agents} agents</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="card" style={{ padding: '16px 18px' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Quick Actions</div>
-            {[
-              { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘' },
-              { label: 'Import Memories', desc: 'From Claude / ChatGPT', icon: '📥', onClick: () => setImportOpen(true) },
-              { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮' },
-            ].map(a => (
-              <button key={a.label} onClick={a.onClick} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', marginBottom: 4, textAlign: 'left' }}>
-                <span style={{ fontSize: 14 }}>{a.icon}</span>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>{a.label}</div>
-                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{a.desc}</div>
-                </div>
-              </button>
-            ))}
-          </div>
+      {/* Paranets — horizontal card grid */}
+      <div style={{ marginBottom: 16 }}>
+        <div className="section-title">
+          Paranets
+          {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
         </div>
+        <div className="paranet-list">
+          {displayParanets.map((p: any, i: number) => (
+            <div key={p.id ?? `fallback-${i}`} className="paranet-card" onClick={() => p.id && navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
+                <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>{p.name}</h3>
+                <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', marginLeft: 'auto' }} />
+              </div>
+              <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 10, color: 'var(--text-muted)' }}>
+                <span>{p.assets.toLocaleString()} assets</span>
+                <span>{p.agents} agents</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Quick actions */}
+      <div className="quick-actions" style={{ marginBottom: 16 }}>
+        {[
+          { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘' },
+          { label: 'Import Memories', desc: 'From Claude / ChatGPT', icon: '📥', onClick: () => setImportOpen(true) },
+          { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮' },
+        ].map(a => (
+          <button key={a.label} className="quick-action" onClick={a.onClick}>
+            <span style={{ fontSize: 16 }}>{a.icon}</span>
+            <div>
+              <div className="qa-label">{a.label}</div>
+              <div className="qa-desc">{a.desc}</div>
+            </div>
+          </button>
+        ))}
       </div>
 
     </div>

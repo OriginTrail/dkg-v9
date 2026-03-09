@@ -434,9 +434,9 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Installable DKG apps (API handlers + static UI)
       // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
-      // Inject the caller's verified token if present; when the server is bound to
-      // loopback only, fall back to the first stored token for /apps/* requests
-      // (TCP guarantees all connections are local — no proxy spoofing possible).
+      // Inject the caller's verified token if present; for loopback-bound servers,
+      // fall back to the first stored token for /apps/* HTML requests only —
+      // TCP binding guarantees only local connections reach loopback sockets.
       let appInjectToken: string | undefined;
       if (installedApps.length > 0 && authEnabled && validTokens.size > 0) {
         const reqToken = extractBearerToken(req.headers.authorization);

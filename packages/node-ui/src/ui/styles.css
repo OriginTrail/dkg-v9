@@ -16,7 +16,8 @@
   --pink:#f472b6;--pink-dim:rgba(244,114,182,0.12);
 }
 html,body{height:100%;overflow:hidden}
-body{font-family:'Satoshi','General Sans',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+body{font-family:'Satoshi','General Sans',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;font-size:14px}
+p{font-size:14px;color:var(--text-muted);line-height:1.6}
 .mono{font-family:'JetBrains Mono',monospace}
 .serif{font-family:'Instrument Serif',serif}
 
@@ -31,7 +32,21 @@ body{font-family:'Satoshi','General Sans',-apple-system,sans-serif;background:va
 ::-webkit-scrollbar-thumb:hover{background:#2a3a4f}
 button{cursor:pointer;transition:filter .15s;font-family:inherit}
 button:hover{filter:brightness(1.1)}
+button:disabled{opacity:.4;cursor:not-allowed;filter:none}
 input::placeholder{color:#475569}
+
+/* ── Unified button styles (matching OriginTrail game) ── */
+.dkg-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;
+  border:1px solid rgba(74,222,128,.3);background:var(--green-dim);color:var(--green);
+  cursor:pointer;transition:filter .15s;font-family:inherit
+}
+.dkg-btn:hover{filter:brightness(1.2)}
+.dkg-btn:disabled{opacity:.4;cursor:not-allowed;filter:none}
+.dkg-btn-secondary{background:var(--surface);border:1px solid var(--border);color:var(--text-muted)}
+.dkg-btn-solid{background:var(--green);border:none;color:var(--bg);font-weight:700}
+.dkg-btn-icon{font-size:14px;flex-shrink:0}
 
 /* Layout */
 .app-layout{display:flex;height:100vh;width:100vw;overflow:hidden}
@@ -242,8 +257,9 @@ input::placeholder{color:#475569}
 @keyframes spin{to{transform:rotate(360deg)}}
 .chat-spinner{animation:spin .8s linear infinite}
 
-/* ── Page title ── */
-.page-title{font-size:20px;font-weight:700;margin-bottom:16px;letter-spacing:-.02em}
+/* ── Page title & headings ── */
+.page-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;margin-bottom:16px;letter-spacing:-.02em}
+h1,h2,h3{font-family:'JetBrains Mono',monospace}
 
 /* ── Form controls ── */
 .input,select.input{
@@ -313,6 +329,19 @@ input::placeholder{color:#475569}
 .paranet-card:hover::before{opacity:1}
 .paranet-card h3{font-size:14px;font-weight:700;margin-bottom:6px;color:var(--text)}
 .paranet-card p{font-size:12px;color:var(--text-muted);line-height:1.5;margin:0}
+
+/* ── Dashboard sections ── */
+.section-title{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.quick-actions{display:flex;gap:10px;flex-wrap:wrap}
+.quick-action{
+  display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:8px;
+  border:1px solid rgba(74,222,128,.3);background:var(--green-dim);color:var(--green);
+  flex:1;min-width:160px;text-align:left;font-weight:600;font-size:13px;
+  cursor:pointer;transition:filter .15s
+}
+.quick-action:hover{filter:brightness(1.2)}
+.quick-action .qa-label{font-size:12px;font-weight:600;color:var(--green)}
+.quick-action .qa-desc{font-size:10px;color:var(--text-muted);font-weight:400}
 
 /* ── Empty & loading states ── */
 .empty-state{display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:13px;padding:48px 24px;text-align:center}

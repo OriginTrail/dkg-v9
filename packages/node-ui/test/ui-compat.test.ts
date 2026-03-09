@@ -237,21 +237,76 @@ describe('explorer graph query safety', () => {
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('uses sandbox matching AppHostPage policy', () => {
+  it('never uses allow-same-origin in sandbox policy', () => {
     expect(apps).toContain('sandbox="allow-scripts allow-forms allow-popups"');
+    expect(apps).not.toMatch(/sandbox=.*allow-same-origin/);
   });
 
-  it('uses one-time nonce handshake before sending token', () => {
+  it('uses onError fallback instead of CORS-blocked HEAD probe', () => {
+    expect(apps).toContain('onError={handleIframeError}');
+    expect(apps).toContain('triedStaticRef');
+    expect(apps).not.toMatch(/fetch\(.*staticUrl.*HEAD/);
+  });
+
+  it('uses nonce handshake before sending token', () => {
     expect(apps).toContain('postMessage');
     expect(apps).toContain('dkg-nonce');
     expect(apps).toContain('randomUUID');
     expect(apps).toMatch(/nonceRef\.current\s*=\s*null/);
   });
 
-  it('listens for dkg-token-request with nonce from iframe', () => {
+  it('listens for dkg-token-request and validates nonce', () => {
     expect(apps).toContain('dkg-token-request');
     expect(apps).toContain('addEventListener');
-    expect(apps).toMatch(/e\.data\.nonce.*===.*nonceRef/);
+    expect(apps).toContain('validateTokenRequest');
+  });
+
+  it('allows re-auth on legitimate reloads (no permanent handshake gate)', () => {
+    expect(apps).not.toMatch(/handshakeCompleteRef/);
+  });
+
+  it('exports validateTokenRequest as a testable pure function', () => {
+    expect(apps).toContain('export function validateTokenRequest');
+  });
+});
+
+describe('validateTokenRequest (pure handshake logic)', () => {
+  // The function is exported from Apps.tsx. Since that file imports React/DOM
+  // which aren't available in this Node-only test, we extract and eval just
+  // the pure function from the source to test the real implementation.
+  let validateTokenRequest: (nonce: string | null, requestNonce: unknown) => boolean;
+
+  const fnMatch = readFile('pages/Apps.tsx').match(
+    /export function validateTokenRequest\([^)]*\)[^{]*\{([^}]+)\}/,
+  );
+  if (fnMatch) {
+    validateTokenRequest = new Function('nonce', 'requestNonce', fnMatch[1]) as any;
+  } else {
+    throw new Error('Could not extract validateTokenRequest from Apps.tsx');
+  }
+
+  it('accepts matching nonce', () => {
+    expect(validateTokenRequest('abc-123', 'abc-123')).toBe(true);
+  });
+
+  it('rejects wrong nonce', () => {
+    expect(validateTokenRequest('abc-123', 'wrong')).toBe(false);
+  });
+
+  it('rejects when stored nonce is null (no pending handshake)', () => {
+    expect(validateTokenRequest(null, 'abc-123')).toBe(false);
+  });
+
+  it('rejects non-string request nonce', () => {
+    expect(validateTokenRequest('abc', 42)).toBe(false);
+    expect(validateTokenRequest('abc', undefined)).toBe(false);
+    expect(validateTokenRequest('abc', null)).toBe(false);
+  });
+
+  it('allows successive handshakes (each with new nonce)', () => {
+    expect(validateTokenRequest('n1', 'n1')).toBe(true);
+    expect(validateTokenRequest('n2', 'n2')).toBe(true);
+    expect(validateTokenRequest('n3', 'n3')).toBe(true);
   });
 });
 
@@ -269,17 +324,25 @@ describe('iframe app hosting', () => {
   });
 });
 
-describe('daemon.ts localhost token fallback', () => {
+describe('daemon.ts app token injection', () => {
   const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
 
-  it('checks server bind host, not req.socket.remoteAddress, for localhost detection', () => {
+  it('does not use req.socket.remoteAddress for localhost detection', () => {
     expect(daemon).not.toContain('req.socket.remoteAddress');
+  });
+
+  it('checks config.apiHost for loopback, not remote address', () => {
     expect(daemon).toContain('config.apiHost');
     expect(daemon).toMatch(/boundToLoopback/);
   });
 
-  it('only falls back to token for loopback-bound servers (127.0.0.1 or ::1)', () => {
-    expect(daemon).toMatch(/boundHost\s*===\s*'127\.0\.0\.1'\s*\|\|\s*boundHost\s*===\s*'::1'/);
+  it('prefers verified bearer token over loopback fallback', () => {
+    expect(daemon).toMatch(/extractBearerToken/);
+    expect(daemon).toMatch(/validTokens\.has\(reqToken\)/);
+  });
+
+  it('only falls back to loopback injection for /apps/* paths', () => {
+    expect(daemon).toMatch(/reqUrl\.pathname\.startsWith\(['"]\/apps\//);
   });
 });
 

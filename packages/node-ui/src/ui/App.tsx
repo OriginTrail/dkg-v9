@@ -104,8 +104,8 @@ export function App() {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.02em' }}>DKG v9 Node</div>
-          <div style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>{liveStatus?.name ?? '…'}</div>
+          <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 500 }}>DKG v9 Node</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6 }}>
             <span style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '0.02em' }}>powered by</span>
             <svg width="60" height="13" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ opacity: 0.55 }}>
@@ -161,7 +161,7 @@ export function App() {
           <Route path="/explorer/*" element={<ExplorerPage />} />
           <Route path="/agent" element={<AgentHubPage />} />
           <Route path="/messages" element={<Navigate to="/agent" replace />} />
-          <Route path="/apps/*" element={<AppsPage />} />
+          <Route path="/apps/*" element={<AppsPage apps={installedApps} />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
           {/* Backward-compatible redirects for legacy routes */}

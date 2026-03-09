@@ -448,4 +448,49 @@ describe('WorkspaceHandler', () => {
       expect(result.bindings[0]['o']).toContain('Updated');
     }
   });
+
+  it('persists ownership triples and does not duplicate on same-creator upsert', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    const peerId = '12D3KooWOwner';
+
+    const msg1 = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-own-1',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(msg1, peerId);
+
+    const gm = new GraphManager(store);
+    const wsMetaGraph = gm.workspaceMetaGraphUri(PARANET);
+    const afterFirst = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${wsMetaGraph}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(afterFirst.type).toBe('bindings');
+    if (afterFirst.type === 'bindings') {
+      expect(afterFirst.bindings.length).toBe(1);
+      expect(afterFirst.bindings[0]['creator']).toContain(peerId);
+    }
+
+    const msg2 = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-own-2',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(msg2, peerId);
+
+    const afterSecond = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${wsMetaGraph}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(afterSecond.type).toBe('bindings');
+    if (afterSecond.type === 'bindings') {
+      expect(afterSecond.bindings.length).toBe(1);
+      expect(afterSecond.bindings[0]['creator']).toContain(peerId);
+    }
+  });
 });

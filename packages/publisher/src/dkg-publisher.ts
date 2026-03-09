@@ -191,6 +191,13 @@ export class DKGPublisher implements Publisher {
       }
     }
     if (newOwnershipEntries.length > 0) {
+      for (const entry of newOwnershipEntries) {
+        await this.store.deleteByPattern({
+          graph: workspaceMetaGraph,
+          subject: entry.rootEntity,
+          predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
+      }
       await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
       for (const entry of newOwnershipEntries) {
         liveOwned.set(entry.rootEntity, entry.creatorPeerId);
@@ -263,13 +270,19 @@ export class DKGPublisher implements Publisher {
     if (options?.clearWorkspaceAfter) {
       const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
       const kaMap = autoPartition(quads);
+      let ownerDeletedTotal = 0;
       for (const rootEntity of kaMap.keys()) {
         await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
         await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
-        await this.store.deleteByPattern({
+        const ownerDeleted = await this.store.deleteByPattern({
           graph: wsMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
         });
+        ownerDeletedTotal += ownerDeleted;
+        await this.deleteMetaForRoot(wsMetaGraph, rootEntity);
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
+      }
+      if (ownerDeletedTotal > 0) {
+        this.log.info(ctx, `Cleared ${ownerDeletedTotal} ownership triple(s) during enshrine cleanup`);
       }
     }
 
@@ -665,39 +678,85 @@ export class DKGPublisher implements Publisher {
    * Reconstruct the in-memory workspaceOwnedEntities map from persisted
    * ownership triples in workspace_meta graphs. Call on startup.
    *
-   * TODO: Currently trusts any dkg:workspaceOwner triple found in the store.
-   * A future improvement should cross-validate against operation metadata
-   * (e.g. publisher signatures) to guard against tampered triples.
+   * Validates each ownership triple against workspace-operation metadata
+   * (wasAttributedTo) to guard against tampered triples. Conflicts are
+   * resolved deterministically by keeping the alphabetically first creator.
    */
   async reconstructWorkspaceOwnership(): Promise<number> {
     const DKG = 'http://dkg.io/ontology/';
-    const paranets = await this.graphManager.listParanets();
-    let total = 0;
-    for (const pid of paranets) {
-      const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(pid);
-      const result = await this.store.query(
-        `SELECT ?entity ?creator WHERE { GRAPH <${wsMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
-      );
-      if (result.type !== 'bindings' || result.bindings.length === 0) continue;
-      if (!this.workspaceOwnedEntities.has(pid)) {
-        this.workspaceOwnedEntities.set(pid, new Map());
-      }
-      const ownedMap = this.workspaceOwnedEntities.get(pid)!;
-      for (const row of result.bindings) {
-        const entity = row['entity'];
-        const creator = row['creator'];
-        if (entity && creator) {
+    const PROV = 'http://www.w3.org/ns/prov#';
+    try {
+      const paranets = await this.graphManager.listParanets();
+      let total = 0;
+      for (const pid of paranets) {
+        const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(pid);
+        const result = await this.store.query(
+          `SELECT ?entity ?creator WHERE { GRAPH <${wsMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+        );
+        if (result.type !== 'bindings' || result.bindings.length === 0) continue;
+
+        const opsResult = await this.store.query(
+          `SELECT ?op ?peer ?root WHERE { GRAPH <${wsMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
+        );
+        const validatedOwners = new Map<string, Set<string>>();
+        if (opsResult.type === 'bindings') {
+          for (const row of opsResult.bindings) {
+            const root = row['root'];
+            const peer = row['peer'];
+            if (!root || !peer) continue;
+            const peerStr = peer.startsWith('"')
+              ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+              : peer;
+            if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
+            validatedOwners.get(root)!.add(peerStr);
+          }
+        }
+
+        if (!this.workspaceOwnedEntities.has(pid)) {
+          this.workspaceOwnedEntities.set(pid, new Map());
+        }
+        const ownedMap = this.workspaceOwnedEntities.get(pid)!;
+        for (const row of result.bindings) {
+          const entity = row['entity'];
+          const creator = row['creator'];
+          if (!entity || !creator) continue;
           const creatorStr = creator.startsWith('"')
             ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
             : creator;
-          if (!ownedMap.has(entity)) {
-            ownedMap.set(entity, creatorStr);
-            total++;
+
+          const validPeers = validatedOwners.get(entity);
+          if (!validPeers || !validPeers.has(creatorStr)) {
+            this.log.warn(
+              createOperationContext('reconstruct'),
+              `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
+            );
+            continue;
           }
+
+          if (ownedMap.has(entity)) {
+            const existing = ownedMap.get(entity)!;
+            if (existing !== creatorStr) {
+              this.log.warn(
+                createOperationContext('reconstruct'),
+                `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
+              );
+              if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+            }
+            continue;
+          }
+
+          ownedMap.set(entity, creatorStr);
+          total++;
         }
       }
+      return total;
+    } catch (err) {
+      this.log.warn(
+        createOperationContext('reconstruct'),
+        `reconstructWorkspaceOwnership failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 0;
     }
-    return total;
   }
 
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {

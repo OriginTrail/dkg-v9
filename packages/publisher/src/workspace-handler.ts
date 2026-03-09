@@ -126,14 +126,21 @@ export class WorkspaceHandler {
       if (!this.workspaceOwnedEntities.has(paranetId)) {
         this.workspaceOwnedEntities.set(paranetId, new Map());
       }
-      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
       const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
+      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
       for (const r of rootEntities) {
         if (!liveOwned.has(r)) {
           newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
         }
       }
       if (newOwnershipEntries.length > 0) {
+        for (const entry of newOwnershipEntries) {
+          await this.store.deleteByPattern({
+            graph: workspaceMetaGraph,
+            subject: entry.rootEntity,
+            predicate: 'http://dkg.io/ontology/workspaceOwner',
+          });
+        }
         await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
         for (const entry of newOwnershipEntries) {
           liveOwned.set(entry.rootEntity, entry.creatorPeerId);

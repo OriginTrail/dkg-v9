@@ -444,7 +444,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
           appInjectToken = reqToken;
         } else if (reqUrl.pathname.startsWith('/apps/')) {
           const boundHost = config.apiHost || '127.0.0.1';
-          const boundToLoopback = boundHost === '127.0.0.1' || boundHost === '::1';
+          const boundToLoopback = boundHost === '127.0.0.1' || boundHost === '::1' || boundHost === '0.0.0.0' || boundHost === '::';
           if (boundToLoopback) {
             appInjectToken = validTokens.values().next().value as string;
           }

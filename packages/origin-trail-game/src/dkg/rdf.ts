@@ -132,25 +132,6 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
   return quads;
 }
 
-function isIri(value: string): boolean {
-  return /^(did:|https?:\/\/)/.test(value);
-}
-
-export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance, timestamp = Date.now()): Quad[] {
-  const g = workspaceGraph(paranetId);
-  const s = `urn:dkg:provenance:${swarmId}:turn${turn}:${timestamp}`;
-  const quads: Quad[] = [
-    quad(s, `${RDF}type`, otUri('TurnProvenance'), g),
-    quad(s, otUri('turn'), literal(turn), g),
-    quad(s, otUri('swarm'), swarmUri(swarmId), g),
-    quad(s, otUri('transactionHash'), literal(provenance.txHash), g),
-    quad(s, otUri('ual'), isIri(provenance.ual) ? provenance.ual : literal(provenance.ual), g),
-  ];
-  if (provenance.blockNumber) {
-    quads.push(quad(s, otUri('blockNumber'), literal(provenance.blockNumber), g));
-  }
-  return quads;
-}
 
 export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance): Quad[] {
   const g = workspaceGraph(paranetId);
@@ -185,10 +166,10 @@ export function consensusAttestationQuads(
 ): Quad[] {
   const g = contextGraph(paranetId, swarmId);
   const t = turnUri(swarmId, turn);
-  const root = `urn:dkg:attestation:${swarmId}:${proposalHash}`;
+  const root = `urn:dkg:attestation:${swarmId}:turn${turn}:${proposalHash}`;
   const quads: Quad[] = [
     quad(root, `${RDF}type`, otUri('ConsensusAttestationBatch'), g),
-    quad(root, otUri('forTurnResult'), t, g),
+    quad(root, otUri('forTurn'), t, g),
     quad(root, otUri('resolution'), literal(resolution), g),
   ];
   for (const att of attestations) {
@@ -293,6 +274,32 @@ export function workspaceLineageQuads(paranetId: string, entries: Array<{ worksp
     quads.push(quad(s, otUri('confirmed'), literal(entry.confirmed ?? false), g));
     const status = entry.status ?? (entry.confirmed ? 'published' : 'workspace');
     quads.push(quad(s, otUri('status'), literal(status), g));
+  }
+  return quads;
+}
+
+export function strategyPatternQuads(
+  paranetId: string,
+  swarmId: string,
+  peerId: string,
+  stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number },
+): Quad[] {
+  const g = contextGraph(paranetId, swarmId);
+  const s = otUri(`strategy/${swarmId}/${peerId}`);
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('StrategyPattern'), g),
+    quad(s, otUri('player'), playerUri(peerId), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
+    quad(s, otUri('totalVotes'), literal(stats.totalVotes), g),
+    quad(s, otUri('favoriteAction'), literal(stats.favoriteAction), g),
+    quad(s, otUri('turnsSurvived'), literal(stats.turnsSurvived), g),
+  ];
+  for (const [action, count] of Object.entries(stats.actionCounts)) {
+    const safeKey = action.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const acUri = otUri(`strategy/${swarmId}/${peerId}/action/${safeKey}`);
+    quads.push(quad(s, otUri('hasActionCount'), acUri, g));
+    quads.push(quad(acUri, otUri('action'), literal(action), g));
+    quads.push(quad(acUri, otUri('count'), literal(count), g));
   }
   return quads;
 }

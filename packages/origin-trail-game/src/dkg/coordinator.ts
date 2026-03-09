@@ -66,7 +66,7 @@ export interface TurnProposal {
   approvalTimestamps: Map<string, number>;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string }>;
+  deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
 }
 
@@ -84,6 +84,7 @@ export interface SwarmState {
   pendingProposal: TurnProposal | null;
   turnHistory: ResolvedTurn[];
   createdAt: number;
+  playerIndexMap: Map<string, number>;
 }
 
 export interface ResolvedTurn {
@@ -93,7 +94,7 @@ export interface ResolvedTurn {
   approvers: string[];
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string }>;
+  deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
   timestamp: number;
 }
@@ -106,25 +107,26 @@ function detectDeaths(
   oldState: GameState | null,
   newState: GameState,
   event?: { type: string; description: string; affectedMember?: string },
-): Array<{ name: string; cause: string }> {
+): Array<{ name: string; cause: string; partyIndex: number }> {
   if (!oldState) return [];
   return newState.party
-    .filter((m, i) => !m.alive && oldState.party[i]?.alive)
-    .map(m => {
+    .map((m, i) => ({ m, i }))
+    .filter(({ m, i }) => !m.alive && oldState.party[i]?.alive)
+    .map(({ m, i }) => {
       if (event?.affectedMember === m.name) {
-        return { name: m.name, cause: event.description };
+        return { name: m.name, cause: event.description, partyIndex: i };
       }
       if (newState.trainingTokens <= 0) {
-        return { name: m.name, cause: 'Ran out of training tokens — starvation' };
+        return { name: m.name, cause: 'Ran out of training tokens — starvation', partyIndex: i };
       }
       if (event) {
-        return { name: m.name, cause: event.description };
+        return { name: m.name, cause: event.description, partyIndex: i };
       }
       const oldMember = oldState.party.find(p => p.name === m.name);
       if (oldMember && oldMember.health > 0 && m.health <= 0) {
-        return { name: m.name, cause: 'Health depleted from sustained damage' };
+        return { name: m.name, cause: 'Health depleted from sustained damage', partyIndex: i };
       }
-      return { name: m.name, cause: 'Succumbed to accumulated damage' };
+      return { name: m.name, cause: 'Succumbed to accumulated damage', partyIndex: i };
     });
 }
 
@@ -286,6 +288,7 @@ export class OriginTrailGameCoordinator {
           pendingProposal: null,
           turnHistory: [],
           createdAt,
+          playerIndexMap: new Map(),
         };
         this.swarms.set(swarmId, swarm);
         this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
@@ -347,6 +350,7 @@ export class OriginTrailGameCoordinator {
       pendingProposal: null,
       turnHistory: [],
       createdAt: now,
+      playerIndexMap: new Map(),
     };
 
     this.swarms.set(swarmId, swarm);
@@ -455,6 +459,7 @@ export class OriginTrailGameCoordinator {
     }
 
     swarm.gameState = newGameState;
+    swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -467,6 +472,7 @@ export class OriginTrailGameCoordinator {
       peerId: this.myPeerId,
       timestamp: now,
       gameStateJson,
+      partyOrder: swarm.players.map(p => p.peerId),
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
@@ -689,24 +695,15 @@ export class OriginTrailGameCoordinator {
         this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
         this.log(`Consensus attestations published for turn ${proposal.turn}`);
 
-        const onChain = publishResult?.onChainResult;
-        if (onChain?.txHash && publishResult?.ual) {
-          try {
-            await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
-              this.paranetId, swarm.id, proposal.turn,
-              { txHash: onChain.txHash, blockNumber: onChain.blockNumber, ual: publishResult.ual },
-            ));
-            this.log(`Turn ${proposal.turn} provenance written: tx=${onChain.txHash}`);
-          } catch (err: any) {
-            this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
-          }
-        }
-        await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
         const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
         await this.publishProvenanceChain(turnEntity, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
+      }
+
+      if (swarm.status === 'finished') {
+        await this.publishStrategyPatterns(swarm);
       }
 
       const resolvedMsg: proto.TurnResolvedMsg = {
@@ -816,29 +813,15 @@ export class OriginTrailGameCoordinator {
       this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
       this.log(`Force-resolve: attestation published for turn ${turnNumber}`);
 
-      const onChain = publishResult?.onChainResult;
-      if (onChain?.txHash && publishResult?.ual) {
-        const provenance: rdf.ChainProvenance = {
-          txHash: onChain.txHash,
-          blockNumber: onChain.blockNumber,
-          ual: publishResult.ual,
-        };
-        try {
-          await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
-            this.paranetId, swarm.id, turnNumber,
-            provenance,
-          ));
-          this.log(`Force-resolve: turn ${turnNumber} provenance written: tx=${onChain.txHash}`);
-        } catch (err: any) {
-          this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
-        }
-      }
-      await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
       await this.publishProvenanceChain(turnEntity, publishResult);
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
+    }
+
+    if (swarm.status === 'finished') {
+      await this.publishStrategyPatterns(swarm);
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -952,6 +935,7 @@ export class OriginTrailGameCoordinator {
       pendingProposal: null,
       turnHistory: [],
       createdAt: msg.timestamp,
+      playerIndexMap: new Map(),
     };
     this.swarms.set(msg.swarmId, swarm);
     this.log(`Remote swarm discovered: ${msg.swarmName} (${msg.swarmId})`);
@@ -987,6 +971,12 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
+    if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
+      swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+    } else {
+      if (msg.partyOrder) this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
+      swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+    }
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -996,6 +986,13 @@ export class OriginTrailGameCoordinator {
     // through workspace gossip replication (Rule 4: don't write to leader-owned root).
 
     this.log(`Journey started for ${msg.swarmId} (remote)`);
+  }
+
+  private isValidPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
+    const currentPeerIds = new Set(swarm.players.map(p => p.peerId));
+    if (partyOrder.length !== currentPeerIds.size) return false;
+    if (new Set(partyOrder).size !== partyOrder.length) return false;
+    return partyOrder.every(pid => currentPeerIds.has(pid));
   }
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {
@@ -1102,6 +1099,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    const receivedAt = Date.now();
     swarm.pendingProposal = {
       turn: msg.turn,
       hash: msg.proposalHash,
@@ -1109,7 +1107,7 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
-      approvalTimestamps: new Map([[msg.peerId, Date.now()], [this.myPeerId, Date.now()]]),
+      approvalTimestamps: new Map([[msg.peerId, receivedAt], [this.myPeerId, receivedAt]]),
       votes,
       resolution,
       deaths,
@@ -1316,6 +1314,94 @@ export class OriginTrailGameCoordinator {
     })));
     await this.recordWorkspaceLineage(this.paranetId, entries);
     this.log(`Recorded ${entries.length} failed lineage entries`);
+  }
+
+  // ── Strategy pattern analysis ────────────────────────────────────
+
+  computePlayerStrategies(swarm: SwarmState): Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> {
+    const playerStats = new Map<string, { totalVotes: number; actionCounts: Record<string, number> }>();
+
+    for (const turn of swarm.turnHistory) {
+      for (const vote of turn.votes) {
+        let entry = playerStats.get(vote.peerId);
+        if (!entry) {
+          entry = { totalVotes: 0, actionCounts: {} };
+          playerStats.set(vote.peerId, entry);
+        }
+        entry.totalVotes++;
+        entry.actionCounts[vote.action] = (entry.actionCounts[vote.action] ?? 0) + 1;
+      }
+    }
+
+    const allPeerIds = swarm.playerIndexMap.size > 0
+      ? [...swarm.playerIndexMap.keys()]
+      : [...new Set(swarm.turnHistory.flatMap(t => t.votes.map(v => v.peerId)))];
+
+    const results: Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> = [];
+    for (const peerId of allPeerIds) {
+      const entry = playerStats.get(peerId) ?? { totalVotes: 0, actionCounts: {} };
+      const favoriteAction = Object.entries(entry.actionCounts)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? 'none';
+      const partyIndex = swarm.playerIndexMap.get(peerId);
+      const partyMember = partyIndex != null ? swarm.gameState?.party[partyIndex] : undefined;
+      const turnsSurvived = partyMember && !partyMember.alive
+        ? this.findDeathTurn(swarm, partyIndex!, partyMember.name)
+        : swarm.turnHistory.length;
+      results.push({
+        peerId,
+        stats: { totalVotes: entry.totalVotes, actionCounts: entry.actionCounts, favoriteAction, turnsSurvived },
+      });
+    }
+    return results;
+  }
+
+  private findDeathTurn(swarm: SwarmState, partyIndex: number, name?: string): number {
+    for (const turn of swarm.turnHistory) {
+      if (turn.deaths.some(d => d.partyIndex != null ? d.partyIndex === partyIndex : d.name === name)) return turn.turn;
+    }
+    return swarm.turnHistory.length;
+  }
+
+  getPlayerStrategies(swarmId: string): Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> | null {
+    const swarm = this.swarms.get(swarmId);
+    if (!swarm) return null;
+    return this.computePlayerStrategies(swarm);
+  }
+
+  private async publishStrategyPatterns(swarm: SwarmState): Promise<void> {
+    const strategies = this.computePlayerStrategies(swarm);
+    const allQuads = strategies.flatMap(s =>
+      rdf.strategyPatternQuads(this.paranetId, swarm.id, s.peerId, s.stats),
+    );
+    if (allQuads.length === 0) return;
+    try {
+      await this.agent.publish(this.paranetId, allQuads);
+      this.log(`Published ${strategies.length} strategy patterns for ${swarm.id}`);
+    } catch (err: any) {
+      this.log(`Failed to publish strategy patterns for ${swarm.id}: ${err.message}`);
+    }
+  }
+
+  // ── Provenance chain ─────────────────────────────────────────────
+
+  async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
+    const ual = publishResult?.ual ?? (publishResult?.kcId != null ? String(publishResult.kcId) : '');
+    const txHash = publishResult?.onChainResult?.txHash ?? '';
+    if (!ual && !txHash) return;
+    const provenance: rdf.PublishProvenance = {
+      rootEntity,
+      ual,
+      txHash,
+      blockNumber: publishResult?.onChainResult?.blockNumber || undefined,
+      publisherPeerId: this.myPeerId,
+      publishedAt: Date.now(),
+    };
+    try {
+      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
+      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
+    } catch (err: any) {
+      this.log(`Failed to write provenance chain for ${rootEntity}: ${err.message}`);
+    }
   }
 
   // ── Utilities ─────────────────────────────────────────────────────

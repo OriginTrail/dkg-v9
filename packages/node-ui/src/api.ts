@@ -553,13 +553,19 @@ function enqueueTurnPersistence(
   if (!memoryManager) {
     return { persistStatus: 'skipped', storeMs: 0 };
   }
-  const queue = getChatPersistenceQueue(db, memoryManager);
-  const snapshot = queue.enqueue(job);
-  return {
-    persistStatus: snapshot.status,
-    persistError: snapshot.error,
-    storeMs: snapshot.storeMs ?? 0,
-  };
+  try {
+    const queue = getChatPersistenceQueue(db, memoryManager);
+    const snapshot = queue.enqueue(job);
+    return {
+      persistStatus: snapshot.status,
+      persistError: snapshot.error,
+      storeMs: snapshot.storeMs ?? 0,
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[chat-persistence] enqueue failed:', message);
+    return { persistStatus: 'failed', persistError: message, storeMs: 0 };
+  }
 }
 
 function beginSse(res: ServerResponse): void {

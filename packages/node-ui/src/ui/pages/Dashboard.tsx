@@ -663,13 +663,13 @@ export function DashboardPage() {
       <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
         {([
           {
-            label: 'Knowledge Assets',
-            value: totalAssets != null ? Number(totalAssets).toLocaleString() : '—',
-            sub: totalAssets != null
-              ? (confirmedKCs != null || tentativeKCs != null
-                ? <><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs ?? 0).toLocaleString()} confirmed</span>{' · '}<span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs ?? 0).toLocaleString()} tentative</span></>
-                : 'from node metrics')
-              : 'loading…',
+            label: 'Knowledge Collections',
+            value: confirmedKCs != null && tentativeKCs != null
+              ? String(Number(confirmedKCs) + Number(tentativeKCs))
+              : totalAssets != null ? Number(totalAssets).toLocaleString() : '—',
+            sub: confirmedKCs != null && tentativeKCs != null
+              ? <><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs).toLocaleString()} confirmed</span>{' · '}<span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs).toLocaleString()} tentative</span></>
+              : totalAssets != null ? 'from node metrics' : 'loading…',
             color: 'var(--green)',
           },
           { label: 'Connected Peers', value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },

@@ -181,7 +181,13 @@ describe('OriginTrail Game API handler', () => {
   it('expeditionLaunchedQuads generates correct RDF triples (C3)', async () => {
     const { expeditionLaunchedQuads } = await import('../src/dkg/rdf.js');
     const quads = expeditionLaunchedQuads('test-paranet', 'swarm-1', '{"status":"active"}', 1700000000000);
-    expect(quads.length).toBe(3);
+    expect(quads.length).toBe(5);
+
+    const typeQuad = quads.find((q: any) => q.predicate.includes('type'));
+    expect(typeQuad?.object).toContain('ExpeditionLaunch');
+
+    const swarmQuad = quads.find((q: any) => q.predicate.includes('swarm'));
+    expect(swarmQuad?.object).toContain('swarm/swarm-1');
 
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
     expect(statusQuad?.object).toContain('traveling');
@@ -192,6 +198,7 @@ describe('OriginTrail Game API handler', () => {
     const launchedAtQuad = quads.find((q: any) => q.predicate.includes('launchedAt'));
     expect(launchedAtQuad?.object).toContain('1700000000000');
 
+    expect(quads[0].subject).toContain('swarm/swarm-1/launch');
     expect(quads.every((q: any) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
   });
 
@@ -229,7 +236,7 @@ describe('OriginTrail Game API handler', () => {
     expect(launchQuads).toBeDefined();
   });
 
-  it('onRemoteExpeditionLaunched persists game state to workspace (C3)', async () => {
+  it('onRemoteExpeditionLaunched updates in-memory state without workspace write (C3)', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
     const { GameEngine } = await import('../src/engine/game-engine.js');
@@ -257,18 +264,11 @@ describe('OriginTrail Game API handler', () => {
 
     const beforeWrites = followerAgent._workspaceWrites.length;
     handle('dkg/paranet/test-remote-launch/app', launchMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
 
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      if (followerAgent._workspaceWrites.length > beforeWrites) break;
-    }
-
-    const wsWritesAfter = followerAgent._workspaceWrites.slice(beforeWrites);
-    expect(wsWritesAfter.length).toBeGreaterThanOrEqual(1);
-    const launchQuads = wsWritesAfter.find((batch: any[]) =>
-      batch.some((q: any) => q.predicate.includes('gameState')),
-    );
-    expect(launchQuads).toBeDefined();
+    // Follower should NOT write to workspace (Rule 4: leader owns swarm root);
+    // launch state is replicated via leader's workspace gossip instead
+    expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
   });
 
   it('GET /players returns registered players from the graph', async () => {

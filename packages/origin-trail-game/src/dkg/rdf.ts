@@ -100,8 +100,10 @@ export function voteCastQuads(paranetId: string, swarmId: string, turn: number, 
 
 export function expeditionLaunchedQuads(paranetId: string, swarmId: string, gameStateJson: string, launchedAt: number): Quad[] {
   const g = workspaceGraph(paranetId);
-  const s = swarmUri(swarmId);
+  const s = otUri(`swarm/${swarmId}/launch`);
   return [
+    quad(s, `${RDF}type`, otUri('ExpeditionLaunch'), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
     quad(s, otUri('status'), literal('traveling'), g),
     quad(s, otUri('gameState'), literal(gameStateJson), g),
     quad(s, otUri('launchedAt'), literal(launchedAt), g),

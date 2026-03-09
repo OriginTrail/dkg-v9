@@ -924,14 +924,8 @@ export class OriginTrailGameCoordinator {
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
 
-    try {
-      await this.agent.writeToWorkspace(
-        this.paranetId,
-        rdf.expeditionLaunchedQuads(this.paranetId, msg.swarmId, msg.gameStateJson, msg.timestamp),
-      );
-    } catch (err) {
-      this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // Leader persists launch state via workspace write; followers receive it
+    // through workspace gossip replication (Rule 4: don't write to leader-owned root).
 
     this.log(`Journey started for ${msg.swarmId} (remote)`);
   }

@@ -428,23 +428,20 @@ export class OriginTrailGameCoordinator {
     if (swarm.players.length < MIN_PLAYERS) throw new Error(`Need at least ${MIN_PLAYERS} players to start`);
 
     const partyNames = swarm.players.map(p => p.displayName);
-    swarm.gameState = gameEngine.createGame(partyNames, this.myPeerId);
+    const newGameState = gameEngine.createGame(partyNames, this.myPeerId);
+    const gameStateJson = JSON.stringify(newGameState);
+    const now = Date.now();
+
+    await this.agent.writeToWorkspace(
+      this.paranetId,
+      rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
+    );
+
+    swarm.gameState = newGameState;
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
-
-    const gameStateJson = JSON.stringify(swarm.gameState);
-    const now = Date.now();
-
-    try {
-      await this.agent.writeToWorkspace(
-        this.paranetId,
-        rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
-      );
-    } catch (err) {
-      this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
-    }
 
     const msg: proto.ExpeditionLaunchedMsg = {
       app: proto.APP_ID,

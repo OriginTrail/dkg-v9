@@ -198,7 +198,7 @@ describe('OriginTrail Game API handler', () => {
     const launchedAtQuad = quads.find((q: any) => q.predicate.includes('launchedAt'));
     expect(launchedAtQuad?.object).toContain('1700000000000');
 
-    expect(quads[0].subject).toContain('swarm/swarm-1/launch');
+    expect(quads[0].subject).toBe('urn:dkg:expedition:swarm-1:launched');
     expect(quads.every((q: any) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
   });
 

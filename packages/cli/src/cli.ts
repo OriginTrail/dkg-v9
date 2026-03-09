@@ -665,8 +665,14 @@ program
   .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      await client.subscribe(paranet);
+      const result = await client.subscribe(paranet);
       console.log(`Subscribed to paranet: ${paranet}`);
+      if (result.catchup) {
+        const c = result.catchup;
+        console.log(
+          `Catch-up sync: peers ${c.peersTried}/${c.syncCapablePeers} (connected ${c.connectedPeers}), data ${c.dataSynced}, workspace ${c.workspaceSynced}`,
+        );
+      }
 
       if (opts.save) {
         const config = await loadConfig();

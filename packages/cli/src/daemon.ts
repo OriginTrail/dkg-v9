@@ -97,6 +97,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log(`Starting DKG ${role} node "${config.name}"...`);
 
   const network = await loadNetworkConfig();
+  const syncParanets = [...new Set([
+    ...(config.paranets ?? []),
+    ...(network?.defaultParanets ?? []),
+  ])];
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());
@@ -135,7 +139,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    syncParanets: config.paranets ?? [],
+    syncParanets,
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -196,10 +200,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   // Ensure configured paranets + network defaults are subscribed and available.
   // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
   // duplicate creator claims and to survive "already exists" gracefully.
-  const paranetsToSubscribe = new Set([
-    ...(config.paranets ?? []),
-    ...(network?.defaultParanets ?? []),
-  ]);
+  const paranetsToSubscribe = new Set(syncParanets);
   for (const p of paranetsToSubscribe) {
     try {
       await agent.ensureParanetLocal({
@@ -924,13 +925,16 @@ async function handleRequest(
     return jsonResponse(res, 200, response);
   }
 
-  // POST /api/subscribe  { paranetId: "..." }
+  // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
   if (req.method === 'POST' && path === '/api/subscribe') {
     const body = await readBody(req);
-    const { paranetId } = JSON.parse(body);
+    const { paranetId, includeWorkspace } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
     agent.subscribeToParanet(paranetId);
-    return jsonResponse(res, 200, { subscribed: paranetId });
+    const catchup = await agent.syncParanetFromConnectedPeers(paranetId, {
+      includeWorkspace: includeWorkspace !== false,
+    });
+    return jsonResponse(res, 200, { subscribed: paranetId, catchup });
   }
 
   // POST /api/paranet/create  { id, name, description? }

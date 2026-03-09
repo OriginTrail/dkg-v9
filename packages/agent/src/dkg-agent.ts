@@ -792,6 +792,66 @@ export class DKGAgent {
   }
 
   /**
+   * Catch up a single paranet from currently connected peers that advertise
+   * the sync protocol. Useful after runtime subscribe so historical data is
+   * backfilled immediately (not only future gossip messages).
+   */
+  async syncParanetFromConnectedPeers(
+    paranetId: string,
+    options?: { includeWorkspace?: boolean },
+  ): Promise<{
+    connectedPeers: number;
+    syncCapablePeers: number;
+    peersTried: number;
+    dataSynced: number;
+    workspaceSynced: number;
+  }> {
+    const ctx = createOperationContext('sync');
+    const includeWorkspace = options?.includeWorkspace ?? false;
+
+    // Keep runtime sync scope up to date so future peer:connect syncs include this paranet.
+    this.trackSyncParanet(paranetId);
+
+    const peers = this.node.libp2p.getPeers();
+    let syncCapablePeers = 0;
+    let peersTried = 0;
+    let dataSynced = 0;
+    let workspaceSynced = 0;
+
+    for (const pid of peers) {
+      let hasSync = false;
+      try {
+        const peer = await this.node.libp2p.peerStore.get(pid);
+        hasSync = peer.protocols.includes(PROTOCOL_SYNC);
+      } catch {
+        // Peer metadata might not be available yet; skip silently.
+      }
+      if (!hasSync) continue;
+
+      syncCapablePeers++;
+      peersTried++;
+      const remotePeerId = pid.toString();
+      dataSynced += await this.syncFromPeer(remotePeerId, [paranetId]);
+      if (includeWorkspace) {
+        workspaceSynced += await this.syncWorkspaceFromPeer(remotePeerId, [paranetId]);
+      }
+    }
+
+    this.log.info(
+      ctx,
+      `Catch-up sync for "${paranetId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} workspace=${workspaceSynced}`,
+    );
+
+    return {
+      connectedPeers: peers.length,
+      syncCapablePeers,
+      peersTried,
+      dataSynced,
+      workspaceSynced,
+    };
+  }
+
+  /**
    * Remove expired workspace operations and their data.
    * Queries workspace_meta for operations with publishedAt older than the TTL,
    * deletes the corresponding triples from workspace and workspace_meta,
@@ -1190,6 +1250,8 @@ export class DKGAgent {
   }
 
   subscribeToParanet(paranetId: string): void {
+    this.trackSyncParanet(paranetId);
+
     // Idempotent: skip if gossip handlers already installed for this paranet
     if (this.gossipRegistered.has(paranetId)) {
       const existing = this.subscribedParanets.get(paranetId);
@@ -1227,6 +1289,20 @@ export class DKGAgent {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
+  }
+
+  /**
+   * Add a paranet to runtime sync scope so sync-on-connect includes it.
+   * System paranets are already included by default and are skipped here.
+   */
+  private trackSyncParanet(paranetId: string): void {
+    const systemParanets = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
+    if (systemParanets.has(paranetId)) return;
+
+    const syncSet = new Set<string>(this.config.syncParanets ?? []);
+    if (syncSet.has(paranetId)) return;
+    syncSet.add(paranetId);
+    this.config.syncParanets = [...syncSet];
   }
 
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {

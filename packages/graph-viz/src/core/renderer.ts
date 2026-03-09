@@ -32,6 +32,10 @@ export class Canvas2DRenderer implements RendererBackend {
   private _loadTime = 0;
   private _fadeInDuration = 1500;
   private _animFrameId: number | null = null;
+  private _initialFitDone = false;
+  private _lastTopologyKey = '';
+  private _continuousSimulation = false;
+  private _fitTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   /** force-graph version compatibility guard */
   private _setAlphaTarget(value: number): void {
@@ -110,18 +114,12 @@ export class Canvas2DRenderer implements RendererBackend {
         const fn = node as ForceNode;
         if (!fn._graphNode) return;
         const radius = this._hexPainter.getRadius(fn._graphNode);
+        const hitRadius = radius + 6;
         const x = fn.x ?? 0;
         const y = fn.y ?? 0;
 
         ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const angle = (Math.PI / 3) * i;
-          const hx = x + radius * Math.cos(angle);
-          const hy = y + radius * Math.sin(angle);
-          if (i === 0) ctx.moveTo(hx, hy);
-          else ctx.lineTo(hx, hy);
-        }
-        ctx.closePath();
+        ctx.arc(x, y, hitRadius, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
       })
@@ -217,7 +215,13 @@ export class Canvas2DRenderer implements RendererBackend {
       .cooldownTicks(200)
       .d3AlphaDecay(0.02)
       .d3VelocityDecay(0.3)
-      .warmupTicks(60);
+      .warmupTicks(60)
+      .onEngineStop(() => {
+        if (!this._initialFitDone && this._graph) {
+          this._initialFitDone = true;
+          this._graph.zoomToFit(400, 40);
+        }
+      });
 
     // Tune the default d3 forces for better spread with large graphs
     const charge = this._graph.d3Force('charge') as any;
@@ -238,6 +242,27 @@ export class Canvas2DRenderer implements RendererBackend {
     collapsedNodeIds?: Set<string>
   ): void {
     if (!this._graph) this.init();
+
+    // Reset auto-fit when graph topology changes.
+    // Sorted node IDs + sorted edge source->target keys for strong collision resistance.
+    let topoHash = 0;
+    const sortedNodeIds = [...nodes.keys()].sort();
+    for (const id of sortedNodeIds) {
+      topoHash = ((topoHash * 31) + simpleHash(id)) | 0;
+    }
+    const sortedEdgeKeys: string[] = [];
+    for (const e of edges.values()) {
+      sortedEdgeKeys.push(`${e.source}\0${e.target}`);
+    }
+    sortedEdgeKeys.sort();
+    for (const ek of sortedEdgeKeys) {
+      topoHash = ((topoHash * 31) + simpleHash(ek)) | 0;
+    }
+    const topoKey = String(topoHash);
+    if (topoKey !== this._lastTopologyKey) {
+      this._lastTopologyKey = topoKey;
+      this._initialFitDone = false;
+    }
 
     // Record load time for fade-in animation
     if (this._loadTime === 0) {
@@ -326,6 +351,18 @@ export class Canvas2DRenderer implements RendererBackend {
       links: newLinks,
     });
 
+    // Schedule initial fit independently of engine stop (handles continuous mode too)
+    if (!this._initialFitDone) {
+      if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
+      this._fitTimeoutId = setTimeout(() => {
+        if (this._graph && !this._initialFitDone) {
+          this._initialFitDone = true;
+          this._graph.zoomToFit(400, 40);
+        }
+        this._fitTimeoutId = null;
+      }, 300);
+    }
+
     // Add a gentle x-force to maintain chronological left→right ordering
     if (xByDate && xByDate.size >= 2) {
       this._graph.d3Force('chronoX', (alpha: number) => {
@@ -364,26 +401,28 @@ export class Canvas2DRenderer implements RendererBackend {
 
   /**
    * Schedule a debounced repaint — used when images finish loading
-   * after the simulation has cooled down. Briefly reheats the simulation
-   * to force force-graph to repaint the canvas.
+   * after the simulation has cooled down. Limits the reheat to 3
+   * ticks so the charge force can't displace settled nodes noticeably.
    */
   private _scheduleRepaint(): void {
     if (this._repaintPending) return;
     this._repaintPending = true;
     requestAnimationFrame(() => {
       this._repaintPending = false;
-      if (this._graph) {
-        // Reheat the simulation very briefly to trigger repaint frames
-        this._graph.d3ReheatSimulation();
-        // Only freeze if drift/pulse are not active (they need continuous ticks)
-        if (!this._riskPulseEnabled) {
-          setTimeout(() => {
-            if (this._graph && !this._riskPulseEnabled) {
-              this._graph.cooldownTicks(0);
-              this._setAlphaTarget(0);
-            }
-          }, 100);
-        }
+      if (!this._graph) return;
+
+      if (this._continuousSimulation || this._riskPulseEnabled) {
+        try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
+      } else {
+        this._graph.cooldownTicks(3);
+        try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
+        this._setAlphaTarget(0);
+        setTimeout(() => {
+          if (this._graph && !this._continuousSimulation && !this._riskPulseEnabled) {
+            this._graph.cooldownTicks(0);
+            this._setAlphaTarget(0);
+          }
+        }, 60);
       }
     });
   }
@@ -464,6 +503,10 @@ export class Canvas2DRenderer implements RendererBackend {
   /** Clean up */
   destroy(): void {
     this._stopAnimLoop();
+    if (this._fitTimeoutId !== null) {
+      clearTimeout(this._fitTimeoutId);
+      this._fitTimeoutId = null;
+    }
     if (this._graph) {
       this._graph._destructor();
       this._graph = null;
@@ -535,11 +578,24 @@ export class Canvas2DRenderer implements RendererBackend {
 
     // When drift or pulse is active, the simulation must run indefinitely
     const needsContinuousRender = config.drift || this._riskPulseEnabled;
+    this._continuousSimulation = needsContinuousRender;
 
     if (needsContinuousRender) {
-      // Prevent the simulation from ever stopping on its own
       this._graph.cooldownTicks(Infinity);
       this._setAlphaTarget(config.driftAlpha ?? 0.008);
+
+      // render() runs before applyAnimation(), so the fallback in render() may
+      // not fire when _continuousSimulation wasn't set yet. Trigger here too.
+      if (!this._initialFitDone) {
+        if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
+        this._fitTimeoutId = setTimeout(() => {
+          if (this._graph && !this._initialFitDone) {
+            this._initialFitDone = true;
+            this._graph.zoomToFit(400, 40);
+          }
+          this._fitTimeoutId = null;
+        }, 300);
+      }
     } else {
       this._graph.cooldownTicks(120);
       this._setAlphaTarget(0);

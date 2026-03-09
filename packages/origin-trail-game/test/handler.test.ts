@@ -2348,6 +2348,40 @@ describe('Sync Memory via DKG', () => {
     expect(syncQuads).toBeDefined();
     expect(syncQuads!.some((q: any) => q.predicate.includes('tracSpent'))).toBe(true);
   });
+
+  it('syncMemory failure does not publish SyncMemoryViaDKG quads', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const leaderPeerId = 'sync-fail-leader';
+    const failAgent = makeMockAgent(leaderPeerId);
+    const coordinator = new OriginTrailGameCoordinator(failAgent, { paranetId: 'sync-fail-test' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 5);
+    const handle = failAgent._messageHandlers.get('dkg/paranet/sync-fail-test/app')![0];
+
+    for (const pid of ['fail-follower-1', 'fail-follower-2']) {
+      handle('dkg/paranet/sync-fail-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: `Player-${pid}`,
+      }), pid);
+      await new Promise(r => setTimeout(r, 20));
+    }
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Drain TRAC so syncMemory fails
+    swarm.gameState!.trac = 0;
+
+    await coordinator.castVote(swarm.id, 'syncMemory');
+    await coordinator.forceResolveTurn(swarm.id);
+    await new Promise(r => setTimeout(r, 200));
+
+    const syncQuads = failAgent._published.find((batch: any[]) =>
+      batch.some((q: any) => q.object?.includes('SyncMemoryViaDKG'))
+    );
+    expect(syncQuads).toBeUndefined();
+  });
 });
 
 describe('Score in swarm state', () => {

@@ -708,11 +708,12 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
 function Leaderboard() {
   const [entries, setEntries] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.leaderboard()
       .then((data: any) => setEntries(data?.entries ?? []))
-      .catch(() => {})
+      .catch((err: any) => setError(err?.message ?? 'Failed to load leaderboard'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -723,6 +724,10 @@ function Leaderboard() {
       </h2>
       {loading ? (
         <p className="ot-muted">Loading scores from the DKG...</p>
+      ) : error ? (
+        <div className="ot-leaderboard-empty">
+          <p className="ot-error">{error}</p>
+        </div>
       ) : entries.length === 0 ? (
         <div className="ot-leaderboard-empty">
           <p className="ot-muted">No completed expeditions yet. Be the first to reach Singularity Harbor!</p>

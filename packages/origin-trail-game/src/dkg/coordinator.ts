@@ -68,6 +68,7 @@ export interface TurnProposal {
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
   deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
+  actionSuccess?: boolean;
 }
 
 export interface SwarmState {
@@ -612,6 +613,7 @@ export class OriginTrailGameCoordinator {
       resolution,
       deaths,
       event: turnEvent,
+      actionSuccess: result.success,
     };
 
     const msg: proto.TurnProposalMsg = {
@@ -706,7 +708,7 @@ export class OriginTrailGameCoordinator {
         await this.publishStrategyPatterns(swarm);
       }
 
-      if (proposal.winningAction === 'syncMemory') {
+      if (proposal.winningAction === 'syncMemory' && proposal.actionSuccess !== false) {
         this.publishSyncMemoryDkg(swarm, proposal.turn, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
       }
 
@@ -832,7 +834,7 @@ export class OriginTrailGameCoordinator {
       await this.publishStrategyPatterns(swarm);
     }
 
-    if (winningAction === 'syncMemory') {
+    if (winningAction === 'syncMemory' && result.success) {
       this.publishSyncMemoryDkg(swarm, turnNumber, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
     }
 
@@ -1514,8 +1516,9 @@ export class OriginTrailGameCoordinator {
   }>> {
     try {
       const result = await this.agent.query(
-        `SELECT ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
+        `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
           ?entry a <${rdf.OT}LeaderboardEntry> .
+          ?entry <${rdf.OT}player> ?player .
           ?entry <${rdf.OT}displayName> ?displayName .
           ?entry <${rdf.OT}score> ?score .
           ?entry <${rdf.OT}outcome> ?outcome .
@@ -1530,7 +1533,7 @@ export class OriginTrailGameCoordinator {
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
       return bindings.map((b: any) => ({
-        player: '',
+        player: stripQuotes(String(b.player ?? '')),
         displayName: stripQuotes(String(b.displayName ?? '')),
         score: Number(stripQuotes(String(b.score ?? '0'))),
         outcome: stripQuotes(String(b.outcome ?? '')),

@@ -392,10 +392,44 @@ function esc(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Adapter loading — DKG_ADAPTERS=autoresearch,other,...
+// ---------------------------------------------------------------------------
+
+type AdapterRegisterFn = (
+  server: McpServer,
+  getClient: () => Promise<DkgClient>,
+  paranetId?: string,
+) => void;
+
+const ADAPTER_MAP: Record<string, string> = {
+  autoresearch: '@dkg/adapter-autoresearch',
+};
+
+async function loadAdapters() {
+  const raw = process.env.DKG_ADAPTERS ?? '';
+  const names = raw.split(',').map(s => s.trim()).filter(Boolean);
+  for (const name of names) {
+    const pkg = ADAPTER_MAP[name] ?? name;
+    try {
+      const mod = await import(pkg) as { registerTools?: AdapterRegisterFn };
+      if (typeof mod.registerTools === 'function') {
+        mod.registerTools(server, getClient);
+        process.stderr.write(`[dkg-mcp] adapter loaded: ${name}\n`);
+      } else {
+        process.stderr.write(`[dkg-mcp] adapter ${name}: no registerTools export, skipped\n`);
+      }
+    } catch (e) {
+      process.stderr.write(`[dkg-mcp] adapter ${name} failed to load: ${formatError(e)}\n`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Start the server
 // ---------------------------------------------------------------------------
 
 async function main() {
+  await loadAdapters();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

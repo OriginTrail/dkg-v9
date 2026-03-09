@@ -1,0 +1,28 @@
+{
+  "name": "@dkg/adapter-autoresearch",
+  "version": "0.0.1",
+  "description": "Autoresearch adapter \u2014 collaborative autonomous ML research over the Decentralized Knowledge Graph",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "zod": "^3.25"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18",
+    "@vitest/coverage-v8": "^4.0.18"
+  }
+}

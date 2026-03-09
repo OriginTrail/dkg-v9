@@ -8,6 +8,7 @@ coverage/
 .env.*
 .dkg/
 nodes/
+data/
 
 # Hardhat build output
 packages/evm-module/artifacts/

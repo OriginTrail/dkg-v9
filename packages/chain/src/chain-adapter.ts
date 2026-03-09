@@ -228,6 +228,9 @@ export interface ChainAdapter {
    */
   verifyPublisherOwnsRange?(publisherAddress: string, startKAId: bigint, endKAId: bigint): Promise<boolean>;
 
+  // Block height (used by ChainEventPoller to seed the scan cursor)
+  getBlockNumber?(): Promise<number>;
+
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 

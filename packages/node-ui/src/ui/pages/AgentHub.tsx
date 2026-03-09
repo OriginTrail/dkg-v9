@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { sendChatMessage, fetchMemorySessions, fetchMemorySession, executeQuery, type MemorySession } from '../api.js';
+import { sendChatMessage, fetchMemorySessions, fetchMemorySession, executeQuery, fetchAgents, sendPeerMessage, fetchMessages, type MemorySession } from '../api.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 
 type Triple = { subject: string; predicate: string; object: string };
@@ -85,7 +85,241 @@ function sessionSummariesFromApi(sessions: MemorySession[]): SessionSummary[] {
   });
 }
 
+interface PeerInfo {
+  name: string;
+  peerId: string;
+  connectionStatus: string;
+  latencyMs?: number | null;
+  lastSeen?: number | null;
+}
+
+interface PeerMsg {
+  ts: number;
+  direction: 'in' | 'out';
+  peer: string;
+  peerName?: string;
+  text: string;
+}
+
+function PeerChatView() {
+  const [peers, setPeers] = useState<PeerInfo[]>([]);
+  const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
+  const [peerMessages, setPeerMessages] = useState<PeerMsg[]>([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [loadingPeers, setLoadingPeers] = useState(true);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [peerMessages]);
+
+  const loadPeers = useCallback(async () => {
+    try {
+      const res = await fetchAgents();
+      const agents: PeerInfo[] = (res.agents ?? [])
+        .filter((a: any) => a.connectionStatus !== 'self')
+        .map((a: any) => ({
+          name: a.name ?? a.peerId?.slice(0, 12),
+          peerId: a.peerId,
+          connectionStatus: a.connectionStatus,
+          latencyMs: a.latencyMs,
+          lastSeen: a.lastSeen,
+        }));
+      agents.sort((a, b) => {
+        if (a.connectionStatus === 'connected' && b.connectionStatus !== 'connected') return -1;
+        if (b.connectionStatus === 'connected' && a.connectionStatus !== 'connected') return 1;
+        return a.name.localeCompare(b.name);
+      });
+      setPeers(agents);
+    } catch { /* ignore */ }
+    setLoadingPeers(false);
+  }, []);
+
+  useEffect(() => { loadPeers(); }, [loadPeers]);
+
+  const loadMessages = useCallback(async (peerId: string) => {
+    try {
+      const res = await fetchMessages({ peer: peerId, limit: 100 });
+      setPeerMessages(res.messages ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const selectPeer = useCallback((peer: PeerInfo) => {
+    setSelectedPeer(peer);
+    setPeerMessages([]);
+    loadMessages(peer.peerId);
+  }, [loadMessages]);
+
+  useEffect(() => {
+    if (!selectedPeer) return;
+    pollRef.current = setInterval(() => loadMessages(selectedPeer.peerId), 4000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [selectedPeer, loadMessages]);
+
+  const sendMsg = useCallback(async () => {
+    if (!selectedPeer || !input.trim() || sending) return;
+    const text = input.trim();
+    setInput('');
+    setSending(true);
+    setPeerMessages(prev => [...prev, { ts: Date.now(), direction: 'out', peer: selectedPeer.peerId, text }]);
+    try {
+      await sendPeerMessage(selectedPeer.peerId, text);
+    } catch (err: any) {
+      setPeerMessages(prev => [...prev, { ts: Date.now(), direction: 'in', peer: 'system', text: `Failed to deliver: ${err.message}` }]);
+    } finally {
+      setSending(false);
+    }
+  }, [selectedPeer, input, sending]);
+
+  const connectedCount = peers.filter(p => p.connectionStatus === 'connected').length;
+  const ALIVE_MS = 5 * 60 * 1000;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
+      {/* Peer list sidebar */}
+      <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
+        <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Network Peers</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+            {connectedCount} connected · {peers.length} discovered
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
+          {loadingPeers && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading peers…</div>}
+          {!loadingPeers && peers.length === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers discovered yet.</div>
+          )}
+          {peers.map(p => {
+            const isSelected = selectedPeer?.peerId === p.peerId;
+            const isOnline = p.connectionStatus === 'connected' || (p.lastSeen != null && Date.now() - p.lastSeen < ALIVE_MS);
+            return (
+              <div
+                key={p.peerId}
+                onClick={() => selectPeer(p)}
+                style={{
+                  padding: '10px 12px', borderRadius: 8, marginBottom: 4, cursor: 'pointer',
+                  background: isSelected ? 'var(--surface)' : 'transparent',
+                  border: isSelected ? '1px solid var(--border)' : '1px solid transparent',
+                  transition: 'all .15s ease',
+                }}
+                onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface)'; }}
+                onMouseLeave={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                    background: isOnline ? '#10b981' : '#6b7280',
+                    boxShadow: isOnline ? '0 0 6px rgba(16,185,129,.5)' : 'none',
+                  }} />
+                  <span style={{
+                    fontSize: 12, fontWeight: isSelected ? 700 : 500,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    color: isSelected ? 'var(--text)' : 'var(--text-muted)',
+                  }}>{p.name}</span>
+                </div>
+                {p.latencyMs != null && (
+                  <div className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2, marginLeft: 15 }}>
+                    {p.latencyMs}ms
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', fontSize: 10, color: 'var(--text-dim)' }}>
+          <button onClick={loadPeers} style={{
+            fontSize: 10, color: 'var(--text-dim)', background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+            textDecoration: 'underline', textUnderlineOffset: 2,
+          }}>Refresh peers</button>
+        </div>
+      </div>
+
+      {/* Chat area */}
+      <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {!selectedPeer ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12, color: 'var(--text-dim)' }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity={0.4}>
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <div style={{ fontSize: 13 }}>Select a peer to start chatting</div>
+            <div style={{ fontSize: 11 }}>Messages are sent directly over the DKG P2P network</div>
+          </div>
+        ) : (
+          <>
+            <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{
+                width: 34, height: 34, borderRadius: '50%',
+                background: selectedPeer.connectionStatus === 'connected' ? 'rgba(16,185,129,.12)' : 'var(--surface)',
+                border: `1px solid ${selectedPeer.connectionStatus === 'connected' ? 'rgba(16,185,129,.3)' : 'var(--border)'}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
+              }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={selectedPeer.connectionStatus === 'connected' ? '#10b981' : '#6b7280'} strokeWidth="2">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                </svg>
+              </div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{selectedPeer.name}</div>
+                <div style={{ fontSize: 11, color: selectedPeer.connectionStatus === 'connected' ? 'var(--green)' : 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+                    background: selectedPeer.connectionStatus === 'connected' ? 'var(--green)' : '#6b7280',
+                  }} />
+                  {selectedPeer.connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}
+                  {selectedPeer.latencyMs != null && <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>· {selectedPeer.latencyMs}ms</span>}
+                </div>
+              </div>
+              <div className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-dim)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {selectedPeer.peerId.slice(0, 16)}…
+              </div>
+            </div>
+
+            <div className="chat-area" style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
+              {peerMessages.length === 0 && (
+                <div style={{ textAlign: 'center', color: 'var(--text-dim)', fontSize: 12, marginTop: 40 }}>
+                  No messages yet. Say hello!
+                </div>
+              )}
+              {peerMessages.map((m, i) => (
+                <div key={i} className={`chat-msg ${m.direction === 'out' ? 'user' : 'assistant'}`}>
+                  <div className={`chat-bubble ${m.direction === 'out' ? 'user' : 'assistant'}`}>
+                    {m.text}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, fontFamily: 'JetBrains Mono, monospace' }}>
+                    {new Date(m.ts).toLocaleTimeString()}
+                  </div>
+                </div>
+              ))}
+              {sending && (
+                <div className="chat-msg user">
+                  <div className="chat-bubble user" style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '12px 16px', opacity: 0.5 }}>
+                    Sending…
+                  </div>
+                </div>
+              )}
+              <div ref={bottomRef} />
+            </div>
+
+            <div className="chat-input-row">
+              <input
+                className="chat-input"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMsg())}
+                placeholder={`Message ${selectedPeer.name}…`}
+              />
+              <button className="chat-send" onClick={sendMsg} disabled={sending || !input.trim()}>Send</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AgentHubPage() {
+  const [mode, setMode] = useState<'agent' | 'peers'>('agent');
   const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -269,7 +503,35 @@ export function AgentHubPage() {
 
   return (
     <div className="page-section" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 0 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
+      {/* Mode tabs */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg)', padding: '0 16px', gap: 0, flexShrink: 0 }}>
+        {(['agent', 'peers'] as const).map(m => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            style={{
+              padding: '12px 20px', fontSize: 12, fontWeight: mode === m ? 700 : 500,
+              background: 'none', border: 'none', borderBottom: mode === m ? '2px solid var(--green)' : '2px solid transparent',
+              color: mode === m ? 'var(--text)' : 'var(--text-muted)', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 6, transition: 'all .15s ease',
+            }}
+          >
+            {m === 'agent' ? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="3"/></svg>
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            )}
+            {m === 'agent' ? 'My Agent' : 'Peer Chat'}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'peers' ? (
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          <PeerChatView />
+        </div>
+      ) : (
+      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', flex: 1, overflow: 'hidden' }}>
 
         {/* Left sidebar: chat history */}
         <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
@@ -567,6 +829,7 @@ export function AgentHubPage() {
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

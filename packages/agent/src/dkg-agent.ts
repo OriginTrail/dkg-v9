@@ -36,6 +36,26 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
+/** Health status of a peer from the last ping round. */
+export interface PeerHealth {
+  peerId: string;
+  alive: boolean;
+  latencyMs: number | null;
+  lastSeen: number | null;
+  lastChecked: number;
+}
+
+/** Tracks the subscription and sync state of a paranet. */
+export interface ParanetSub {
+  name?: string;
+  /** GossipSub topics are active for this paranet. */
+  subscribed: boolean;
+  /** Definition triples exist in the local triple store. */
+  synced: boolean;
+  /** On-chain paranet ID (keccak256 hash), if known. */
+  onChainId?: string;
+}
+
 export interface DKGAgentConfig {
   name: string;
   framework?: string;
@@ -115,6 +135,10 @@ export class DKGAgent {
   private workspaceCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly config: DKGAgentConfig;
   private started = false;
+  private readonly subscribedParanets = new Map<string, ParanetSub>();
+  private readonly gossipRegistered = new Set<string>();
+  private readonly seenOnChainIds = new Set<string>();
+  private readonly peerHealth = new Map<string, PeerHealth>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -292,6 +316,17 @@ export class DKGAgent {
         publishHandler,
         onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
+
+          // Track the hash for dedup but don't pollute subscribedParanets.
+          // Gossip topics are keyed by cleartext name, not the on-chain hash.
+          // The paranet will be fully subscribed once ontology sync or
+          // discoverParanetsFromChain resolves the cleartext name.
+          const alreadyKnown = this.seenOnChainIds.has(paranetId)
+            || [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
+          if (!alreadyKnown) {
+            this.seenOnChainIds.add(paranetId);
+            this.log.info(ctx, `Noted on-chain paranet ${paranetId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
+          }
         },
       });
       this.chainPoller.start();
@@ -460,6 +495,9 @@ export class DKGAgent {
         const synced = await this.syncFromPeer(remotePeer);
         this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
+        // After syncing ONTOLOGY, discover and auto-subscribe to any new paranets
+        await this.discoverParanetsFromStore();
+
         const wsParanets = this.config.syncParanets ?? [];
         if (wsParanets.length > 0) {
           const wsSynced = await this.syncWorkspaceFromPeer(remotePeer, wsParanets);
@@ -503,7 +541,7 @@ export class DKGAgent {
    */
   async syncFromPeer(
     remotePeerId: string,
-    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, ...(this.config.syncParanets ?? [])],
+    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncParanets ?? [])],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
@@ -1123,6 +1161,16 @@ export class DKGAgent {
   }
 
   subscribeToParanet(paranetId: string): void {
+    // Idempotent: skip if gossip handlers already installed for this paranet
+    if (this.gossipRegistered.has(paranetId)) {
+      const existing = this.subscribedParanets.get(paranetId);
+      if (!existing?.subscribed) {
+        this.subscribedParanets.set(paranetId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+      }
+      return;
+    }
+    this.gossipRegistered.add(paranetId);
+
     const publishTopic = paranetPublishTopic(paranetId);
     const workspaceTopic = paranetWorkspaceTopic(paranetId);
     const appTopic = paranetAppTopic(paranetId);
@@ -1130,6 +1178,9 @@ export class DKGAgent {
     this.gossip.subscribe(publishTopic);
     this.gossip.subscribe(workspaceTopic);
     this.gossip.subscribe(appTopic);
+
+    const existing = this.subscribedParanets.get(paranetId);
+    this.subscribedParanets.set(paranetId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
     this.gossip.onMessage(publishTopic, async (_topic, data) => {
       const ctx = createOperationContext('gossip');
@@ -1152,6 +1203,7 @@ export class DKGAgent {
         // triples for paranets we already have locally. This prevents duplicate
         // creator/timestamp triples when multiple nodes create the same paranet
         // during simultaneous startup.
+        // Also auto-subscribe to any newly discovered paranets.
         if (request.paranetId === SYSTEM_PARANETS.ONTOLOGY) {
           const paranetPrefix = 'did:dkg:paranet:';
           const incomingParanetUris = new Set(
@@ -1161,10 +1213,14 @@ export class DKGAgent {
           );
           if (incomingParanetUris.size > 0) {
             const duplicateUris = new Set<string>();
+            const newParanetIds: string[] = [];
             for (const uri of incomingParanetUris) {
               const id = uri.startsWith(paranetPrefix) ? uri.slice(paranetPrefix.length) : null;
-              if (id && await this.paranetExists(id)) {
+              if (!id) continue;
+              if (await this.paranetExists(id)) {
                 duplicateUris.add(uri);
+              } else if (id !== SYSTEM_PARANETS.AGENTS && id !== SYSTEM_PARANETS.ONTOLOGY) {
+                newParanetIds.push(id);
               }
             }
             if (duplicateUris.size > 0) {
@@ -1174,6 +1230,22 @@ export class DKGAgent {
                   .map(q => q.object),
               );
               normalized = normalized.filter(q => !duplicateUris.has(q.subject) && !activityUris.has(q.subject));
+            }
+
+            // Auto-subscribe to newly discovered paranets from gossip
+            for (const newId of newParanetIds) {
+              const nameQuad = normalized.find(q =>
+                q.subject === `${paranetPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
+              );
+              const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
+              this.subscribedParanets.set(newId, {
+                name,
+                subscribed: true,
+                synced: true,
+                onChainId: this.subscribedParanets.get(newId)?.onChainId,
+              });
+              this.subscribeToParanet(newId);
+              this.log.info(ctx, `Discovered paranet "${name}" (${newId}) via gossip — auto-subscribed`);
             }
           }
         }
@@ -1382,6 +1454,13 @@ export class DKGAgent {
     // Create the actual named graphs for the paranet
     await gm.ensureParanet(opts.id);
 
+    this.subscribedParanets.set(opts.id, {
+      name: opts.name,
+      subscribed: !opts.private,
+      synced: true,
+      onChainId: onChainId,
+    });
+
     if (!opts.private) {
       // Auto-subscribe to the new paranet's GossipSub topic
       this.subscribeToParanet(opts.id);
@@ -1416,8 +1495,139 @@ export class DKGAgent {
   }
 
   /**
-   * Check whether a paranet is registered (definition triples exist
-   * in the ontology paranet).
+   * Idempotent "ensure" variant of createParanet for boot-time defaults.
+   * If the paranet already exists locally, just ensures GossipSub subscription
+   * and registry entry. If not, inserts definition triples and optionally
+   * registers on-chain (or gracefully handles "already exists" on-chain).
+   * Unlike createParanet(), this never throws for duplicates and avoids
+   * re-claiming creator if the paranet is already on-chain.
+   */
+  async ensureParanetLocal(opts: {
+    id: string;
+    name: string;
+    description?: string;
+    revealOnChain?: boolean;
+  }): Promise<void> {
+    const ctx = createOperationContext('system');
+
+    const exists = await this.paranetExists(opts.id);
+    if (exists) {
+      // Already synced locally — just make sure we're subscribed
+      this.subscribeToParanet(opts.id);
+      this.subscribedParanets.set(opts.id, {
+        name: opts.name,
+        subscribed: true,
+        synced: true,
+        onChainId: this.subscribedParanets.get(opts.id)?.onChainId,
+      });
+      return;
+    }
+
+    // Not yet in local store — try chain registration (idempotent)
+    let onChainId: string | undefined;
+    let alreadyOnChain = false;
+    if (this.chain.chainId !== 'none') {
+      try {
+        const result = await this.chain.createParanet({
+          name: opts.id,
+          description: opts.description,
+          accessPolicy: 0,
+          revealOnChain: opts.revealOnChain,
+        });
+        onChainId = result.paranetId;
+        this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+          alreadyOnChain = true;
+          onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
+          this.log.info(ctx, `Paranet "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
+        } else {
+          this.log.warn(ctx, `On-chain registration for "${opts.id}" failed: ${msg}`);
+        }
+      }
+    }
+
+    // Insert local definition triples. Use "network" as creator when the
+    // paranet already existed on-chain (avoid every node claiming creator).
+    const gm = new GraphManager(this.store);
+    const paranetUri = paranetDataGraphUri(opts.id);
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const now = new Date().toISOString();
+    const creator = alreadyOnChain ? 'did:dkg:network' : `did:dkg:agent:${this.peerId}`;
+
+    const quads: Quad[] = [
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creator, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
+    ];
+
+    if (onChainId) {
+      quads.push({
+        subject: paranetUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
+        object: `"${onChainId}"`,
+        graph: ontologyGraph,
+      });
+    }
+
+    if (opts.description) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
+        object: `"${opts.description}"`,
+        graph: ontologyGraph,
+      });
+    }
+
+    await this.store.insert(quads);
+    await gm.ensureParanet(opts.id);
+
+    this.subscribeToParanet(opts.id);
+    this.subscribedParanets.set(opts.id, {
+      name: opts.name,
+      subscribed: true,
+      synced: true,
+      onChainId,
+    });
+
+    this.log.info(ctx, `Ensured paranet "${opts.id}" locally (creator=${alreadyOnChain ? 'network' : 'self'})`);
+
+    // Broadcast so peers learn about it
+    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+    const nquads = quads.map(q => {
+      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
+    }).join('\n');
+
+    const msg = encodePublishRequest({
+      ual: `did:dkg:paranet:${opts.id}`,
+      nquads: new TextEncoder().encode(nquads),
+      paranetId: SYSTEM_PARANETS.ONTOLOGY,
+      kas: [],
+      publisherIdentity: this.wallet.keypair.publicKey,
+      publisherAddress: '',
+      startKAId: 0,
+      endKAId: 0,
+      chainId: '',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    try {
+      await this.gossip.publish(ontologyTopic, msg);
+    } catch {
+      // No peers subscribed — ok during boot
+    }
+  }
+
+  /**
+   * Check whether a paranet is registered (definition triples exist in the
+   * ontology graph). Always store-backed to avoid false positives from
+   * in-memory state that may not have been persisted yet.
    */
   async paranetExists(paranetId: string): Promise<boolean> {
     const paranetUri = paranetDataGraphUri(paranetId);
@@ -1430,7 +1640,9 @@ export class DKGAgent {
   }
 
   /**
-   * List all registered paranets with their metadata.
+   * List all known paranets by merging the subscription registry with
+   * SPARQL-discovered definition triples. Returns enriched entries with
+   * `subscribed` and `synced` flags.
    */
   async listParanets(): Promise<Array<{
     id: string;
@@ -1440,6 +1652,8 @@ export class DKGAgent {
     creator?: string;
     createdAt?: string;
     isSystem: boolean;
+    subscribed: boolean;
+    synced: boolean;
   }>> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
@@ -1467,27 +1681,48 @@ export class DKGAgent {
       }
     `);
 
-    if (result.type !== 'bindings') return [];
-
     const prefix = 'did:dkg:paranet:';
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
       creator?: string; createdAt?: string; isSystem: boolean;
+      subscribed: boolean; synced: boolean;
     }>();
-    for (const row of result.bindings as Record<string, string>[]) {
-      const uri = row['paranet'] ?? '';
+
+    if (result.type === 'bindings') {
+      for (const row of result.bindings as Record<string, string>[]) {
+        const uri = row['paranet'] ?? '';
+        if (seen.has(uri)) continue;
+        const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
+        const sub = this.subscribedParanets.get(id);
+        seen.set(uri, {
+          id,
+          uri,
+          name: stripLiteral(row['name'] ?? id),
+          description: row['desc'] ? stripLiteral(row['desc']) : undefined,
+          creator: row['creator'],
+          createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
+          isSystem: !!row['isSystem'],
+          subscribed: sub?.subscribed ?? false,
+          synced: true,
+        });
+      }
+    }
+
+    // Add registry entries that don't have triples yet (subscribed but not synced)
+    for (const [id, sub] of this.subscribedParanets) {
+      const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
-      const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
       seen.set(uri, {
         id,
         uri,
-        name: stripLiteral(row['name'] ?? id),
-        description: row['desc'] ? stripLiteral(row['desc']) : undefined,
-        creator: row['creator'],
-        createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
-        isSystem: !!row['isSystem'],
+        name: sub.name ?? id,
+        isSystem: false,
+        subscribed: sub.subscribed,
+        synced: sub.synced,
       });
     }
+
     return Array.from(seen.values());
   }
 
@@ -1501,6 +1736,179 @@ export class DKGAgent {
 
   get multiaddrs(): string[] {
     return this.node.multiaddrs;
+  }
+
+  /** Returns a snapshot of the paranet subscription registry. */
+  getSubscribedParanets(): ReadonlyMap<string, ParanetSub> {
+    return this.subscribedParanets;
+  }
+
+  /** Returns the latest health snapshot for all known peers. */
+  getPeerHealth(): ReadonlyMap<string, PeerHealth> {
+    return this.peerHealth;
+  }
+
+  /**
+   * Ping all known peers to check liveness. Updates the peerHealth map with
+   * latency and last-seen timestamps. Returns the number of peers that responded.
+   */
+  async pingPeers(): Promise<number> {
+    const ctx = createOperationContext('system');
+    const peers = this.node.libp2p.getPeers();
+    if (peers.length === 0) return 0;
+
+    const PING_TIMEOUT_MS = 10_000;
+    let alive = 0;
+    const now = Date.now();
+
+    const results = await Promise.allSettled(
+      peers.map(async (peerId) => {
+        const id = peerId.toString();
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
+        try {
+          const latency = await this.node.libp2p.services.ping.ping(peerId, { signal: ac.signal });
+          clearTimeout(timer);
+          this.peerHealth.set(id, {
+            peerId: id,
+            alive: true,
+            latencyMs: latency,
+            lastSeen: now,
+            lastChecked: now,
+          });
+          return true;
+        } catch {
+          clearTimeout(timer);
+          const prev = this.peerHealth.get(id);
+          this.peerHealth.set(id, {
+            peerId: id,
+            alive: false,
+            latencyMs: null,
+            lastSeen: prev?.lastSeen ?? null,
+            lastChecked: now,
+          });
+          return false;
+        }
+      }),
+    );
+
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) alive++;
+    }
+
+    this.log.info(ctx, `Peer health ping: ${alive}/${peers.length} peers alive`);
+    return alive;
+  }
+
+  /**
+   * Scan the local ONTOLOGY graph for paranet definitions and auto-subscribe
+   * to any that aren't yet in the subscription registry. Called after
+   * syncFromPeer to catch paranets discovered via ONTOLOGY sync.
+   */
+  async discoverParanetsFromStore(): Promise<number> {
+    const ctx = createOperationContext('system');
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const prefix = 'did:dkg:paranet:';
+    let discovered = 0;
+
+    const result = await this.store.query(`
+      SELECT ?paranet ?name WHERE {
+        GRAPH <${ontologyGraph}> {
+          ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+        }
+      }
+    `);
+
+    if (result.type !== 'bindings') return 0;
+
+    for (const row of result.bindings as Record<string, string>[]) {
+      const uri = row['paranet'] ?? '';
+      const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
+      if (!id) continue;
+
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+      const existing = this.subscribedParanets.get(id);
+      if (existing?.subscribed && existing?.synced) continue;
+
+      const name = row['name'] ? stripLiteral(row['name']) : id;
+      this.subscribedParanets.set(id, {
+        name,
+        subscribed: true,
+        synced: true,
+        onChainId: existing?.onChainId,
+      });
+
+      if (!existing?.subscribed) {
+        this.subscribeToParanet(id);
+      }
+
+      this.log.info(ctx, `Discovered paranet "${name}" (${id}) from store — auto-subscribed`);
+      discovered++;
+    }
+
+    if (discovered > 0) {
+      this.log.info(ctx, `Auto-subscribed to ${discovered} new paranet(s) from store`);
+    }
+    return discovered;
+  }
+
+  /**
+   * Query the on-chain ParanetV9Registry for all registered paranets and
+   * auto-subscribe to any not yet in the subscription registry.
+   * Returns the number of newly discovered paranets.
+   */
+  async discoverParanetsFromChain(): Promise<number> {
+    const ctx = createOperationContext('system');
+    if (!this.chain.listParanetsFromChain) {
+      this.log.info(ctx, 'Chain adapter does not support listParanetsFromChain — skipping');
+      return 0;
+    }
+
+    let onChainParanets;
+    try {
+      onChainParanets = await this.chain.listParanetsFromChain();
+    } catch (err) {
+      this.log.warn(ctx, `Chain paranet scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 0;
+    }
+
+    // Build a set of all known on-chain IDs (stored and computed) for fast dedup
+    const knownOnChainIds = new Set<string>();
+    for (const [localId, sub] of this.subscribedParanets) {
+      if (sub.onChainId) knownOnChainIds.add(sub.onChainId);
+      // Also compute expected hash for locally-known paranet IDs
+      knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
+    }
+
+    let discovered = 0;
+    for (const p of onChainParanets) {
+      if (knownOnChainIds.has(p.paranetId)) continue;
+
+      if (!p.name) {
+        // Hash-only entry (metadata not revealed) — record for dedup but don't
+        // subscribe to gossip topics since hash-keyed topics are unusable.
+        this.log.info(ctx, `Noted unresolved on-chain paranet ${p.paranetId.slice(0, 16)}… (no metadata)`);
+        knownOnChainIds.add(p.paranetId);
+        continue;
+      }
+
+      this.subscribedParanets.set(p.name, {
+        name: p.name,
+        subscribed: true,
+        synced: false,
+        onChainId: p.paranetId,
+      });
+      this.subscribeToParanet(p.name);
+      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      discovered++;
+    }
+
+    if (discovered > 0) {
+      this.log.info(ctx, `Discovered ${discovered} new paranet(s) from chain`);
+    }
+    return discovered;
   }
 
   async stop(): Promise<void> {

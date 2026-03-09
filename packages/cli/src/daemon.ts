@@ -183,27 +183,53 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     }
   }
 
-  // Subscribe to configured paranets + network defaults
+  // Ensure configured paranets + network defaults are subscribed and available.
+  // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
+  // duplicate creator claims and to survive "already exists" gracefully.
   const paranetsToSubscribe = new Set([
     ...(config.paranets ?? []),
     ...(network?.defaultParanets ?? []),
   ]);
   for (const p of paranetsToSubscribe) {
-    const exists = await agent.paranetExists(p);
-    if (!exists) {
-      try {
-        await agent.createParanet({ id: p, name: p, description: `Default testnet paranet "${p}"` });
-        log(`Created paranet: ${p}`);
-      } catch {
-        log(`Paranet "${p}" not yet available (will receive via gossip)`);
-      }
+    try {
+      await agent.ensureParanetLocal({
+        id: p,
+        name: p,
+        description: `Default paranet: ${p}`,
+      });
+      log(`Ensured paranet: ${p}`);
+    } catch (err) {
+      log(`Paranet "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
+      agent.subscribeToParanet(p);
     }
-    agent.subscribeToParanet(p);
-    log(`Subscribed to paranet: ${p}`);
   }
 
-  // Profile is published once at startup (above). No periodic re-publish —
-  // peers discover us via the initial gossip broadcast + relay.
+  // Run an initial chain scan for paranets we might not know about,
+  // then repeat every 30 minutes as a fallback discovery mechanism.
+  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
+  setTimeout(async () => {
+    try {
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+    } catch { /* non-critical */ }
+  }, 15_000);
+  const chainScanTimer = setInterval(async () => {
+    try {
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+    } catch { /* non-critical */ }
+  }, CHAIN_SCAN_INTERVAL_MS);
+  if (chainScanTimer.unref) chainScanTimer.unref();
+
+  // Periodic peer health ping (every 2 minutes)
+  const PING_INTERVAL_MS = 2 * 60 * 1000;
+  setTimeout(async () => {
+    try { await agent.pingPeers(); } catch { /* non-critical */ }
+  }, 30_000);
+  const pingTimer = setInterval(async () => {
+    try { await agent.pingPeers(); } catch { /* non-critical */ }
+  }, PING_INTERVAL_MS);
+  if (pingTimer.unref) pingTimer.unref();
 
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
@@ -408,12 +434,21 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Installable DKG apps (API handlers + static UI)
       // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
-      // Only inject the auth token into HTML when the request itself is authenticated,
-      // and inject the caller's own token (not a different one) to avoid leaking credentials.
+      // Inject the caller's verified token if present; when the server is bound to
+      // loopback only, fall back to the first stored token for /apps/* requests
+      // (TCP guarantees all connections are local — no proxy spoofing possible).
       let appInjectToken: string | undefined;
-      if (installedApps.length > 0 && authEnabled) {
+      if (installedApps.length > 0 && authEnabled && validTokens.size > 0) {
         const reqToken = extractBearerToken(req.headers.authorization);
-        if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
+        if (reqToken && validTokens.has(reqToken)) {
+          appInjectToken = reqToken;
+        } else if (reqUrl.pathname.startsWith('/apps/')) {
+          const boundHost = config.apiHost || '127.0.0.1';
+          const boundToLoopback = boundHost === '127.0.0.1' || boundHost === '::1';
+          if (boundToLoopback) {
+            appInjectToken = validTokens.values().next().value as string;
+          }
+        }
       }
       const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
       if (appHandled) return;
@@ -442,6 +477,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   async function shutdown() {
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
+    clearInterval(chainScanTimer);
+    clearInterval(pingTimer);
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();
@@ -536,15 +573,19 @@ async function handleRequest(
       }
     }
     const myPeerId = agent.peerId;
+    const healthMap = agent.getPeerHealth();
     const enriched = agents.map((a: any) => {
       const isSelf = a.peerId === myPeerId;
       const conn = connByPeer.get(a.peerId);
+      const health = healthMap.get(a.peerId);
       return {
         ...a,
         connectionStatus: isSelf ? 'self' : conn ? 'connected' : 'disconnected',
         connectionTransport: conn?.transport ?? null,
         connectionDirection: conn?.direction ?? null,
         connectedSinceMs: conn?.sinceMs ?? null,
+        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
+        latencyMs: health?.latencyMs ?? null,
       };
     });
     return jsonResponse(res, 200, { agents: enriched });

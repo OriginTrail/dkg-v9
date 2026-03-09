@@ -200,7 +200,9 @@ async function serveAppStatic(
       const injection = `<script>${parts.join(';')}</script>`;
       const injected = html.replace('</head>', `${injection}</head>`);
       const buf = Buffer.from(injected, 'utf-8');
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
+      const headers: Record<string, string | number> = { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache' };
+      if (!authToken) headers['Access-Control-Allow-Origin'] = '*';
+      res.writeHead(200, headers);
       res.end(buf);
     } else {
       const s = await stat(filePath);

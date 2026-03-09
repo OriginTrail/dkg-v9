@@ -150,9 +150,23 @@ describe('dashboard uses runtime data', () => {
   });
 
   it('stat cards use live data with fallback', () => {
-    expect(dashboard).toContain('totalAssets');
+    expect(dashboard).toContain('totalKCs');
     expect(dashboard).toContain('peerCount');
     expect(dashboard).toContain('agentCount');
+  });
+
+  it('card is labeled Knowledge Collections, not Knowledge Assets', () => {
+    expect(dashboard).toContain("'Knowledge Collections'");
+    expect(dashboard).not.toMatch(/['"]Knowledge Assets['"]/);
+  });
+
+  it('KC breakdown only renders when both confirmed and tentative are present', () => {
+    expect(dashboard).toMatch(/confirmedKCs\s*!=\s*null\s*&&\s*tentativeKCs\s*!=\s*null/);
+  });
+
+  it('falls back to total_kcs, not total_triples, for KC count', () => {
+    expect(dashboard).toMatch(/total_kcs/);
+    expect(dashboard).not.toMatch(/total_triples/);
   });
 
   it('agentCount preserves zero (does not use || null)', () => {

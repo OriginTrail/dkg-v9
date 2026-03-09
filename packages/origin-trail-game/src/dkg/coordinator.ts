@@ -66,7 +66,7 @@ export interface TurnProposal {
   approvalTimestamps: Map<string, number>;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string }>;
+  deaths: Array<{ name: string; cause: string; partyIndex: number }>;
   event?: { type: string; description: string };
 }
 
@@ -94,7 +94,7 @@ export interface ResolvedTurn {
   approvers: string[];
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string }>;
+  deaths: Array<{ name: string; cause: string; partyIndex: number }>;
   event?: { type: string; description: string };
   timestamp: number;
 }
@@ -107,25 +107,26 @@ function detectDeaths(
   oldState: GameState | null,
   newState: GameState,
   event?: { type: string; description: string; affectedMember?: string },
-): Array<{ name: string; cause: string }> {
+): Array<{ name: string; cause: string; partyIndex: number }> {
   if (!oldState) return [];
   return newState.party
-    .filter((m, i) => !m.alive && oldState.party[i]?.alive)
-    .map(m => {
+    .map((m, i) => ({ m, i }))
+    .filter(({ m, i }) => !m.alive && oldState.party[i]?.alive)
+    .map(({ m, i }) => {
       if (event?.affectedMember === m.name) {
-        return { name: m.name, cause: event.description };
+        return { name: m.name, cause: event.description, partyIndex: i };
       }
       if (newState.trainingTokens <= 0) {
-        return { name: m.name, cause: 'Ran out of training tokens — starvation' };
+        return { name: m.name, cause: 'Ran out of training tokens — starvation', partyIndex: i };
       }
       if (event) {
-        return { name: m.name, cause: event.description };
+        return { name: m.name, cause: event.description, partyIndex: i };
       }
       const oldMember = oldState.party.find(p => p.name === m.name);
       if (oldMember && oldMember.health > 0 && m.health <= 0) {
-        return { name: m.name, cause: 'Health depleted from sustained damage' };
+        return { name: m.name, cause: 'Health depleted from sustained damage', partyIndex: i };
       }
-      return { name: m.name, cause: 'Succumbed to accumulated damage' };
+      return { name: m.name, cause: 'Succumbed to accumulated damage', partyIndex: i };
     });
 }
 
@@ -426,7 +427,6 @@ export class OriginTrailGameCoordinator {
       if (swarm.gameState) swarm.gameState.status = 'lost';
       this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
-      await this.publishStrategyPatterns(swarm);
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
@@ -472,6 +472,7 @@ export class OriginTrailGameCoordinator {
       peerId: this.myPeerId,
       timestamp: now,
       gameStateJson,
+      partyOrder: swarm.players.map(p => p.peerId),
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
@@ -1001,7 +1002,11 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
-    swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+    if (msg.partyOrder) {
+      swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+    } else {
+      swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+    }
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -1373,10 +1378,8 @@ export class OriginTrailGameCoordinator {
   }
 
   private findDeathTurn(swarm: SwarmState, partyIndex: number): number {
-    const memberName = swarm.gameState?.party[partyIndex]?.name;
-    if (!memberName) return swarm.turnHistory.length;
     for (const turn of swarm.turnHistory) {
-      if (turn.deaths.some(d => d.name === memberName)) return turn.turn;
+      if (turn.deaths.some(d => d.partyIndex === partyIndex)) return turn.turn;
     }
     return swarm.turnHistory.length;
   }

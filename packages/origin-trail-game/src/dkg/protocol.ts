@@ -55,6 +55,7 @@ export interface SwarmLeftMsg extends BaseMessage {
 export interface ExpeditionLaunchedMsg extends BaseMessage {
   type: 'expedition:launched';
   gameStateJson: string;
+  partyOrder?: string[];
 }
 
 export interface VoteCastMsg extends BaseMessage {
@@ -73,7 +74,7 @@ export interface TurnProposalMsg extends BaseMessage {
   resultMessage: string;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string }>;
+  deaths: Array<{ name: string; cause: string; partyIndex: number }>;
   event?: { type: string; description: string };
 }
 

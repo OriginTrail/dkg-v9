@@ -63,6 +63,7 @@ export interface TurnProposal {
   newStateJson: string;
   resultMessage: string;
   approvals: Set<string>;
+  approvalTimestamps: Map<string, number>;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
   deaths: Array<{ name: string; cause: string }>;
@@ -600,6 +601,7 @@ export class OriginTrailGameCoordinator {
       newStateJson,
       resultMessage: result.message,
       approvals: new Set([this.myPeerId]),
+      approvalTimestamps: new Map([[this.myPeerId, Date.now()]]),
       votes,
       resolution,
       deaths,
@@ -667,12 +669,25 @@ export class OriginTrailGameCoordinator {
 
     if (isLeader) {
       try {
-        const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
-          this.paranetId, swarm.id, proposal.turn,
-          proposal.winningAction, proposal.newStateJson,
-          [...proposal.approvals],
-        ));
+        const attestations: rdf.ConsensusAttestation[] = [...proposal.approvals].map(pid => ({
+          peerId: pid,
+          proposalHash: proposal.hash,
+          approved: true,
+          timestamp: proposal.approvalTimestamps.get(pid) ?? Date.now(),
+        }));
+        const turnQuads = [
+          ...rdf.turnResolvedQuads(
+            this.paranetId, swarm.id, proposal.turn,
+            proposal.winningAction, proposal.newStateJson,
+            [...proposal.approvals],
+          ),
+          ...rdf.consensusAttestationQuads(
+            this.paranetId, swarm.id, proposal.turn, attestations, proposal.resolution, proposal.hash,
+          ),
+        ];
+        const publishResult = await this.agent.publish(this.paranetId, turnQuads);
         this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
+        this.log(`Consensus attestations published for turn ${proposal.turn}`);
 
         const onChain = publishResult?.onChainResult;
         if (onChain?.txHash && publishResult?.ual) {
@@ -780,11 +795,24 @@ export class OriginTrailGameCoordinator {
     await this.broadcast(msg);
 
     try {
-      const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
-        this.paranetId, swarm.id, turnNumber,
-        winningAction, newStateJson, [this.myPeerId],
-      ));
+      const attestations: rdf.ConsensusAttestation[] = [{
+        peerId: this.myPeerId,
+        proposalHash: hash,
+        approved: true,
+        timestamp: Date.now(),
+      }];
+      const turnQuads = [
+        ...rdf.turnResolvedQuads(
+          this.paranetId, swarm.id, turnNumber,
+          winningAction, newStateJson, [this.myPeerId],
+        ),
+        ...rdf.consensusAttestationQuads(
+          this.paranetId, swarm.id, turnNumber, attestations, 'force-resolved', hash,
+        ),
+      ];
+      const publishResult = await this.agent.publish(this.paranetId, turnQuads);
       this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
+      this.log(`Force-resolve: attestation published for turn ${turnNumber}`);
 
       const onChain = publishResult?.onChainResult;
       if (onChain?.txHash && publishResult?.ual) {
@@ -1077,6 +1105,7 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
+      approvalTimestamps: new Map([[msg.peerId, Date.now()], [this.myPeerId, Date.now()]]),
       votes,
       resolution,
       deaths,
@@ -1105,6 +1134,7 @@ export class OriginTrailGameCoordinator {
     if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
 
     swarm.pendingProposal.approvals.add(msg.peerId);
+    swarm.pendingProposal.approvalTimestamps.set(msg.peerId, Date.now());
     this.log(`Approval from ${msg.peerId.slice(0, 8)} for turn ${msg.turn} (${swarm.pendingProposal.approvals.size}/${signatureThreshold(swarm.players.length)} needed)`);
 
     await this.checkProposalThreshold(swarm);

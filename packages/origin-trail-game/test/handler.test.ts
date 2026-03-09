@@ -846,6 +846,217 @@ describe('Chain provenance in turn results (C4)', () => {
   });
 });
 
+
+describe('Consensus attestation triples (V1)', () => {
+  it('consensusAttestationQuads generates correct RDF structure with distinct root entity', async () => {
+    const { consensusAttestationQuads, turnUri } = await import('../src/dkg/rdf.js');
+    const proposalHash = 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
+    const quads = consensusAttestationQuads('test-paranet', 'swarm-1', 1, [
+      { peerId: 'peer-a', proposalHash, approved: true, timestamp: 1000 },
+      { peerId: 'peer-b', proposalHash, approved: true, timestamp: 1001 },
+    ], 'consensus', proposalHash);
+
+    // Root entity is a distinct ConsensusAttestationBatch, NOT the turn URI
+    const batchQuads = quads.filter(q => q.object.includes('ConsensusAttestationBatch'));
+    expect(batchQuads).toHaveLength(1);
+    const root = batchQuads[0].subject;
+    expect(root).toContain('urn:dkg:attestation:');
+    expect(root).toContain(proposalHash);
+    expect(root).not.toBe(turnUri('swarm-1', 1));
+
+    // Root references the turn via forTurnResult
+    const forTurnQuad = quads.find(q => q.predicate.includes('forTurnResult'));
+    expect(forTurnQuad).toBeDefined();
+    expect(forTurnQuad!.subject).toBe(root);
+    expect(forTurnQuad!.object).toBe(turnUri('swarm-1', 1));
+
+    // Resolution triple on the batch root, not the turn
+    const resQuad = quads.find(q => q.predicate.includes('resolution'));
+    expect(resQuad).toBeDefined();
+    expect(resQuad!.subject).toBe(root);
+    expect(resQuad!.object).toContain('consensus');
+
+    // Two attestation entities
+    const attQuads = quads.filter(q => q.object.includes('ConsensusAttestation') && !q.object.includes('Batch'));
+    expect(attQuads).toHaveLength(2);
+
+    // Individual attestation URIs contain full proposalHash
+    for (const aq of attQuads) {
+      expect(aq.subject).toContain(proposalHash);
+    }
+
+    // Each has signer, proposalHash, approved, attestedAt, plus hasAttestation link
+    const signerQuads = quads.filter(q => q.predicate.includes('/signer'));
+    expect(signerQuads).toHaveLength(2);
+    expect(signerQuads[0].object).toContain('peer-a');
+    expect(signerQuads[1].object).toContain('peer-b');
+
+    const hashQuads = quads.filter(q => q.predicate.includes('proposalHash'));
+    expect(hashQuads).toHaveLength(2);
+
+    const approvedQuads = quads.filter(q => q.predicate.includes('/approved'));
+    expect(approvedQuads).toHaveLength(2);
+
+    const linkQuads = quads.filter(q => q.predicate.includes('hasAttestation'));
+    expect(linkQuads).toHaveLength(2);
+    for (const lq of linkQuads) {
+      expect(lq.subject).toBe(root);
+    }
+  });
+
+  it('forceResolveTurn publishes turn and attestation triples in a single call', async () => {
+    const leaderPeerId = 'leader-att-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {};
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'att-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'AttestSwarm', 4);
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/att-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['att-p2', 'P2'], ['att-p3', 'P3']] as const) {
+      handle('dkg/paranet/att-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+    await coordinator.forceResolveTurn(swarm.id);
+
+    // Turn + attestation quads should be merged in a single publish call
+    const combinedPublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('ConsensusAttestation')) &&
+      quads.some((q: any) => q.object?.includes('TurnResult')),
+    );
+    expect(combinedPublish).toBeDefined();
+
+    // Attestation root is a distinct ConsensusAttestationBatch
+    const batchQuad = combinedPublish.find((q: any) => q.object?.includes('ConsensusAttestationBatch'));
+    expect(batchQuad).toBeDefined();
+    expect(batchQuad.subject).toContain('urn:dkg:attestation:');
+
+    const signerQuad = combinedPublish.find((q: any) => q.predicate?.includes('/signer'));
+    expect(signerQuad).toBeDefined();
+    expect(signerQuad.object).toContain(leaderPeerId);
+
+    const attLogs = logs.filter(l => l.includes('attestation published'));
+    expect(attLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consensus flow via checkProposalThreshold publishes attestation triples with distinct root', async () => {
+    const leaderPeerId = 'leader-cons-1';
+    const followerPeerId = 'follower-cons-1';
+    const thirdPeerId = 'third-cons-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {};
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'cons-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm');
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/cons-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
+      handle('dkg/paranet/cons-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Leader votes locally
+    await coordinator.castVote(swarm.id, 'advance');
+
+    // Remote peers vote via gossip — third vote triggers proposeTurnResolution
+    for (const pid of [followerPeerId, thirdPeerId]) {
+      handle('dkg/paranet/cons-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 100));
+
+    // Leader auto-approved (2/3 needed for 3 players). Simulate a follower approval to reach threshold.
+    const proposal = swarm.pendingProposal;
+    expect(proposal).not.toBeNull();
+
+    handle('dkg/paranet/cons-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: followerPeerId, timestamp: 999, turn: 1,
+      proposalHash: proposal!.hash,
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Turn + attestation quads should be merged in a single publish call
+    const combinedPublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('ConsensusAttestation')) &&
+      quads.some((q: any) => q.object?.includes('TurnResult')),
+    );
+    expect(combinedPublish).toBeDefined();
+
+    // Attestation root is a distinct ConsensusAttestationBatch, NOT the turn URI
+    const batchQuad = combinedPublish.find((q: any) => q.object?.includes('ConsensusAttestationBatch'));
+    expect(batchQuad).toBeDefined();
+    const attRoot = batchQuad.subject;
+    expect(attRoot).toContain('urn:dkg:attestation:');
+
+    const turnRoots = combinedPublish.filter((q: any) => q.object?.includes('TurnResult')).map((q: any) => q.subject);
+    for (const tr of turnRoots) {
+      expect(tr).not.toBe(attRoot);
+    }
+
+    // Batch root links to turn via forTurnResult
+    const forTurnQuad = combinedPublish.find((q: any) => q.predicate?.includes('forTurnResult'));
+    expect(forTurnQuad).toBeDefined();
+    expect(forTurnQuad.subject).toBe(attRoot);
+
+    // Should have attestations from both leader and follower
+    const signerQuads = combinedPublish.filter((q: any) => q.predicate?.includes('/signer'));
+    expect(signerQuads.length).toBe(2);
+
+    // Approval timestamps must be local Date.now(), never the forged msg.timestamp (999)
+    const attestedAtQuads = combinedPublish.filter((q: any) => q.predicate?.includes('attestedAt'));
+    for (const aq of attestedAtQuads) {
+      const ts = parseInt(aq.object.replace(/"/g, '').replace(/\^\^.*/, ''), 10);
+      expect(ts).not.toBe(999);
+      expect(ts).toBeGreaterThan(1_000_000_000_000);
+    }
+
+    const resolutionQuad = combinedPublish.find((q: any) => q.predicate?.includes('resolution'));
+    expect(resolutionQuad).toBeDefined();
+    expect(resolutionQuad.object).toContain('consensus');
+
+    // Turn should have advanced
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.turnHistory).toHaveLength(1);
+    expect(swarm.turnHistory[0].resolution).toBe('consensus');
+  });
+});
+
 describe('Player profile RDF quads', () => {
   it('playerProfileQuads generates correct triples', async () => {
     const { playerProfileQuads } = await import('../src/dkg/rdf.js');

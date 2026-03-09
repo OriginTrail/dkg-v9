@@ -18,6 +18,12 @@ import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-tr
 import * as proto from './protocol.js';
 import * as rdf from './rdf.js';
 
+/** Subset of PublishResult from @dkg/publisher — keep aligned with the canonical type. */
+interface DKGPublishReturn {
+  ual?: string;
+  onChainResult?: { txHash?: string; blockNumber?: number };
+}
+
 interface DKGAgent {
   peerId: string;
   gossip: {
@@ -27,7 +33,7 @@ interface DKGAgent {
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
   writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
-  publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<any>;
+  publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
   query(sparql: string, options?: any): Promise<any>;
 }
 

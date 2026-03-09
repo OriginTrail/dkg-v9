@@ -479,12 +479,12 @@ describe('Entity exclusivity — no duplicate root entities', () => {
 
 describe('Chain provenance in turn results (C4)', () => {
   it('turnProvenanceQuads uses workspace graph and distinct root entity', async () => {
-    const { turnProvenanceQuads } = await import('../src/dkg/rdf.js');
+    const { turnProvenanceQuads, turnUri } = await import('../src/dkg/rdf.js');
     const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
       txHash: '0xabc123',
       blockNumber: 42,
       ual: 'did:dkg:test/ual/1',
-    });
+    }, 1000);
 
     const txQuad = quads.find(q => q.predicate.includes('transactionHash'));
     expect(txQuad).toBeDefined();
@@ -494,9 +494,11 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(blockQuad).toBeDefined();
     expect(blockQuad!.object).toContain('42');
 
+    // UAL emitted as IRI (unquoted) when it starts with did:
     const ualQuad = quads.find(q => q.predicate.includes('/ual'));
     expect(ualQuad).toBeDefined();
-    expect(ualQuad!.object).toContain('did:dkg:test/ual/1');
+    expect(ualQuad!.object).toBe('did:dkg:test/ual/1');
+    expect(ualQuad!.object.startsWith('"')).toBe(false);
 
     const graphs = new Set(quads.map(q => q.graph));
     expect(graphs.size).toBe(1);
@@ -504,7 +506,10 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const roots = new Set(quads.map(q => q.subject));
     expect(roots.size).toBe(1);
-    expect([...roots][0]).toContain('/provenance');
+    const root = [...roots][0];
+    expect(root).toMatch(/^urn:dkg:provenance:/);
+    // Provenance root must be distinct from the published turn entity
+    expect(root).not.toBe(turnUri('swarm-1', 1));
   });
 
   it('turnResolvedQuads does not include provenance triples', async () => {
@@ -527,6 +532,30 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeDefined();
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeDefined();
     expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
+  });
+
+  it('turnProvenanceQuads omits blockNumber when 0 (sentinel)', async () => {
+    const { turnProvenanceQuads } = await import('../src/dkg/rdf.js');
+    const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
+      txHash: '0xabc123',
+      blockNumber: 0,
+      ual: 'did:dkg:test/ual/1',
+    });
+
+    expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeDefined();
+    expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
+  });
+
+  it('turnProvenanceQuads emits UAL as literal when not an IRI', async () => {
+    const { turnProvenanceQuads } = await import('../src/dkg/rdf.js');
+    const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
+      txHash: '0xabc123',
+      ual: 'some-plain-string',
+    });
+
+    const ualQuad = quads.find(q => q.predicate.includes('/ual'));
+    expect(ualQuad).toBeDefined();
+    expect(ualQuad!.object.startsWith('"')).toBe(true);
   });
 
   it('forceResolveTurn writes provenance to workspace (not a second publish) when on-chain result is available', async () => {
@@ -579,13 +608,26 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('100');
 
+    // Workspace graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
     expect([...wsGraphs][0]).toBe('did:dkg:paranet:prov-test');
 
+    // Provenance root entity uses urn:dkg:provenance: prefix, distinct from turn entity
     const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
     expect(wsRoots.size).toBe(1);
-    expect([...wsRoots][0]).toContain('/provenance');
+    const provRoot = [...wsRoots][0];
+    expect(provRoot).toMatch(/^urn:dkg:provenance:/);
+    // Must NOT collide with the published turn entity
+    const turnQuads = leaderAgent._published[leaderAgent._published.length - 1];
+    const turnRoots = new Set(turnQuads.map((q: any) => q.subject));
+    for (const turnRoot of turnRoots) {
+      expect(provRoot).not.toBe(turnRoot);
+    }
+
+    // UAL emitted as IRI (not quoted)
+    const ualQuad = provenanceWrite.find((q: any) => q.predicate?.includes('/ual'));
+    expect(ualQuad.object.startsWith('"')).toBe(false);
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs.length).toBeGreaterThanOrEqual(1);
@@ -709,13 +751,25 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('200');
 
+    // Workspace graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
     expect([...wsGraphs][0]).toBe('did:dkg:paranet:consensus-prov');
 
+    // Provenance root entity uses urn:dkg:provenance: prefix, distinct from turn entity
     const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
     expect(wsRoots.size).toBe(1);
-    expect([...wsRoots][0]).toContain('/provenance');
+    const provRoot = [...wsRoots][0];
+    expect(provRoot).toMatch(/^urn:dkg:provenance:/);
+    const turnQuads = leaderAgent._published[leaderAgent._published.length - 1];
+    const turnRoots = new Set(turnQuads.map((q: any) => q.subject));
+    for (const turnRoot of turnRoots) {
+      expect(provRoot).not.toBe(turnRoot);
+    }
+
+    // UAL emitted as IRI (not quoted)
+    const ualQuad = provenanceWrite.find((q: any) => q.predicate?.includes('/ual'));
+    expect(ualQuad.object.startsWith('"')).toBe(false);
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs.length).toBeGreaterThanOrEqual(1);

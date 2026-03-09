@@ -72,6 +72,12 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         return json(res, 200, { players });
       }
 
+      if (req.method === 'GET' && subpath === '/leaderboard') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const entries = await coordinator.getLeaderboard();
+        return json(res, 200, { entries });
+      }
+
       if (req.method === 'GET' && subpath === '/info') {
         return json(res, 200, {
           id: 'origin-trail-game',

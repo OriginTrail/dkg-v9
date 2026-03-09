@@ -116,17 +116,24 @@ export class GameEngine {
     return { success: true, newState, message, creditsGained };
   }
 
+  static readonly SYNC_MEMORY_TRAC_COST = 5;
+
   private syncMemory(state: GameState): ActionResult {
+    const tracCost = GameEngine.SYNC_MEMORY_TRAC_COST;
+    if (state.trac < tracCost) {
+      return { success: false, newState: state, message: `Not enough TRAC to sync memory via DKG (need ${tracCost} TRAC)` };
+    }
     let newState = { ...state, party: state.party.map(m => ({ ...m })) };
     const partySize = getPartySize(state);
     newState.trainingTokens = Math.max(0, newState.trainingTokens - partySize * 3);
+    newState.trac -= tracCost;
     for (const member of newState.party) {
       if (member.alive && member.health < 100) member.health = Math.min(100, member.health + 10);
     }
     newState = this.advanceDay(newState, 1);
     newState.moveCount++;
     newState = this.checkEndConditions(newState);
-    return { success: true, newState, message: 'Synced memory to DKG. Coherence scores improved.' };
+    return { success: true, newState, message: `Synced memory via DKG — ${tracCost} TRAC spent on-chain. Coherence scores improved.` };
   }
 
   private forceBottleneck(state: GameState): ActionResult {

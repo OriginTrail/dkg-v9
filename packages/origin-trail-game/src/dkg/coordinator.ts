@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { gameEngine } from '../engine/game-engine.js';
+import { gameEngine, GameEngine } from '../engine/game-engine.js';
 import type { GameState, ActionResult } from '../game/types.js';
 import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-train.js';
 import * as proto from './protocol.js';
@@ -68,6 +68,7 @@ export interface TurnProposal {
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
   deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
+  actionSuccess?: boolean;
 }
 
 export interface SwarmState {
@@ -612,6 +613,7 @@ export class OriginTrailGameCoordinator {
       resolution,
       deaths,
       event: turnEvent,
+      actionSuccess: result.success,
     };
 
     const msg: proto.TurnProposalMsg = {
@@ -704,6 +706,14 @@ export class OriginTrailGameCoordinator {
 
       if (swarm.status === 'finished') {
         await this.publishStrategyPatterns(swarm);
+      }
+
+      if (proposal.winningAction === 'syncMemory' && proposal.actionSuccess !== false) {
+        this.publishSyncMemoryDkg(swarm, proposal.turn, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
+      }
+
+      if (swarm.status === 'finished') {
+        this.publishLeaderboardEntries(swarm).catch(() => {});
       }
 
       const resolvedMsg: proto.TurnResolvedMsg = {
@@ -822,6 +832,14 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.status === 'finished') {
       await this.publishStrategyPatterns(swarm);
+    }
+
+    if (winningAction === 'syncMemory' && result.success) {
+      this.publishSyncMemoryDkg(swarm, turnNumber, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
+    }
+
+    if (swarm.status === 'finished') {
+      this.publishLeaderboardEntries(swarm).catch(() => {});
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -1239,6 +1257,7 @@ export class OriginTrailGameCoordinator {
         approvals: swarm.pendingProposal.approvals.size,
         threshold: signatureThreshold(swarm.players.length),
       } : null,
+      score: swarm.gameState ? gameEngine.calculateScore(swarm.gameState) : 0,
       lastTurn: swarm.turnHistory[swarm.turnHistory.length - 1] ?? null,
       turnHistory: swarm.turnHistory.map(t => ({
         ...t,
@@ -1458,6 +1477,89 @@ export class OriginTrailGameCoordinator {
     const quads = rdf.networkTopologyQuads(this.paranetId, this.myPeerId, peers);
     await this.agent.writeToWorkspace(this.paranetId, quads);
     this.log(`Topology snapshot written: ${peers.length} peers`);
+  // ── Leaderboard ───────────────────────────────────────────────────
+
+  private async publishLeaderboardEntries(swarm: SwarmState): Promise<void> {
+    if (!swarm.gameState || swarm.leaderPeerId !== this.myPeerId) return;
+    const gs = swarm.gameState;
+    const outcome = gs.status === 'won' ? 'won' as const : 'lost' as const;
+    const score = gameEngine.calculateScore(gs);
+    const survivors = gs.party.filter(m => m.alive).length;
+    const now = Date.now();
+
+    const allQuads: any[] = [];
+    for (const player of swarm.players) {
+      allQuads.push(...rdf.leaderboardEntryQuads(
+        this.paranetId, swarm.id, player.peerId, player.displayName,
+        score, outcome, gs.epochs, survivors, gs.party.length, now,
+      ));
+    }
+
+    try {
+      await this.agent.publish(this.paranetId, allQuads);
+      this.log(`Leaderboard entries published for swarm ${swarm.id} (${outcome}, score=${score})`);
+    } catch (err: any) {
+      this.log(`Failed to publish leaderboard: ${err.message}`);
+    }
+  }
+
+  async getLeaderboard(): Promise<Array<{
+    player: string;
+    displayName: string;
+    score: number;
+    outcome: string;
+    epochs: number;
+    survivors: number;
+    partySize: number;
+    swarmId: string;
+    finishedAt: number;
+  }>> {
+    try {
+      const result = await this.agent.query(
+        `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
+          ?entry a <${rdf.OT}LeaderboardEntry> .
+          ?entry <${rdf.OT}player> ?player .
+          ?entry <${rdf.OT}displayName> ?displayName .
+          ?entry <${rdf.OT}score> ?score .
+          ?entry <${rdf.OT}outcome> ?outcome .
+          ?entry <${rdf.OT}epochs> ?epochs .
+          ?entry <${rdf.OT}survivors> ?survivors .
+          ?entry <${rdf.OT}partySize> ?partySize .
+          ?entry <${rdf.OT}swarm> ?swarm .
+          ?entry <${rdf.OT}finishedAt> ?finishedAt .
+          BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
+        } ORDER BY DESC(?score) LIMIT 50`,
+        { paranetId: this.paranetId, includeWorkspace: false },
+      );
+      const bindings = result?.result?.bindings ?? result?.bindings ?? [];
+      return bindings.map((b: any) => ({
+        player: stripQuotes(String(b.player ?? '')),
+        displayName: stripQuotes(String(b.displayName ?? '')),
+        score: Number(stripQuotes(String(b.score ?? '0'))),
+        outcome: stripQuotes(String(b.outcome ?? '')),
+        epochs: Number(stripQuotes(String(b.epochs ?? '0'))),
+        survivors: Number(stripQuotes(String(b.survivors ?? '0'))),
+        partySize: Number(stripQuotes(String(b.partySize ?? '0'))),
+        swarmId: stripQuotes(String(b.swarmId ?? '')),
+        finishedAt: Number(stripQuotes(String(b.finishedAt ?? '0'))),
+      }));
+    } catch (err: any) {
+      this.log(`Leaderboard query failed: ${err.message}`);
+      return [];
+    }
+  }
+
+  // ── Sync Memory via DKG (on-chain publish) ──────────────────────
+
+  async publishSyncMemoryDkg(swarm: SwarmState, turn: number, tracSpent: number): Promise<void> {
+    if (swarm.leaderPeerId !== this.myPeerId) return;
+    const quads = rdf.syncMemoryDkgQuads(this.paranetId, swarm.id, turn, this.myPeerId, tracSpent);
+    try {
+      await this.agent.publish(this.paranetId, quads);
+      this.log(`Sync Memory via DKG published for swarm ${swarm.id}, turn ${turn} (${tracSpent} TRAC spent)`);
+    } catch (err: any) {
+      this.log(`Failed to publish sync memory DKG: ${err.message}`);
+    }
   }
 
   destroy(): void {

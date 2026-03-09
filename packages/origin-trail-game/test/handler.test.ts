@@ -2231,4 +2231,170 @@ describe('V5: Strategy patterns published when game finishes', () => {
     const strategyQuads = allPublished.filter((q: any) => q.predicate?.includes('type') && q.object?.includes('StrategyPattern'));
     expect(strategyQuads.length).toBe(3);
   }, 60_000);
+describe('Leaderboard', () => {
+  it('GET /leaderboard returns entries from DKG', async () => {
+    const leaderboardAgent = makeMockAgent('lb-peer');
+    leaderboardAgent.query = async () => ({
+      bindings: [
+        { displayName: '"Alice"', score: '"3500"', outcome: '"won"', epochs: '"2000"', survivors: '"3"', partySize: '"4"', swarmId: '"swarm-1"', finishedAt: '"1700000000000"' },
+        { displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
+      ],
+    });
+    const lbHandler = createHandler(leaderboardAgent, { paranets: ['test'] });
+
+    const req = createMockReq('GET', '/api/apps/origin-trail-game/leaderboard');
+    const mock = createMockRes();
+    await lbHandler(req, mock.res, new URL(req.url, 'http://localhost'));
+    const data = JSON.parse(mock.body);
+
+    expect(data.entries).toHaveLength(2);
+    expect(data.entries[0].displayName).toBe('Alice');
+    expect(data.entries[0].score).toBe(3500);
+    expect(data.entries[0].outcome).toBe('won');
+    expect(data.entries[1].displayName).toBe('Bob');
+    expect(data.entries[1].outcome).toBe('lost');
+  });
+
+  it('GET /leaderboard returns empty array when no data', async () => {
+    const agent2 = makeMockAgent('empty-peer');
+    const handler2 = createHandler(agent2, { paranets: ['test'] });
+    const req = createMockReq('GET', '/api/apps/origin-trail-game/leaderboard');
+    const mock = createMockRes();
+    await handler2(req, mock.res, new URL(req.url, 'http://localhost'));
+    const data = JSON.parse(mock.body);
+    expect(data.entries).toEqual([]);
+  });
+});
+
+describe('Leaderboard RDF quads', () => {
+  it('generates leaderboard entry quads with correct structure', async () => {
+    const { leaderboardEntryQuads } = await import('../src/dkg/rdf.js');
+    const quads = leaderboardEntryQuads('test-paranet', 'swarm-1', 'peer-1', 'Alice', 3500, 'won', 2000, 3, 4, 1700000000000);
+
+    expect(quads.length).toBe(10);
+    expect(quads.some(q => q.object.includes('LeaderboardEntry'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('score') && q.object.includes('3500'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('outcome') && q.object.includes('won'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('displayName') && q.object.includes('Alice'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('epochs') && q.object.includes('2000'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('survivors') && q.object.includes('3'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('partySize') && q.object.includes('4'))).toBe(true);
+  });
+});
+
+describe('Sync Memory via DKG', () => {
+  it('syncMemory action costs TRAC', async () => {
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const state = engine.createGame(['Agent1'], 'player1');
+
+    const initialTrac = state.trac;
+    const result = engine.executeAction(state, { type: 'syncMemory' });
+
+    expect(result.success).toBe(true);
+    expect(result.newState.trac).toBe(initialTrac - GameEngine.SYNC_MEMORY_TRAC_COST);
+    expect(result.message).toContain('TRAC spent on-chain');
+    expect(result.message).toContain('Sync');
+  });
+
+  it('syncMemory fails when not enough TRAC', async () => {
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const state = engine.createGame(['Agent1'], 'player1');
+    state.trac = 0;
+
+    const result = engine.executeAction(state, { type: 'syncMemory' });
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('Not enough TRAC');
+  });
+
+  it('generates sync memory DKG quads', async () => {
+    const { syncMemoryDkgQuads } = await import('../src/dkg/rdf.js');
+    const quads = syncMemoryDkgQuads('test-paranet', 'swarm-1', 3, 'peer-1', 5);
+
+    expect(quads.some(q => q.object.includes('SyncMemoryViaDKG'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('tracSpent') && q.object.includes('5'))).toBe(true);
+    expect(quads.some(q => q.predicate.includes('turn') && q.object.includes('3'))).toBe(true);
+  });
+
+  it('leader publishes sync memory DKG quads on syncMemory turn resolution', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const leaderPeerId = 'sync-leader';
+    const syncAgent = makeMockAgent(leaderPeerId);
+    const coordinator = new OriginTrailGameCoordinator(syncAgent, { paranetId: 'sync-test' });
+
+    // Create swarm + add remote players to satisfy MIN_PLAYERS
+    const swarm = await coordinator.createSwarm('Leader', 'SyncSwarm', 5);
+    const handle = syncAgent._messageHandlers.get('dkg/paranet/sync-test/app')![0];
+
+    for (const pid of ['follower-1', 'follower-2']) {
+      handle('dkg/paranet/sync-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: `Player-${pid}`,
+      }), pid);
+      await new Promise(r => setTimeout(r, 20));
+    }
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'syncMemory');
+    await coordinator.forceResolveTurn(swarm.id);
+    await new Promise(r => setTimeout(r, 200));
+
+    const syncQuads = syncAgent._published.find((batch: any[]) =>
+      batch.some((q: any) => q.object?.includes('SyncMemoryViaDKG'))
+    );
+    expect(syncQuads).toBeDefined();
+    expect(syncQuads!.some((q: any) => q.predicate.includes('tracSpent'))).toBe(true);
+  });
+
+  it('syncMemory failure does not publish SyncMemoryViaDKG quads', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const leaderPeerId = 'sync-fail-leader';
+    const failAgent = makeMockAgent(leaderPeerId);
+    const coordinator = new OriginTrailGameCoordinator(failAgent, { paranetId: 'sync-fail-test' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 5);
+    const handle = failAgent._messageHandlers.get('dkg/paranet/sync-fail-test/app')![0];
+
+    for (const pid of ['fail-follower-1', 'fail-follower-2']) {
+      handle('dkg/paranet/sync-fail-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: `Player-${pid}`,
+      }), pid);
+      await new Promise(r => setTimeout(r, 20));
+    }
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Drain TRAC so syncMemory fails
+    swarm.gameState!.trac = 0;
+
+    await coordinator.castVote(swarm.id, 'syncMemory');
+    await coordinator.forceResolveTurn(swarm.id);
+    await new Promise(r => setTimeout(r, 200));
+
+    const syncQuads = failAgent._published.find((batch: any[]) =>
+      batch.some((q: any) => q.object?.includes('SyncMemoryViaDKG'))
+    );
+    expect(syncQuads).toBeUndefined();
+  });
+});
+
+describe('Score in swarm state', () => {
+  it('formatSwarmState includes score for finished games', async () => {
+    const scoreAgent = makeMockAgent('score-peer');
+    const scoreHandler = createHandler(scoreAgent, { paranets: ['test'] });
+
+    const createReq = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Scorer', swarmName: 'Score Swarm' });
+    const createMock = createMockRes();
+    await scoreHandler(createReq, createMock.res, new URL(createReq.url, 'http://localhost'));
+    const created = JSON.parse(createMock.body);
+
+    expect(created).toHaveProperty('score');
+    expect(typeof created.score).toBe('number');
+  });
 });

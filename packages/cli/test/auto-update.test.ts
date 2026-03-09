@@ -76,7 +76,7 @@ describe('checkForUpdate', () => {
       expect.stringContaining('new commit detected'),
     );
     expect(log).toHaveBeenCalledWith(
-      'Auto-update: skipping — fast-forward merge not possible (history has diverged)',
+      expect.stringContaining('fast-forward merge failed'),
     );
     expect(mockedWriteFile).not.toHaveBeenCalled();
   });
@@ -110,7 +110,7 @@ describe('checkForUpdate', () => {
       expect.stringContaining('rolled back to previous commit'),
     );
     expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('stale after rollback'),
+      expect.stringContaining('artifacts may be stale'),
     );
   });
 });

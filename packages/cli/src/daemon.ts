@@ -1049,8 +1049,8 @@ export async function checkForUpdate(
       execSync(`git merge --ff-only origin/${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
-    } catch {
-      log('Auto-update: skipping — fast-forward merge not possible (history has diverged)');
+    } catch (mergeErr: any) {
+      log(`Auto-update: skipping — fast-forward merge failed: ${mergeErr.message}`);
       return;
     }
 
@@ -1066,8 +1066,12 @@ export async function checkForUpdate(
       try {
         execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
         execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+        try {
+          execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+        } catch (buildErr: any) {
+          log(`Auto-update: rollback build failed — artifacts may be stale: ${buildErr.message}`);
+        }
         log('Auto-update: rolled back to previous commit after build failure');
-        log('Auto-update: warning — node_modules and build artifacts may be stale after rollback');
       } catch (resetErr: any) {
         log(`Auto-update: rollback failed — ${resetErr.message}`);
       }

@@ -37,6 +37,29 @@ export default function (api) {
     }
   }
 
+  // --- Integration config (Phase 0) ---
+  // Override daemon URL from environment if set
+  if (process.env.DKG_DAEMON_URL) {
+    config.daemonUrl = process.env.DKG_DAEMON_URL;
+  }
+
+  // Deep-clone integration sub-configs
+  if (wsConfig.memory) {
+    config.memory = { ...wsConfig.memory };
+    // Auto-set memoryDir from workspace if not explicit
+    if (!config.memory.memoryDir && workspaceDir) {
+      config.memory.memoryDir = join(workspaceDir, 'memory');
+    }
+  }
+  if (wsConfig.channel) {
+    config.channel = { ...wsConfig.channel };
+  }
+
+  // Pass workspace directory to the API for auto-detection
+  if (workspaceDir && !api.workspaceDir) {
+    api.workspaceDir = workspaceDir;
+  }
+
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
 }

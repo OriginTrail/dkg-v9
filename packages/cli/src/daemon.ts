@@ -388,6 +388,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     agentToolsContext,
   );
   const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
+  // Expose memoryManager to handleRequest via config (for openclaw-channel bridge routes)
+  (config as any)._memoryManager = memoryManager;
   log('Memory manager ready');
   if (config.llm) log('Chat assistant ready (LLM + DKG tools enabled)');
   else log('Chat assistant ready');
@@ -763,6 +765,89 @@ async function handleRequest(
       timedOut: reply === null,
       waitMs: Date.now() - waitStart,
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
+  // -----------------------------------------------------------------------
+
+  // POST /api/openclaw-channel/send  { text, correlationId, identity? }
+  // DKG Node UI frontend calls this to send a message to the local OpenClaw
+  // agent.  The daemon forwards to the adapter's channel bridge server and
+  // returns the agent's reply.
+  if (req.method === 'POST' && path === '/api/openclaw-channel/send') {
+    const body = await readBody(req);
+    let payload: { text?: string; correlationId?: string; identity?: string };
+    try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
+
+    const { text, correlationId, identity } = payload;
+    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    const corrId = correlationId ?? crypto.randomUUID();
+
+    // Determine the adapter channel bridge URL.
+    // Priority: config.openclawChannel.bridgeUrl > default localhost:9201
+    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+    try {
+      const bridgeRes = await fetch(`${bridgeUrl}/inbound`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+        signal: AbortSignal.timeout(120_000), // 2 min for agent processing
+      });
+      const reply = await bridgeRes.json();
+      return jsonResponse(res, bridgeRes.status, reply);
+    } catch (err: any) {
+      if (err.name === 'TimeoutError') {
+        return jsonResponse(res, 504, { error: 'Agent response timeout', correlationId: corrId });
+      }
+      return jsonResponse(res, 503, {
+        error: 'OpenClaw gateway offline or channel bridge not reachable',
+        details: err.message,
+        retryAfter: 5,
+      });
+    }
+  }
+
+  // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
+  // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
+  // using the same ChatMemoryManager pathway as built-in Agent Hub chat.
+  if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
+    const body = await readBody(req);
+    let payload: any;
+    try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
+
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls } = payload;
+    if (!sessionId || !userMessage || !assistantReply) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
+    }
+    try {
+      const memoryManager = (config as any)._memoryManager as import('@dkg/node-ui').ChatMemoryManager | undefined;
+      if (!memoryManager) {
+        return jsonResponse(res, 503, { error: 'Memory manager not available' });
+      }
+      await memoryManager.storeChatExchange(
+        sessionId,
+        userMessage,
+        assistantReply,
+        toolCalls,
+        { turnId: turnId ?? crypto.randomUUID(), persistenceState: 'stored' },
+      );
+      return jsonResponse(res, 200, { ok: true });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // GET /api/openclaw-channel/health — check if the channel bridge is reachable
+  if (req.method === 'GET' && path === '/api/openclaw-channel/health') {
+    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+    try {
+      const healthRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(5_000) });
+      const data = await healthRes.json();
+      return jsonResponse(res, 200, { ok: true, bridge: data });
+    } catch (err: any) {
+      return jsonResponse(res, 200, { ok: false, error: err.message });
+    }
   }
 
   // POST /api/connect  { multiaddr: "..." }

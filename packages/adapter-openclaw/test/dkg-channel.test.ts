@@ -78,23 +78,43 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isUsingGatewayRoute).toBe(false);
   });
 
-  it('processInbound should use routeInboundMessage if available', async () => {
-    const expectedReply = { text: 'Hello from agent', turnId: 't-1' };
-    const routeInboundMessage = vi.fn().mockResolvedValueOnce(expectedReply);
-    const api = makeApi({ routeInboundMessage });
+  it('processInbound should use plugin-sdk dispatch when runtime.channel is available', async () => {
+    // Simulate a runtime with channel subsystem + config
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          dispatchReplyWithBufferedBlockDispatcher: vi.fn().mockImplementation(
+            async (_ctx: any, _cfg: any, opts: any) => {
+              // Simulate agent reply delivery
+              await opts.deliver({ text: 'Hello from agent' });
+            },
+          ),
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-1', 'owner');
 
-    expect(reply).toEqual(expectedReply);
-    expect(routeInboundMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channelName: CHANNEL_NAME,
-        senderId: 'owner',
-        senderIsOwner: true,
-        text: 'Hello',
-        correlationId: 'corr-1',
-      }),
+    expect(reply.text).toBe('Hello from agent');
+    expect(reply.correlationId).toBe('corr-1');
+    expect(mockRuntime.channel.routing.resolveAgentRoute).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: CHANNEL_NAME }),
     );
   });
 

@@ -9,18 +9,16 @@
  *
  * Transport: The DKG daemon exposes `/api/openclaw-channel/send` for
  * the frontend.  The daemon forwards the message to this plugin via
- * either `api.registerHttpRoute()` (preferred) or a standalone HTTP
- * server on a dedicated port.
+ * a standalone HTTP server on a dedicated port (bridge mode).
  *
- * Spike A must validate:
- *   1. Custom channel joins the shared "main" session
- *   2. Identity propagation (senderIsOwner)
- *   3. Cross-channel context continuity
+ * Message routing uses OpenClaw's plugin-sdk `dispatchInboundReplyWithBase`
+ * helper — the same pathway used by built-in channels (Telegram, Discord,
+ * etc.).  This ensures the message enters the agent's session system with
+ * full context continuity.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type {
-  ChannelInboundMessage,
   ChannelOutboundReply,
   DkgOpenClawConfig,
   OpenClawPluginApi,
@@ -37,6 +35,12 @@ interface PendingRequest {
 
 export class DkgChannelPlugin {
   private api: OpenClawPluginApi | null = null;
+  /** OpenClaw runtime — provides channel routing, session, and reply subsystems. */
+  private runtime: any = null;
+  /** Full OpenClawConfig — needed for agent dispatch. */
+  private cfg: any = null;
+  /** Plugin-sdk helpers — lazily loaded at first dispatch. */
+  private sdk: any = null;
   private server: Server | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly port: number;
@@ -57,31 +61,34 @@ export class DkgChannelPlugin {
     this.api = api;
     const log = api.logger;
 
-    // Debug: log available API surface to understand routing options
-    const apiKeys = Object.keys(api).filter(k => typeof (api as any)[k] === 'function').sort();
-    log.info?.(`[dkg-channel] Available API methods: ${apiKeys.join(', ')}`);
+    // Capture the runtime and config from the plugin API.
+    // These are not part of the typed API surface but are available at runtime.
+    this.runtime = (api as any).runtime;
+    this.cfg = (api as any).cfg ?? (api as any).config ?? this.runtime?.cfg ?? this.runtime?.config;
 
-    // Inspect runtime.channel for message routing API
-    const runtime = (api as any).runtime;
-    if (runtime?.channel) {
-      const ch = runtime.channel;
-      const chMethods = Object.keys(ch).filter(k => typeof ch[k] === 'function').sort();
-      log.info?.(`[dkg-channel] runtime.channel methods: ${chMethods.join(', ')}`);
-      const chAllKeys = Object.keys(ch).sort();
-      log.info?.(`[dkg-channel] runtime.channel all keys: ${chAllKeys.join(', ')}`);
-
-      // Check for nested objects that might have routing
-      for (const key of chAllKeys) {
-        if (ch[key] && typeof ch[key] === 'object' && !Array.isArray(ch[key])) {
-          const nested = Object.keys(ch[key]).filter(k => typeof ch[key][k] === 'function').sort();
-          if (nested.length > 0) {
-            log.info?.(`[dkg-channel] runtime.channel.${key} methods: ${nested.join(', ')}`);
-          }
-        }
+    // Log what we found for diagnostics
+    if (this.runtime?.channel) {
+      log.info?.('[dkg-channel] runtime.channel available — dispatch routing enabled');
+    } else {
+      log.warn?.('[dkg-channel] runtime.channel not available — dispatch routing will not work');
+    }
+    if (this.cfg && typeof this.cfg === 'object' && Object.keys(this.cfg).length > 5) {
+      log.info?.('[dkg-channel] OpenClawConfig captured');
+    } else {
+      // Log what we got to help debug
+      const cfgKeys = this.cfg ? Object.keys(this.cfg).slice(0, 10).join(', ') : 'null';
+      log.warn?.(`[dkg-channel] cfg may be incomplete (keys: ${cfgKeys})`);
+      // Try additional paths
+      const rt = this.runtime;
+      if (rt) {
+        const rtKeys = Object.keys(rt).filter(k => k.toLowerCase().includes('config') || k.toLowerCase().includes('cfg')).join(', ');
+        log.info?.(`[dkg-channel] runtime config-like keys: ${rtKeys || 'none'}`);
+        const allRtKeys = Object.keys(rt).sort().join(', ');
+        log.info?.(`[dkg-channel] runtime all keys: ${allRtKeys}`);
       }
     }
 
-    // --- Strategy 1: register as a first-class channel ---
+    // --- Register as a first-class channel ---
     if (typeof api.registerChannel === 'function') {
       api.registerChannel({
         id: CHANNEL_NAME,
@@ -96,7 +103,7 @@ export class DkgChannelPlugin {
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
 
-    // --- Strategy 2: register an HTTP route on the gateway ---
+    // --- Register an HTTP route on the gateway ---
     if (typeof api.registerHttpRoute === 'function') {
       api.registerHttpRoute({
         method: 'POST',
@@ -150,6 +157,29 @@ export class DkgChannelPlugin {
   }
 
   // ---------------------------------------------------------------------------
+  // Plugin-SDK lazy loader
+  // ---------------------------------------------------------------------------
+
+  private loadSdk(): any {
+    if (this.sdk) return this.sdk;
+    try {
+      // In-process: the OpenClaw gateway already has this module loaded
+      this.sdk = require('openclaw/plugin-sdk');
+    } catch {
+      // Fallback: resolve via module.createRequire from the OpenClaw install
+      try {
+        const { createRequire } = require('node:module');
+        const ocMain = require.resolve('openclaw');
+        const ocRequire = createRequire(ocMain);
+        this.sdk = ocRequire('./plugin-sdk');
+      } catch {
+        this.api?.logger.warn?.('[dkg-channel] Could not load openclaw/plugin-sdk — dispatch unavailable');
+      }
+    }
+    return this.sdk;
+  }
+
+  // ---------------------------------------------------------------------------
   // Inbound message handling  (DKG daemon → OpenClaw session)
   // ---------------------------------------------------------------------------
 
@@ -165,37 +195,233 @@ export class DkgChannelPlugin {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
 
-    const message: ChannelInboundMessage = {
-      channelName: CHANNEL_NAME,
-      senderId: identity || 'owner',
-      senderIsOwner: true,
-      text,
-      correlationId,
+    const runtime = this.runtime;
+    const cfg = this.cfg;
+
+    // --- Primary: dispatch via plugin-sdk (same as Telegram/Discord) ---
+    if (runtime?.channel && cfg) {
+      api.logger.info?.(`[dkg-channel] Dispatching via plugin-sdk for: ${correlationId}`);
+      try {
+        return await this.dispatchViaPluginSdk(text, correlationId, identity);
+      } catch (err: any) {
+        api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
+        throw err;
+      }
+    } else {
+      api.logger.warn?.(`[dkg-channel] No runtime.channel (${!!runtime?.channel}) or cfg (${!!cfg}) — falling back`);
+    }
+
+    // --- Fallback: pending request waiting for onOutbound callback ---
+    if (typeof (api as any).registerChannel === 'function') {
+      return new Promise<ChannelOutboundReply>((resolve, reject) => {
+        const TIMEOUT_MS = 120_000;
+        const timer = setTimeout(() => {
+          this.pendingRequests.delete(correlationId);
+          reject(new Error('Agent response timeout'));
+        }, TIMEOUT_MS);
+
+        this.pendingRequests.set(correlationId, { resolve, reject, timer });
+      });
+    }
+
+    throw new Error(
+      'No message routing mechanism available. ' +
+      'The OpenClaw gateway must support runtime.channel dispatch or registerChannel().',
+    );
+  }
+
+  /**
+   * Dispatch an inbound message using OpenClaw's plugin-sdk dispatch system.
+   * This is the same pathway used by Telegram, Discord, and other built-in channels.
+   */
+  private async dispatchViaPluginSdk(
+    text: string,
+    correlationId: string,
+    identity: string,
+  ): Promise<ChannelOutboundReply> {
+    const log = this.api!.logger;
+    const runtime = this.runtime;
+    const cfg = this.cfg;
+    const sdk = this.loadSdk();
+
+    // 1. Resolve agent route (agentId + sessionKey)
+    let route: any;
+    try {
+      route = runtime.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: CHANNEL_NAME,
+        accountId: 'default',
+        peer: { kind: 'direct', id: identity || 'owner' },
+      });
+      log.info?.(`[dkg-channel] Route resolved: agent=${route.agentId}, session=${route.sessionKey}`);
+    } catch (err: any) {
+      log.warn?.(`[dkg-channel] resolveAgentRoute failed: ${err.message}`);
+      throw err;
+    }
+
+    // 2. Resolve store path for session files
+    const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
+
+    // 3. Build formatted envelope (what the agent sees as the message header)
+    const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
+    const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
+      storePath,
+      sessionKey: route.sessionKey,
+    });
+    const formattedBody = runtime.channel.reply.formatAgentEnvelope({
+      channel: 'DKG UI',
+      from: identity || 'Owner',
+      body: text,
+      timestamp: Date.now(),
+      previousTimestamp,
+      envelope: envelopeOpts,
+    });
+
+    // 4. Build FinalizedMsgContext (the context payload for the agent)
+    const ctxPayload = {
+      Body: formattedBody,
+      BodyForAgent: text,
+      RawBody: text,
+      CommandBody: text,
+      BodyForCommands: text,
+      From: identity || 'Owner',
+      To: route.agentId,
+      SessionKey: route.sessionKey,
+      AccountId: 'default',
+      Provider: CHANNEL_NAME,
+      Surface: CHANNEL_NAME,
+      ChatType: 'direct',
+      CommandAuthorized: true,  // DKG UI user is the agent owner
+      SenderId: identity || 'owner',
+      SenderName: identity || 'Owner',
+      Timestamp: Date.now(),
+      ConversationLabel: `DKG UI (${identity || 'Owner'})`,
     };
 
-    // --- Primary: use OpenClaw's routeInboundMessage API ---
-    if (typeof api.routeInboundMessage === 'function') {
-      return api.routeInboundMessage(message);
+    // 5. Dispatch and collect reply
+    if (sdk?.dispatchInboundReplyWithBase) {
+      log.info?.('[dkg-channel] Using plugin-sdk dispatchInboundReplyWithBase');
+      return this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId);
     }
 
-    // --- Fallback: register a pending request and wait for onOutbound callback ---
-    // This path is used when registerChannel() is available but
-    // routeInboundMessage() is not — the gateway calls our onOutbound().
-    if (typeof api.registerChannel !== 'function') {
-      throw new Error(
-        'No message routing mechanism available. ' +
-        'The OpenClaw gateway must support either routeInboundMessage() or registerChannel().',
-      );
-    }
+    // 6. Direct runtime dispatch fallback (no sdk)
+    log.info?.('[dkg-channel] Falling back to direct runtime dispatch');
+    return this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId);
+  }
+
+  private dispatchWithSdk(
+    sdk: any,
+    cfg: any,
+    route: any,
+    storePath: string,
+    ctxPayload: any,
+    correlationId: string,
+  ): Promise<ChannelOutboundReply> {
+    const log = this.api!.logger;
+    const runtime = this.runtime;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
       const TIMEOUT_MS = 120_000;
       const timer = setTimeout(() => {
-        this.pendingRequests.delete(correlationId);
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
 
-      this.pendingRequests.set(correlationId, { resolve, reject, timer });
+      const replyChunks: string[] = [];
+
+      sdk.dispatchInboundReplyWithBase({
+        cfg,
+        channel: CHANNEL_NAME,
+        route: { agentId: route.agentId, sessionKey: route.sessionKey },
+        storePath,
+        ctxPayload,
+        core: {
+          channel: {
+            session: { recordInboundSession: runtime.channel.session.recordInboundSession },
+            reply: { dispatchReplyWithBufferedBlockDispatcher: runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher },
+          },
+        },
+        deliver: async (payload: any) => {
+          const text = payload?.text;
+          if (text) replyChunks.push(text);
+        },
+        onRecordError: (err: any) => {
+          log.warn?.(`[dkg-channel] Session record error: ${err}`);
+        },
+        onDispatchError: (err: any) => {
+          log.warn?.(`[dkg-channel] Dispatch error: ${err}`);
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      }).then(() => {
+        clearTimeout(timer);
+        const replyText = replyChunks.join('\n') || '(no response)';
+        log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
+        resolve({ text: replyText, correlationId });
+      }).catch((err: any) => {
+        clearTimeout(timer);
+        log.warn?.(`[dkg-channel] dispatchInboundReplyWithBase failed: ${err.message}`);
+        reject(err);
+      });
+    });
+  }
+
+  private dispatchWithRuntime(
+    runtime: any,
+    cfg: any,
+    route: any,
+    storePath: string,
+    ctxPayload: any,
+    correlationId: string,
+  ): Promise<ChannelOutboundReply> {
+    const log = this.api!.logger;
+
+    return new Promise<ChannelOutboundReply>((resolve, reject) => {
+      const TIMEOUT_MS = 120_000;
+      const timer = setTimeout(() => {
+        reject(new Error('Agent response timeout'));
+      }, TIMEOUT_MS);
+
+      const replyChunks: string[] = [];
+
+      // Record inbound session
+      try {
+        runtime.channel.session.recordInboundSession({
+          storePath,
+          sessionKey: route.sessionKey,
+          channel: CHANNEL_NAME,
+          chatType: 'direct',
+          peer: { kind: 'direct', id: 'owner' },
+        });
+      } catch (err: any) {
+        log.warn?.(`[dkg-channel] recordInboundSession failed: ${err.message}`);
+      }
+
+      // Dispatch via the buffered block dispatcher
+      runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher(
+        ctxPayload,
+        cfg,
+        {
+          deliver: async (payload: any) => {
+            const text = payload?.text;
+            if (text) replyChunks.push(text);
+          },
+          onError: (err: any) => {
+            log.warn?.(`[dkg-channel] Dispatch error: ${err}`);
+            clearTimeout(timer);
+            reject(err instanceof Error ? err : new Error(String(err)));
+          },
+        },
+        {},  // replyOptions
+      ).then(() => {
+        clearTimeout(timer);
+        const replyText = replyChunks.join('\n') || '(no response)';
+        log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
+        resolve({ text: replyText, correlationId });
+      }).catch((err: any) => {
+        clearTimeout(timer);
+        log.warn?.(`[dkg-channel] dispatchReplyWithBufferedBlockDispatcher failed: ${err.message}`);
+        reject(err);
+      });
     });
   }
 

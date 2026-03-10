@@ -33,7 +33,7 @@ sequenceDiagram
     participant Agent as DKGAgent
     participant Node as DKGNode (libp2p)
     participant Store as TripleStore
-    participant Chain as EVM Adapter
+    participant Chain as Chain
     participant Relay as Relay Node
     participant DHT as Kademlia DHT
 
@@ -43,7 +43,11 @@ sequenceDiagram
     CLI->>Agent: DKGAgent.create(config)
     Agent->>Store: createTripleStore(backend: "oxigraph")
     Agent->>Node: new DKGNode(listenPort, privateKey, relayPeers)
-    Agent->>Chain: new EVMAdapter(rpcUrl, hubAddress, opKeys)
+    alt chainConfig provided
+        Agent->>Chain: new EVMAdapter(rpcUrl, hubAddress, opKeys)
+    else no chain config
+        Agent->>Chain: new NoChainAdapter()
+    end
 
     Agent->>Node: start()
     Node->>Node: createLibp2p(tcp, websockets, noise, yamux, gossipsub, kadDHT)
@@ -52,7 +56,9 @@ sequenceDiagram
     Node->>DHT: Bootstrap peer discovery
 
     Agent->>Agent: Create Publisher, PublishHandler, WorkspaceHandler
-    Agent->>Agent: Create ChainEventPoller
+    opt Chain available
+        Agent->>Agent: Create ChainEventPoller
+    end
     Agent->>Agent: Register protocol handlers
 
     Note over Agent: Protocol handlers registered:
@@ -60,20 +66,26 @@ sequenceDiagram
     Note over Agent: /dkg/query/2.0.0 — remote query
     Note over Agent: /dkg/sync/1.0.0 — bulk sync
     Note over Agent: /dkg/access/1.0.0 — private data access
-    Note over Agent: /dkg/discover/1.0.0 — peer discovery
+    Note over Agent: /dkg/message/1.0.0 — agent messaging
 
-    Agent->>Chain: ensureProfile() → identityId
+    opt Chain available (chainId ≠ "none")
+        Agent->>Chain: ensureProfile() → identityId
+    end
     Agent->>Agent: publishProfile() → agent ontology triples
 
     loop For each configured paranet
         Agent->>Agent: ensureParanetLocal(paranetId)
         Agent->>Agent: subscribeToParanet(paranetId)
-        Note over Agent: Subscribe to: publish, workspace, app, update, sessions topics
+        Note over Agent: Subscribe to 4 GossipSub topics: publish, workspace, app, update
     end
 
-    Agent->>Chain: Start ChainEventPoller (interval: 12s)
+    opt Chain available
+        Agent->>Chain: Start ChainEventPoller (interval: 12s)
+    end
     Agent->>Agent: Start periodic peer ping (interval: 2min)
-    Agent->>Chain: Initial chain scan for paranets
+    opt Chain available
+        Agent->>Chain: Initial chain scan for paranets
+    end
 ```
 
 ---
@@ -81,6 +93,16 @@ sequenceDiagram
 ## 2. Publish Operation
 
 ### 2.1 Full End-to-End Flow
+
+Current implementation note: the code path today is a **single-node publish
+submission** with local data storage first, then a direct
+`publishKnowledgeAssets(...)` call. The publisher currently signs both the
+publisher commitment and the receiver-attestation payload with its configured
+EVM wallet before submitting on-chain. Gossip then distributes the result to
+other nodes. Receiver-side confirmation currently happens only through the
+targeted on-chain verification in `GossipPublishHandler`; `ChainEventPoller`
+confirms local pending publishes tracked by `PublishHandler`, not gossip-only
+tentative data.
 
 ```mermaid
 sequenceDiagram
@@ -96,14 +118,11 @@ sequenceDiagram
 
     Agent->>Pub: publish(options)
 
-    Note over Pub: Phase 1 — Prepare
+    Note over Pub: Phase 1 — Prepare + validate
 
+    Pub->>GM: ensureParanet(paranetId)
     Pub->>Pub: autoPartition(quads) → group by rootEntity
-    Pub->>Pub: skolemize blank nodes per rootEntity
-    Pub->>Pub: Build KAManifest [{tokenId, rootEntity, privateMerkleRoot}]
-
-    Note over Pub: Phase 2 — Validate
-
+    Pub->>Pub: Build manifest + KA metadata
     Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
     Note over Pub: Rule 1: Graph URI matches paranet
     Note over Pub: Rule 2: Subjects are rootEntities or skolemized children
@@ -111,37 +130,69 @@ sequenceDiagram
     Note over Pub: Rule 4: Entity exclusivity (no duplicates)
     Note over Pub: Rule 5: No raw blank nodes
 
-    Note over Pub: Phase 3 — Compute Merkle Roots
+    Note over Pub: Phase 2 — Compute Merkle roots
 
-    Pub->>Pub: computePublicRoot(quads) per KA
-    Pub->>Pub: computeKARoot(publicRoot, privateRoot?) per KA
-    Pub->>Pub: computeKCRoot(kaRoots[]) → kcMerkleRoot
+    opt privateQuads present
+        Pub->>Pub: computePrivateRoot(all private quads)
+        Pub->>Pub: add synthetic public anchor hash
+    end
+    Pub->>Pub: compute kcMerkleRoot
+    Note over Pub: default path = flat Merkle tree over public triple hashes<br/>entityProofs=true = per-KA roots then computeKCRoot(kaRoots)
 
-    Note over Pub: Phase 4 — Store Locally
+    Note over Pub: Phase 3 — Store locally first
 
-    Pub->>GM: ensureParanet(paranetId)
     Pub->>Store: insert(quads → data graph)
     opt Private quads provided
-        Pub->>Store: insert(privateQuads → private graph)
+        Pub->>Store: storePrivateTriples(paranetId, rootEntity, privateQuads)
     end
 
-    Note over Pub: Phase 5 — On-Chain
+    rect rgb(232, 245, 233)
+        Note over Pub,Chain: Phase 4 — Submit on-chain publish
+        Pub->>Pub: sign publisher commitment
+        Pub->>Pub: sign (merkleRoot, publicByteSize) attestation
+        Pub->>Chain: publishKnowledgeAssets({kaCount, merkleRoot, publicByteSize, tokenAmount, publisherSignature, receiverSignatures})
+        Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
+    end
 
-    Pub->>Chain: reserveUALRange(kaCount) → {startId, endId}
-    Pub->>Chain: batchMintKnowledgeAssets({merkleRoot, startKAId, endKAId, signatures})
-    Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
+    alt on-chain call succeeds
+        Note over Pub: Phase 5 — Store confirmed metadata
 
-    Note over Pub: Phase 6 — Metadata
+        Pub->>Pub: generateConfirmedFullMetadata(...)
+        Pub->>Store: insert(metadataQuads → meta graph)
+        Pub->>Pub: track ownedEntities + batch→paranet binding
+    else on-chain call fails or is skipped
+        Note over Pub: Phase 5 — Store tentative metadata
+        Pub->>Pub: generateTentativeMetadata(...)
+        Pub->>Store: insert(metadataQuads → meta graph)
+    end
 
-    Pub->>Pub: generateConfirmedFullMetadata(ual, manifest, chainResult)
-    Pub->>Store: insert(metadataQuads → meta graph)
+    Note over Pub: Phase 6 — Gossip replication of publish result
 
-    Note over Pub: Phase 7 — Broadcast
-
-    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status: "confirmed"}
-    Agent->>Agent: encodePublishRequest(paranetId, nquads, ual, chainInfo)
+    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status}
+    Agent->>Agent: encodePublishRequest(paranetId, nquads, ual, chainInfo?)
     Agent->>GS: publish(paranetPublishTopic, encodedMsg)
 ```
+
+Important implementation details reflected in code:
+
+- There is only **one protocol publish** in this flow:
+  `publishKnowledgeAssets(...)` is the actual on-chain publish. The final
+  `GossipSub.publish(...)` call is just peer-to-peer replication of that result.
+- In the current implementation, gossip replication happens after
+  `DKGPublisher.publish()` returns, regardless of whether the result is
+  `confirmed` or `tentative`.
+- The publisher inserts **data first** and writes tentative metadata only if the
+  on-chain step fails or is unavailable.
+- The on-chain publish path uses `publishKnowledgeAssets(...)`, not a separate
+  `reserveUALRange(...)` + `batchMintKnowledgeAssets(...)` sequence in the
+  current `DKGPublisher.publish()` implementation.
+- `ownedEntities` and `knownBatchParanets` are updated only on confirmed local
+  publishes.
+- Broadcasts contain **public quads only**; private triples stay in the private
+  store.
+
+That means the final network step is best read as: "replicate the current local
+publish result to peers," not "perform the publish."
 
 ### 2.2 RDF Triples Produced
 
@@ -185,18 +236,18 @@ Optional private content marker:
     dkg:chainId           "base:84532" .
 
 # KA (Knowledge Asset) — one per rootEntity
-<did:dkg:base:84532/0xPubAddr/42/0>
+<did:dkg:base:84532/0xPubAddr/42/1>
     rdf:type                dkg:KnowledgeAsset ;
     dkg:rootEntity          <https://example.org/entity/1> ;
     dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "0"^^xsd:integer ;
+    dkg:tokenId             "1"^^xsd:integer ;
     dkg:publicTripleCount   "3"^^xsd:integer .
 
-<did:dkg:base:84532/0xPubAddr/42/1>
+<did:dkg:base:84532/0xPubAddr/42/2>
     rdf:type                dkg:KnowledgeAsset ;
     dkg:rootEntity          <https://example.org/entity/2> ;
     dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "1"^^xsd:integer ;
+    dkg:tokenId             "2"^^xsd:integer ;
     dkg:publicTripleCount   "5"^^xsd:integer ;
     dkg:privateTripleCount  "2"^^xsd:integer ;
     dkg:privateMerkleRoot   "0x7c211..." .
@@ -212,7 +263,7 @@ sequenceDiagram
     participant GS as GossipSub Mesh
     participant R1 as Receiver Node 1
     participant R2 as Receiver Node 2
-    participant Chain as Base Sepolia
+    participant Chain as Chain
 
     Pub->>GS: publish(paranetPublishTopic, PublishRequest)
 
@@ -221,28 +272,34 @@ sequenceDiagram
     GS-->>R1: PublishRequest
     GS-->>R2: PublishRequest
 
-    Note over R1: Phase 1 — Store tentatively
+    Note over R1: Phase 1 — Decode + structural validation
 
     R1->>R1: Decode PublishRequest
     R1->>R1: Validate: paranetId matches subscription
-    R1->>R1: Parse nquads → insert into data graph
+    R1->>R1: Parse N-Triples/N-Quads payload
+    R1->>R1: validatePublishRequest(...)
+    R1->>R1: Query local data graph for Rule 4 replay/conflict check
+
+    Note over R1: Phase 2 — Tentative insert
+
+    R1->>R1: Insert public data unless this is a replay
+    R1->>R1: Recompute Merkle root from received payload
     R1->>R1: generateTentativeMetadata(ual, manifest)
     R1->>R1: Store meta with dkg:status "tentative"
 
-    Note over R1: Phase 2 — Verify on-chain (optional)
+    Note over R1: Phase 3 — Targeted on-chain verification (optional)
 
     alt PublishRequest includes txHash + blockNumber
-        R1->>Chain: listenForEvents({fromBlock: blockNumber})
+        R1->>Chain: listenForEvents({fromBlock: blockNumber, toBlock: blockNumber, eventTypes: [KnowledgeBatchCreated]})
         Chain-->>R1: KnowledgeBatchCreated event
-        R1->>R1: Verify merkleRoot matches, publisher owns range
+        R1->>R1: Verify txHash, merkleRoot, publisherAddress, KA range
         R1->>R1: promoteGossipToConfirmed()
         R1->>R1: Swap dkg:status "tentative" → "confirmed"
-        R1->>R1: Add chain provenance (txHash, blockNumber, etc.)
     else No chain info in message
         R1->>R1: Stay tentative, register for ChainEventPoller
     end
 
-    Note over R1: Phase 3 — Tentative timeout (60 min)
+    Note over R1: Phase 4 — Tentative timeout (60 min)
 
     alt Not confirmed within 60 min
         R1->>R1: Remove tentative data + metadata
@@ -256,6 +313,17 @@ sequenceDiagram
 > - Consider making the timeout configurable and/or adding a re-request
 >   mechanism via the sync protocol.
 
+Current implementation details:
+
+- Receivers do **not** trust gossip-supplied on-chain status; they always store
+  gossip-received publishes as tentative first.
+- `GossipPublishHandler` promotes tentative metadata by swapping status quads.
+  It does **not** currently append full chain provenance during gossip-based
+  promotion.
+- Replay publishes are tolerated: if validation failures are all Rule 4
+  conflicts, the handler treats the message as a replay and skips duplicate data
+  insertion while still attempting verification.
+
 ---
 
 ## 4. Chain Event Confirmation
@@ -268,9 +336,10 @@ sequenceDiagram
     participant Store as TripleStore
 
     loop Every 12 seconds
-        Poller->>Poller: Check: hasPendingPublishes?
-        alt Has pending publishes
-            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, types: ["KnowledgeBatchCreated"]})
+        Poller->>Poller: Check pending publishes / paranet watcher
+        alt Has pending publishes or paranet watcher enabled
+            Poller->>Chain: getBlockNumber()
+            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, toBlock: upperBound, eventTypes})
 
             loop For each KnowledgeBatchCreated event
                 Chain-->>Poller: {merkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
@@ -279,17 +348,30 @@ sequenceDiagram
                 alt Match found
                     PH->>Store: Delete dkg:status "tentative"
                     PH->>Store: Insert dkg:status "confirmed"
-                    PH->>Store: Insert chain provenance triples
                     PH-->>Poller: confirmed = true
                 else No match
                     PH-->>Poller: confirmed = false
                 end
             end
 
-            Poller->>Poller: Update lastBlock
+            opt ParanetCreated observed
+                Poller->>Poller: invoke onParanetCreated callback
+            end
+
+            Poller->>Poller: Advance lastBlock to scanned upperBound
         end
     end
 ```
+
+Current implementation details:
+
+- The poller only starts work when there are pending publishes or a paranet
+  discovery callback is configured.
+- On first successful head lookup, if there are no pending publishes, it seeds
+  the cursor near the tip instead of scanning full history.
+- Publish confirmation is a **status-only promotion** in `PublishHandler`:
+  delete tentative status, insert confirmed status, clear timeout, persist the
+  pending-publish journal.
 
 ### Chain Events Emitted
 
@@ -356,15 +438,30 @@ sequenceDiagram
     dkg:rootEntity        <https://example.org/entity/2> .
 ```
 
-> **REVIEW: Workspace access control.**
+> **Implementation note: Workspace access control.**
 > The current model is creator-only upsert — only the original publisher can
-> overwrite their entities. This is enforced via `workspaceOwnedEntities` (in-memory map).
-> **Problem:** On node restart, this map is empty. Any node can then claim
-> ownership of unclaimed entities. Consider persisting ownership to workspace_meta.
+> overwrite their entities. This is enforced via `workspaceOwnedEntities`
+> (`Map<paranetId, Map<rootEntity, creatorPeerId>>`) and persisted into
+> `/_workspace_meta` with `dkg:workspaceOwner` / `prov:wasAttributedTo` triples.
+> `DKGPublisher.reconstructWorkspaceOwnership()` rebuilds the in-memory map on
+> startup from those persisted ownership records.
 
 ---
 
 ## 6. Update Operation
+
+There are two distinct concerns in an update flow:
+
+1. **Owner authorization** — only the batch publisher is allowed to change the
+   KC on-chain.
+2. **State safety** — if other nodes, apps, or reducers depend on the current
+   version, the ecosystem may still need consensus before the owner commits the
+   replacement.
+
+On mainnet, treat `updateKnowledgeAssets` as the final commit primitive, not as
+proof that the new state was socially or application-wise accepted. The chain
+confirms who may update; consensus confirms whether the dependent system should
+move to that update.
 
 ```mermaid
 sequenceDiagram
@@ -382,12 +479,13 @@ sequenceDiagram
     Pub->>Pub: Validate quads (same rules)
     Pub->>Pub: Compute new merkle root
 
-    Pub->>Store: Delete old data for affected rootEntities
-    Pub->>Store: Insert new quads into data graph
-
-    Pub->>Chain: updateKnowledgeAssets({batchId, newMerkleRoot, signatures})
+    Pub->>Chain: updateKnowledgeAssets({batchId, newMerkleRoot, newPublicByteSize})
     Chain-->>Pub: TxResult {txHash, blockNumber}
-    Chain->>Chain: Emit KnowledgeBatchUpdated
+
+    loop For each affected rootEntity
+        Pub->>Store: Delete old data in canonical graph
+        Pub->>Store: Insert replacement quads
+    end
 
     Pub->>Store: Update meta graph (new merkle root, timestamp)
     Pub-->>Agent: PublishResult {kcId, ual, status: "confirmed"}
@@ -396,6 +494,73 @@ sequenceDiagram
 
     Note over GS: Receivers verify via chain.verifyKAUpdate()<br/>then apply update in canonical order
 ```
+
+### Why updates may need consensus first
+
+Protocol authorization is not enough when the updated KC is a dependency for
+other execution paths. If a pricing graph, policy graph, workflow state, or
+shared reducer input changes underneath active consumers, a unilateral update
+can create a cascading mismatch:
+
+- one service starts using the new state,
+- another still executes against the old assumptions,
+- downstream validation disagrees,
+- retries, compensating actions, or manual intervention follow.
+
+That is why mainnet applications commonly gate updates behind a pre-update
+consensus step whenever dependents exist.
+
+```mermaid
+sequenceDiagram
+    participant Owner as KC Owner
+    participant DepA as Dependent A
+    participant DepB as Dependent B
+    participant DepC as Dependent C
+    participant Chain as Mainnet
+
+    rect rgb(251, 234, 234)
+        Note over Owner,DepC: No consensus gate
+        Owner->>Chain: commit update U2
+        Chain-->>DepA: sees U2
+        Note over DepB,DepC: still executing against U1-derived assumptions
+        DepA-->>DepB: emits data based on U2
+        DepB-->>DepC: validation mismatch / rollback / fork
+    end
+
+    rect rgb(232, 245, 233)
+        Note over Owner,DepC: Consensus gate before commit
+        Owner->>DepA: propose U2
+        Owner->>DepB: propose U2
+        Owner->>DepC: propose U2
+        DepA-->>Owner: accept
+        DepB-->>Owner: accept
+        DepC-->>Owner: accept
+        Owner->>Chain: commit update U2 after quorum
+        Chain-->>DepA: canonical U2
+        Chain-->>DepB: canonical U2
+        Chain-->>DepC: canonical U2
+    end
+```
+
+### Mainnet-safe update policy
+
+- **Use owner-only update directly** for isolated assets where no live process
+  depends on the previous version.
+- **Require consensus before update** for shared state machines, workflow
+  checkpoints, pricing/policy inputs, or any asset that other parties execute
+  against.
+- **Broadcast the on-chain update last** so gossip acts as distribution of an
+  already-agreed canonical state, not as the place where conflicts are created.
+
+Current implementation details:
+
+- `DKGPublisher.update()` computes the replacement Merkle root before touching
+  the local store.
+- It only mutates local triples after `chain.updateKnowledgeAssets(...)`
+  succeeds.
+- Receivers verify updates with `verifyKAUpdate(...)`, recompute the Merkle
+  root from the payload, and apply updates in canonical `(blockNumber, txIndex)`
+  order.
 
 > **REVIEW: Update ordering.**
 > Updates are applied in canonical `(blockNumber, txIndex)` order. This is
@@ -438,7 +603,7 @@ sequenceDiagram
     QE-->>Agent: {bindings: [...]}
     Agent-->>App: QueryResult
 
-    Note over QE: Design: LOCAL ONLY — no remote query<br/>Data must arrive via publish/sync first
+    Note over QE: DKGQueryEngine is local-only by design (Spec §1.6 Store Isolation)
 ```
 
 ### Query Access Policy
@@ -454,13 +619,27 @@ interface ParanetQueryPolicy {
 }
 ```
 
-> **REVIEW: Query isolation.**
-> The query engine is intentionally local-only (Spec §1.6 Store Isolation).
-> This means a node can only query data it has received via publish/sync.
-> **Implication for apps:** If an app needs data from a paranet it hasn't
-> synced, it must first sync from a peer. There's no query federation.
-> This is a conscious design choice for privacy/security, but may frustrate
-> app developers expecting a "world computer" model.
+### Remote Queries (cross-agent)
+
+While `DKGQueryEngine` executes only against the local triple store, remote
+queries ARE supported at the protocol and HTTP layers:
+
+- **Protocol:** `/dkg/query/2.0.0` — peers send query requests; the receiving
+  node's `QueryHandler` enforces access policy, rate limits, and SPARQL
+  restrictions before delegating to its local `DKGQueryEngine`.
+- **HTTP API:** `POST /api/query-remote` — applications send remote queries
+  via the daemon, which routes them to the target peer over the protocol.
+
+**Remote query restrictions** (enforced by `QueryHandler`):
+- `SERVICE` clauses rejected — no federated queries across endpoints
+- Explicit `GRAPH` clauses rejected — queries are auto-scoped to the target paranet
+- `FROM` / `FROM NAMED` clauses rejected — same reason
+
+> **Design note:** The query engine is intentionally local-only (Spec §1.6 Store
+> Isolation). All queries run against the local store only — including published data,
+> workspace data, and any other locally-held triples. Remote queries delegate execution
+> to another peer's local engine — they do not provide query federation or cross-store
+> joins.
 
 ---
 
@@ -471,28 +650,36 @@ sequenceDiagram
     participant A as Node A (requester)
     participant B as Node B (provider)
 
-    A->>B: /dkg/sync/1.0.0 SyncRequest {paranetIds, fromTimestamp?}
+    Note over A,B: Data Sync — paginated text protocol over /dkg/sync/1.0.0
 
-    B->>B: Query meta graph for KCs matching filters
-    B->>B: Serialize data + metadata
+    A->>B: "{paranetId}|0|500"
+    B->>B: Query data graph (OFFSET 0 LIMIT 500)
+    B->>B: Append meta graph triples (first page only)
+    B-->>A: N-Quads string (data + meta triples)
 
-    B-->>A: SyncResponse {quads[], metadata[]}
+    A->>A: Parse N-Quads, accumulate
 
-    A->>A: For each KC in response:
-    A->>A: verifySyncedData(quads, metadata)
-
-    Note over A: Merkle verification:
-    Note over A: 1. computePublicRoot(quads) per rootEntity
-    Note over A: 2. computeKARoot(publicRoot, privateRoot?)
-    Note over A: 3. computeKCRoot(kaRoots[])
-    Note over A: 4. Compare to merkleRoot in metadata
-
-    alt Merkle root matches
-        A->>A: Insert quads into data graph
-        A->>A: Insert metadata into meta graph
-    else Mismatch
-        A->>A: Reject — data tampered or incomplete
+    loop Next pages until empty response or 120s total timeout
+        A->>B: "{paranetId}|{offset}|500"
+        B->>B: Query data graph (OFFSET {offset} LIMIT 500)
+        B-->>A: N-Quads string (data triples only)
+        A->>A: Parse, accumulate
+        Note over A: Up to 3 retry attempts per page (exponential backoff)
     end
+
+    Note over A: Per-KC Merkle verification:
+    Note over A: 1. Try flat mode (single Merkle over all triple hashes)
+    Note over A: 2. If flat fails → entity-proofs mode (per-KA roots → KC root)
+    Note over A: 3. Either matching on-chain merkleRoot is sufficient
+
+    Note over A: Partial acceptance rules:
+    Note over A: • Each KC verified independently — verified KCs inserted, failed KCs rejected
+    Note over A: • KCs with missing KA metadata → accepted on trust
+    Note over A: • Overlapping root-entity KCs → skip Merkle, defer to chain verification
+    Note over A: • System paranets → accept unverified data
+
+    A->>A: Insert verified data into data graph
+    A->>A: Insert verified metadata into meta graph
 ```
 
 ### Workspace Sync
@@ -502,19 +689,43 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
 
-    A->>B: /dkg/sync/1.0.0 WorkspaceSyncRequest {paranetIds}
+    Note over A,B: Workspace Sync — TTL-filtered, paginated
 
-    B->>B: Export workspace + workspace_meta quads
-    B-->>A: WorkspaceSyncResponse {quads[]}
+    A->>B: "workspace:{paranetId}|0|500"
+    B->>B: Query workspace + workspace_meta graphs
+    B->>B: Apply TTL filter (default: 48h) — exclude expired triples
+    B-->>A: N-Quads string (workspace data + meta on first page)
 
-    A->>A: Insert into workspace graph
-    A->>A: Update workspaceOwnedEntities
+    loop Next pages
+        A->>B: "workspace:{paranetId}|{offset}|500"
+        B-->>A: N-Quads string (workspace data only)
+    end
+
+    A->>A: Validate workspace ops (require type + publishedAt)
+    A->>A: Extract creator from validated ops (wasAttributedTo)
+    A->>A: Insert into workspace + workspace_meta graphs
+    A->>A: Update workspaceOwnedEntities from validated metadata
 ```
 
-> **REVIEW: Sync completeness.**
-> Workspace sync does NOT include the `workspaceOwnedEntities` map.
-> A synced node cannot enforce creator-only upsert for workspace entities
-> it received via sync. This is a known limitation.
+Current implementation details:
+
+- Sync uses a plain-text request protocol: `"{paranetId}|{offset}|{limit}"` for data,
+  `"workspace:{paranetId}|{offset}|{limit}"` for workspace.
+- Page size is 500 triples (`SYNC_PAGE_SIZE`). Meta graph triples are included only
+  on the first page (offset=0).
+- Total sync timeout is 120 seconds. Each page has up to 3 retry attempts with
+  exponential backoff.
+- Merkle verification tries flat mode first (single tree over all triple hashes),
+  then falls back to entity-proofs mode (per-KA roots → KC root). Verification is
+  **per-KC** — verified KCs are inserted while failed KCs are individually rejected.
+  KCs with missing KA metadata are accepted on trust; overlapping root-entity KCs
+  skip Merkle verification and defer to chain-level checks.
+- System paranets (e.g., agent registry) accept unverified data when the paranet
+  is in the `SYSTEM_PARANETS` set.
+- Workspace sync applies a configurable TTL filter (`workspaceTtlMs`, default 48h).
+  Synced workspace operations are validated (require `rdf:type` + `publishedAt`),
+  and creator-entity mappings are extracted to populate `workspaceOwnedEntities`,
+  enabling creator-only upsert enforcement after sync.
 
 ---
 
@@ -525,18 +736,39 @@ sequenceDiagram
     participant Agent as DKGAgent
     participant Chain as EVM Adapter
     participant Store as TripleStore
+    participant Peer as Peer Node
 
-    Agent->>Chain: listParanetsFromChain(fromBlock?)
+    Note over Agent: Path 1 — Chain event detection (deferred)
 
-    loop For each ParanetCreated event
-        Chain-->>Agent: {paranetId, creator, accessPolicy, blockNumber}
-        Agent->>Agent: ensureParanetLocal(paranetId)
-        Agent->>Store: createGraph(data, meta, private, workspace, workspace_meta)
-        Agent->>Agent: subscribeToParanet(paranetId)
-        Note over Agent: Subscribe to 5 GossipSub topics
+    opt Chain available
+        Agent->>Chain: ChainEventPoller observes ParanetCreated
+        Chain-->>Agent: {paranetId (hash), creator, accessPolicy}
+        Agent->>Agent: Record hash in seenOnChainIds (defer subscription)
+        Note over Agent: Cannot subscribe yet — need cleartext paranet name
     end
 
-    Note over Agent: Also discovered via:<br/>- ChainEventPoller (ParanetCreated events)<br/>- Peer sync (paranets in synced metadata)<br/>- Config file (paranets[] array)
+    Note over Agent: Path 2 — Store-based discovery (after sync)
+
+    Agent->>Peer: Sync ONTOLOGY paranet data
+    Peer-->>Agent: Paranet definition triples
+    Agent->>Store: Query ONTOLOGY graph for dkg:Paranet entities
+    loop For each discovered paranet (not yet subscribed)
+        Agent->>Agent: Update subscription registry (name, subscribed, synced)
+        Agent->>Agent: subscribeToParanet(paranetId)
+        Note over Agent: Subscribe to 4 GossipSub topics (publish, workspace, app, update)
+    end
+
+    Note over Agent: Path 3 — Chain registry scan (periodic)
+
+    opt Chain available
+        Agent->>Chain: listParanetsFromChain() — query registry for cleartext names
+        loop For each paranet with resolved name
+            Agent->>Agent: subscribeToParanet(name)
+            Note over Agent: synced=false — data sync still needed
+        end
+    end
+
+    Note over Agent: Also discovered via config file (paranets[] array)
 ```
 
 ---
@@ -576,6 +808,16 @@ graph TB
 | `dkg/paranet/{id}/update` | KA updates | UpdateRequest |
 | `dkg/paranet/{id}/sessions` | Multi-party sessions | Session proposals, coordination |
 | `dkg/paranet/{id}/sessions/{sid}` | Per-session messages | Round data, commitments |
+
+> **Note on `dkg/network/peers`:** The topic constant is defined (`networkPeersTopic()`)
+> but has no publish, subscribe, or handler usage on this branch. It is reserved for
+> future peer discovery but not currently active.
+
+> **Note on sessions topics:** The base `subscribeToParanet()` flow does NOT subscribe
+> to sessions topics. The attested-assets layer can subscribe the paranet-level sessions
+> topic (`dkg/paranet/{id}/sessions`) via `SessionManager.subscribeParanet()`. Per-session
+> topics (`dkg/paranet/{id}/sessions/{sid}`) are subscribed when a session is created or
+> a proposal is received.
 
 > **REVIEW: App topic is untyped.**
 > The `app` topic carries JSON messages with an `app` field for routing (e.g.
@@ -769,14 +1011,14 @@ graph LR
 | P1 | Tentative data dropped after 60 min if chain is slow | Medium | Make timeout configurable; add re-request via sync protocol |
 | P2 | No publish receipt/ACK from receivers | Low | Consider adding a lightweight gossip ACK for publisher visibility |
 | P3 | Gossip publish can be replayed (no nonce/dedup) | Medium | Add `operationId` + dedup window to GossipSub handlers |
-| P4 | `broadcastPublish` has a 5s timeout; large payloads may fail | Medium | Chunk large publish payloads or use direct protocol for big KCs |
+| P4 | `broadcastPublish` uses retry with exponential backoff (3 attempts, 500ms base); large payloads may still fail | Medium | Consider chunking large publish payloads or using direct protocol for big KCs |
 
 ### 14.2 Workspace
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
-| W1 | `workspaceOwnedEntities` is in-memory only | High | Persist to workspace_meta; reconstruct on startup |
-| W2 | No TTL on workspace data | Medium | Add configurable TTL; old workspace ops should be prunable |
+| W1 | ~~`workspaceOwnedEntities` is in-memory only~~ | ~~High~~ | **RESOLVED** — ownership is persisted to `workspace_meta` and reconstructed on startup via `reconstructWorkspaceOwnership()` |
+| W2 | ~~No TTL on workspace data~~ | ~~Medium~~ | **RESOLVED** — TTL is implemented (default 48h). Cleanup runs every 15 minutes, pruning expired workspace ops, their data triples, and ownership entries |
 | W3 | No workspace versioning | Low | Track version/revision per rootEntity for optimistic concurrency |
 
 ### 14.3 Consensus / Game
@@ -795,7 +1037,7 @@ graph LR
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
-| G1 | `offMessage` has a bug: returns early when handlers exist | Bug | Fix: `if (!handlers) return;` should be `if (handlers)` |
+| G1 | ~~`offMessage` has a bug~~ | ~~Bug~~ | **RESOLVED** — code is correct: `if (!handlers) return;` safely exits when no handlers exist, then deletes the specific handler and cleans up empty sets |
 | G2 | All apps share single `app` topic per paranet | Medium | Add per-app subtopics: `dkg/paranet/{id}/app/{appId}` |
 | G3 | No message signing/authentication on gossip level | Medium | GossipSub supports `strictNoSign: false` — enable message signing |
 | G4 | Vote heartbeat creates O(n × 6) messages per turn | Low | Acceptable for 3-8 players; not scalable beyond ~20 |

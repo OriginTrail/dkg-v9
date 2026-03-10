@@ -228,7 +228,14 @@ function buildGraphColorsFromMembership(
 
 function GraphTab() {
   const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
-  const paranets = useMemo(() => paranetData?.paranets ?? [], [paranetData]);
+  const paranetKey = useMemo(
+    () => JSON.stringify((paranetData?.paranets ?? []).map((p: any) => p.id).sort()),
+    [paranetData],
+  );
+  // Only produce a new reference when the set of paranet IDs actually changes,
+  // not on every 30-second poll cycle.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const paranets = useMemo(() => paranetData?.paranets ?? [], [paranetKey]);
 
   const [triples, setTriples] = useState<Triple[] | null>(null);
   const [allTriples, setAllTriples] = useState<Triple[] | null>(null);
@@ -389,7 +396,7 @@ function GraphTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, refreshKey, selectedParanet?.id, paranets]);
+  }, [limit, refreshKey, selectedParanet?.id, selectedParanet?.uri, paranets]);
 
   // Re-filter when predicates or literals toggle changes
   useEffect(() => {
@@ -426,8 +433,7 @@ function GraphTab() {
 
   useEffect(() => {
     loadGraph();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limit, refreshKey, selectedParanet?.id]);
+  }, [loadGraph]);
 
   const handleNodeClick = useCallback((node: any) => {
     if (!allTriples) return;

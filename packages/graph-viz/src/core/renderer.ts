@@ -392,10 +392,10 @@ export class Canvas2DRenderer implements RendererBackend {
     });
 
     // Schedule initial fit independently of engine stop (handles continuous mode too)
-    if (!this._initialFitDone) {
+    if (!this._autoFitDisabled && !this._initialFitDone) {
       if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
       this._fitTimeoutId = setTimeout(() => {
-        if (this._graph && !this._initialFitDone) {
+        if (this._graph && !this._autoFitDisabled && !this._initialFitDone) {
           this._initialFitDone = true;
           this._graph.zoomToFit(400, 40);
         }

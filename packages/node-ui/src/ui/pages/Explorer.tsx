@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
-import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
 
 export function ExplorerPage() {
@@ -92,21 +92,6 @@ function triplesWithLiteralsAsNodes(
   return out;
 }
 
-function GraphZoomToFit() {
-  const { viz } = useRdfGraph();
-  useEffect(() => {
-    if (!viz) return;
-    const t = setTimeout(() => {
-      try {
-        viz.zoomToFit(40);
-      } catch {
-        // ignore
-      }
-    }, 800);
-    return () => clearTimeout(t);
-  }, [viz]);
-  return null;
-}
 
 interface NodeDetails {
   uri: string;
@@ -587,13 +572,12 @@ function GraphTab() {
                   },
                   hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
                   focus: { maxNodes: 50000, hops: 999 },
+                  autoFitDisabled: true,
                 }}
                 viewConfig={graphViewConfig}
                 style={{ width: '100%', height: '100%' }}
                 onNodeClick={handleNodeClick}
-              >
-                <GraphZoomToFit />
-              </RdfGraph>
+              />
             </div>
           )}
         </div>

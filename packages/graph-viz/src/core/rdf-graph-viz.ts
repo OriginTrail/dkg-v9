@@ -110,6 +110,10 @@ export class RdfGraphViz {
       this._rendererReady = Promise.resolve();
     }
 
+    if (config.autoFitDisabled) {
+      this._renderer.autoFitDisabled = true;
+    }
+
     // Auto-resize on container resize
     if (typeof ResizeObserver !== 'undefined') {
       const observer = new ResizeObserver(() => this._renderer?.resize());
@@ -308,6 +312,11 @@ export class RdfGraphViz {
   /** Fit all visible nodes in view */
   zoomToFit(padding?: number): void {
     this._renderer?.zoomToFit(padding);
+  }
+
+  /** Prevent the renderer from automatically calling zoomToFit when the simulation settles. */
+  set autoFitDisabled(value: boolean) {
+    if (this._renderer) this._renderer.autoFitDisabled = value;
   }
 
   // --- Label Mode ---

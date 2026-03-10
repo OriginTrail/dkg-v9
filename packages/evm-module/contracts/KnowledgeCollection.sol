@@ -263,6 +263,7 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
             );
         }
 
+        uint256 minSigs = parametersStorage.minimumRequiredSignatures();
         uint256 uniqueCount;
         for (uint256 i; i < identityIds.length; i++) {
             bool isDuplicate = false;
@@ -274,12 +275,10 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
             }
             if (!isDuplicate) {
                 uniqueCount++;
+                if (uniqueCount >= minSigs) break;
             }
         }
-        require(
-            uniqueCount >= parametersStorage.minimumRequiredSignatures(),
-            "Insufficient unique receiver identities"
-        );
+        require(uniqueCount >= minSigs, "Insufficient unique receiver identities");
 
         for (uint256 i; i < identityIds.length; i++) {
             _verifySignature(identityIds[i], messageHash, r[i], vs[i]);

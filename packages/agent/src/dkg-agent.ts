@@ -993,9 +993,9 @@ export class DKGAgent {
     paranetId: string,
     quads: Quad[],
     privateQuads?: Quad[],
-    opts?: { onPhase?: PhaseCallback },
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
-    const ctx = createOperationContext('publish');
+    const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting publish to paranet "${paranetId}" with ${quads.length} triples`);
 
@@ -1017,10 +1017,14 @@ export class DKGAgent {
     return result;
   }
 
-  async update(kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
-    const ctx = createOperationContext('publish');
+  async update(
+    kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[],
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+  ): Promise<PublishResult> {
+    const ctx = opts?.operationCtx ?? createOperationContext('update');
+    const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
-    const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx });
+    const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     if (result.onChainResult && result.publicQuads) {
@@ -1062,8 +1066,8 @@ export class DKGAgent {
    * When localOnly is false (default), replicates via GossipSub workspace topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean }): Promise<{ workspaceOperationId: string }> {
-    const ctx = createOperationContext('workspace');
+  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ workspaceOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
@@ -1086,20 +1090,20 @@ export class DKGAgent {
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { clearWorkspaceAfter?: boolean },
+    options?: { clearWorkspaceAfter?: boolean; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
     return this.publisher.enshrineFromWorkspace(paranetId, selection, {
-      operationCtx: createOperationContext('enshrine'),
+      operationCtx: options?.operationCtx ?? createOperationContext('enshrine'),
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
     });
   }
 
   async query(
     sparql: string,
-    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean },
+    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean; operationCtx?: OperationContext },
   ) {
     const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
-    const ctx = createOperationContext('query');
+    const ctx = opts.operationCtx ?? createOperationContext('query');
     this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.paranetId,

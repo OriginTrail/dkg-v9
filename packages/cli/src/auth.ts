@@ -106,11 +106,13 @@ export function extractBearerToken(headerValue: string | undefined): string | un
 const PUBLIC_PATHS = new Set([
   '/api/status',
   '/api/chain/rpc-health',
+  '/metrics',
 ]);
 
 const PUBLIC_PREFIXES = [
   '/ui',
   '/apps/',
+  '/api/apps/',
 ];
 
 function isPublicPath(pathname: string): boolean {

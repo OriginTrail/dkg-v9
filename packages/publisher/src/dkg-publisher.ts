@@ -586,12 +586,12 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
 
-    // Phase 1: compute merkle roots and manifest without mutating the store
+    onPhase?.('prepare', 'start');
     const kaMap = autoPartition(quads);
     const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
@@ -618,8 +618,9 @@ export class DKGPublisher implements Publisher {
 
     const kcMerkleRoot = computeKCRoot(kaRoots);
     const allSkolemizedQuads = [...kaMap.values()].flat();
+    onPhase?.('prepare', 'end');
 
-    // Phase 2: submit chain tx — local store is still untouched
+    onPhase?.('chain', 'start');
     const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
@@ -627,6 +628,7 @@ export class DKGPublisher implements Publisher {
     });
 
     if (!txResult.success) {
+      onPhase?.('chain', 'end');
       return {
         kcId,
         ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
@@ -636,8 +638,9 @@ export class DKGPublisher implements Publisher {
         publicQuads: allSkolemizedQuads,
       };
     }
+    onPhase?.('chain', 'end');
 
-    // Phase 3: chain succeeded — now apply local mutations
+    onPhase?.('store', 'start');
     for (const [rootEntity, publicQuads] of kaMap) {
       await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
@@ -651,6 +654,7 @@ export class DKGPublisher implements Publisher {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
     }
+    onPhase?.('store', 'end');
 
     const result: PublishResult = {
       kcId,

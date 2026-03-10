@@ -43,7 +43,11 @@ sequenceDiagram
     CLI->>Agent: DKGAgent.create(config)
     Agent->>Store: createTripleStore(backend: "oxigraph")
     Agent->>Node: new DKGNode(listenPort, privateKey, relayPeers)
-    Agent->>Chain: new EVMAdapter(rpcUrl, hubAddress, opKeys)
+    alt chainConfig provided
+        Agent->>Chain: new EVMAdapter(rpcUrl, hubAddress, opKeys)
+    else no chain config
+        Agent->>Chain: new NoChainAdapter()
+    end
 
     Agent->>Node: start()
     Node->>Node: createLibp2p(tcp, websockets, noise, yamux, gossipsub, kadDHT)
@@ -52,7 +56,9 @@ sequenceDiagram
     Node->>DHT: Bootstrap peer discovery
 
     Agent->>Agent: Create Publisher, PublishHandler, WorkspaceHandler
-    Agent->>Agent: Create ChainEventPoller
+    opt Chain available
+        Agent->>Agent: Create ChainEventPoller
+    end
     Agent->>Agent: Register protocol handlers
 
     Note over Agent: Protocol handlers registered:
@@ -60,20 +66,26 @@ sequenceDiagram
     Note over Agent: /dkg/query/2.0.0 — remote query
     Note over Agent: /dkg/sync/1.0.0 — bulk sync
     Note over Agent: /dkg/access/1.0.0 — private data access
-    Note over Agent: /dkg/discover/1.0.0 — peer discovery
+    Note over Agent: /dkg/message/1.0.0 — agent messaging
 
-    Agent->>Chain: ensureProfile() → identityId
+    opt Chain available (chainId ≠ "none")
+        Agent->>Chain: ensureProfile() → identityId
+    end
     Agent->>Agent: publishProfile() → agent ontology triples
 
     loop For each configured paranet
         Agent->>Agent: ensureParanetLocal(paranetId)
         Agent->>Agent: subscribeToParanet(paranetId)
-        Note over Agent: Subscribe to: publish, workspace, app, update, sessions topics
+        Note over Agent: Subscribe to 4 GossipSub topics: publish, workspace, app, update
     end
 
-    Agent->>Chain: Start ChainEventPoller (interval: 12s)
+    opt Chain available
+        Agent->>Chain: Start ChainEventPoller (interval: 12s)
+    end
     Agent->>Agent: Start periodic peer ping (interval: 2min)
-    Agent->>Chain: Initial chain scan for paranets
+    opt Chain available
+        Agent->>Chain: Initial chain scan for paranets
+    end
 ```
 
 ---
@@ -591,7 +603,7 @@ sequenceDiagram
     QE-->>Agent: {bindings: [...]}
     Agent-->>App: QueryResult
 
-    Note over QE: Design: LOCAL ONLY — no remote query<br/>Data must arrive via publish/sync first
+    Note over QE: DKGQueryEngine is local-only by design (Spec §1.6 Store Isolation)
 ```
 
 ### Query Access Policy
@@ -607,13 +619,27 @@ interface ParanetQueryPolicy {
 }
 ```
 
-> **REVIEW: Query isolation.**
-> The query engine is intentionally local-only (Spec §1.6 Store Isolation).
-> This means a node can only query data it has received via publish/sync.
-> **Implication for apps:** If an app needs data from a paranet it hasn't
-> synced, it must first sync from a peer. There's no query federation.
-> This is a conscious design choice for privacy/security, but may frustrate
-> app developers expecting a "world computer" model.
+### Remote Queries (cross-agent)
+
+While `DKGQueryEngine` executes only against the local triple store, remote
+queries ARE supported at the protocol and HTTP layers:
+
+- **Protocol:** `/dkg/query/2.0.0` — peers send query requests; the receiving
+  node's `QueryHandler` enforces access policy, rate limits, and SPARQL
+  restrictions before delegating to its local `DKGQueryEngine`.
+- **HTTP API:** `POST /api/query-remote` — applications send remote queries
+  via the daemon, which routes them to the target peer over the protocol.
+
+**Remote query restrictions** (enforced by `QueryHandler`):
+- `SERVICE` clauses rejected — no federated queries across endpoints
+- Explicit `GRAPH` clauses rejected — queries are auto-scoped to the target paranet
+- `FROM` / `FROM NAMED` clauses rejected — same reason
+
+> **Design note:** The query engine is intentionally local-only (Spec §1.6 Store
+> Isolation). All queries run against the local store only — including published data,
+> workspace data, and any other locally-held triples. Remote queries delegate execution
+> to another peer's local engine — they do not provide query federation or cross-store
+> joins.
 
 ---
 
@@ -624,28 +650,36 @@ sequenceDiagram
     participant A as Node A (requester)
     participant B as Node B (provider)
 
-    A->>B: /dkg/sync/1.0.0 SyncRequest {paranetIds, fromTimestamp?}
+    Note over A,B: Data Sync — paginated text protocol over /dkg/sync/1.0.0
 
-    B->>B: Query meta graph for KCs matching filters
-    B->>B: Serialize data + metadata
+    A->>B: "{paranetId}|0|500"
+    B->>B: Query data graph (OFFSET 0 LIMIT 500)
+    B->>B: Append meta graph triples (first page only)
+    B-->>A: N-Quads string (data + meta triples)
 
-    B-->>A: SyncResponse {quads[], metadata[]}
+    A->>A: Parse N-Quads, accumulate
 
-    A->>A: For each KC in response:
-    A->>A: verifySyncedData(quads, metadata)
-
-    Note over A: Merkle verification:
-    Note over A: 1. computePublicRoot(quads) per rootEntity
-    Note over A: 2. computeKARoot(publicRoot, privateRoot?)
-    Note over A: 3. computeKCRoot(kaRoots[])
-    Note over A: 4. Compare to merkleRoot in metadata
-
-    alt Merkle root matches
-        A->>A: Insert quads into data graph
-        A->>A: Insert metadata into meta graph
-    else Mismatch
-        A->>A: Reject — data tampered or incomplete
+    loop Next pages until empty response or 120s total timeout
+        A->>B: "{paranetId}|{offset}|500"
+        B->>B: Query data graph (OFFSET {offset} LIMIT 500)
+        B-->>A: N-Quads string (data triples only)
+        A->>A: Parse, accumulate
+        Note over A: Up to 3 retry attempts per page (exponential backoff)
     end
+
+    Note over A: Per-KC Merkle verification:
+    Note over A: 1. Try flat mode (single Merkle over all triple hashes)
+    Note over A: 2. If flat fails → entity-proofs mode (per-KA roots → KC root)
+    Note over A: 3. Either matching on-chain merkleRoot is sufficient
+
+    Note over A: Partial acceptance rules:
+    Note over A: • Each KC verified independently — verified KCs inserted, failed KCs rejected
+    Note over A: • KCs with missing KA metadata → accepted on trust
+    Note over A: • Overlapping root-entity KCs → skip Merkle, defer to chain verification
+    Note over A: • System paranets → accept unverified data
+
+    A->>A: Insert verified data into data graph
+    A->>A: Insert verified metadata into meta graph
 ```
 
 ### Workspace Sync
@@ -655,19 +689,43 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
 
-    A->>B: /dkg/sync/1.0.0 WorkspaceSyncRequest {paranetIds}
+    Note over A,B: Workspace Sync — TTL-filtered, paginated
 
-    B->>B: Export workspace + workspace_meta quads
-    B-->>A: WorkspaceSyncResponse {quads[]}
+    A->>B: "workspace:{paranetId}|0|500"
+    B->>B: Query workspace + workspace_meta graphs
+    B->>B: Apply TTL filter (default: 48h) — exclude expired triples
+    B-->>A: N-Quads string (workspace data + meta on first page)
 
-    A->>A: Insert into workspace graph
-    A->>A: Update workspaceOwnedEntities
+    loop Next pages
+        A->>B: "workspace:{paranetId}|{offset}|500"
+        B-->>A: N-Quads string (workspace data only)
+    end
+
+    A->>A: Validate workspace ops (require type + publishedAt)
+    A->>A: Extract creator from validated ops (wasAttributedTo)
+    A->>A: Insert into workspace + workspace_meta graphs
+    A->>A: Update workspaceOwnedEntities from validated metadata
 ```
 
-> **REVIEW: Sync completeness.**
-> Workspace sync does NOT include the `workspaceOwnedEntities` map.
-> A synced node cannot enforce creator-only upsert for workspace entities
-> it received via sync. This is a known limitation.
+Current implementation details:
+
+- Sync uses a plain-text request protocol: `"{paranetId}|{offset}|{limit}"` for data,
+  `"workspace:{paranetId}|{offset}|{limit}"` for workspace.
+- Page size is 500 triples (`SYNC_PAGE_SIZE`). Meta graph triples are included only
+  on the first page (offset=0).
+- Total sync timeout is 120 seconds. Each page has up to 3 retry attempts with
+  exponential backoff.
+- Merkle verification tries flat mode first (single tree over all triple hashes),
+  then falls back to entity-proofs mode (per-KA roots → KC root). Verification is
+  **per-KC** — verified KCs are inserted while failed KCs are individually rejected.
+  KCs with missing KA metadata are accepted on trust; overlapping root-entity KCs
+  skip Merkle verification and defer to chain-level checks.
+- System paranets (e.g., agent registry) accept unverified data when the paranet
+  is in the `SYSTEM_PARANETS` set.
+- Workspace sync applies a configurable TTL filter (`workspaceTtlMs`, default 48h).
+  Synced workspace operations are validated (require `rdf:type` + `publishedAt`),
+  and creator-entity mappings are extracted to populate `workspaceOwnedEntities`,
+  enabling creator-only upsert enforcement after sync.
 
 ---
 
@@ -678,18 +736,39 @@ sequenceDiagram
     participant Agent as DKGAgent
     participant Chain as EVM Adapter
     participant Store as TripleStore
+    participant Peer as Peer Node
 
-    Agent->>Chain: listParanetsFromChain(fromBlock?)
+    Note over Agent: Path 1 — Chain event detection (deferred)
 
-    loop For each ParanetCreated event
-        Chain-->>Agent: {paranetId, creator, accessPolicy, blockNumber}
-        Agent->>Agent: ensureParanetLocal(paranetId)
-        Agent->>Store: createGraph(data, meta, private, workspace, workspace_meta)
-        Agent->>Agent: subscribeToParanet(paranetId)
-        Note over Agent: Subscribe to 5 GossipSub topics
+    opt Chain available
+        Agent->>Chain: ChainEventPoller observes ParanetCreated
+        Chain-->>Agent: {paranetId (hash), creator, accessPolicy}
+        Agent->>Agent: Record hash in seenOnChainIds (defer subscription)
+        Note over Agent: Cannot subscribe yet — need cleartext paranet name
     end
 
-    Note over Agent: Also discovered via:<br/>- ChainEventPoller (ParanetCreated events)<br/>- Peer sync (paranets in synced metadata)<br/>- Config file (paranets[] array)
+    Note over Agent: Path 2 — Store-based discovery (after sync)
+
+    Agent->>Peer: Sync ONTOLOGY paranet data
+    Peer-->>Agent: Paranet definition triples
+    Agent->>Store: Query ONTOLOGY graph for dkg:Paranet entities
+    loop For each discovered paranet (not yet subscribed)
+        Agent->>Agent: Update subscription registry (name, subscribed, synced)
+        Agent->>Agent: subscribeToParanet(paranetId)
+        Note over Agent: Subscribe to 4 GossipSub topics (publish, workspace, app, update)
+    end
+
+    Note over Agent: Path 3 — Chain registry scan (periodic)
+
+    opt Chain available
+        Agent->>Chain: listParanetsFromChain() — query registry for cleartext names
+        loop For each paranet with resolved name
+            Agent->>Agent: subscribeToParanet(name)
+            Note over Agent: synced=false — data sync still needed
+        end
+    end
+
+    Note over Agent: Also discovered via config file (paranets[] array)
 ```
 
 ---
@@ -729,6 +808,16 @@ graph TB
 | `dkg/paranet/{id}/update` | KA updates | UpdateRequest |
 | `dkg/paranet/{id}/sessions` | Multi-party sessions | Session proposals, coordination |
 | `dkg/paranet/{id}/sessions/{sid}` | Per-session messages | Round data, commitments |
+
+> **Note on `dkg/network/peers`:** The topic constant is defined (`networkPeersTopic()`)
+> but has no publish, subscribe, or handler usage on this branch. It is reserved for
+> future peer discovery but not currently active.
+
+> **Note on sessions topics:** The base `subscribeToParanet()` flow does NOT subscribe
+> to sessions topics. The attested-assets layer can subscribe the paranet-level sessions
+> topic (`dkg/paranet/{id}/sessions`) via `SessionManager.subscribeParanet()`. Per-session
+> topics (`dkg/paranet/{id}/sessions/{sid}`) are subscribed when a session is created or
+> a proposal is received.
 
 > **REVIEW: App topic is untyped.**
 > The `app` topic carries JSON messages with an `app` field for routing (e.g.
@@ -922,14 +1011,14 @@ graph LR
 | P1 | Tentative data dropped after 60 min if chain is slow | Medium | Make timeout configurable; add re-request via sync protocol |
 | P2 | No publish receipt/ACK from receivers | Low | Consider adding a lightweight gossip ACK for publisher visibility |
 | P3 | Gossip publish can be replayed (no nonce/dedup) | Medium | Add `operationId` + dedup window to GossipSub handlers |
-| P4 | `broadcastPublish` has a 5s timeout; large payloads may fail | Medium | Chunk large publish payloads or use direct protocol for big KCs |
+| P4 | `broadcastPublish` uses retry with exponential backoff (3 attempts, 500ms base); large payloads may still fail | Medium | Consider chunking large publish payloads or using direct protocol for big KCs |
 
 ### 14.2 Workspace
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
-| W1 | `workspaceOwnedEntities` is in-memory only | High | Persist to workspace_meta; reconstruct on startup |
-| W2 | No TTL on workspace data | Medium | Add configurable TTL; old workspace ops should be prunable |
+| W1 | ~~`workspaceOwnedEntities` is in-memory only~~ | ~~High~~ | **RESOLVED** — ownership is persisted to `workspace_meta` and reconstructed on startup via `reconstructWorkspaceOwnership()` |
+| W2 | ~~No TTL on workspace data~~ | ~~Medium~~ | **RESOLVED** — TTL is implemented (default 48h). Cleanup runs every 15 minutes, pruning expired workspace ops, their data triples, and ownership entries |
 | W3 | No workspace versioning | Low | Track version/revision per rootEntity for optimistic concurrency |
 
 ### 14.3 Consensus / Game
@@ -948,7 +1037,7 @@ graph LR
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
-| G1 | `offMessage` has a bug: returns early when handlers exist | Bug | Fix: `if (!handlers) return;` should be `if (handlers)` |
+| G1 | ~~`offMessage` has a bug~~ | ~~Bug~~ | **RESOLVED** — code is correct: `if (!handlers) return;` safely exits when no handlers exist, then deletes the specific handler and cleans up empty sets |
 | G2 | All apps share single `app` topic per paranet | Medium | Add per-app subtopics: `dkg/paranet/{id}/app/{appId}` |
 | G3 | No message signing/authentication on gossip level | Medium | GossipSub supports `strictNoSign: false` — enable message signing |
 | G4 | Vote heartbeat creates O(n × 6) messages per turn | Low | Acceptable for 3-8 players; not scalable beyond ~20 |

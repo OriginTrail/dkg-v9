@@ -158,6 +158,82 @@ export class ApiClient {
     return this.post('/api/subscribe', { paranetId, ...options });
   }
 
+  async syncStatus(paranetId: string): Promise<{
+    paranetId: string;
+    local: {
+      paranetId: string;
+      kcCount: number;
+      rootHash: string;
+    };
+    connectedPeers: number;
+    syncCapablePeers: number;
+    inventoryCapablePeers: number;
+    peers: Array<{
+      peerId: string;
+      supportsSync: boolean;
+      supportsInventory: boolean;
+    }>;
+  }> {
+    return this.post('/api/sync/status', { paranetId });
+  }
+
+  async syncVerify(paranetId: string, options?: { peerId?: string }): Promise<{
+    paranetId: string;
+    verifications: Array<{
+      paranetId: string;
+      peerId: string;
+      inventoryProtocolAvailable: boolean;
+      inSync: boolean;
+      local: { kcCount: number; rootHash: string };
+      remote: { kcCount: number; rootHash: string } | null;
+      counts: {
+        missingLocal: number;
+        mismatched: number;
+        extraLocal: number;
+      };
+      samples: {
+        missingLocal: string[];
+        mismatched: Array<{ kcUal: string; localMerkleRoot: string; remoteMerkleRoot: string }>;
+        extraLocal: string[];
+      };
+    }>;
+    summary: {
+      peersChecked: number;
+      peersInSync: number;
+      peersDiverged: number;
+    };
+  }> {
+    return this.post('/api/sync/verify', { paranetId, ...options });
+  }
+
+  async syncRepair(paranetId: string, options?: {
+    peerId?: string;
+    includeWorkspace?: boolean;
+  }): Promise<
+    | {
+      paranetId: string;
+      mode: 'peer';
+      peerId: string;
+      result: {
+        dataSynced: number;
+        workspaceSynced: number;
+      };
+    }
+    | {
+      paranetId: string;
+      mode: 'connected-peers';
+      catchup: {
+        connectedPeers: number;
+        syncCapablePeers: number;
+        peersTried: number;
+        dataSynced: number;
+        workspaceSynced: number;
+      };
+    }
+  > {
+    return this.post('/api/sync/repair', { paranetId, ...options });
+  }
+
   async connect(multiaddr: string): Promise<{ connected: boolean }> {
     return this.post('/api/connect', { multiaddr });
   }

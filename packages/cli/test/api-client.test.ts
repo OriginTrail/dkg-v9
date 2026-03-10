@@ -109,6 +109,59 @@ describe('ApiClient', () => {
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.paranetId).toBe('my-paranet');
     });
+
+    it('syncStatus() posts to /api/sync/status', async () => {
+      globalThis.fetch = mockFetchOk({
+        paranetId: 'p1',
+        local: { paranetId: 'p1', kcCount: 1, rootHash: 'abc' },
+        connectedPeers: 0,
+        syncCapablePeers: 0,
+        inventoryCapablePeers: 0,
+        peers: [],
+      });
+
+      const result = await client.syncStatus('p1');
+      expect(result.paranetId).toBe('p1');
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/sync/status`);
+      expect(JSON.parse(opts.body)).toEqual({ paranetId: 'p1' });
+    });
+
+    it('syncVerify() posts paranet and peer options', async () => {
+      globalThis.fetch = mockFetchOk({
+        paranetId: 'p1',
+        verifications: [],
+        summary: { peersChecked: 0, peersInSync: 0, peersDiverged: 0 },
+      });
+
+      const result = await client.syncVerify('p1', { peerId: 'peer-1' });
+      expect(result.paranetId).toBe('p1');
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/sync/verify`);
+      expect(JSON.parse(opts.body)).toEqual({ paranetId: 'p1', peerId: 'peer-1' });
+    });
+
+    it('syncRepair() posts peer and workspace options', async () => {
+      globalThis.fetch = mockFetchOk({
+        paranetId: 'p1',
+        mode: 'peer',
+        peerId: 'peer-1',
+        result: { dataSynced: 10, workspaceSynced: 2 },
+      });
+
+      const result = await client.syncRepair('p1', { peerId: 'peer-1', includeWorkspace: false });
+      expect(result.paranetId).toBe('p1');
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/sync/repair`);
+      expect(JSON.parse(opts.body)).toEqual({
+        paranetId: 'p1',
+        peerId: 'peer-1',
+        includeWorkspace: false,
+      });
+    });
   });
 
   describe('messages() query string building', () => {

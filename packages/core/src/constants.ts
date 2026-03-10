@@ -2,6 +2,7 @@ export const PROTOCOL_PUBLISH = '/dkg/publish/1.0.0';
 export const PROTOCOL_QUERY = '/dkg/query/1.0.0';
 export const PROTOCOL_DISCOVER = '/dkg/discover/1.0.0';
 export const PROTOCOL_SYNC = '/dkg/sync/1.0.0';
+export const PROTOCOL_SYNC_INVENTORY = '/dkg/sync-inventory/1.0.0';
 export const PROTOCOL_MESSAGE = '/dkg/message/1.0.0';
 export const PROTOCOL_ACCESS = '/dkg/access/1.0.0';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/query/2.0.0';

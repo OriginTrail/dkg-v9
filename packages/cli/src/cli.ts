@@ -688,6 +688,132 @@ program
     }
   });
 
+// ─── dkg sync ───────────────────────────────────────────────────────
+
+const syncCmd = program
+  .command('sync')
+  .description('Sync verification and repair commands');
+
+syncCmd
+  .command('status <paranet>')
+  .description('Show local inventory root and connected peer sync capabilities')
+  .action(async (paranet: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.syncStatus(paranet);
+
+      console.log(`Paranet:         ${result.paranetId}`);
+      console.log(`Local KC count:  ${result.local.kcCount}`);
+      console.log(`Local root:      ${result.local.rootHash}`);
+      console.log(`Connected peers: ${result.connectedPeers}`);
+      console.log(`Sync-capable:    ${result.syncCapablePeers}`);
+      console.log(`Inventory-capable: ${result.inventoryCapablePeers}`);
+
+      if (result.peers.length > 0) {
+        console.log('\nPeers:');
+        for (const p of result.peers) {
+          console.log(
+            `  ${p.peerId}  sync=${p.supportsSync ? 'yes' : 'no'}  inventory=${p.supportsInventory ? 'yes' : 'no'}`,
+          );
+        }
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+syncCmd
+  .command('verify <paranet>')
+  .description('Compare local inventory with one peer or all inventory-capable peers')
+  .option('--peer <peer>', 'Peer ID or agent name to verify against')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.syncVerify(paranet, {
+        peerId: opts.peer,
+      });
+
+      if (result.summary.peersChecked === 0) {
+        console.log('No inventory-capable peers available for verification.');
+        return;
+      }
+
+      console.log(`Paranet:       ${result.paranetId}`);
+      console.log(`Peers checked: ${result.summary.peersChecked}`);
+      console.log(`In sync:       ${result.summary.peersInSync}`);
+      console.log(`Diverged:      ${result.summary.peersDiverged}`);
+
+      for (const v of result.verifications) {
+        const status = v.inSync ? 'in-sync' : 'diverged';
+        console.log(`\nPeer ${v.peerId}: ${status}`);
+        if (!v.inventoryProtocolAvailable) {
+          console.log('  inventory protocol unavailable');
+          continue;
+        }
+        console.log(`  local:  count=${v.local.kcCount} root=${v.local.rootHash}`);
+        if (v.remote) {
+          console.log(`  remote: count=${v.remote.kcCount} root=${v.remote.rootHash}`);
+        }
+        console.log(
+          `  diff: missing-local=${v.counts.missingLocal}, mismatched=${v.counts.mismatched}, extra-local=${v.counts.extraLocal}`,
+        );
+
+        if (!v.inSync) {
+          if (v.samples.missingLocal.length > 0) {
+            console.log('  sample missing-local KCs:');
+            for (const kc of v.samples.missingLocal) console.log(`    - ${kc}`);
+          }
+          if (v.samples.mismatched.length > 0) {
+            console.log('  sample mismatched KCs:');
+            for (const m of v.samples.mismatched) {
+              console.log(`    - ${m.kcUal}`);
+            }
+          }
+          if (v.samples.extraLocal.length > 0) {
+            console.log('  sample extra-local KCs:');
+            for (const kc of v.samples.extraLocal) console.log(`    - ${kc}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+syncCmd
+  .command('repair <paranet>')
+  .description('Run catch-up sync for a paranet (from one peer or all connected peers)')
+  .option('--peer <peer>', 'Peer ID or agent name to repair from')
+  .option('--no-workspace', 'Skip workspace catch-up')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.syncRepair(paranet, {
+        peerId: opts.peer,
+        includeWorkspace: opts.workspace,
+      });
+
+      console.log(`Paranet: ${paranet}`);
+      if (result.mode === 'peer') {
+        console.log(`Mode:    peer (${result.peerId})`);
+        console.log(`Data synced:      ${result.result.dataSynced}`);
+        console.log(`Workspace synced: ${result.result.workspaceSynced}`);
+      } else {
+        console.log('Mode:    connected peers');
+        console.log(
+          `Peers tried:      ${result.catchup.peersTried}/${result.catchup.syncCapablePeers} (connected ${result.catchup.connectedPeers})`,
+        );
+        console.log(`Data synced:      ${result.catchup.dataSynced}`);
+        console.log(`Workspace synced: ${result.catchup.workspaceSynced}`);
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg paranet ────────────────────────────────────────────────────
 
 const paranetCmd = program

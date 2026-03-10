@@ -6,7 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@dkg/agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger } from '@dkg/core';
+import {
+  computeNetworkId,
+  createOperationContext,
+  DKGEvent,
+  Logger,
+  PROTOCOL_SYNC,
+  PROTOCOL_SYNC_INVENTORY,
+} from '@dkg/core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -935,6 +942,176 @@ async function handleRequest(
       includeWorkspace: includeWorkspace !== false,
     });
     return jsonResponse(res, 200, { subscribed: paranetId, catchup });
+  }
+
+  // POST /api/sync/status  { paranetId: "..." }
+  if (req.method === 'POST' && path === '/api/sync/status') {
+    const body = await readBody(req);
+    const { paranetId } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+
+    const local = await (agent as any).getParanetInventorySummary(paranetId);
+    const peerStates: Array<{
+      peerId: string;
+      supportsSync: boolean;
+      supportsInventory: boolean;
+    }> = [];
+
+    for (const pid of agent.node.libp2p.getPeers()) {
+      const peerId = pid.toString();
+      let protocols: string[] = [];
+      try {
+        const peer = await agent.node.libp2p.peerStore.get(pid);
+        protocols = peer.protocols;
+      } catch {
+        protocols = [];
+      }
+      peerStates.push({
+        peerId,
+        supportsSync: protocols.includes(PROTOCOL_SYNC),
+        supportsInventory: protocols.includes(PROTOCOL_SYNC_INVENTORY),
+      });
+    }
+
+    return jsonResponse(res, 200, {
+      paranetId,
+      local,
+      connectedPeers: peerStates.length,
+      syncCapablePeers: peerStates.filter(p => p.supportsSync).length,
+      inventoryCapablePeers: peerStates.filter(p => p.supportsInventory).length,
+      peers: peerStates,
+    });
+  }
+
+  // POST /api/sync/verify  { paranetId: "...", peerId?: "..." }
+  if (req.method === 'POST' && path === '/api/sync/verify') {
+    const body = await readBody(req);
+    const { paranetId, peerId: rawPeerId } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+
+    const targets: string[] = [];
+    if (rawPeerId) {
+      const resolved = await resolveNameToPeerId(agent, rawPeerId);
+      if (!resolved) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+      targets.push(resolved);
+    } else {
+      for (const pid of agent.node.libp2p.getPeers()) {
+        const peerId = pid.toString();
+        try {
+          const peer = await agent.node.libp2p.peerStore.get(pid);
+          if (peer.protocols.includes(PROTOCOL_SYNC_INVENTORY)) {
+            targets.push(peerId);
+          }
+        } catch {
+          // ignore unresolved peer metadata
+        }
+      }
+    }
+
+    if (targets.length === 0) {
+      return jsonResponse(res, 200, {
+        paranetId,
+        verifications: [],
+        summary: {
+          peersChecked: 0,
+          peersInSync: 0,
+          peersDiverged: 0,
+        },
+      });
+    }
+
+    const verifications: any[] = [];
+    for (const peerId of targets) {
+      verifications.push(await (agent as any).verifyParanetSyncWithPeer(peerId, paranetId));
+    }
+
+    const peersInSync = verifications.filter(v => v.inSync).length;
+    return jsonResponse(res, 200, {
+      paranetId,
+      verifications,
+      summary: {
+        peersChecked: verifications.length,
+        peersInSync,
+        peersDiverged: verifications.length - peersInSync,
+      },
+    });
+  }
+
+  // POST /api/sync/inspect  { paranetId: "...", peerId?: "...", maxItems?: number, maxTreeDepth?: number }
+  if (req.method === 'POST' && path === '/api/sync/inspect') {
+    const body = await readBody(req);
+    const {
+      paranetId,
+      peerId: rawPeerId,
+      maxItems,
+      maxTreeDepth,
+    } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+
+    let targetPeerId: string | null = null;
+    if (rawPeerId) {
+      const resolved = await resolveNameToPeerId(agent, rawPeerId);
+      if (!resolved) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+      targetPeerId = resolved;
+    } else {
+      for (const pid of agent.node.libp2p.getPeers()) {
+        try {
+          const peer = await agent.node.libp2p.peerStore.get(pid);
+          if (peer.protocols.includes(PROTOCOL_SYNC_INVENTORY)) {
+            targetPeerId = pid.toString();
+            break;
+          }
+        } catch {
+          // ignore unresolved peer metadata
+        }
+      }
+    }
+
+    if (!targetPeerId) {
+      return jsonResponse(res, 400, {
+        error: 'No inventory-capable peer available. Provide --peer or connect to a peer supporting /dkg/sync-inventory/1.0.0.',
+      });
+    }
+
+    const inspect = await (agent as any).inspectParanetMerkleComparison(
+      targetPeerId,
+      paranetId,
+      {
+        maxItems: typeof maxItems === 'number' ? maxItems : undefined,
+        maxTreeDepth: typeof maxTreeDepth === 'number' ? maxTreeDepth : undefined,
+      },
+    );
+    return jsonResponse(res, 200, inspect);
+  }
+
+  // POST /api/sync/repair  { paranetId: "...", peerId?: "...", includeWorkspace?: boolean }
+  if (req.method === 'POST' && path === '/api/sync/repair') {
+    const body = await readBody(req);
+    const { paranetId, peerId: rawPeerId, includeWorkspace } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+
+    if (rawPeerId) {
+      const peerId = await resolveNameToPeerId(agent, rawPeerId);
+      if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+      const result = await (agent as any).syncParanetFromPeer(peerId, paranetId, {
+        includeWorkspace: includeWorkspace !== false,
+      });
+      return jsonResponse(res, 200, {
+        paranetId,
+        mode: 'peer',
+        peerId,
+        result,
+      });
+    }
+
+    const catchup = await agent.syncParanetFromConnectedPeers(paranetId, {
+      includeWorkspace: includeWorkspace !== false,
+    });
+    return jsonResponse(res, 200, {
+      paranetId,
+      mode: 'connected-peers',
+      catchup,
+    });
   }
 
   // POST /api/paranet/create  { id, name, description? }

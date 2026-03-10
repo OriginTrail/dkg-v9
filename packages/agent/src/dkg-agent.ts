@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_INVENTORY, PROTOCOL_QUERY_REMOTE,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
@@ -30,10 +30,14 @@ import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { createHash } from 'node:crypto';
 
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
+const SYNC_INVENTORY_LEAF_PAGE_SIZE = 250;
+const SYNC_INVENTORY_DIFF_THRESHOLD = 64;
+const SYNC_INVENTORY_MAX_PREFIX_BITS = 24;
 const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -55,6 +59,19 @@ export interface ParanetSub {
   synced: boolean;
   /** On-chain paranet ID (keccak256 hash), if known. */
   onChainId?: string;
+}
+
+interface SyncInventoryLeaf {
+  kcUal: string;
+  merkleRoot: string;
+  leafHash: string;
+  leafBytes: Uint8Array;
+}
+
+interface SyncInventorySnapshot {
+  leaves: SyncInventoryLeaf[];
+  byKc: Map<string, SyncInventoryLeaf>;
+  rootHash: string;
 }
 
 export interface DKGAgentConfig {
@@ -482,6 +499,12 @@ export class DKGAgent {
       return new TextEncoder().encode(nquads.join('\n'));
     });
 
+    // Merkle-based set reconciliation protocol.
+    // Used to compare KC inventories and fetch only missing KCs.
+    this.router.register(PROTOCOL_SYNC_INVENTORY, async (data) => {
+      return this.handleSyncInventoryRequest(data);
+    });
+
     // Subscribe to both system paranet GossipSub topics
     for (const systemParanet of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
       this.subscribeToParanet(systemParanet);
@@ -566,71 +589,22 @@ export class DKGAgent {
     paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncParanets ?? [])],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
 
     try {
       for (const pid of paranetIds) {
-        const dataGraph = paranetDataGraphUri(pid);
-        const metaGraph = paranetMetaGraphUri(pid);
-
-        const allQuads: Quad[] = [];
-        let offset = 0;
-        this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
-
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          if (Date.now() > deadline) {
-            this.log.warn(ctx, `Sync timeout after ${SYNC_TOTAL_TIMEOUT_MS}ms (${allQuads.length} triples received so far)`);
-            break;
-          }
-
-          const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
-
-          const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
-            {
-              maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-              baseDelayMs: 1000,
-              onRetry: (attempt, delay, err) => {
-                this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
-              },
-            },
-          );
-
-          const nquadsText = new TextDecoder().decode(responseBytes).trim();
-          if (!nquadsText) break;
-
-          const quads = parseNQuads(nquadsText);
-          if (quads.length === 0) break;
-          allQuads.push(...quads);
-
-          const dataCount = quads.filter(q => q.graph === dataGraph).length;
-          offset += dataCount;
-          this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
-          if (dataCount < SYNC_PAGE_SIZE) break;
-        }
-
-        if (allQuads.length === 0) continue;
-
-        const dataQuads = allQuads.filter(q => q.graph === dataGraph);
-        const metaQuads = allQuads.filter(q => q.graph === metaGraph);
-
         const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
-        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
 
-        if (verified.data.length > 0) {
-          await this.store.insert(verified.data);
-          totalSynced += verified.data.length;
+        // Use Merkle set reconciliation for non-system paranets. If remote peer
+        // does not support the inventory protocol, fall back to page sync.
+        let synced: number | null = null;
+        if (!isSystemParanet) {
+          synced = await this.syncParanetByInventory(remotePeerId, pid, ctx);
         }
-        if (verified.meta.length > 0) {
-          await this.store.insert(verified.meta);
-          totalSynced += verified.meta.length;
+        if (synced == null) {
+          synced = await this.syncParanetByPagination(remotePeerId, pid, ctx, isSystemParanet);
         }
-
-        if (verified.rejected > 0) {
-          this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
-        }
+        totalSynced += synced ?? 0;
       }
       if (totalSynced > 0) {
         this.log.info(ctx, `Sync complete: ${totalSynced} verified triples from ${remotePeerId}`);
@@ -639,6 +613,532 @@ export class DKGAgent {
       this.log.warn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
+  }
+
+  /**
+   * Legacy pagination sync path. Kept as fallback when inventory protocol is
+   * unavailable or reconciliation fails.
+   */
+  private async syncParanetByPagination(
+    remotePeerId: string,
+    paranetId: string,
+    ctx: OperationContext,
+    acceptUnverified: boolean,
+  ): Promise<number> {
+    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
+    const dataGraph = paranetDataGraphUri(paranetId);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+
+    const allQuads: Quad[] = [];
+    let offset = 0;
+    let synced = 0;
+
+    this.log.info(ctx, `Syncing paranet "${paranetId}" from ${remotePeerId} (pagination)`);
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (Date.now() > deadline) {
+        this.log.warn(ctx, `Sync timeout after ${SYNC_TOTAL_TIMEOUT_MS}ms (${allQuads.length} triples received so far)`);
+        break;
+      }
+
+      const payload = new TextEncoder().encode(`${paranetId}|${offset}|${SYNC_PAGE_SIZE}`);
+
+      const responseBytes = await withRetry(
+        () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
+        {
+          maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+          baseDelayMs: 1000,
+          onRetry: (attempt, delay, err) => {
+            this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+          },
+        },
+      );
+
+      const nquadsText = new TextDecoder().decode(responseBytes).trim();
+      if (!nquadsText) break;
+
+      const quads = parseNQuads(nquadsText);
+      if (quads.length === 0) break;
+      allQuads.push(...quads);
+
+      const dataCount = quads.filter(q => q.graph === dataGraph).length;
+      offset += dataCount;
+      this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
+      if (dataCount < SYNC_PAGE_SIZE) break;
+    }
+
+    if (allQuads.length === 0) return 0;
+
+    const dataQuads = allQuads.filter(q => q.graph === dataGraph);
+    const metaQuads = allQuads.filter(q => q.graph === metaGraph);
+    const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, acceptUnverified);
+
+    if (verified.data.length > 0) {
+      await this.store.insert(verified.data);
+      synced += verified.data.length;
+    }
+    if (verified.meta.length > 0) {
+      await this.store.insert(verified.meta);
+      synced += verified.meta.length;
+    }
+
+    if (verified.rejected > 0) {
+      this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
+    }
+
+    return synced;
+  }
+
+  /**
+   * Merkle set-reconciliation path for paranet sync.
+   *
+   * Returns:
+   * - number: synced triples
+   * - null: inventory protocol unavailable / error (caller should fall back)
+   */
+  private async syncParanetByInventory(
+    remotePeerId: string,
+    paranetId: string,
+    ctx: OperationContext,
+  ): Promise<number | null> {
+    const localInventory = await this.buildParanetInventory(paranetId);
+
+    const remoteRoot = await this.requestInventoryPrefixHash(remotePeerId, paranetId, '');
+    if (!remoteRoot) {
+      return null;
+    }
+
+    // No KC inventory on remote side (possibly metadata-less data). Fall back
+    // to pagination to avoid skipping historical triples.
+    if (remoteRoot.leafCount === 0) {
+      return null;
+    }
+
+    if (
+      remoteRoot.rootHash === localInventory.rootHash
+      && remoteRoot.leafCount === localInventory.leaves.length
+    ) {
+      this.log.info(ctx, `Merkle inventory match for "${paranetId}" — no catch-up needed`);
+      return 0;
+    }
+
+    const missing = await this.findMissingRemoteKCs(remotePeerId, paranetId, localInventory, remoteRoot);
+    if (!missing) {
+      return null;
+    }
+
+    const missingKcUals = [...missing.keys()];
+    if (missingKcUals.length === 0) {
+      this.log.info(ctx, `Merkle diff for "${paranetId}" found no missing KCs to fetch`);
+      return 0;
+    }
+
+    this.log.info(ctx, `Merkle diff for "${paranetId}": fetching ${missingKcUals.length} missing KC(s)`);
+
+    const fetchedQuads = await this.fetchKCsByInventory(remotePeerId, paranetId, missingKcUals);
+    if (!fetchedQuads) {
+      return null;
+    }
+    if (fetchedQuads.length === 0) {
+      return 0;
+    }
+
+    const dataGraph = paranetDataGraphUri(paranetId);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    const dataQuads = fetchedQuads.filter(q => q.graph === dataGraph);
+    const metaQuads = fetchedQuads.filter(q => q.graph === metaGraph);
+    const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, false);
+
+    let synced = 0;
+    if (verified.data.length > 0) {
+      await this.store.insert(verified.data);
+      synced += verified.data.length;
+    }
+    if (verified.meta.length > 0) {
+      await this.store.insert(verified.meta);
+      synced += verified.meta.length;
+    }
+
+    if (verified.rejected > 0) {
+      this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
+    }
+
+    return synced;
+  }
+
+  private async buildParanetInventory(paranetId: string): Promise<SyncInventorySnapshot> {
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    const result = await this.store.query(
+      `SELECT ?kc ?root WHERE {
+         GRAPH <${metaGraph}> {
+           ?kc <http://dkg.io/ontology/merkleRoot> ?root .
+         }
+       }
+       ORDER BY ?kc`,
+    );
+
+    const leaves: SyncInventoryLeaf[] = [];
+    if (result.type === 'bindings') {
+      for (const row of result.bindings) {
+        const kcUal = row['kc'];
+        const merkleRoot = row['root'] ? stripLiteral(row['root']) : '';
+        if (!kcUal || !merkleRoot) continue;
+        const leafBytes = computeInventoryLeafHash(kcUal, merkleRoot);
+        leaves.push({
+          kcUal,
+          merkleRoot,
+          leafHash: toHex(leafBytes),
+          leafBytes,
+        });
+      }
+    }
+
+    leaves.sort((a, b) => {
+      if (a.leafHash < b.leafHash) return -1;
+      if (a.leafHash > b.leafHash) return 1;
+      return 0;
+    });
+
+    const byKc = new Map<string, SyncInventoryLeaf>();
+    for (const leaf of leaves) {
+      byKc.set(leaf.kcUal, leaf);
+    }
+
+    return {
+      leaves,
+      byKc,
+      rootHash: computeInventoryRootHash(leaves),
+    };
+  }
+
+  private async findMissingRemoteKCs(
+    remotePeerId: string,
+    paranetId: string,
+    localInventory: SyncInventorySnapshot,
+    remoteRootHint: { leafCount: number; rootHash: string },
+  ): Promise<Map<string, string> | null> {
+    const missing = new Map<string, string>();
+
+    const walk = async (
+      prefixBits: string,
+      remoteHint?: { leafCount: number; rootHash: string },
+    ): Promise<boolean> => {
+      const remote = remoteHint ?? await this.requestInventoryPrefixHash(remotePeerId, paranetId, prefixBits);
+      if (!remote) return false;
+
+      const localLeaves = localInventory.leaves.filter(l => leafMatchesPrefixBits(l.leafHash, prefixBits));
+      const localRoot = computeInventoryRootHash(localLeaves);
+
+      if (remote.leafCount === localLeaves.length && remote.rootHash === localRoot) {
+        return true;
+      }
+
+      if (remote.leafCount === 0) {
+        return true;
+      }
+
+      if (
+        remote.leafCount <= SYNC_INVENTORY_DIFF_THRESHOLD
+        || prefixBits.length >= SYNC_INVENTORY_MAX_PREFIX_BITS
+      ) {
+        const remoteLeaves = await this.requestInventoryPrefixLeaves(remotePeerId, paranetId, prefixBits);
+        if (!remoteLeaves) return false;
+
+        for (const leaf of remoteLeaves) {
+          const local = localInventory.byKc.get(leaf.kcUal);
+          if (!local || local.merkleRoot !== leaf.merkleRoot) {
+            missing.set(leaf.kcUal, leaf.merkleRoot);
+          }
+        }
+        return true;
+      }
+
+      const leftOk = await walk(`${prefixBits}0`);
+      if (!leftOk) return false;
+      return walk(`${prefixBits}1`);
+    };
+
+    const ok = await walk('', remoteRootHint);
+    if (!ok) return null;
+
+    return missing;
+  }
+
+  private async requestSyncInventory<T>(
+    remotePeerId: string,
+    payload: Record<string, unknown>,
+  ): Promise<T | null> {
+    try {
+      const bytes = new TextEncoder().encode(JSON.stringify(payload));
+      const responseBytes = await withRetry(
+        () => this.router.send(remotePeerId, PROTOCOL_SYNC_INVENTORY, bytes),
+        {
+          maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+          baseDelayMs: 500,
+        },
+      );
+      const text = new TextDecoder().decode(responseBytes).trim();
+      if (!text) return null;
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private async requestInventoryPrefixHash(
+    remotePeerId: string,
+    paranetId: string,
+    prefixBits: string,
+  ): Promise<{ leafCount: number; rootHash: string } | null> {
+    const response = await this.requestSyncInventory<{
+      ok?: boolean;
+      type?: string;
+      leafCount?: number;
+      rootHash?: string;
+    }>(remotePeerId, {
+      type: 'prefixHash',
+      paranetId,
+      prefixBits,
+    });
+
+    if (!response?.ok || response.type !== 'prefixHash') return null;
+    if (typeof response.leafCount !== 'number' || typeof response.rootHash !== 'string') return null;
+
+    return {
+      leafCount: response.leafCount,
+      rootHash: response.rootHash.toLowerCase(),
+    };
+  }
+
+  private async requestInventoryPrefixLeaves(
+    remotePeerId: string,
+    paranetId: string,
+    prefixBits: string,
+  ): Promise<Array<{ kcUal: string; merkleRoot: string; leafHash: string }> | null> {
+    const leaves: Array<{ kcUal: string; merkleRoot: string; leafHash: string }> = [];
+    let offset = 0;
+
+    while (true) {
+      const response = await this.requestSyncInventory<{
+        ok?: boolean;
+        type?: string;
+        total?: number;
+        offset?: number;
+        limit?: number;
+        leaves?: Array<{ kcUal?: string; merkleRoot?: string; leafHash?: string }>;
+      }>(remotePeerId, {
+        type: 'prefixLeaves',
+        paranetId,
+        prefixBits,
+        offset,
+        limit: SYNC_INVENTORY_LEAF_PAGE_SIZE,
+      });
+
+      if (!response?.ok || response.type !== 'prefixLeaves' || !Array.isArray(response.leaves)) {
+        return null;
+      }
+
+      const chunk = response.leaves
+        .filter(l => typeof l.kcUal === 'string' && typeof l.merkleRoot === 'string' && typeof l.leafHash === 'string')
+        .map(l => ({
+          kcUal: l.kcUal as string,
+          merkleRoot: l.merkleRoot as string,
+          leafHash: (l.leafHash as string).toLowerCase(),
+        }));
+
+      leaves.push(...chunk);
+
+      const total = typeof response.total === 'number' ? response.total : leaves.length;
+      if (chunk.length === 0 || leaves.length >= total) break;
+      offset += chunk.length;
+    }
+
+    return leaves;
+  }
+
+  private async fetchKCsByInventory(
+    remotePeerId: string,
+    paranetId: string,
+    kcUals: string[],
+  ): Promise<Quad[] | null> {
+    const chunks = chunkArray(kcUals, 64);
+    const allQuads: Quad[] = [];
+
+    for (const chunk of chunks) {
+      const response = await this.requestSyncInventory<{
+        ok?: boolean;
+        type?: string;
+        nquads?: string;
+      }>(remotePeerId, {
+        type: 'fetchKCs',
+        paranetId,
+        kcUals: chunk,
+      });
+
+      if (!response?.ok || response.type !== 'fetchKCs' || typeof response.nquads !== 'string') {
+        return null;
+      }
+
+      const nquadsText = response.nquads.trim();
+      if (!nquadsText) continue;
+      allQuads.push(...parseNQuads(nquadsText));
+    }
+
+    return allQuads;
+  }
+
+  private async handleSyncInventoryRequest(data: Uint8Array): Promise<Uint8Array> {
+    try {
+      const text = new TextDecoder().decode(data).trim();
+      const request = JSON.parse(text) as {
+        type?: string;
+        paranetId?: string;
+        prefixBits?: string;
+        offset?: number;
+        limit?: number;
+        kcUals?: string[];
+      };
+
+      if (!request.paranetId || typeof request.paranetId !== 'string') {
+        return encodeSyncInventoryResponse({ ok: false, error: 'Missing paranetId' });
+      }
+
+      const paranetId = request.paranetId;
+
+      if (request.type === 'prefixHash') {
+        const prefixBits = normalizePrefixBits(request.prefixBits ?? '');
+        const inventory = await this.buildParanetInventory(paranetId);
+        const scopedLeaves = inventory.leaves.filter(l => leafMatchesPrefixBits(l.leafHash, prefixBits));
+        return encodeSyncInventoryResponse({
+          ok: true,
+          type: 'prefixHash',
+          prefixBits,
+          leafCount: scopedLeaves.length,
+          rootHash: computeInventoryRootHash(scopedLeaves),
+        });
+      }
+
+      if (request.type === 'prefixLeaves') {
+        const prefixBits = normalizePrefixBits(request.prefixBits ?? '');
+        const inventory = await this.buildParanetInventory(paranetId);
+        const scopedLeaves = inventory.leaves.filter(l => leafMatchesPrefixBits(l.leafHash, prefixBits));
+        const offset = Math.max(0, Number(request.offset) || 0);
+        const limit = Math.max(1, Math.min(Number(request.limit) || SYNC_INVENTORY_LEAF_PAGE_SIZE, SYNC_INVENTORY_LEAF_PAGE_SIZE));
+        const page = scopedLeaves.slice(offset, offset + limit).map(l => ({
+          kcUal: l.kcUal,
+          merkleRoot: l.merkleRoot,
+          leafHash: l.leafHash,
+        }));
+
+        return encodeSyncInventoryResponse({
+          ok: true,
+          type: 'prefixLeaves',
+          prefixBits,
+          offset,
+          limit,
+          total: scopedLeaves.length,
+          leaves: page,
+        });
+      }
+
+      if (request.type === 'fetchKCs') {
+        const kcUals = Array.isArray(request.kcUals)
+          ? request.kcUals.filter((x): x is string => typeof x === 'string').slice(0, 1024)
+          : [];
+        const nquads = await this.buildKCSyncPayload(paranetId, kcUals);
+        return encodeSyncInventoryResponse({
+          ok: true,
+          type: 'fetchKCs',
+          nquads,
+        });
+      }
+
+      return encodeSyncInventoryResponse({ ok: false, error: `Unsupported request type: ${String(request.type)}` });
+    } catch (err) {
+      return encodeSyncInventoryResponse({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async buildKCSyncPayload(paranetId: string, requestedKcUals: string[]): Promise<string> {
+    const uniqueKCs = [...new Set(requestedKcUals.filter(u => isSafeUriToken(u)))];
+    if (uniqueKCs.length === 0) return '';
+
+    const dataGraph = paranetDataGraphUri(paranetId);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    const kcValues = uniqueKCs.map(uri => `<${uri}>`).join(' ');
+
+    const kaRootResult = await this.store.query(
+      `SELECT ?ka ?re WHERE {
+         GRAPH <${metaGraph}> {
+           VALUES ?kc { ${kcValues} }
+           ?ka <http://dkg.io/ontology/partOf> ?kc .
+           ?ka <http://dkg.io/ontology/rootEntity> ?re .
+         }
+       }
+       ORDER BY ?ka ?re`,
+    );
+
+    const metaSubjects = new Set<string>(uniqueKCs);
+    const rootEntities = new Set<string>();
+    if (kaRootResult.type === 'bindings') {
+      for (const row of kaRootResult.bindings) {
+        if (row['ka']) metaSubjects.add(row['ka']);
+        if (row['re'] && isSafeUriToken(row['re'])) rootEntities.add(row['re']);
+      }
+    }
+
+    const lines = new Set<string>();
+
+    if (metaSubjects.size > 0) {
+      const metaValues = [...metaSubjects]
+        .filter(isSafeUriToken)
+        .map(uri => `<${uri}>`)
+        .join(' ');
+
+      if (metaValues.length > 0) {
+        const metaResult = await this.store.query(
+          `SELECT ?s ?p ?o WHERE {
+             GRAPH <${metaGraph}> {
+               VALUES ?s { ${metaValues} }
+               ?s ?p ?o .
+             }
+           }
+           ORDER BY ?s ?p ?o`,
+        );
+        if (metaResult.type === 'bindings') {
+          for (const b of metaResult.bindings) {
+            if (!b['s'] || !b['p'] || !b['o']) continue;
+            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+            lines.add(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
+          }
+        }
+      }
+    }
+
+    if (rootEntities.size > 0) {
+      const rootValues = [...rootEntities].map(uri => `<${uri}>`).join(' ');
+      const dataResult = await this.store.query(
+        `SELECT ?s ?p ?o WHERE {
+           GRAPH <${dataGraph}> { ?s ?p ?o }
+           VALUES ?re { ${rootValues} }
+           FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
+         }
+         ORDER BY ?s ?p ?o`,
+      );
+      if (dataResult.type === 'bindings') {
+        for (const b of dataResult.bindings) {
+          if (!b['s'] || !b['p'] || !b['o']) continue;
+          const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+          lines.add(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
+        }
+      }
+    }
+
+    return [...lines].join('\n');
   }
 
   /**
@@ -848,6 +1348,420 @@ export class DKGAgent {
       peersTried,
       dataSynced,
       workspaceSynced,
+    };
+  }
+
+  /**
+   * Catch up a single paranet from one specific peer.
+   */
+  async syncParanetFromPeer(
+    remotePeerId: string,
+    paranetId: string,
+    options?: { includeWorkspace?: boolean },
+  ): Promise<{ dataSynced: number; workspaceSynced: number }> {
+    const includeWorkspace = options?.includeWorkspace ?? false;
+    this.trackSyncParanet(paranetId);
+    const dataSynced = await this.syncFromPeer(remotePeerId, [paranetId]);
+    const workspaceSynced = includeWorkspace
+      ? await this.syncWorkspaceFromPeer(remotePeerId, [paranetId])
+      : 0;
+    return { dataSynced, workspaceSynced };
+  }
+
+  /**
+   * Local inventory summary for a paranet (confirmed/tentative KC meta graph).
+   */
+  async getParanetInventorySummary(paranetId: string): Promise<{
+    paranetId: string;
+    kcCount: number;
+    rootHash: string;
+  }> {
+    const inv = await this.buildParanetInventory(paranetId);
+    return {
+      paranetId,
+      kcCount: inv.leaves.length,
+      rootHash: inv.rootHash,
+    };
+  }
+
+  /**
+   * Compare local KC inventory for a paranet against one remote peer.
+   * Returns exact missing/mismatched/extra counts and samples.
+   */
+  async verifyParanetSyncWithPeer(
+    remotePeerId: string,
+    paranetId: string,
+    options?: { sampleLimit?: number },
+  ): Promise<{
+    paranetId: string;
+    peerId: string;
+    inventoryProtocolAvailable: boolean;
+    inSync: boolean;
+    local: { kcCount: number; rootHash: string };
+    remote: { kcCount: number; rootHash: string } | null;
+    counts: {
+      missingLocal: number;
+      mismatched: number;
+      extraLocal: number;
+    };
+    samples: {
+      missingLocal: string[];
+      mismatched: Array<{ kcUal: string; localMerkleRoot: string; remoteMerkleRoot: string }>;
+      extraLocal: string[];
+    };
+  }> {
+    const sampleLimit = Math.max(1, options?.sampleLimit ?? 20);
+    const local = await this.buildParanetInventory(paranetId);
+    const remoteRoot = await this.requestInventoryPrefixHash(remotePeerId, paranetId, '');
+    if (!remoteRoot) {
+      return {
+        paranetId,
+        peerId: remotePeerId,
+        inventoryProtocolAvailable: false,
+        inSync: false,
+        local: { kcCount: local.leaves.length, rootHash: local.rootHash },
+        remote: null,
+        counts: { missingLocal: 0, mismatched: 0, extraLocal: 0 },
+        samples: { missingLocal: [], mismatched: [], extraLocal: [] },
+      };
+    }
+
+    const remoteLeaves = await this.requestInventoryPrefixLeaves(remotePeerId, paranetId, '');
+    if (!remoteLeaves) {
+      return {
+        paranetId,
+        peerId: remotePeerId,
+        inventoryProtocolAvailable: false,
+        inSync: false,
+        local: { kcCount: local.leaves.length, rootHash: local.rootHash },
+        remote: { kcCount: remoteRoot.leafCount, rootHash: remoteRoot.rootHash },
+        counts: { missingLocal: 0, mismatched: 0, extraLocal: 0 },
+        samples: { missingLocal: [], mismatched: [], extraLocal: [] },
+      };
+    }
+
+    const remoteByKc = new Map<string, { merkleRoot: string }>();
+    for (const leaf of remoteLeaves) {
+      remoteByKc.set(leaf.kcUal, { merkleRoot: leaf.merkleRoot });
+    }
+
+    const missingLocal: string[] = [];
+    const mismatched: Array<{ kcUal: string; localMerkleRoot: string; remoteMerkleRoot: string }> = [];
+    const extraLocal: string[] = [];
+
+    for (const [kcUal, remoteLeaf] of remoteByKc) {
+      const localLeaf = local.byKc.get(kcUal);
+      if (!localLeaf) {
+        if (missingLocal.length < sampleLimit) missingLocal.push(kcUal);
+        continue;
+      }
+      if (localLeaf.merkleRoot !== remoteLeaf.merkleRoot) {
+        if (mismatched.length < sampleLimit) {
+          mismatched.push({
+            kcUal,
+            localMerkleRoot: localLeaf.merkleRoot,
+            remoteMerkleRoot: remoteLeaf.merkleRoot,
+          });
+        }
+      }
+    }
+
+    for (const localLeaf of local.leaves) {
+      if (!remoteByKc.has(localLeaf.kcUal)) {
+        if (extraLocal.length < sampleLimit) extraLocal.push(localLeaf.kcUal);
+      }
+    }
+
+    const missingLocalCount = [...remoteByKc.keys()].filter(k => !local.byKc.has(k)).length;
+    const mismatchedCount = [...remoteByKc.entries()].filter(([k, r]) => {
+      const localLeaf = local.byKc.get(k);
+      return !!localLeaf && localLeaf.merkleRoot !== r.merkleRoot;
+    }).length;
+    const extraLocalCount = local.leaves.filter(l => !remoteByKc.has(l.kcUal)).length;
+
+    return {
+      paranetId,
+      peerId: remotePeerId,
+      inventoryProtocolAvailable: true,
+      inSync: missingLocalCount === 0 && mismatchedCount === 0 && extraLocalCount === 0,
+      local: {
+        kcCount: local.leaves.length,
+        rootHash: local.rootHash,
+      },
+      remote: {
+        kcCount: remoteRoot.leafCount,
+        rootHash: remoteRoot.rootHash,
+      },
+      counts: {
+        missingLocal: missingLocalCount,
+        mismatched: mismatchedCount,
+        extraLocal: extraLocalCount,
+      },
+      samples: {
+        missingLocal,
+        mismatched,
+        extraLocal,
+      },
+    };
+  }
+
+  /**
+   * Inspect Merkle inventory reconciliation details for one paranet vs one peer.
+   * Returns compared tree prefixes and concrete KC-level reconciliation sets.
+   */
+  async inspectParanetMerkleComparison(
+    remotePeerId: string,
+    paranetId: string,
+    options?: { maxItems?: number; maxTreeDepth?: number },
+  ): Promise<{
+    paranetId: string;
+    peerId: string;
+    inventoryProtocolAvailable: boolean;
+    local: {
+      kcCount: number;
+      rootHash: string;
+      leaves: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+      leavesTruncated: boolean;
+    };
+    remote: {
+      kcCount: number;
+      rootHash: string;
+      leaves: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+      leavesTruncated: boolean;
+    } | null;
+    tree: {
+      maxDepth: number;
+      comparedPrefixes: Array<{
+        prefixBits: string;
+        depth: number;
+        equal: boolean;
+        localLeafCount: number;
+        remoteLeafCount: number;
+        localRootHash: string;
+        remoteRootHash: string;
+      }>;
+    };
+    reconciliation: {
+      counts: {
+        missingLocal: number;
+        mismatched: number;
+        extraLocal: number;
+      };
+      missingLocal: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+      mismatched: Array<{
+        kcUal: string;
+        localMerkleRoot: string;
+        remoteMerkleRoot: string;
+        localLeafHash: string;
+        remoteLeafHash: string;
+      }>;
+      extraLocal: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+      itemsTruncated: boolean;
+    };
+  }> {
+    const maxItems = Math.max(1, Math.min(options?.maxItems ?? 500, 5000));
+    const maxTreeDepth = Math.max(0, Math.min(options?.maxTreeDepth ?? 16, 32));
+
+    const local = await this.buildParanetInventory(paranetId);
+    const localLeavesForView = local.leaves.slice(0, maxItems).map(l => ({
+      kcUal: l.kcUal,
+      merkleRoot: l.merkleRoot,
+      leafHash: l.leafHash,
+    }));
+
+    const remoteRoot = await this.requestInventoryPrefixHash(remotePeerId, paranetId, '');
+    if (!remoteRoot) {
+      return {
+        paranetId,
+        peerId: remotePeerId,
+        inventoryProtocolAvailable: false,
+        local: {
+          kcCount: local.leaves.length,
+          rootHash: local.rootHash,
+          leaves: localLeavesForView,
+          leavesTruncated: local.leaves.length > maxItems,
+        },
+        remote: null,
+        tree: {
+          maxDepth: maxTreeDepth,
+          comparedPrefixes: [],
+        },
+        reconciliation: {
+          counts: { missingLocal: 0, mismatched: 0, extraLocal: 0 },
+          missingLocal: [],
+          mismatched: [],
+          extraLocal: [],
+          itemsTruncated: false,
+        },
+      };
+    }
+
+    const comparedPrefixes: Array<{
+      prefixBits: string;
+      depth: number;
+      equal: boolean;
+      localLeafCount: number;
+      remoteLeafCount: number;
+      localRootHash: string;
+      remoteRootHash: string;
+    }> = [];
+    let prefixWalkOk = true;
+
+    const walkPrefixes = async (
+      prefixBits: string,
+      remoteHint?: { leafCount: number; rootHash: string },
+    ): Promise<void> => {
+      const remote = remoteHint ?? await this.requestInventoryPrefixHash(remotePeerId, paranetId, prefixBits);
+      if (!remote) {
+        prefixWalkOk = false;
+        return;
+      }
+
+      const scopedLocalLeaves = local.leaves.filter(l => leafMatchesPrefixBits(l.leafHash, prefixBits));
+      const localRootHash = computeInventoryRootHash(scopedLocalLeaves);
+      const equal = remote.leafCount === scopedLocalLeaves.length && remote.rootHash === localRootHash;
+
+      comparedPrefixes.push({
+        prefixBits,
+        depth: prefixBits.length,
+        equal,
+        localLeafCount: scopedLocalLeaves.length,
+        remoteLeafCount: remote.leafCount,
+        localRootHash,
+        remoteRootHash: remote.rootHash,
+      });
+
+      if (equal || remote.leafCount === 0) return;
+      if (prefixBits.length >= maxTreeDepth) return;
+      if (remote.leafCount <= SYNC_INVENTORY_DIFF_THRESHOLD) return;
+
+      await walkPrefixes(`${prefixBits}0`);
+      await walkPrefixes(`${prefixBits}1`);
+    };
+
+    await walkPrefixes('', remoteRoot);
+
+    const remoteLeaves = await this.requestInventoryPrefixLeaves(remotePeerId, paranetId, '');
+    if (!remoteLeaves) {
+      return {
+        paranetId,
+        peerId: remotePeerId,
+        inventoryProtocolAvailable: false,
+        local: {
+          kcCount: local.leaves.length,
+          rootHash: local.rootHash,
+          leaves: localLeavesForView,
+          leavesTruncated: local.leaves.length > maxItems,
+        },
+        remote: {
+          kcCount: remoteRoot.leafCount,
+          rootHash: remoteRoot.rootHash,
+          leaves: [],
+          leavesTruncated: false,
+        },
+        tree: {
+          maxDepth: maxTreeDepth,
+          comparedPrefixes,
+        },
+        reconciliation: {
+          counts: { missingLocal: 0, mismatched: 0, extraLocal: 0 },
+          missingLocal: [],
+          mismatched: [],
+          extraLocal: [],
+          itemsTruncated: false,
+        },
+      };
+    }
+
+    const remoteByKc = new Map<string, { merkleRoot: string; leafHash: string }>();
+    for (const leaf of remoteLeaves) {
+      remoteByKc.set(leaf.kcUal, {
+        merkleRoot: leaf.merkleRoot,
+        leafHash: leaf.leafHash,
+      });
+    }
+
+    const missingLocalAll: Array<{ kcUal: string; merkleRoot: string; leafHash: string }> = [];
+    const mismatchedAll: Array<{
+      kcUal: string;
+      localMerkleRoot: string;
+      remoteMerkleRoot: string;
+      localLeafHash: string;
+      remoteLeafHash: string;
+    }> = [];
+    const extraLocalAll: Array<{ kcUal: string; merkleRoot: string; leafHash: string }> = [];
+
+    for (const [kcUal, remoteLeaf] of remoteByKc) {
+      const localLeaf = local.byKc.get(kcUal);
+      if (!localLeaf) {
+        missingLocalAll.push({
+          kcUal,
+          merkleRoot: remoteLeaf.merkleRoot,
+          leafHash: remoteLeaf.leafHash,
+        });
+        continue;
+      }
+      if (localLeaf.merkleRoot !== remoteLeaf.merkleRoot) {
+        mismatchedAll.push({
+          kcUal,
+          localMerkleRoot: localLeaf.merkleRoot,
+          remoteMerkleRoot: remoteLeaf.merkleRoot,
+          localLeafHash: localLeaf.leafHash,
+          remoteLeafHash: remoteLeaf.leafHash,
+        });
+      }
+    }
+
+    for (const localLeaf of local.leaves) {
+      if (!remoteByKc.has(localLeaf.kcUal)) {
+        extraLocalAll.push({
+          kcUal: localLeaf.kcUal,
+          merkleRoot: localLeaf.merkleRoot,
+          leafHash: localLeaf.leafHash,
+        });
+      }
+    }
+
+    const remoteLeavesForView = remoteLeaves.slice(0, maxItems).map(l => ({
+      kcUal: l.kcUal,
+      merkleRoot: l.merkleRoot,
+      leafHash: l.leafHash,
+    }));
+
+    return {
+      paranetId,
+      peerId: remotePeerId,
+      inventoryProtocolAvailable: prefixWalkOk,
+      local: {
+        kcCount: local.leaves.length,
+        rootHash: local.rootHash,
+        leaves: localLeavesForView,
+        leavesTruncated: local.leaves.length > maxItems,
+      },
+      remote: {
+        kcCount: remoteRoot.leafCount,
+        rootHash: remoteRoot.rootHash,
+        leaves: remoteLeavesForView,
+        leavesTruncated: remoteLeaves.length > maxItems,
+      },
+      tree: {
+        maxDepth: maxTreeDepth,
+        comparedPrefixes,
+      },
+      reconciliation: {
+        counts: {
+          missingLocal: missingLocalAll.length,
+          mismatched: mismatchedAll.length,
+          extraLocal: extraLocalAll.length,
+        },
+        missingLocal: missingLocalAll.slice(0, maxItems),
+        mismatched: mismatchedAll.slice(0, maxItems),
+        extraLocal: extraLocalAll.slice(0, maxItems),
+        itemsTruncated:
+          missingLocalAll.length > maxItems
+          || mismatchedAll.length > maxItems
+          || extraLocalAll.length > maxItems,
+      },
     };
   }
 
@@ -1979,6 +2893,65 @@ export class DKGAgent {
     }
   }
 
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function computeInventoryLeafHash(kcUal: string, merkleRoot: string): Uint8Array {
+  const digest = createHash('sha256')
+    .update(`${kcUal}|${merkleRoot}`, 'utf8')
+    .digest();
+  return new Uint8Array(digest);
+}
+
+function computeInventoryRootHash(leaves: Array<{ leafBytes: Uint8Array }>): string {
+  const root = new MerkleTree(leaves.map(l => l.leafBytes)).root;
+  return toHex(root);
+}
+
+function normalizePrefixBits(prefixBits: string): string {
+  if (!prefixBits) return '';
+  const cleaned = prefixBits.replace(/[^01]/g, '');
+  return cleaned.slice(0, 256);
+}
+
+function leafMatchesPrefixBits(leafHashHex: string, prefixBits: string): boolean {
+  if (!prefixBits) return true;
+  for (let i = 0; i < prefixBits.length; i++) {
+    if (bitAt(leafHashHex, i) !== prefixBits[i]) return false;
+  }
+  return true;
+}
+
+function bitAt(leafHashHex: string, bitIndex: number): '0' | '1' {
+  const nibbleIndex = Math.floor(bitIndex / 4);
+  const nibbleHex = leafHashHex[nibbleIndex] ?? '0';
+  const nibble = parseInt(nibbleHex, 16);
+  const shift = 3 - (bitIndex % 4);
+  return ((nibble >> shift) & 1) === 1 ? '1' : '0';
+}
+
+function encodeSyncInventoryResponse(payload: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+function isSafeUriToken(value: string): boolean {
+  if (!value) return false;
+  if (value.includes('<') || value.includes('>')) return false;
+  return !/\s/.test(value);
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (chunkSize <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
 }
 
 function splitNQuadLine(line: string): string[] {

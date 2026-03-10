@@ -105,6 +105,112 @@ export const fetchLogs = (params: Record<string, string> = {}) => {
 // --- Paranets ---
 export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
 
+// --- Sync ---
+export interface SyncStatusResponse {
+  paranetId: string;
+  local: {
+    paranetId: string;
+    kcCount: number;
+    rootHash: string;
+  };
+  connectedPeers: number;
+  syncCapablePeers: number;
+  inventoryCapablePeers: number;
+  peers: Array<{
+    peerId: string;
+    supportsSync: boolean;
+    supportsInventory: boolean;
+  }>;
+}
+
+export interface SyncInspectResponse {
+  paranetId: string;
+  peerId: string;
+  inventoryProtocolAvailable: boolean;
+  local: {
+    kcCount: number;
+    rootHash: string;
+    leaves: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+    leavesTruncated: boolean;
+  };
+  remote: {
+    kcCount: number;
+    rootHash: string;
+    leaves: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+    leavesTruncated: boolean;
+  } | null;
+  tree: {
+    maxDepth: number;
+    comparedPrefixes: Array<{
+      prefixBits: string;
+      depth: number;
+      equal: boolean;
+      localLeafCount: number;
+      remoteLeafCount: number;
+      localRootHash: string;
+      remoteRootHash: string;
+    }>;
+  };
+  reconciliation: {
+    counts: {
+      missingLocal: number;
+      mismatched: number;
+      extraLocal: number;
+    };
+    missingLocal: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+    mismatched: Array<{
+      kcUal: string;
+      localMerkleRoot: string;
+      remoteMerkleRoot: string;
+      localLeafHash: string;
+      remoteLeafHash: string;
+    }>;
+    extraLocal: Array<{ kcUal: string; merkleRoot: string; leafHash: string }>;
+    itemsTruncated: boolean;
+  };
+}
+
+export const fetchSyncStatus = (paranetId: string) =>
+  post<SyncStatusResponse>('/api/sync/status', { paranetId });
+
+export const inspectSync = (
+  paranetId: string,
+  peerId?: string,
+  options?: { maxItems?: number; maxTreeDepth?: number },
+) =>
+  post<SyncInspectResponse>('/api/sync/inspect', {
+    paranetId,
+    peerId,
+    ...options,
+  });
+
+export const repairSync = (
+  paranetId: string,
+  options?: { peerId?: string; includeWorkspace?: boolean },
+) =>
+  post<
+    | {
+      paranetId: string;
+      mode: 'peer';
+      peerId: string;
+      result: { dataSynced: number; workspaceSynced: number };
+    }
+    | {
+      paranetId: string;
+      mode: 'connected-peers';
+      catchup: {
+        connectedPeers: number;
+        syncCapablePeers: number;
+        peersTried: number;
+        dataSynced: number;
+        workspaceSynced: number;
+      };
+    }
+  >('/api/sync/repair', {
+    paranetId,
+    ...options,
+  });
+
 // --- Query ---
 export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_workspace') =>
   post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace, graphSuffix });

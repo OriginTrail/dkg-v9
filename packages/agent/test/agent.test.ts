@@ -21,6 +21,12 @@ import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const PROTOCOL_SYNC_INVENTORY = '/dkg/sync-inventory/1.0.0';
+
 describe('AgentWallet', () => {
   it('generates a wallet with keypair', async () => {
     const wallet = await DKGAgentWallet.generate();
@@ -740,6 +746,121 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
       expect(result.workspaceSynced).toBe(0);
     } finally {
       await agent.stop().catch(() => {});
+    }
+  });
+
+  it('syncFromPeer uses inventory reconciliation protocol for non-system paranets', async () => {
+    const paranetId = `inventory-sync-${Date.now()}`;
+    const agentA = await DKGAgent.create({
+      name: 'InventorySyncA',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter(),
+      syncParanets: [paranetId],
+    });
+    const agentB = await DKGAgent.create({
+      name: 'InventorySyncB',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter(),
+      syncParanets: [paranetId],
+    });
+
+    try {
+      await agentA.start();
+      await agentB.start();
+
+      await agentA.createParanet({ id: paranetId, name: 'Inventory Sync', description: 'test' });
+      agentA.subscribeToParanet(paranetId);
+      agentB.subscribeToParanet(paranetId);
+
+      const addrA = agentA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
+      expect(addrA).toBeDefined();
+      await agentB.connectTo(addrA!);
+      await sleep(500);
+
+      await agentA.publish(paranetId, [
+        { subject: 'urn:inv:test:1', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+        { subject: 'urn:inv:test:2', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+      ]);
+
+      const router = (agentB as any).router;
+      const originalSend = router.send.bind(router);
+      const protocols: string[] = [];
+      router.send = async (peerId: string, protocolId: string, payload: Uint8Array, timeout?: number) => {
+        protocols.push(protocolId);
+        return originalSend(peerId, protocolId, payload, timeout);
+      };
+
+      await agentB.syncFromPeer(agentA.peerId, [paranetId]);
+
+      router.send = originalSend;
+
+      expect(protocols).toContain(PROTOCOL_SYNC_INVENTORY);
+
+      const qr = await agentB.query(
+        'SELECT ?name WHERE { ?s <http://schema.org/name> ?name } ORDER BY ?name',
+        paranetId,
+      );
+      expect(qr.bindings.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await agentA.stop().catch(() => {});
+      await agentB.stop().catch(() => {});
+    }
+  });
+
+  it('verifyParanetSyncWithPeer reports divergence then convergence after repair', async () => {
+    const paranetId = `inventory-verify-${Date.now()}`;
+    const agentA = await DKGAgent.create({
+      name: 'InventoryVerifyA',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter(),
+      syncParanets: [paranetId],
+    });
+    const agentB = await DKGAgent.create({
+      name: 'InventoryVerifyB',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter(),
+      syncParanets: [paranetId],
+    });
+
+    try {
+      await agentA.start();
+      await agentB.start();
+
+      await agentA.createParanet({ id: paranetId, name: 'Inventory Verify', description: 'test' });
+      agentA.subscribeToParanet(paranetId);
+
+      const addrA = agentA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
+      expect(addrA).toBeDefined();
+      await agentB.connectTo(addrA!);
+      await sleep(500);
+
+      await agentA.publish(paranetId, [
+        { subject: 'urn:verify:test:1', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      ]);
+
+      const before = await agentB.verifyParanetSyncWithPeer(agentA.peerId, paranetId);
+      expect(before.inventoryProtocolAvailable).toBe(true);
+      expect(before.inSync).toBe(false);
+      expect(before.counts.missingLocal).toBeGreaterThan(0);
+
+      const repaired = await agentB.syncParanetFromPeer(agentA.peerId, paranetId, {
+        includeWorkspace: false,
+      });
+      expect(repaired.dataSynced).toBeGreaterThan(0);
+
+      const after = await agentB.verifyParanetSyncWithPeer(agentA.peerId, paranetId);
+      expect(after.inventoryProtocolAvailable).toBe(true);
+      expect(after.inSync).toBe(true);
+      expect(after.counts.missingLocal).toBe(0);
+      expect(after.counts.mismatched).toBe(0);
+      expect(after.counts.extraLocal).toBe(0);
+    } finally {
+      await agentA.stop().catch(() => {});
+      await agentB.stop().catch(() => {});
     }
   });
 

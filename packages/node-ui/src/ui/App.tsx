@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
 import { ExplorerPage } from './pages/Explorer.js';
+import { SyncPage } from './pages/Sync.js';
 import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
 import { SettingsPage } from './pages/Settings.js';
@@ -17,6 +18,7 @@ const chevronIcon = (
 const NAV_ICONS: Record<string, React.ReactNode> = {
   home: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
   graph: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/><line x1="15.5" y1="7.5" x2="8.5" y2="16.5"/></svg>,
+  sync: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 1-14.14 7.39"/><path d="M3 12a9 9 0 0 1 14.14-7.39"/><polyline points="3 4 3 10 9 10"/><polyline points="21 20 21 14 15 14"/></svg>,
   terminal: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
   play: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
   messages: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
@@ -263,6 +265,9 @@ export function App() {
           <NavLink to="/explorer" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
             {NAV_ICONS.graph}<span>Memory Explorer</span>
           </NavLink>
+          <NavLink to="/sync" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
+            {NAV_ICONS.sync}<span>Sync</span>
+          </NavLink>
           <NavLink to="/agent" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
             {NAV_ICONS.terminal}<span>Agent Hub</span>
           </NavLink>
@@ -298,6 +303,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
+          <Route path="/sync" element={<SyncPage />} />
           <Route path="/agent" element={<AgentHubPage />} />
           <Route path="/messages" element={<Navigate to="/agent" replace />} />
           <Route path="/apps/*" element={<AppsPage apps={installedApps} />} />

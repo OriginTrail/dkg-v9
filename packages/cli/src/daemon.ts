@@ -33,6 +33,33 @@ import {
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
+type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
+
+interface CatchupJobResult {
+  connectedPeers: number;
+  syncCapablePeers: number;
+  peersTried: number;
+  dataSynced: number;
+  workspaceSynced: number;
+}
+
+interface CatchupJob {
+  jobId: string;
+  paranetId: string;
+  includeWorkspace: boolean;
+  status: CatchupJobState;
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: CatchupJobResult;
+  error?: string;
+}
+
+interface CatchupTracker {
+  jobs: Map<string, CatchupJob>;
+  latestByParanet: Map<string, string>;
+}
+
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
@@ -458,6 +485,11 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     }
   }
 
+  const catchupTracker: CatchupTracker = {
+    jobs: new Map(),
+    latestByParanet: new Map(),
+  };
+
   // --- HTTP API ---
 
   const server = createServer(async (req, res) => {
@@ -504,7 +536,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
       if (appHandled) return;
 
-      await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
+      await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker, catchupTracker);
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
     }
@@ -555,6 +587,7 @@ async function handleRequest(
   opWallets: import('@dkg/agent').OpWalletsConfig,
   network: Awaited<ReturnType<typeof loadNetworkConfig>>,
   tracker: OperationTracker,
+  catchupTracker: CatchupTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -930,11 +963,82 @@ async function handleRequest(
     const body = await readBody(req);
     const { paranetId, includeWorkspace } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const shouldSyncWorkspace = includeWorkspace !== false;
     agent.subscribeToParanet(paranetId);
-    const catchup = await agent.syncParanetFromConnectedPeers(paranetId, {
-      includeWorkspace: includeWorkspace !== false,
+
+    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const job: CatchupJob = {
+      jobId,
+      paranetId,
+      includeWorkspace: shouldSyncWorkspace,
+      status: 'queued',
+      queuedAt: Date.now(),
+    };
+    catchupTracker.jobs.set(jobId, job);
+    catchupTracker.latestByParanet.set(paranetId, jobId);
+
+    while (catchupTracker.jobs.size > 100) {
+      let oldestId: string | undefined;
+      let oldestQueuedAt = Number.POSITIVE_INFINITY;
+      for (const [id, entry] of catchupTracker.jobs.entries()) {
+        if (entry.queuedAt < oldestQueuedAt) {
+          oldestQueuedAt = entry.queuedAt;
+          oldestId = id;
+        }
+      }
+      if (!oldestId) break;
+      const removed = catchupTracker.jobs.get(oldestId);
+      catchupTracker.jobs.delete(oldestId);
+      if (removed && catchupTracker.latestByParanet.get(removed.paranetId) === oldestId) {
+        catchupTracker.latestByParanet.delete(removed.paranetId);
+      }
+    }
+
+    void (async () => {
+      job.status = 'running';
+      job.startedAt = Date.now();
+      try {
+        const result = await agent.syncParanetFromConnectedPeers(paranetId, {
+          includeWorkspace: shouldSyncWorkspace,
+        });
+        job.result = result;
+        job.status = 'done';
+      } catch (err) {
+        job.error = err instanceof Error ? err.message : String(err);
+        job.status = 'failed';
+      } finally {
+        job.finishedAt = Date.now();
+      }
+    })();
+
+    return jsonResponse(res, 200, {
+      subscribed: paranetId,
+      catchup: {
+        status: 'queued',
+        includeWorkspace: shouldSyncWorkspace,
+        jobId,
+      },
     });
-    return jsonResponse(res, 200, { subscribed: paranetId, catchup });
+  }
+
+  // GET /api/sync/catchup-status?paranetId=<id> | ?jobId=<id>
+  if (req.method === 'GET' && path === '/api/sync/catchup-status') {
+    const paranetId = url.searchParams.get('paranetId');
+    const jobIdParam = url.searchParams.get('jobId');
+    if (!paranetId && !jobIdParam) {
+      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "jobId" query param' });
+    }
+
+    const jobId = jobIdParam ?? (paranetId ? catchupTracker.latestByParanet.get(paranetId) : undefined);
+    if (!jobId) {
+      return jsonResponse(res, 404, { error: 'No catch-up job found' });
+    }
+    const job = catchupTracker.jobs.get(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: `Catch-up job "${jobId}" not found` });
+    }
+
+    return jsonResponse(res, 200, job);
   }
 
   // POST /api/paranet/create  { id, name, description? }

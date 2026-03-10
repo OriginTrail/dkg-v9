@@ -147,15 +147,41 @@ export class ApiClient {
 
   async subscribe(paranetId: string, options?: { includeWorkspace?: boolean }): Promise<{
     subscribed: string;
-    catchup?: {
+    catchup?:
+      | {
+        connectedPeers: number;
+        syncCapablePeers: number;
+        peersTried: number;
+        dataSynced: number;
+        workspaceSynced: number;
+      }
+      | {
+        status: 'queued';
+        includeWorkspace: boolean;
+        jobId: string;
+      };
+  }> {
+    return this.post('/api/subscribe', { paranetId, ...options });
+  }
+
+  async catchupStatus(paranetId: string): Promise<{
+    jobId: string;
+    paranetId: string;
+    includeWorkspace: boolean;
+    status: 'queued' | 'running' | 'done' | 'failed';
+    queuedAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+    result?: {
       connectedPeers: number;
       syncCapablePeers: number;
       peersTried: number;
       dataSynced: number;
       workspaceSynced: number;
     };
+    error?: string;
   }> {
-    return this.post('/api/subscribe', { paranetId, ...options });
+    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {

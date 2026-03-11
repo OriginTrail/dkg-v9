@@ -287,9 +287,15 @@ describe('SPARQL helper cards', () => {
   });
 
   it('uses separate metadata source variables instead of reusing ?source', () => {
-    expect(explorer).toContain('SELECT ?g ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp');
+    expect(explorer).toContain('SELECT ?g ?metaGraph ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp');
     expect(explorer).toContain('?workspaceOwner');
     expect(explorer).toContain('?publisherPeerId');
+  });
+
+  it('queries provenance from companion meta graphs mapped per data graph', () => {
+    expect(explorer).toContain('metaGraphsForDataGraph');
+    expect(explorer).toContain('VALUES (?g ?metaGraph)');
+    expect(explorer).toContain('GRAPH ?metaGraph');
   });
 
   it('guards runQuery state updates against out-of-order responses', () => {

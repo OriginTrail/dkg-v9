@@ -817,11 +817,12 @@ ${values}
         const graphUris = Array.from(new Set(rows.map((r: any) => String(r.g ?? '')).filter(Boolean)));
         let graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
         if (graphUris.length > 0) {
-          const graphValues = graphUris.map((g) => `<${g}>`).join(' ');
-          const metaQuery = `SELECT ?g ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp WHERE {
-  VALUES ?g { ${graphValues} }
+          const graphMetaPairs = graphUris.flatMap((g) => metaGraphsForDataGraph(g).map((metaGraph) => [g, metaGraph] as const));
+          const pairValues = graphMetaPairs.map(([g, metaGraph]) => `(<${g}> <${metaGraph}>)`).join(' ');
+          const metaQuery = `SELECT ?g ?metaGraph ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp WHERE {
+  VALUES (?g ?metaGraph) { ${pairValues} }
   OPTIONAL {
-    GRAPH ?g {
+    GRAPH ?metaGraph {
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/workspaceOwner> ?workspaceOwner }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/creator> ?creator }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherPeerId> ?publisherPeerId }
@@ -1173,6 +1174,21 @@ function normalizeNodeSource(raw: string): string {
   if (/^Qm[A-Za-z0-9]+/.test(v)) return v; // legacy peer id style
   if (/^0x[a-fA-F0-9]{40}$/.test(v)) return v;
   return '';
+}
+
+function metaGraphsForDataGraph(graphUri: string): string[] {
+  const g = (graphUri || '').trim();
+  if (!g) return [];
+  const out = new Set<string>();
+  if (g.endsWith('/workspace')) {
+    const base = g.slice(0, -'/workspace'.length);
+    out.add(`${base}/_workspace_meta`);
+    out.add(`${base}/_meta`);
+  } else {
+    out.add(`${g}/_meta`);
+    out.add(`${g}/_workspace_meta`);
+  }
+  return Array.from(out);
 }
 
 function buildJsonLd(triples: Array<{ s: string; p: string; o: string }>): any[] {

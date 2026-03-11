@@ -11,6 +11,16 @@ describe('SPARQL utility behavior', () => {
     expect(stripped).not.toContain('# trailing comment');
   });
 
+  it('does not treat < comparison operators as IRI starts', () => {
+    const query = `SELECT ?s WHERE {
+  ?s <http://schema.org/value> ?n .
+  FILTER(?n < 10) # drop this comment
+}`;
+    const stripped = stripSparqlComments(query);
+    expect(stripped).toContain('FILTER(?n < 10)');
+    expect(stripped).not.toContain('# drop this comment');
+  });
+
   it('derives triples using pattern constants and variable bindings', () => {
     const query = `SELECT ?o WHERE {
   <did:dkg:network:v9-testnet> <http://www.w3.org/2000/01/rdf-schema#label> ?o

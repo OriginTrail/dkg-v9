@@ -28,6 +28,12 @@ export function stripSparqlComments(sparql: string): string {
 
     if (!inSingle && !inDouble) {
       if (ch === '<') {
+        const next = sparql[i + 1] ?? '';
+        const looksLikeIriStart = next !== '' && !/\s/.test(next) && next !== '=' && next !== '>';
+        if (!looksLikeIriStart) {
+          out += ch;
+          continue;
+        }
         inIri = true;
         out += ch;
         continue;

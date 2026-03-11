@@ -417,10 +417,6 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: chain,
-      publishConfig: {
-        minimumReceiverSignatures: 2,
-        signatureCollectionTimeoutMs: 2000,
-      },
     });
 
     await nodeA.start();

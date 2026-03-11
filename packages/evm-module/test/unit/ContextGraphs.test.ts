@@ -8,6 +8,7 @@ import {
   ContextGraphs,
   ContextGraphStorage,
   IdentityStorage,
+  KnowledgeAssetsStorage,
   Profile,
   Hub,
 } from '../../typechain';
@@ -18,6 +19,7 @@ type ContextGraphFixture = {
   ContextGraphs: ContextGraphs;
   ContextGraphStorage: ContextGraphStorage;
   IdentityStorage: IdentityStorage;
+  KnowledgeAssetsStorage: KnowledgeAssetsStorage;
   Profile: Profile;
   Hub: Hub;
 };
@@ -26,12 +28,15 @@ describe('@unit ContextGraphs', () => {
   let accounts: SignerWithAddress[];
   let ContextGraphsContract: ContextGraphs;
   let ContextGraphStorageContract: ContextGraphStorage;
+  let KnowledgeAssetsStorageContract: KnowledgeAssetsStorage;
   let ProfileContract: Profile;
+  let HubContract: Hub;
 
   async function deployContextGraphFixture(): Promise<ContextGraphFixture> {
     await hre.deployments.fixture([
       'ContextGraphs',
       'ContextGraphStorage',
+      'KnowledgeAssetsStorage',
       'Profile',
       'Identity',
     ]);
@@ -40,10 +45,20 @@ describe('@unit ContextGraphs', () => {
     const ContextGraphs = await hre.ethers.getContract<ContextGraphs>('ContextGraphs');
     const ContextGraphStorage = await hre.ethers.getContract<ContextGraphStorage>('ContextGraphStorage');
     const IdentityStorage = await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
+    const KnowledgeAssetsStorage = await hre.ethers.getContract<KnowledgeAssetsStorage>('KnowledgeAssetsStorage');
     const Profile = await hre.ethers.getContract<Profile>('Profile');
     const Hub = await hre.ethers.getContract<Hub>('Hub');
 
-    return { accounts: signers, ContextGraphs, ContextGraphStorage, IdentityStorage, Profile, Hub };
+    await Hub.setContractAddress('TestBatchHelper', signers[19].address);
+
+    return { accounts: signers, ContextGraphs, ContextGraphStorage, IdentityStorage, KnowledgeAssetsStorage, Profile, Hub };
+  }
+
+  async function createBatchWithRoot(merkleRoot: string, publisher: string): Promise<bigint> {
+    await KnowledgeAssetsStorageContract.connect(accounts[19]).createKnowledgeBatch(
+      publisher, merkleRoot, 1000, 10, 1, 10, 1, 100, 0, false,
+    );
+    return KnowledgeAssetsStorageContract.getLatestBatchId();
   }
 
   beforeEach(async () => {
@@ -51,7 +66,9 @@ describe('@unit ContextGraphs', () => {
     accounts = f.accounts;
     ContextGraphsContract = f.ContextGraphs;
     ContextGraphStorageContract = f.ContextGraphStorage;
+    KnowledgeAssetsStorageContract = f.KnowledgeAssetsStorage;
     ProfileContract = f.Profile;
+    HubContract = f.Hub;
   });
 
   describe('createContextGraph', () => {
@@ -141,8 +158,8 @@ describe('@unit ContextGraphs', () => {
         0,
       );
       const contextGraphId = 1n;
-      const batchId = 42n;
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-root'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
 
       const digest = ethers.solidityPackedKeccak256(
         ['uint256', 'bytes32'],

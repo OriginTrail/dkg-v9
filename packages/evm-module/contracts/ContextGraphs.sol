@@ -86,9 +86,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32[] calldata signatureRs,
         bytes32[] calldata signatureVss
     ) external {
-        bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
-        require(onChainRoot == bytes32(0) || onChainRoot == merkleRoot, "MerkleRoot does not match batch");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
+        bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
+        require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
         contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
     }
 

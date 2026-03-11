@@ -492,6 +492,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
           config.workspaceTtlMs = ttlMs;
+          agent.setWorkspaceTtlMs(ttlMs);
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {

@@ -103,11 +103,6 @@ export interface DKGAgentConfig {
   syncParanets?: string[];
   /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   workspaceTtlMs?: number;
-  /** Publish protocol configuration for signature collection. */
-  publishConfig?: {
-    minimumReceiverSignatures?: number;
-    signatureCollectionTimeoutMs?: number;
-  };
 }
 
 /**
@@ -797,6 +792,14 @@ export class DKGAgent {
       this.log.warn(ctx, `Workspace sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
+  }
+
+  /**
+   * Update the workspace TTL at runtime. Takes effect immediately for queries
+   * and the next cleanup cycle without requiring a restart.
+   */
+  setWorkspaceTtlMs(ttlMs: number): void {
+    (this.config as any).workspaceTtlMs = ttlMs;
   }
 
   /**

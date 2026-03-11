@@ -906,25 +906,37 @@ export class EVMChainAdapter implements ChainAdapter {
     const receipt = await tx.wait();
 
     let batchId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = signer.address;
+
     for (const log of receipt.logs) {
       try {
         const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
         if (parsed?.name === 'KnowledgeBatchCreated') {
           batchId = BigInt(parsed.args.batchId);
-          break;
         }
       } catch { /* not this contract */ }
     }
 
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
     return {
       batchId,
+      startKAId,
+      endKAId,
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
-      blockTimestamp: Math.floor(Date.now() / 1000),
-      publisherAddress: signer.address,
+      blockTimestamp,
+      publisherAddress,
     };
   }
 

@@ -327,6 +327,10 @@ export class DKGPublisher implements Publisher {
         }
       }
 
+      const sortedSigs = [...participantSigs]
+        .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
+        .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
+
       const maxRetries = 3;
       let attempt = 0;
       let registered = false;
@@ -340,7 +344,7 @@ export class DKGPublisher implements Publisher {
             contextGraphId: BigInt(ctxGraphId),
             batchId: publishResult.onChainResult.batchId,
             merkleRoot: publishResult.merkleRoot,
-            signerSignatures: participantSigs,
+            signerSignatures: sortedSigs,
           });
           registered = true;
           this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} registered to context graph ${ctxGraphId}`);

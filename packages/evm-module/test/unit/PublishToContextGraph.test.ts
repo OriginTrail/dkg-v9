@@ -114,6 +114,7 @@ describe('@unit PublishToContextGraph', () => {
     };
 
     await Hub.setContractAddress('HubOwner', signers[0].address);
+    await Hub.setContractAddress('TestBatchHelper', signers[19].address);
 
     return result;
   }
@@ -139,6 +140,13 @@ describe('@unit PublishToContextGraph', () => {
   // ========================================================================
   // Helpers
   // ========================================================================
+
+  async function createBatchWithRoot(merkleRoot: string, publisher: string): Promise<bigint> {
+    await KnowledgeAssetsStorageContract.connect(accounts[19]).createKnowledgeBatch(
+      publisher, merkleRoot, 1000, 10, 1, 10, 1, 100, 0, false,
+    );
+    return KnowledgeAssetsStorageContract.getLatestBatchId();
+  }
 
   async function setupPublisherAndReceivers() {
     const publishingNode = getDefaultPublishingNode(accounts);
@@ -242,8 +250,7 @@ describe('@unit PublishToContextGraph', () => {
         merkleRoot,
       );
 
-      // batchId is still passed for linking but NOT part of the signed message
-      const batchId = 42n;
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
 
       await expect(
         ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
@@ -675,6 +682,7 @@ describe('@unit PublishToContextGraph', () => {
 
       // Edge node signs (contextGraphId, merkleRoot)
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('edge-node-data'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
       const { rs, vss } = await buildParticipantSignatures(
         [edgeOp],
         contextGraphId,
@@ -685,7 +693,7 @@ describe('@unit PublishToContextGraph', () => {
       await expect(
         ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
           contextGraphId,
-          1n,
+          batchId,
           merkleRoot,
           [edgeId],
           rs,
@@ -713,12 +721,13 @@ describe('@unit PublishToContextGraph', () => {
       );
 
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('edge-only'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
       const { rs, vss } = await buildParticipantSignatures([edgeOp], 1n, merkleRoot);
 
       await expect(
         ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
           1n,
-          1n,
+          batchId,
           merkleRoot,
           [edgeId],
           rs,
@@ -752,6 +761,7 @@ describe('@unit PublishToContextGraph', () => {
       );
 
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('mixed-node'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
       const { rs, vss } = await buildParticipantSignatures(
         [coreOp, edgeOp],
         1n,
@@ -761,7 +771,7 @@ describe('@unit PublishToContextGraph', () => {
       await expect(
         ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
           1n,
-          1n,
+          batchId,
           merkleRoot,
           [coreId, edgeId],
           rs,

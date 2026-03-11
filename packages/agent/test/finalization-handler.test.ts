@@ -359,6 +359,57 @@ describe('FinalizationHandler', () => {
     expect(dataResult.type === 'bindings' ? dataResult.bindings.length : 0).toBe(0);
   });
 
+  it('derives rootEntities from local workspace data, not gossip (trust boundary)', async () => {
+    const store = new OxigraphStore();
+    const gm = new GraphManager(store);
+    await gm.ensureParanet(PARANET);
+
+    const rootA = 'http://example.org/entity/A';
+    const rootB = 'http://example.org/entity/B';
+    const wsGraph = paranetWorkspaceGraphUri(PARANET);
+    const quadsA = makeQuads(rootA, 2, wsGraph);
+    const quadsB = makeQuads(rootB, 2, wsGraph);
+    await store.insert([...quadsA, ...quadsB]);
+
+    const merkleRoot = computeMerkleForQuads([...quadsA, ...quadsB], PARANET);
+
+    const mockChain = {
+      chainId: 'mock:31337',
+      listenForEvents: async function* () {
+        yield {
+          type: 'KnowledgeBatchCreated',
+          blockNumber: 100,
+          data: {
+            txHash: '0xabc123',
+            merkleRoot: '0x' + Array.from(merkleRoot).map(b => b.toString(16).padStart(2, '0')).join(''),
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+            startKAId: '1',
+            endKAId: '1',
+          },
+        };
+      },
+    } as any;
+
+    const handler = new FinalizationHandler(store, mockChain);
+
+    // Gossip message has roots in REVERSED order (attacker-crafted)
+    const data = makeFinalizationMsg({
+      kcMerkleRoot: merkleRoot,
+      rootEntities: [rootB, rootA],
+      blockNumber: 100,
+    });
+    await handler.handleFinalizationMessage(data, PARANET);
+
+    // Metadata should exist: the handler derived roots from autoPartition (sorted),
+    // not from the gossip message's reversed order
+    const metaResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}/_meta> { ?s <http://dkg.io/ontology/status> ?st . FILTER(CONTAINS(?st, "confirmed")) } }`,
+    );
+    expect(metaResult.type).toBe('bindings');
+    const bindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
+    expect(bindings.length).toBeGreaterThan(0);
+  });
+
   it('skips promotion when UAL is already confirmed in context graph meta (dedup guard)', async () => {
     const store = new OxigraphStore();
     const gm = new GraphManager(store);

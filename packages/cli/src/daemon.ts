@@ -929,12 +929,16 @@ async function handleRequest(
     }
     for (let i = 0; i < participantIdentityIds.length; i++) {
       const id = participantIdentityIds[i];
-      if (typeof id !== 'number' && typeof id !== 'string') {
+      if (typeof id === 'number') {
+        if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
+        }
+      } else if (typeof id === 'string') {
+        if (!/^\d+$/.test(id) || id === '0') {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
+        }
+      } else {
         return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
-      }
-      const n = Number(id);
-      if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
-        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive integer` });
       }
     }
     try {

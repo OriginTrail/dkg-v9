@@ -1,11 +1,12 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
+  PROTOCOL_ACCESS, PROTOCOL_ATTEST, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
+  encodeAttestationRequest,
+  decodePublishAck,
   encodeKAUpdateRequest,
-  encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
   type DKGNodeConfig, type OperationContext,
@@ -13,10 +14,11 @@ import {
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
 import {
-  DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
+  DKGPublisher, AttestationHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
-  computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  type PublishResult, type PhaseCallback, type KAMetadata,
+  TentativePublishStore,
+  computeFlatCollectionRoot, autoPartition,
+  type PublishResult, type PhaseCallback, type KAMetadata, type PreparedPublish,
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
 import {
@@ -30,7 +32,6 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
 const SYNC_PAGE_SIZE = 500;
@@ -132,13 +133,14 @@ export class DKGAgent {
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
-  private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
   private workspaceCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly config: DKGAgentConfig;
+  private readonly tentativeStore: TentativePublishStore;
+  private readonly attestationSigner: { signMessage(message: Uint8Array | string): Promise<string> };
   private started = false;
   private readonly subscribedParanets = new Map<string, ParanetSub>();
   private readonly gossipRegistered = new Set<string>();
@@ -155,6 +157,8 @@ export class DKGAgent {
     eventBus: TypedEventBus,
     chain: ChainAdapter,
     workspaceOwnedEntities: Map<string, Map<string, string>>,
+    tentativeStore: TentativePublishStore,
+    attestationSigner: { signMessage(message: Uint8Array | string): Promise<string> },
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -165,6 +169,8 @@ export class DKGAgent {
     this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.eventBus = eventBus;
     this.chain = chain;
+    this.tentativeStore = tentativeStore;
+    this.attestationSigner = attestationSigner;
     this.discovery = new DiscoveryClient(queryEngine);
     this.profileManager = new ProfileManager(publisher, store);
   }
@@ -217,6 +223,35 @@ export class DKGAgent {
 
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
+    const tentativeStore = new TentativePublishStore(
+      store,
+      { journal: config.dataDir ? new PublishJournal(config.dataDir) : undefined },
+    );
+    let attestationSigner: { signMessage(message: Uint8Array | string): Promise<string> };
+    if (opKeys?.[0]) {
+      attestationSigner = new ethers.Wallet(opKeys[0]);
+    } else if (typeof (chain as any).signMessage === 'function') {
+      // Delegate to chain adapter's real signer instead of fabricating a random wallet
+      attestationSigner = {
+        async signMessage(message: Uint8Array | string): Promise<string> {
+          const bytes = typeof message === 'string' ? ethers.toUtf8Bytes(message) : message;
+          const result = await (chain as any).signMessage(bytes);
+          // Reconstruct serialized signature from {r, vs} returned by chain adapter
+          const sig = ethers.Signature.from({
+            r: ethers.hexlify(result.r),
+            yParityAndS: ethers.hexlify(result.vs),
+          });
+          return sig.serialized;
+        },
+      };
+    } else {
+      // No signing capability — attestation requests will be rejected (identityId=0)
+      attestationSigner = {
+        async signMessage(): Promise<string> {
+          return '0x' + '00'.repeat(65);
+        },
+      };
+    }
 
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store);
@@ -243,6 +278,7 @@ export class DKGAgent {
       keypair,
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
+      tentativeStore,
     });
 
     try {
@@ -260,7 +296,7 @@ export class DKGAgent {
 
     return new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities,
+      workspaceOwnedEntities, tentativeStore, attestationSigner,
     );
   }
 
@@ -280,15 +316,10 @@ export class DKGAgent {
     const accessHandler = new AccessHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_ACCESS, accessHandler.handler);
 
-    const journal = this.config.dataDir ? new PublishJournal(this.config.dataDir) : undefined;
-    const publishHandler = new PublishHandler(this.store, this.eventBus, { journal });
-    this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
-    if (journal) {
-      try {
-        await publishHandler.restorePendingPublishes();
-      } catch (err) {
-        this.log.warn(ctx, `Journal restore failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    try {
+      await this.tentativeStore.restore();
+    } catch (err) {
+      this.log.warn(ctx, `Tentative journal restore failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Register cross-agent query handler (deny-by-default for security)
@@ -333,12 +364,19 @@ export class DKGAgent {
       }
     }
 
+    const attestationHandler = new AttestationHandler(this.store, {
+      tentativeStore: this.tentativeStore,
+      getIdentityId: () => this.publisher.getIdentityId(),
+      signReceiverAttestation: async (merkleRoot, publicByteSize) => this.signReceiverAttestation(merkleRoot, publicByteSize),
+    });
+    this.router.register(PROTOCOL_ATTEST, attestationHandler.handler);
+
     // Start chain event poller for trustless confirmation of tentative publishes
     // and discovery of on-chain paranets. Only with a real chain adapter.
     if (this.chain.chainId !== 'none') {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
-        publishHandler,
+        tentativeStore: this.tentativeStore,
         onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 
@@ -930,8 +968,11 @@ export class DKGAgent {
 
     const profileCtx = createOperationContext('publish');
     this.log.info(profileCtx, `Publishing agent profile`);
-    const result = await this.profileManager.publishProfile(profileConfig);
-    await this.broadcastPublish(AGENT_REGISTRY_PARANET, result, profileCtx);
+    const result = await this.profileManager.publishProfile(profileConfig, {
+      operationCtx: profileCtx,
+      preBroadcast: async (preparedPublish) => this.preBroadcastPublish(preparedPublish, profileCtx),
+      receiverSignatureProvider: async (preparedPublish) => this.collectReceiverAttestations(preparedPublish, profileCtx),
+    });
 
     return result;
   }
@@ -1031,11 +1072,15 @@ export class DKGAgent {
         );
       }
     }
-    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
-    onPhase?.('broadcast', 'start');
-    this.log.info(ctx, `Local publish complete, broadcasting to peers`);
-    await this.broadcastPublish(paranetId, result, ctx);
-    onPhase?.('broadcast', 'end');
+    const result = await this.publisher.publish({
+      paranetId,
+      quads,
+      privateQuads,
+      operationCtx: ctx,
+      onPhase,
+      preBroadcast: async (preparedPublish) => this.preBroadcastPublish(preparedPublish, ctx),
+      receiverSignatureProvider: async (preparedPublish) => this.collectReceiverAttestations(preparedPublish, ctx),
+    });
     this.log.info(ctx, `Publish complete — status=${result.status} kcId=${result.kcId}`);
     return result;
   }
@@ -1106,8 +1151,7 @@ export class DKGAgent {
 
   /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
-   * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
-   * workspace state can promote it to canonical without re-downloading the full payload.
+   * Confirmation is driven by the shared chain poller, not by a publisher-sent finalization message.
    */
   async enshrineFromWorkspace(
     paranetId: string,
@@ -1126,35 +1170,9 @@ export class DKGAgent {
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       contextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
+      preBroadcast: async (preparedPublish) => this.preBroadcastPublish(preparedPublish, ctx),
+      receiverSignatureProvider: async (preparedPublish) => this.collectReceiverAttestations(preparedPublish, ctx),
     });
-
-    if (result.status === 'confirmed' && result.onChainResult) {
-      const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
-
-      const msg: FinalizationMessageMsg = {
-        ual: result.ual,
-        paranetId,
-        kcMerkleRoot: result.merkleRoot,
-        txHash: result.onChainResult.txHash ?? '',
-        blockNumber: result.onChainResult.blockNumber ?? 0,
-        batchId: result.onChainResult.batchId ?? 0n,
-        startKAId: result.onChainResult.startKAId ?? 0n,
-        endKAId: result.onChainResult.endKAId ?? 0n,
-        publisherAddress: result.onChainResult.publisherAddress ?? '',
-        rootEntities,
-        timestampMs: Date.now(),
-        operationId: ctx.operationId,
-        contextGraphId: ctxGraphIdStr,
-      };
-
-      const topic = paranetFinalizationTopic(paranetId);
-      try {
-        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
-        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}`);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
-    }
 
     return result;
   }
@@ -1370,20 +1388,13 @@ export class DKGAgent {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
-
-    const finalizationTopic = paranetFinalizationTopic(paranetId);
-    this.gossip.subscribe(finalizationTopic);
-    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
-      const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, paranetId);
-    });
   }
 
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {
     if (!this.gossipPublishHandler) {
       this.gossipPublishHandler = new GossipPublishHandler(
         this.store,
-        this.chain.chainId === 'none' ? undefined : this.chain,
+        this.tentativeStore,
         this.subscribedParanets,
         {
           paranetExists: (id) => this.paranetExists(id),
@@ -1413,17 +1424,6 @@ export class DKGAgent {
     }
     return this.updateHandler;
   }
-
-  private getOrCreateFinalizationHandler(): FinalizationHandler {
-    if (!this.finalizationHandler) {
-      this.finalizationHandler = new FinalizationHandler(
-        this.store,
-        this.chain.chainId === 'none' ? undefined : this.chain,
-      );
-    }
-    return this.finalizationHandler;
-  }
-
   /**
    * Create a paranet by registering it on-chain (if a chain adapter is
    * available) and publishing its definition triples into the system
@@ -2023,47 +2023,131 @@ export class DKGAgent {
     await store.insert(quads);
   }
 
-  private async broadcastPublish(paranetId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
-    // Use the public quads from the publish result to avoid leaking private
-    // triples that are stored in the same data graph.
-    const publicQuads = result.publicQuads ?? [];
-    const ntriples = publicQuads.map(q => {
-      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} .`;
-    }).join('\n');
-
-    const onChain = result.onChainResult;
-    const msg = encodePublishRequest({
-      ual: result.ual,
-      nquads: new TextEncoder().encode(ntriples),
-      paranetId,
-      kas: result.kaManifest.map(ka => ({
-        tokenId: Number(ka.tokenId),
-        rootEntity: ka.rootEntity,
-        privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
-        privateTripleCount: ka.privateTripleCount ?? 0,
-      })),
-      publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: onChain?.publisherAddress ?? '',
-      startKAId: Number(onChain?.startKAId ?? 0),
-      endKAId: Number(onChain?.endKAId ?? 0),
-      chainId: this.chain.chainId,
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
-      txHash: onChain?.txHash ?? '',
-      blockNumber: onChain?.blockNumber ?? 0,
-      operationId: ctx.operationId,
-    });
-
-    const topic = paranetPublishTopic(paranetId);
-    this.log.info(ctx, `Broadcasting to topic ${topic}`);
+  private async preBroadcastPublish(preparedPublish: PreparedPublish, ctx: OperationContext): Promise<void> {
+    const topic = paranetPublishTopic(preparedPublish.paranetId);
+    this.log.info(ctx, `Pre-broadcasting tentative publish to ${topic}`);
     try {
-      await this.gossip.publish(topic, msg);
+      await this.gossip.publish(topic, preparedPublish.encodedPublishRequest);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }
   }
 
+  private async collectReceiverAttestations(
+    preparedPublish: PreparedPublish,
+    ctx: OperationContext,
+  ): Promise<Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>> {
+    const minimumRequired =
+      typeof this.chain.getMinimumRequiredSignatures === 'function'
+        ? await this.chain.getMinimumRequiredSignatures()
+        : 0;
+    if (minimumRequired <= 0) {
+      return [];
+    }
+
+    const peers = this.node.libp2p.getPeers()
+      .map((peerId) => peerId.toString())
+      .filter((peerId) => peerId !== this.node.peerId.toString());
+    if (peers.length === 0) {
+      throw new Error(`Insufficient receiver signatures: got 0, need ${minimumRequired}`);
+    }
+
+    const request = encodeAttestationRequest({
+      operationId: preparedPublish.operationId,
+      paranetId: preparedPublish.paranetId,
+      publisherAddress: preparedPublish.publisherAddress,
+      merkleRoot: preparedPublish.merkleRoot,
+      publicByteSize: Number(preparedPublish.publicByteSize),
+    });
+
+    const signatures = new Map<bigint, { identityId: bigint; r: Uint8Array; vs: Uint8Array }>();
+    await delay(250);
+
+    for (let attempt = 0; attempt < 3 && signatures.size < minimumRequired; attempt++) {
+      const responses = await Promise.allSettled(
+        peers.map(async (peerId) => {
+          const ackBytes = await Promise.race([
+            this.router.send(peerId, PROTOCOL_ATTEST, request),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('attestation timeout')), 2_500)),
+          ]);
+          return { peerId, ack: decodePublishAck(ackBytes) };
+        }),
+      );
+
+      for (const response of responses) {
+        if (response.status !== 'fulfilled') {
+          continue;
+        }
+        const { ack } = response.value;
+        const identityId = protoToBigInt(ack.identityId ?? 0);
+        const ackPublicByteSize = protoToBigInt(ack.publicByteSize ?? 0);
+        if (!ack.accepted || identityId <= 0n) {
+          continue;
+        }
+        if (ack.signatureR.length === 0 || ack.signatureVs.length === 0) {
+          continue;
+        }
+        if (!buffersEqual(new Uint8Array(ack.merkleRoot), preparedPublish.merkleRoot)) {
+          continue;
+        }
+        if (ackPublicByteSize !== preparedPublish.publicByteSize) {
+          continue;
+        }
+        signatures.set(identityId, {
+          identityId,
+          r: new Uint8Array(ack.signatureR),
+          vs: new Uint8Array(ack.signatureVs),
+        });
+      }
+
+      if (signatures.size < minimumRequired) {
+        await delay(250 * (attempt + 1));
+      }
+    }
+
+    if (signatures.size < minimumRequired) {
+      throw new Error(`Insufficient receiver signatures: got ${signatures.size}, need ${minimumRequired}`);
+    }
+
+    return Array.from(signatures.values())
+      .sort((left, right) => (left.identityId < right.identityId ? -1 : left.identityId > right.identityId ? 1 : 0));
+  }
+
+  private async signReceiverAttestation(
+    merkleRoot: Uint8Array,
+    publicByteSize: bigint,
+  ): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    const messageHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'uint64'],
+      [ethers.hexlify(merkleRoot), publicByteSize],
+    );
+    const signature = ethers.Signature.from(
+      await this.attestationSigner.signMessage(ethers.getBytes(messageHash)),
+    );
+    return {
+      r: ethers.getBytes(signature.r),
+      vs: ethers.getBytes(signature.yParityAndS),
+    };
+  }
+
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function protoToBigInt(val: number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
+  if (typeof val === 'bigint') return val;
+  if (typeof val === 'number') return BigInt(val);
+  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
+}
+
+function buffersEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function splitNQuadLine(line: string): string[] {
@@ -2166,6 +2250,7 @@ function verifySyncedData(
   // Extract KC UALs and their claimed merkle roots from meta triples
   const kcMerkleRoots = new Map<string, string>();
   const kcRootEntities = new Map<string, string[]>();
+  const kcManifest = new Map<string, Array<{ rootEntity: string; privateMerkleRoot?: Uint8Array }>>();
 
   for (const q of metaQuads) {
     if (q.predicate === `${DKG_NS}merkleRoot`) {
@@ -2176,6 +2261,7 @@ function verifySyncedData(
   // Find KA → KC relationships and root entities
   const kaToKc = new Map<string, string>();
   const kaRootEntity = new Map<string, string>();
+  const kaPrivateMerkleRoot = new Map<string, Uint8Array>();
 
   for (const q of metaQuads) {
     if (q.predicate === `${DKG_NS}partOf`) {
@@ -2183,6 +2269,13 @@ function verifySyncedData(
     }
     if (q.predicate === `${DKG_NS}rootEntity`) {
       kaRootEntity.set(q.subject, stripLiteral(q.object));
+    }
+    if (q.predicate === `${DKG_NS}privateMerkleRoot`) {
+      const hex = stripLiteral(q.object);
+      kaPrivateMerkleRoot.set(
+        q.subject,
+        ethers.getBytes(hex.startsWith('0x') ? hex : `0x${hex}`),
+      );
     }
   }
 
@@ -2192,6 +2285,11 @@ function verifySyncedData(
     if (rootEntity && kcMerkleRoots.has(kcUri)) {
       if (!kcRootEntities.has(kcUri)) kcRootEntities.set(kcUri, []);
       kcRootEntities.get(kcUri)!.push(rootEntity);
+      if (!kcManifest.has(kcUri)) kcManifest.set(kcUri, []);
+      kcManifest.get(kcUri)!.push({
+        rootEntity,
+        privateMerkleRoot: kaPrivateMerkleRoot.get(kaUri),
+      });
     }
   }
 
@@ -2248,33 +2346,19 @@ function verifySyncedData(
         allQuadsForKC.push(...quads);
       }
 
-      // Try flat mode first (publisher default: single merkle over all triple hashes)
-      const flatHashes = allQuadsForKC.map(computeTripleHash);
-      const flatRoot = new MerkleTree(flatHashes).root;
-      const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+      const computedRoot = computeFlatCollectionRoot(
+        allQuadsForKC.map((quad) => ({ ...quad, graph: '' })),
+        kcManifest.get(kcUal) ?? rootEntities.map((rootEntity) => ({ rootEntity })),
+      );
+      const computedHex = Array.from(computedRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
-      if (flatHex === claimedHex) {
-        verifiedKcUals.add(kcUal);
-        continue;
-      }
-
-      // Try entity-proofs mode (two-level: per-entity KA roots → KC root)
-      const kaRoots: Uint8Array[] = [];
-      for (const re of rootEntities) {
-        const quads = partitioned.get(re) ?? [];
-        const publicRoot = computePublicRoot(quads);
-        kaRoots.push(computeKARoot(publicRoot, undefined));
-      }
-      const epRoot = computeKCRoot(kaRoots);
-      const epHex = Array.from(epRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-
-      if (epHex === claimedHex) {
+      if (computedHex === claimedHex) {
         verifiedKcUals.add(kcUal);
       } else if (acceptUnverified) {
-        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${computedHex.slice(0, 16)}…`);
         rejected++;
       } else {
-        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${computedHex.slice(0, 16)}…`);
         rejected++;
       }
     } catch {

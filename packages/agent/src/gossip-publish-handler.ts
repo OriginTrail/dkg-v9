@@ -1,17 +1,14 @@
 import {
   decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  type OperationContext,
 } from '@dkg/core';
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
-import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
+  computeFlatCollectionRoot, computePublicByteSize, autoPartition,
+  generateTentativeMetadata, TentativePublishStore,
   validatePublishRequest,
   type KAMetadata,
 } from '@dkg/publisher';
-import { ethers } from 'ethers';
 
 export interface GossipPublishHandlerCallbacks {
   paranetExists: (id: string) => Promise<boolean>;
@@ -20,19 +17,19 @@ export interface GossipPublishHandlerCallbacks {
 
 export class GossipPublishHandler {
   private readonly store: TripleStore;
-  private readonly chain: ChainAdapter | undefined;
+  private readonly tentativeStore: TentativePublishStore;
   private readonly subscribedParanets: Map<string, any>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
 
   constructor(
     store: TripleStore,
-    chain: ChainAdapter | undefined,
+    tentativeStore: TentativePublishStore,
     subscribedParanets: Map<string, any>,
     callbacks: GossipPublishHandlerCallbacks,
   ) {
     this.store = store;
-    this.chain = chain;
+    this.tentativeStore = tentativeStore;
     this.subscribedParanets = subscribedParanets;
     this.callbacks = callbacks;
   }
@@ -134,7 +131,9 @@ export class GossipPublishHandler {
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } }`;
         const result = await this.store.query(sparql);
         const existingEntities = new Set<string>(
-          result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
+          result.type === 'bindings'
+            ? (result.bindings as Array<Record<string, string>>).map((binding) => binding['s']).filter(Boolean)
+            : [],
         );
 
         const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities);
@@ -153,152 +152,71 @@ export class GossipPublishHandler {
         await this.store.insert(normalized);
       }
 
-      if (request.ual) {
-        const partitioned = autoPartition(normalized);
-        const kaRoots: Uint8Array[] = [];
-        const kaMetadata: KAMetadata[] = [];
-
-        for (const [rootEntity, entityQuads] of partitioned) {
-          const publicRoot = computePublicRoot(entityQuads);
-          const kaEntry = request.kas?.find((ka) => ka.rootEntity === rootEntity);
-          const privateRoot = kaEntry?.privateMerkleRoot?.length
-            ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined;
-          kaRoots.push(computeKARoot(publicRoot, privateRoot));
-
-          const tokenId = kaEntry ? protoToNumber(kaEntry.tokenId) : 0;
-          kaMetadata.push({
+      if (request.ual && request.operationId && request.kas?.length > 0) {
+        // Use sequential ordinals (1, 2, 3...) instead of trusting wire tokenIds.
+        // The publisher assigns ordinals 1..N; a malformed manifest with arbitrary
+        // tokenIds would corrupt canonical KA ID calculation during confirmation.
+        const kaMetadata: KAMetadata[] = request.kas.map((ka, index) => {
+          const rootEntity = ka.rootEntity;
+          const entityQuads = normalized.filter((quad) =>
+            quad.subject === rootEntity || quad.subject.startsWith(rootEntity + '/.well-known/genid/'),
+          );
+          const privateMerkleRoot = ka.privateMerkleRoot?.length
+            ? new Uint8Array(ka.privateMerkleRoot)
+            : undefined;
+          return {
             rootEntity,
             kcUal: request.ual,
-            tokenId: BigInt(tokenId),
+            tokenId: BigInt(index + 1),
             publicTripleCount: entityQuads.length,
-            privateTripleCount: kaEntry?.privateTripleCount ?? 0,
-            privateMerkleRoot: privateRoot,
-          });
-        }
+            privateTripleCount: ka.privateTripleCount ?? 0,
+            privateMerkleRoot,
+          };
+        });
+        const merkleRoot = computeFlatCollectionRoot(
+          normalized.map((quad) => ({ ...quad, graph: '' })),
+          kaMetadata.map((ka) => ({
+            rootEntity: ka.rootEntity,
+            privateMerkleRoot: ka.privateMerkleRoot,
+          })),
+        );
+        const publicByteSize = computePublicByteSize(normalized.map((quad) => ({ ...quad, graph: '' })));
 
-        const merkleRoot = computeKCRoot(kaRoots);
+        await this.store.insert(generateTentativeMetadata(
+          {
+            ual: request.ual,
+            paranetId: request.paranetId,
+            merkleRoot,
+            kaCount: kaMetadata.length,
+            publisherPeerId: request.publisherAddress || 'unknown',
+            timestamp: new Date(),
+          },
+          kaMetadata,
+        ));
 
-        const kcMeta = {
-          ual: request.ual,
+        await this.tentativeStore.register({
+          operationId: request.operationId,
+          tentativeUal: request.ual,
           paranetId: request.paranetId,
+          publisherAddress: request.publisherAddress || '',
           merkleRoot,
-          kaCount: kaMetadata.length,
+          publicByteSize,
+          createdAt: Date.now(),
+          dataGraph,
+          metaGraph: graphManager.metaGraphUri(request.paranetId),
           publisherPeerId: request.publisherAddress || 'unknown',
-          timestamp: new Date(),
-        };
+          kaRecords: kaMetadata.map((ka) => ({
+            ordinal: Number(ka.tokenId),
+            rootEntity: ka.rootEntity,
+            privateTripleCount: ka.privateTripleCount,
+            privateMerkleRoot: ka.privateMerkleRoot,
+          })),
+        });
 
-        // Always store gossip-received data as tentative first —
-        // never trust self-reported on-chain status from gossip messages.
-        const metaQuads = generateTentativeMetadata(kcMeta, kaMetadata);
-        await this.store.insert(metaQuads);
-
-        // If the gossip message includes on-chain proof (txHash + blockNumber),
-        // attempt targeted verification and promote to confirmed if valid.
-        const txHash = request.txHash ?? '';
-        const blockNumber = protoToNumber(request.blockNumber ?? 0);
-        const startKAId = protoToBigInt(request.startKAId ?? 0);
-        const endKAId = protoToBigInt(request.endKAId ?? 0);
-
-        if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
-          const verified = await this.verifyGossipOnChain(
-            txHash, blockNumber, merkleRoot, request.publisherAddress,
-            startKAId, endKAId,
-            ctx,
-          );
-          if (verified) {
-            await this.promoteGossipToConfirmed(request.ual, request.paranetId, kcMeta, kaMetadata);
-            this.log.info(ctx, `Gossip publish ${request.ual} verified on-chain (tx=${txHash.slice(0, 10)}…, block=${blockNumber})`);
-          } else {
-            this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (on-chain verification failed or pending)`);
-          }
-        } else {
-          this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (no on-chain proof in message)`);
-        }
+        this.log.info(ctx, `Gossip publish ${request.ual} stored tentatively for attestation and chain-poller confirmation`);
       }
     } catch (err) {
       this.log.warn(ctx, `Gossip: failed to process publish broadcast: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  /**
-   * Verify a gossip-received publish by doing a targeted on-chain lookup
-   * at the exact block specified in the gossip message. Uses both fromBlock
-   * and toBlock to constrain the scan to a single block, and validates
-   * txHash against event data when available.
-   */
-  private async verifyGossipOnChain(
-    txHash: string,
-    blockNumber: number,
-    expectedMerkleRoot: Uint8Array,
-    expectedPublisher: string,
-    expectedStartKAId: bigint,
-    expectedEndKAId: bigint,
-    ctx: OperationContext,
-  ): Promise<boolean> {
-    if (!this.chain || this.chain.chainId === 'none') return false;
-
-    if (blockNumber <= 0) {
-      this.log.warn(ctx, `Gossip verification skipped: invalid blockNumber=${blockNumber}`);
-      return false;
-    }
-
-    try {
-      const filter: EventFilter = {
-        eventTypes: ['KnowledgeBatchCreated'],
-        fromBlock: blockNumber,
-        toBlock: blockNumber,
-      };
-      for await (const event of this.chain.listenForEvents(filter)) {
-        if (event.blockNumber !== blockNumber) continue;
-
-        if (txHash) {
-          if (!event.data['txHash'] || (event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase()) {
-            continue;
-          }
-        }
-
-        const eventMerkle = typeof event.data['merkleRoot'] === 'string'
-          ? ethers.getBytes(event.data['merkleRoot'] as string)
-          : event.data['merkleRoot'] as Uint8Array;
-        const eventPublisher = (event.data['publisherAddress'] as string) ?? '';
-        const eventStartKAId = BigInt(event.data['startKAId'] as string ?? '0');
-        const eventEndKAId = BigInt(event.data['endKAId'] as string ?? '0');
-
-        const merkleMatch = ethers.hexlify(eventMerkle) === ethers.hexlify(expectedMerkleRoot);
-        const publisherMatch = eventPublisher.toLowerCase() === expectedPublisher.toLowerCase();
-        const rangeMatch = eventStartKAId === expectedStartKAId && eventEndKAId === expectedEndKAId;
-
-        if (merkleMatch && publisherMatch && rangeMatch) {
-          return true;
-        }
-      }
-    } catch (err) {
-      this.log.warn(ctx, `Gossip on-chain verification failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return false;
-  }
-
-  /**
-   * Promote gossip-received tentative data to confirmed via a status-only
-   * swap: insert the confirmed quad first, then delete the tentative one,
-   * so metadata is never lost even if the second operation fails.
-   */
-  private async promoteGossipToConfirmed(
-    ual: string,
-    paranetId: string,
-    _kcMeta: { ual: string; paranetId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
-    _kaMetadata: KAMetadata[],
-  ): Promise<void> {
-    const tentativeStatus = getTentativeStatusQuad(ual, paranetId);
-    const confirmedStatus = getConfirmedStatusQuad(ual, paranetId);
-    try {
-      await this.store.insert([confirmedStatus]);
-      await this.store.delete([tentativeStatus]);
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('gossip'),
-        `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
-      );
     }
   }
 }
@@ -363,17 +281,6 @@ function splitNQuadLine(line: string): string[] {
 function strip(s: string): string {
   if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
   return s;
-}
-
-function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof val === 'number') return val;
-  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
-}
-
-function protoToBigInt(val: number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
-  if (typeof val === 'bigint') return val;
-  if (typeof val === 'number') return BigInt(val);
-  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
 function isSafeIri(value: string): boolean {

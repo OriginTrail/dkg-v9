@@ -393,7 +393,12 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     this.requireV9();
 
-    const txSigner = this.nextSigner();
+    // Always use the primary signer so the on-chain publisherAddress matches
+    // what DKGPublisher baked into tentative records and gossip messages.
+    // Round-robin would cause peers to fail poller-driven confirmation because
+    // their tentative records store the primary address but the chain event
+    // would contain a different signer's address.
+    const txSigner = this.signer;
     const ka = this.contracts.knowledgeAssets!.connect(txSigner) as Contract;
     const kaAddress = await this.contracts.knowledgeAssets!.getAddress();
 
@@ -601,6 +606,14 @@ export class EVMChainAdapter implements ChainAdapter {
     return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
   }
 
+  async getMinimumRequiredSignatures(): Promise<number> {
+    await this.init();
+    if (!this.contracts.parametersStorage) {
+      throw new Error('ParametersStorage not available');
+    }
+    return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+  }
+
   // =====================================================================
   // Events
   // =====================================================================
@@ -625,6 +638,7 @@ export class EVMChainAdapter implements ChainAdapter {
                 batchId: parsed.args.batchId.toString(),
                 publisherAddress: parsed.args.publisher?.toString(),
                 merkleRoot: parsed.args.merkleRoot,
+                publicByteSize: parsed.args.publicByteSize.toString(),
                 startKAId: parsed.args.startKAId.toString(),
                 endKAId: parsed.args.endKAId.toString(),
                 txHash: log.transactionHash,

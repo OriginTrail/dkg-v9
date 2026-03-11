@@ -36,6 +36,7 @@ export class NoChainAdapter implements ChainAdapter {
   async reserveUALRange(_count: number): Promise<ReservedRange> { noChain(); }
   async batchMintKnowledgeAssets(_params: BatchMintParams): Promise<BatchMintResult> { noChain(); }
   async publishKnowledgeAssets(_params: PublishParams): Promise<OnChainPublishResult> { noChain(); }
+  async getMinimumRequiredSignatures(): Promise<number> { return 0; }
   async updateKnowledgeAssets(_params: UpdateKAParams): Promise<TxResult> { noChain(); }
   async extendStorage(_params: ExtendStorageParams): Promise<TxResult> { noChain(); }
   async transferNamespace(_newOwner: string): Promise<TxResult> { noChain(); }

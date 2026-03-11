@@ -34,7 +34,7 @@ export class PublishJournal {
     this.filePath = join(dataDir, JOURNAL_FILENAME);
   }
 
-  async save(entries: JournalEntry[]): Promise<void> {
+  async save(entries: unknown[]): Promise<void> {
     const dir = dirname(this.filePath);
     await mkdir(dir, { recursive: true });
 
@@ -44,10 +44,10 @@ export class PublishJournal {
     await rename(tmp, this.filePath);
   }
 
-  async load(): Promise<JournalEntry[]> {
+  async load<T = JournalEntry>(): Promise<T[]> {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
-      return JSON.parse(raw) as JournalEntry[];
+      return JSON.parse(raw) as T[];
     } catch (err: unknown) {
       if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];

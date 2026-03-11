@@ -8,7 +8,7 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeFlatCollectionRoot, autoPartition,
   generateConfirmedFullMetadata,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@dkg/publisher';
@@ -61,7 +61,7 @@ export class FinalizationHandler {
       const workspaceQuads = await this.getWorkspaceQuadsForRoots(paranetId, msg.rootEntities);
 
       if (workspaceQuads.length > 0) {
-        const merkleMatch = this.verifyMerkleMatch(workspaceQuads, paranetId, msg.kcMerkleRoot, ctxGraphId);
+        const merkleMatch = this.verifyMerkleMatch(workspaceQuads, msg.rootEntities, msg.kcMerkleRoot);
 
         if (merkleMatch) {
           const batchId = protoToBigInt(msg.batchId);
@@ -127,20 +127,12 @@ export class FinalizationHandler {
     return result.type === 'quads' ? result.quads : [];
   }
 
-  private verifyMerkleMatch(workspaceQuads: Quad[], paranetId: string, expectedMerkleRoot: Uint8Array, ctxGraphId?: string): boolean {
-    const dataGraph = ctxGraphId
-      ? contextGraphDataUri(paranetId, ctxGraphId)
-      : paranetDataGraphUri(paranetId);
-    const normalized = workspaceQuads.map(q => ({ ...q, graph: dataGraph }));
-    const partitioned = autoPartition(normalized);
-
-    const kaRoots: Uint8Array[] = [];
-    for (const [, entityQuads] of partitioned) {
-      const publicRoot = computePublicRoot(entityQuads);
-      kaRoots.push(computeKARoot(publicRoot, undefined));
-    }
-
-    const computedRoot = computeKCRoot(kaRoots);
+  private verifyMerkleMatch(workspaceQuads: Quad[], rootEntities: string[], expectedMerkleRoot: Uint8Array): boolean {
+    const normalized = workspaceQuads.map((quad) => ({ ...quad, graph: '' }));
+    const computedRoot = computeFlatCollectionRoot(
+      normalized,
+      rootEntities.map((rootEntity) => ({ rootEntity })),
+    );
     return ethers.hexlify(computedRoot) === ethers.hexlify(expectedMerkleRoot);
   }
 
@@ -235,16 +227,15 @@ export class FinalizationHandler {
     await this.store.insert(canonicalQuads);
 
     const partitioned = autoPartition(canonicalQuads);
-    const rootEntities = [...partitioned.keys()].sort();
+    const rootEntities = _rootEntities.filter((rootEntity, index, entities) =>
+      entities.indexOf(rootEntity) === index,
+    );
     const kaMetadata: KAMetadata[] = [];
-    const kaRoots: Uint8Array[] = [];
 
     for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
       const rootEntity = rootEntities[tokenIdx];
       const entityQuads = partitioned.get(rootEntity) ?? [];
       if (entityQuads.length === 0) continue;
-      const publicRoot = computePublicRoot(entityQuads);
-      kaRoots.push(computeKARoot(publicRoot, undefined));
       kaMetadata.push({
         rootEntity,
         kcUal: ual,
@@ -255,7 +246,10 @@ export class FinalizationHandler {
       });
     }
 
-    const merkleRoot = computeKCRoot(kaRoots);
+    const merkleRoot = computeFlatCollectionRoot(
+      canonicalQuads.map((quad) => ({ ...quad, graph: '' })),
+      rootEntities.map((rootEntity) => ({ rootEntity })),
+    );
 
     const kcMeta: KCMetadata = {
       ual,

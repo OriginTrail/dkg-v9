@@ -1,20 +1,21 @@
 import type { Quad, TripleStore } from '@dkg/storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@dkg/chain';
 import type { EventBus, OperationContext } from '@dkg/core';
-import { DKGEvent, Logger, createOperationContext, sha256, MerkleTree, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, type Ed25519Keypair } from '@dkg/core';
+import { DKGEvent, Logger, createOperationContext, encodePublishRequest, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
-import type { Publisher, PublishOptions, PublishResult, KAManifestEntry } from './publisher.js';
+import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PreparedPublish } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHash, computePublicRoot, computePrivateRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computePublicRoot, computePrivateRoot, computeFlatCollectionRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
-  generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
   generateOwnershipQuads,
   type KAMetadata,
 } from './metadata.js';
+import { computePublicByteSize, serializePublicPayload } from './public-payload.js';
+import { TentativePublishStore } from './tentative-publish-store.js';
 import { ethers } from 'ethers';
 
 export interface DKGPublisherConfig {
@@ -35,6 +36,7 @@ export interface DKGPublisherConfig {
   workspaceOwnedEntities?: Map<string, Map<string, string>>;
   /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
   knownBatchParanets?: Map<string, string>;
+  tentativeStore?: TentativePublishStore;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -61,6 +63,7 @@ export class DKGPublisher implements Publisher {
   private readonly ownedEntities = new Map<string, Set<string>>();
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   readonly knownBatchParanets: Map<string, string>;
+  private readonly tentativeStore: TentativePublishStore;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -81,11 +84,20 @@ export class DKGPublisher implements Publisher {
       this.publisherWallet = new ethers.Wallet(config.publisherPrivateKey);
       this.publisherAddress = this.publisherWallet.address;
     } else {
-      this.publisherAddress = config.publisherAddress ?? '0x' + '0'.repeat(40);
-      if (config.chain.chainId !== 'none') {
-        const random = ethers.Wallet.createRandom();
-        this.publisherWallet = new ethers.Wallet(random.privateKey);
-      }
+      const chainInfo = config.chain as unknown as {
+        getSignerAddress?: () => string;
+        signerAddress?: unknown;
+      };
+      const chainPublisherAddress = typeof chainInfo.getSignerAddress === 'function'
+        ? chainInfo.getSignerAddress()
+        : typeof chainInfo.signerAddress === 'string'
+          ? chainInfo.signerAddress
+          : undefined;
+      this.publisherAddress = config.publisherAddress ?? chainPublisherAddress ?? '0x' + '0'.repeat(40);
+      // No random wallet — without a real private key, publisherWallet stays
+      // undefined and shouldAttemptChainPublish will gate on !!publisherWallet,
+      // skipping on-chain publishes. A random wallet would produce signatures
+      // inconsistent with the reported identity/address.
     }
 
     for (const key of config.additionalSignerKeys ?? []) {
@@ -96,6 +108,7 @@ export class DKGPublisher implements Publisher {
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
     this.knownBatchParanets = config.knownBatchParanets ?? new Map();
+    this.tentativeStore = config.tentativeStore ?? new TentativePublishStore(config.store);
   }
 
   /**
@@ -255,6 +268,8 @@ export class DKGPublisher implements Publisher {
       clearWorkspaceAfter?: boolean;
       contextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      preBroadcast?: PublishOptions['preBroadcast'];
+      receiverSignatureProvider?: PublishOptions['receiverSignatureProvider'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
@@ -314,9 +329,11 @@ export class DKGPublisher implements Publisher {
       operationCtx: ctx,
       targetGraphUri,
       targetMetaGraphUri,
+      preBroadcast: options?.preBroadcast,
+      receiverSignatureProvider: options?.receiverSignatureProvider,
     });
 
-    if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
+    if (ctxGraphId && publishResult.status !== 'failed' && publishResult.onChainResult) {
       // Build participant signatures: use provided ones, or self-sign if chain adapter supports it
       let participantSigs = options?.contextGraphSignatures ?? [];
       if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
@@ -382,6 +399,10 @@ export class DKGPublisher implements Publisher {
                 this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
               }
             }
+            // Remove tentative store entry so it can't be falsely confirmed
+            // later by the chain poller (the data was already rolled back).
+            this.tentativeStore.remove(ctx.operationId);
+
             const ownedSet = this.ownedEntities.get(paranetId);
             if (ownedSet) {
               for (const ka of publishResult.kaManifest ?? []) {
@@ -404,7 +425,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    if (options?.clearWorkspaceAfter) {
+    if (options?.clearWorkspaceAfter && publishResult.status !== 'failed') {
       const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
@@ -496,11 +517,16 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false, onPhase } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    const operationId = ctx.operationId;
+    const tentativeSeq = ++this.tentativeCounter;
+    const tentativeUal = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
+    const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(paranetId);
+    const metaGraph = options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(paranetId);
 
     onPhase?.('prepare', 'start');
-    this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private (entityProofs=${entityProofs})`);
+    this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private`);
     await this.graphManager.ensureParanet(paranetId);
 
     const kaMap = autoPartition(quads);
@@ -508,37 +534,30 @@ export class DKGPublisher implements Publisher {
     const manifestEntries: KAManifestEntry[] = [];
     const kaMetadata: KAMetadata[] = [];
 
-    // Step 1: Compute privateMerkleRoot over ALL private triples
-    let privateMerkleRoot: Uint8Array | undefined;
-    if (privateQuads.length > 0) {
-      privateMerkleRoot = computePrivateRoot(privateQuads);
-    }
-
-    // Step 2: Build manifest entries (needed regardless of merkle mode)
+    // Step 1: build manifest entries with ordinal token IDs 1..N
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
       const entityPrivateQuads = privateQuads.filter(
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
+      const entityPrivateRoot = entityPrivateQuads.length > 0
+        ? computePrivateRoot(entityPrivateQuads)
+        : undefined;
 
       manifestEntries.push({
         tokenId: tokenCounter,
         rootEntity,
-        privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
-          : undefined,
+        privateMerkleRoot: entityPrivateRoot,
         privateTripleCount: entityPrivateQuads.length,
       });
 
       kaMetadata.push({
         rootEntity,
-        kcUal: '',
+        kcUal: tentativeUal,
         tokenId: tokenCounter,
         publicTripleCount: publicQuads.length,
         privateTripleCount: entityPrivateQuads.length,
-        privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
-          : undefined,
+        privateMerkleRoot: entityPrivateRoot,
       });
 
       tokenCounter++;
@@ -551,54 +570,46 @@ export class DKGPublisher implements Publisher {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
     }
 
-    // Step 3: Compute kcMerkleRoot using the two-level scheme
-    let kcMerkleRoot: Uint8Array;
-    const allPublicHashes = allSkolemizedQuads.map(computeTripleHash);
-
-    if (privateMerkleRoot) {
-      // Anchor privateMerkleRoot as a synthetic public triple hash
-      const syntheticTripleHash = computeTripleHash({
-        subject: `urn:dkg:kc`,
-        predicate: 'http://dkg.io/ontology/privateContentRoot',
-        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
-        graph: '',
-      });
-      allPublicHashes.push(syntheticTripleHash);
-    }
-
-    if (entityProofs) {
-      // Per-entity kaRoots → Merkle tree
-      const kaRoots: Uint8Array[] = [];
-      for (const [rootEntity, publicQuads] of kaMap) {
-        const pubRoot = computePublicRoot(publicQuads);
-        kaRoots.push(pubRoot ?? new Uint8Array(32));
-      }
-      kcMerkleRoot = computeKCRoot(kaRoots);
-      this.log.info(ctx, `Computed kcMerkleRoot (entityProofs) for ${kaRoots.length} KAs`);
-    } else {
-      // Flat hash over all public triples + synthetic anchor
-      const tree = new MerkleTree(allPublicHashes);
-      kcMerkleRoot = tree.root;
-      this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
-    }
+    const kcMerkleRoot = computeFlatCollectionRoot(allSkolemizedQuads, manifestEntries);
     const kaCount = manifestEntries.length;
+    const serializedPublicPayload = serializePublicPayload(allSkolemizedQuads);
+    const publicByteSize = computePublicByteSize(allSkolemizedQuads);
+    const preparedPublish: PreparedPublish = {
+      operationId,
+      paranetId,
+      tentativeUal,
+      publisherAddress: this.publisherAddress,
+      merkleRoot: kcMerkleRoot,
+      publicByteSize,
+      encodedPublishRequest: encodePublishRequest({
+        ual: tentativeUal,
+        nquads: serializedPublicPayload,
+        paranetId,
+        kas: manifestEntries.map((entry) => ({
+          tokenId: Number(entry.tokenId),
+          rootEntity: entry.rootEntity,
+          privateMerkleRoot: entry.privateMerkleRoot ?? new Uint8Array(0),
+          privateTripleCount: entry.privateTripleCount ?? 0,
+        })),
+        publisherIdentity: this.keypair.publicKey,
+        publisherAddress: this.publisherAddress,
+        startKAId: 0,
+        endKAId: 0,
+        chainId: this.chain.chainId,
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+        txHash: '',
+        blockNumber: 0,
+        operationId,
+      }),
+      publicQuads: allSkolemizedQuads,
+      manifest: manifestEntries,
+    };
 
     onPhase?.('prepare', 'end');
     onPhase?.('store', 'start');
 
-    const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(paranetId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
-
-    // Store synthetic triple anchoring privateMerkleRoot in the data graph
-    if (privateMerkleRoot) {
-      normalizedQuads.push({
-        subject: 'urn:dkg:kc',
-        predicate: 'http://dkg.io/ontology/privateContentRoot',
-        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
-        graph: dataGraph,
-      });
-    }
-
     this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
 
@@ -613,26 +624,68 @@ export class DKGPublisher implements Publisher {
     }
 
     onPhase?.('store', 'end');
+    let tentativeQuads = generateTentativeMetadata(
+      {
+        ual: tentativeUal,
+        paranetId,
+        merkleRoot: kcMerkleRoot,
+        kaCount,
+        publisherPeerId: '',
+        timestamp: new Date(),
+      },
+      kaMetadata,
+    );
+    if (options.targetMetaGraphUri) {
+      const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
+      tentativeQuads = tentativeQuads.map((quad) =>
+        quad.graph === defaultMeta ? { ...quad, graph: options.targetMetaGraphUri! } : quad,
+      );
+    }
+    await this.store.insert(tentativeQuads);
+    await this.tentativeStore.register({
+      operationId,
+      tentativeUal,
+      paranetId,
+      publisherAddress: this.publisherAddress,
+      merkleRoot: kcMerkleRoot,
+      publicByteSize,
+      createdAt: Date.now(),
+      dataGraph,
+      metaGraph,
+      publisherPeerId: '',
+      kaRecords: manifestEntries.map((entry) => ({
+        ordinal: Number(entry.tokenId),
+        rootEntity: entry.rootEntity,
+        privateTripleCount: entry.privateTripleCount ?? 0,
+        privateMerkleRoot: entry.privateMerkleRoot,
+      })),
+    });
+    this.log.info(ctx, `Stored as tentative: UAL=${tentativeUal}`);
 
-    // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = allSkolemizedQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
-    const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
-    const merkleRootHex = ethers.hexlify(kcMerkleRoot);
+    if (options.preBroadcast) {
+      onPhase?.('broadcast', 'start');
+      await options.preBroadcast(preparedPublish);
+      onPhase?.('broadcast', 'end');
+    }
 
-    // Collect receiver signatures from peers (replicate-then-publish)
-    let collectedReceiverSigs: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> | undefined;
+    let collectedReceiverSigs: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [];
     if (options.receiverSignatureProvider) {
       onPhase?.('collect_signatures', 'start');
       try {
-        collectedReceiverSigs = await options.receiverSignatureProvider(merkleRootHex, publicByteSize);
+        collectedReceiverSigs = await options.receiverSignatureProvider(preparedPublish);
         this.log.info(ctx, `Collected ${collectedReceiverSigs.length} receiver signature(s) from peers`);
       } catch (err) {
+        onPhase?.('collect_signatures', 'end');
         this.log.warn(ctx, `Receiver signature collection failed: ${err instanceof Error ? err.message : String(err)}`);
+        return {
+          kcId: 0n,
+          ual: tentativeUal,
+          merkleRoot: kcMerkleRoot,
+          kaManifest: manifestEntries,
+          preparedPublish,
+          status: 'failed',
+          publicQuads: allSkolemizedQuads,
+        };
       }
       onPhase?.('collect_signatures', 'end');
     }
@@ -640,54 +693,59 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
 
     let onChainResult: OnChainPublishResult | undefined;
-    let status: 'tentative' | 'confirmed' = 'tentative';
-    const tentativeSeq = ++this.tentativeCounter;
-    let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
+    let status: 'tentative' | 'failed' = 'tentative';
+    const minimumRequiredSignatures =
+      typeof this.chain.getMinimumRequiredSignatures === 'function'
+        ? await this.chain.getMinimumRequiredSignatures()
+        : 0;
+    const receiverSignatures = [...collectedReceiverSigs]
+      .sort((left, right) => (left.identityId < right.identityId ? -1 : left.identityId > right.identityId ? 1 : 0))
+      .filter((signature, index, signatures) => index === 0 || signature.identityId !== signatures[index - 1].identityId);
 
     const identityId = this.publisherNodeIdentityId;
+    const canSign = !!this.publisherWallet || typeof this.chain.signMessage === 'function';
+    const shouldAttemptChainPublish =
+      this.chain.chainId !== 'none' &&
+      canSign &&
+      identityId > 0n;
 
-    if (!this.publisherWallet) {
-      this.log.warn(ctx, `No EVM wallet configured — skipping on-chain publish`);
-    } else if (identityId === 0n) {
-      this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
-    } else {
-      this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
+    if (shouldAttemptChainPublish) {
+      if (minimumRequiredSignatures > 0 && receiverSignatures.length < minimumRequiredSignatures) {
+        onPhase?.('chain', 'end');
+        return {
+          kcId: 0n,
+          ual: tentativeUal,
+          merkleRoot: kcMerkleRoot,
+          kaManifest: manifestEntries,
+          preparedPublish,
+          status: 'failed',
+          publicQuads: allSkolemizedQuads,
+        };
+      }
 
       const tokenAmount =
         typeof this.chain.getRequiredPublishTokenAmount === 'function'
           ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, 1)
           : 1n;
-
-      // Publisher signature: sign keccak256(abi.encodePacked(uint72 identityId, bytes32 merkleRoot))
+      const merkleRootHex = ethers.hexlify(kcMerkleRoot);
       const pubMsgHash = ethers.solidityPackedKeccak256(
         ['uint72', 'bytes32'],
         [identityId, merkleRootHex],
       );
-      const pubSig = ethers.Signature.from(
-        await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
-      );
-
-      let receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
-      if (collectedReceiverSigs && collectedReceiverSigs.length > 0) {
-        receiverSignatures = [...collectedReceiverSigs]
-          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
+      // Sign publisher proof: prefer local wallet, fall back to chain adapter's signer
+      let pubSig: ethers.Signature;
+      if (this.publisherWallet) {
+        pubSig = ethers.Signature.from(
+          await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
+        );
       } else {
-        const rcvMsgHash = ethers.solidityPackedKeccak256(
-          ['bytes32', 'uint64'],
-          [merkleRootHex, publicByteSize],
-        );
-        const rcvSig = ethers.Signature.from(
-          await this.publisherWallet.signMessage(ethers.getBytes(rcvMsgHash)),
-        );
-        receiverSignatures = [{
-          identityId,
-          r: ethers.getBytes(rcvSig.r),
-          vs: ethers.getBytes(rcvSig.yParityAndS),
-        }];
+        const chainSig = await this.chain.signMessage!(ethers.getBytes(pubMsgHash));
+        pubSig = ethers.Signature.from({
+          r: ethers.hexlify(chainSig.r),
+          yParityAndS: ethers.hexlify(chainSig.vs),
+        });
       }
 
-      this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         onChainResult = await this.chain.publishKnowledgeAssets({
           kaCount,
@@ -702,92 +760,35 @@ export class DKGPublisher implements Publisher {
           },
           receiverSignatures,
         });
-
         onChainResult.tokenAmount = tokenAmount;
-
-        // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
-        ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
-
-        for (const km of kaMetadata) {
-          km.kcUal = ual;
+        await this.tentativeStore.markSubmitted(operationId, {
+          txHash: onChainResult.txHash,
+          startKAId: onChainResult.startKAId ?? 0n,
+          endKAId: onChainResult.endKAId ?? 0n,
+        });
+        if (!this.ownedEntities.has(paranetId)) {
+          this.ownedEntities.set(paranetId, new Set());
         }
-        let confirmedQuads = generateConfirmedFullMetadata(
-          {
-            ual,
-            paranetId,
-            merkleRoot: kcMerkleRoot,
-            kaCount,
-            publisherPeerId: '',
-            timestamp: new Date(),
-          },
-          kaMetadata,
-          {
-            txHash: onChainResult.txHash,
-            blockNumber: onChainResult.blockNumber,
-            blockTimestamp: onChainResult.blockTimestamp,
-            publisherAddress: onChainResult.publisherAddress,
-            batchId: onChainResult.batchId,
-            chainId: this.chain.chainId,
-          },
-        );
-        if (options.targetMetaGraphUri) {
-          const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
-          confirmedQuads = confirmedQuads.map((q) =>
-            q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-          );
+        for (const entry of manifestEntries) {
+          this.ownedEntities.get(paranetId)!.add(entry.rootEntity);
         }
-        await this.store.insert(confirmedQuads);
-        status = 'confirmed';
-        this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
+        this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
       } catch (err) {
-        this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
+        status = 'failed';
+        this.log.warn(ctx, `On-chain publish failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
-
-    if (status === 'tentative') {
-      // ual already set to the tentative form above; no reassignment needed
-      for (const km of kaMetadata) {
-        km.kcUal = ual;
-      }
-      let tentativeQuads = generateTentativeMetadata(
-        {
-          ual,
-          paranetId,
-          merkleRoot: kcMerkleRoot,
-          kaCount,
-          publisherPeerId: '',
-          timestamp: new Date(),
-        },
-        kaMetadata,
-      );
-      if (options.targetMetaGraphUri) {
-        const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
-        tentativeQuads = tentativeQuads.map((q) =>
-          q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-        );
-      }
-      await this.store.insert(tentativeQuads);
-      this.log.info(ctx, `Stored as tentative: UAL=${ual}`);
-    }
-
-    // Track owned entities and batch→paranet binding on confirmed publishes
-    if (status === 'confirmed' && onChainResult) {
-      if (!this.ownedEntities.has(paranetId)) {
-        this.ownedEntities.set(paranetId, new Set());
-      }
-      for (const e of manifestEntries) {
-        this.ownedEntities.get(paranetId)!.add(e.rootEntity);
-      }
-      this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
+    } else if (minimumRequiredSignatures > 0 && receiverSignatures.length < minimumRequiredSignatures) {
+      status = 'failed';
     }
 
     onPhase?.('chain', 'end');
 
     const result: PublishResult = {
       kcId: onChainResult?.batchId ?? 0n,
-      ual,
+      ual: tentativeUal,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
+      preparedPublish,
       status,
       onChainResult,
       publicQuads: allSkolemizedQuads,
@@ -805,7 +806,6 @@ export class DKGPublisher implements Publisher {
 
     // Phase 1: compute merkle roots and manifest without mutating the store
     const kaMap = autoPartition(quads);
-    const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
     const entityPrivateMap = new Map<string, Quad[]>();
 
@@ -816,10 +816,7 @@ export class DKGPublisher implements Publisher {
       );
       entityPrivateMap.set(rootEntity, entityPrivateQuads);
 
-      const pubRoot = computePublicRoot(publicQuads);
       const privRoot = entityPrivateQuads.length > 0 ? computePrivateRoot(entityPrivateQuads) : undefined;
-
-      kaRoots.push(computeKARoot(pubRoot, privRoot));
       manifestEntries.push({
         tokenId: tokenCounter++,
         rootEntity,
@@ -828,14 +825,14 @@ export class DKGPublisher implements Publisher {
       });
     }
 
-    const kcMerkleRoot = computeKCRoot(kaRoots);
     const allSkolemizedQuads = [...kaMap.values()].flat();
+    const kcMerkleRoot = computeFlatCollectionRoot(allSkolemizedQuads, manifestEntries);
 
     // Phase 2: submit chain tx — local store is still untouched
     const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
-      newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
+      newPublicByteSize: computePublicByteSize(allSkolemizedQuads),
     });
 
     if (!txResult.success) {

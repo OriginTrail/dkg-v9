@@ -12,7 +12,7 @@ import {
 import type { ChainAdapter } from '@dkg/chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash, computePublicRoot, computeKCRoot, computeKARoot } from './merkle.js';
+import { computeFlatCollectionRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
@@ -21,6 +21,7 @@ import {
 } from './metadata.js';
 import { autoPartition } from './auto-partition.js';
 import { PublishJournal, type JournalEntry } from './publish-journal.js';
+import { computePublicByteSize } from './public-payload.js';
 
 interface PendingPublish {
   ual: string;
@@ -216,22 +217,15 @@ export class PublishHandler {
 
       // ── Merkle verification ──
       const partitioned = autoPartition(quads);
-      const kaRoots: Uint8Array[] = [];
-
-      for (const m of manifest) {
-        const publicQuads = partitioned.get(m.rootEntity) ?? [];
-        const publicRoot = computePublicRoot(publicQuads);
-
-        const kaEntry = request.kas.find((ka) => ka.rootEntity === m.rootEntity);
-        const privateRoot =
-          kaEntry?.privateMerkleRoot?.length
-            ? new Uint8Array(kaEntry.privateMerkleRoot)
-            : undefined;
-
-        kaRoots.push(computeKARoot(publicRoot, privateRoot));
-      }
-
-      const computedMerkleRoot = computeKCRoot(kaRoots);
+      const computedMerkleRoot = computeFlatCollectionRoot(
+        quads,
+        manifest.map((entry) => ({
+          rootEntity: entry.rootEntity,
+          privateMerkleRoot: request.kas.find((ka) => ka.rootEntity === entry.rootEntity)?.privateMerkleRoot?.length
+            ? new Uint8Array(request.kas.find((ka) => ka.rootEntity === entry.rootEntity)!.privateMerkleRoot)
+            : undefined,
+        })),
+      );
 
       // ── UAL consistency ──
       const startKAId = protoToBigInt(request.startKAId);
@@ -330,7 +324,7 @@ export class PublishHandler {
         from: fromPeerId,
       });
 
-      const publicByteSize = request.nquads.length;
+      const publicByteSize = Number(computePublicByteSize(quads));
       const { signatureR, signatureVs } = await this.signMerkleRootAndByteSize(computedMerkleRoot, publicByteSize);
       this.log.info(ctx, `Sending signed ack for ${request.ual} (publicByteSize=${publicByteSize})`);
 

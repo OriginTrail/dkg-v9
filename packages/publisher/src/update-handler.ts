@@ -6,7 +6,7 @@ import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computePublicRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computeFlatCollectionRoot } from './merkle.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -144,14 +144,13 @@ export class UpdateHandler {
         }
       }
 
-      const kaRoots: Uint8Array[] = [];
-      for (const m of manifest) {
-        const entityQuads = partitioned.get(m.rootEntity) ?? [];
-        const pubRoot = computePublicRoot(entityQuads);
-        const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-        kaRoots.push(computeKARoot(pubRoot, privRoot));
-      }
-      const computedRoot = computeKCRoot(kaRoots);
+      const computedRoot = computeFlatCollectionRoot(
+        quads,
+        manifest.map((entry) => ({
+          rootEntity: entry.rootEntity,
+          privateMerkleRoot: entry.privateMerkleRoot?.length ? new Uint8Array(entry.privateMerkleRoot) : undefined,
+        })),
+      );
 
       const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
       if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {

@@ -1,4 +1,5 @@
 export const PROTOCOL_PUBLISH = '/dkg/publish/1.0.0';
+export const PROTOCOL_ATTEST = '/dkg/attest/1.0.0';
 export const PROTOCOL_QUERY = '/dkg/query/1.0.0';
 export const PROTOCOL_DISCOVER = '/dkg/discover/1.0.0';
 export const PROTOCOL_SYNC = '/dkg/sync/1.0.0';

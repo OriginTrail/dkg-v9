@@ -18,9 +18,7 @@ import {
 import { OxigraphStore, type Quad } from '@dkg/storage';
 import { MockChainAdapter } from '@dkg/chain';
 import {
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computeFlatCollectionRoot,
   autoPartition,
   generateTentativeMetadata,
   generateKCMetadata,
@@ -128,12 +126,9 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     ];
 
     const partitioned = autoPartition(triples);
-    const kaRoots: Uint8Array[] = [];
     const kaMetadata: KAMetadata[] = [];
 
     for (const [rootEntity, entityQuads] of partitioned) {
-      const publicRoot = computePublicRoot(entityQuads);
-      kaRoots.push(computeKARoot(publicRoot, undefined));
       kaMetadata.push({
         rootEntity,
         kcUal: 'did:dkg:mock:31337/0xAttacker/1',
@@ -143,7 +138,10 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       });
     }
 
-    const merkleRoot = computeKCRoot(kaRoots);
+    const merkleRoot = computeFlatCollectionRoot(
+      triples.map((triple) => ({ ...triple, graph: '' })),
+      kaMetadata.map((entry) => ({ rootEntity: entry.rootEntity })),
+    );
 
     const kcMeta = {
       ual: 'did:dkg:mock:31337/0xAttacker/1',
@@ -314,21 +312,14 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:paranet:${PARANET}`),
     ];
 
-    const legitimatePartitioned = autoPartition(legitimateTriples);
-    const legitimateKaRoots: Uint8Array[] = [];
-    for (const [, entityQuads] of legitimatePartitioned) {
-      const publicRoot = computePublicRoot(entityQuads);
-      legitimateKaRoots.push(computeKARoot(publicRoot, undefined));
-    }
-    const legitimateMerkleRoot = computeKCRoot(legitimateKaRoots);
-
-    const tamperedPartitioned = autoPartition(tamperedTriples);
-    const tamperedKaRoots: Uint8Array[] = [];
-    for (const [, entityQuads] of tamperedPartitioned) {
-      const publicRoot = computePublicRoot(entityQuads);
-      tamperedKaRoots.push(computeKARoot(publicRoot, undefined));
-    }
-    const tamperedMerkleRoot = computeKCRoot(tamperedKaRoots);
+    const legitimateMerkleRoot = computeFlatCollectionRoot(
+      legitimateTriples.map((triple) => ({ ...triple, graph: '' })),
+      [{ rootEntity: entity }],
+    );
+    const tamperedMerkleRoot = computeFlatCollectionRoot(
+      tamperedTriples.map((triple) => ({ ...triple, graph: '' })),
+      [{ rootEntity: entity }],
+    );
 
     // Merkle roots should differ — a receiver can detect the tampering
     expect(Buffer.from(legitimateMerkleRoot).toString('hex'))
@@ -350,18 +341,56 @@ afterEach(async () => {
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+async function queryStatusBindings(agent: DKGAgent, paranetId: string) {
+  const result = await agent.query(
+    `SELECT ?kc ?status WHERE {
+      GRAPH <did:dkg:paranet:${paranetId}/_meta> {
+        ?kc <http://dkg.io/ontology/status> ?status
+      }
+    }`,
+    paranetId,
+  );
+
+  return result.bindings.map((binding) => ({
+    kc: binding['kc'],
+    status: binding['status'],
+  }));
+}
+
+async function pollUntil<T>(
+  queryFn: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  timeoutMs: number,
+  intervalMs = 500,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue: T | undefined;
+
+  while (Date.now() < deadline) {
+    lastValue = await queryFn();
+    if (predicate(lastValue)) {
+      return lastValue;
+    }
+    await sleep(intervalMs);
+  }
+
+  return lastValue as T;
+}
+
 describe('Integration: gossip ingestion verifies on-chain and promotes to confirmed', () => {
-  it('receiver gossip data starts tentative and promotes to confirmed via shared chain', async () => {
+  it('receiver gossip data starts tentative and is finalized by the chain poller', async () => {
     const sharedChain = new MockChainAdapter('mock:31337', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
 
     const agentA = await DKGAgent.create({
       name: 'GossipSender',
+      listenHost: '127.0.0.1',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
     });
     const agentB = await DKGAgent.create({
       name: 'GossipReceiver',
+      listenHost: '127.0.0.1',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
@@ -378,27 +407,42 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     agentB.subscribeToParanet('gossip-verify');
     await sleep(500);
 
-    await agentA.publish('gossip-verify', [
+    const publishResult = await agentA.publish('gossip-verify', [
       { subject: 'did:dkg:test:Verified', predicate: 'http://schema.org/name', object: '"VerifiedBot"', graph: '' },
     ]);
+    expect(publishResult.status).toBe('tentative');
+    expect(publishResult.onChainResult).toBeDefined();
 
-    await sleep(4000);
+    const tentativeStatuses = await pollUntil(
+      () => queryStatusBindings(agentB, 'gossip-verify'),
+      (bindings) => bindings.some((binding) => binding.status?.includes('tentative')),
+      8_000,
+    );
+    expect(tentativeStatuses.some((binding) => binding.status?.includes('tentative'))).toBe(true);
 
-    const statusResult = await agentB.query(
-      `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-verify/_meta> {
-          ?kc <http://dkg.io/ontology/status> ?status
-        }
-      }`,
-      'gossip-verify',
+    const finalUal = `did:dkg:${sharedChain.chainId}/${publishResult.onChainResult!.publisherAddress}/${publishResult.onChainResult!.startKAId!}`;
+    const confirmedStatuses = await pollUntil(
+      () => queryStatusBindings(agentB, 'gossip-verify'),
+      (bindings) => (
+        bindings.some((binding) => binding.kc === finalUal && binding.status?.includes('confirmed')) &&
+        !bindings.some((binding) => binding.kc?.includes('/t') && binding.status?.includes('tentative'))
+      ),
+      20_000,
+      1_000,
     );
 
-    const statuses = statusResult.bindings.map(b => b['status']);
-    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
-    expect(hasConfirmed).toBe(true);
+    expect(
+      confirmedStatuses.some((binding) => binding.kc === finalUal && binding.status?.includes('confirmed')),
+    ).toBe(true);
+    expect(
+      confirmedStatuses.some((binding) => binding.kc?.includes('/t') && binding.status?.includes('tentative')),
+    ).toBe(false);
 
-    const hasTentative = statuses.some(s => s?.includes('tentative'));
-    expect(hasTentative).toBe(false);
+    const dataResult = await agentB.query(
+      `SELECT ?name WHERE { <did:dkg:test:Verified> <http://schema.org/name> ?name }`,
+      'gossip-verify',
+    );
+    expect(dataResult.bindings).toHaveLength(1);
   }, 25000);
 
   it('receiver without shared chain leaves gossip data as tentative', async () => {
@@ -407,12 +451,14 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const agentA = await DKGAgent.create({
       name: 'TentSender',
+      listenHost: '127.0.0.1',
       listenPort: 0,
       skills: [],
       chainAdapter: chainA,
     });
     const agentB = await DKGAgent.create({
       name: 'TentReceiver',
+      listenHost: '127.0.0.1',
       listenPort: 0,
       skills: [],
       chainAdapter: chainB,
@@ -429,26 +475,18 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     agentB.subscribeToParanet('gossip-tent');
     await sleep(500);
 
-    await agentA.publish('gossip-tent', [
+    const publishResult = await agentA.publish('gossip-tent', [
       { subject: 'did:dkg:test:Tentative', predicate: 'http://schema.org/name', object: '"TentativeBot"', graph: '' },
     ]);
+    expect(publishResult.status).toBe('tentative');
 
-    await sleep(4000);
-
-    const statusResult = await agentB.query(
-      `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-tent/_meta> {
-          ?kc <http://dkg.io/ontology/status> ?status
-        }
-      }`,
-      'gossip-tent',
+    const statuses = await pollUntil(
+      () => queryStatusBindings(agentB, 'gossip-tent'),
+      (bindings) => bindings.some((binding) => binding.status?.includes('tentative')),
+      8_000,
     );
 
-    const statuses = statusResult.bindings.map(b => b['status']);
-    const hasTentative = statuses.some(s => s?.includes('tentative'));
-    expect(hasTentative).toBe(true);
-
-    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
-    expect(hasConfirmed).toBe(false);
+    expect(statuses.some((binding) => binding.status?.includes('tentative'))).toBe(true);
+    expect(statuses.some((binding) => binding.status?.includes('confirmed'))).toBe(false);
   }, 25000);
 });

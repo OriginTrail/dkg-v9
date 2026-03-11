@@ -1,5 +1,6 @@
 import type { ChainAdapter, EventFilter, ChainEvent } from '@dkg/chain';
 import { Logger, createOperationContext, type OperationContext } from '@dkg/core';
+import type { TentativePublishStore } from './tentative-publish-store.js';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -13,7 +14,8 @@ export type OnParanetCreated = (info: {
 
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
-  publishHandler: PublishHandler;
+  tentativeStore?: TentativePublishStore;
+  publishHandler?: Pick<PublishHandler, 'hasPendingPublishes' | 'confirmByMerkleRoot'>;
   /** Polling interval in ms. Default: 12000 (roughly 1 L2 block). */
   intervalMs?: number;
   /** Called when a ParanetCreated event is detected on-chain. */
@@ -30,7 +32,8 @@ export interface ChainEventPollerConfig {
  */
 export class ChainEventPoller {
   private readonly chain: ChainAdapter;
-  private readonly publishHandler: PublishHandler;
+  private readonly tentativeStore?: TentativePublishStore;
+  private readonly publishHandler?: Pick<PublishHandler, 'hasPendingPublishes' | 'confirmByMerkleRoot'>;
   private readonly intervalMs: number;
   private readonly onParanetCreated?: OnParanetCreated;
   private readonly log = new Logger('ChainEventPoller');
@@ -44,6 +47,7 @@ export class ChainEventPoller {
 
   constructor(config: ChainEventPollerConfig) {
     this.chain = config.chain;
+    this.tentativeStore = config.tentativeStore;
     this.publishHandler = config.publishHandler;
     this.intervalMs = config.intervalMs ?? 12_000;
     this.onParanetCreated = config.onParanetCreated;
@@ -79,7 +83,9 @@ export class ChainEventPoller {
   }
 
   private async poll(): Promise<void> {
-    const hasPending = this.publishHandler.hasPendingPublishes;
+    const hasPending =
+      (this.tentativeStore?.hasTentatives() ?? false) ||
+      (this.publishHandler?.hasPendingPublishes ?? false);
     const watchParanets = !!this.onParanetCreated;
     if (!hasPending && !watchParanets) return;
 
@@ -144,24 +150,45 @@ export class ChainEventPoller {
       : data['merkleRoot'] as Uint8Array;
 
     const publisherAddress = data['publisherAddress'] as string ?? '';
+    const publicByteSize = BigInt(data['publicByteSize'] as string ?? '0');
     const startKAId = BigInt(data['startKAId'] as string ?? '0');
     const endKAId = BigInt(data['endKAId'] as string ?? '0');
+    const txHash = typeof data['txHash'] === 'string' ? data['txHash'] : undefined;
 
     this.log.info(ctx,
       `Chain event: KnowledgeBatchCreated block=${event.blockNumber} ` +
       `publisher=${publisherAddress} range=${startKAId}..${endKAId}`,
     );
 
-    const confirmed = await this.publishHandler.confirmByMerkleRoot(
-      merkleRoot,
-      {
+    let confirmed = false;
+
+    if (this.publishHandler) {
+      confirmed = await this.publishHandler.confirmByMerkleRoot(
+        merkleRoot,
+        {
+          publisherAddress,
+          startKAId,
+          endKAId,
+          chainId: this.chain.chainId,
+        },
+        ctx,
+      );
+    }
+
+    if (this.tentativeStore) {
+      const tentativeConfirmed = await this.tentativeStore.confirmFromChain({
+        merkleRoot,
         publisherAddress,
+        publicByteSize,
         startKAId,
         endKAId,
+        txHash,
+        blockNumber: event.blockNumber,
+        batchId: BigInt(data['batchId'] as string ?? '0'),
         chainId: this.chain.chainId,
-      },
-      ctx,
-    );
+      }, ctx);
+      confirmed = confirmed || tentativeConfirmed;
+    }
 
     if (confirmed) {
       this.log.info(ctx, `Confirmed tentative publish via chain event (block ${event.blockNumber})`);

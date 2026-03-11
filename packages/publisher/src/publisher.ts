@@ -13,13 +13,24 @@ export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
 
+export interface PreparedPublish {
+  operationId: string;
+  paranetId: string;
+  tentativeUal: string;
+  publisherAddress: string;
+  merkleRoot: Uint8Array;
+  publicByteSize: bigint;
+  encodedPublishRequest: Uint8Array;
+  publicQuads: Quad[];
+  manifest: KAManifestEntry[];
+}
+
 /**
  * Callback that collects receiver signatures from peers.
  * Called AFTER data preparation, BEFORE on-chain tx.
  */
 export type ReceiverSignatureProvider = (
-  merkleRoot: string,
-  publicByteSize: bigint,
+  preparedPublish: PreparedPublish,
 ) => Promise<ReceiverSignature[]>;
 
 /**
@@ -36,23 +47,17 @@ export interface PublishOptions {
   privateQuads?: Quad[];
   manifest?: KAManifestEntry[];
   operationCtx?: OperationContext;
-  /**
-   * When true, triples are grouped by root entity and each group gets its
-   * own `kaRoot`. The `kcMerkleRoot` is a Merkle tree over sorted `kaRoot`
-   * values, enabling selective disclosure (prove one entity without
-   * revealing others). Off by default — the flat hash is simpler and cheaper.
-   */
-  entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
   /** Override the data graph URI (used for context graph enshrinement). */
   targetGraphUri?: string;
   /** Override the meta graph URI (used for context graph enshrinement). */
   targetMetaGraphUri?: string;
+  /** Broadcast the pre-chain gossip replication message before chain submission. */
+  preBroadcast?: (preparedPublish: PreparedPublish) => Promise<void>;
   /**
    * If provided, publisher calls this to collect receiver signatures
-   * from peers BEFORE the on-chain tx (replicate-then-publish).
-   * If absent, falls back to self-signing (legacy behavior).
+   * from peers AFTER pre-broadcast and BEFORE the on-chain tx.
    */
   receiverSignatureProvider?: ReceiverSignatureProvider;
 }
@@ -63,6 +68,7 @@ export interface PublishResult {
   ual: string;
   merkleRoot: Uint8Array;
   kaManifest: KAManifestEntry[];
+  preparedPublish?: PreparedPublish;
   status: 'tentative' | 'confirmed' | 'failed';
   onChainResult?: OnChainPublishResult;
   /** Public quads that were stored (used for broadcast — never includes private triples). */

@@ -1,4 +1,10 @@
 export {
+  type AttestationRequestMsg,
+  encodeAttestationRequest,
+  decodeAttestationRequest,
+} from './attestation.js';
+
+export {
   type PublishRequestMsg,
   type PublishAckMsg,
   type KAManifestEntryMsg,

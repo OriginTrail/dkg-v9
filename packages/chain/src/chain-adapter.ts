@@ -228,6 +228,7 @@ export interface ChainAdapter {
    * Used so the publisher can approve and send the correct token amount.
    */
   getRequiredPublishTokenAmount?(publicByteSize: bigint, epochs: number): Promise<bigint>;
+  getMinimumRequiredSignatures?(): Promise<number>;
 
   // V9 knowledge updates
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;

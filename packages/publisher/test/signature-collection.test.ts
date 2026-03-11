@@ -269,15 +269,17 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
        * AFTER data preparation but BEFORE the on-chain tx.
        * In real code, this broadcasts data to peers and collects signed acks.
        */
-      receiverSignatureProvider: async (merkleRoot: string, publicByteSize: bigint) => {
-        phases.push('collect_signatures:start');
-        const sig = await peer.signReceiverAck(merkleRoot, publicByteSize);
-        phases.push('collect_signatures:end');
+      receiverSignatureProvider: async (preparedPublish) => {
+        const sig = await peer.signReceiverAck(
+          ethers.hexlify(preparedPublish.merkleRoot),
+          preparedPublish.publicByteSize,
+        );
         return [sig];
       },
     });
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
 
     // Verify phase ordering: prepare → store → collect_signatures → chain
     const prepareIdx = phases.indexOf('prepare:start');
@@ -302,8 +304,11 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     await publisher.publish({
       paranetId: PARANET,
       quads,
-      receiverSignatureProvider: async (merkleRoot, publicByteSize) => {
-        return [await peer.signReceiverAck(merkleRoot, publicByteSize)];
+      receiverSignatureProvider: async (preparedPublish) => {
+        return [await peer.signReceiverAck(
+          ethers.hexlify(preparedPublish.merkleRoot),
+          preparedPublish.publicByteSize,
+        )];
       },
     });
 
@@ -315,14 +320,13 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     expect(callArgs.receiverSignatures[0].identityId).toBe(2n);
   });
 
-  it('publish() falls back to self-signed when no receiverSignatureProvider', async () => {
+  it('publish() submits no receiver signatures when no receiverSignatureProvider and quorum is zero', async () => {
     const chainPublishSpy = vi.spyOn(chain, 'publishKnowledgeAssets');
 
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"Fallback Test"'),
     ];
 
-    // No receiverSignatureProvider → should use legacy self-signing
     await publisher.publish({
       paranetId: PARANET,
       quads,
@@ -331,9 +335,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     expect(chainPublishSpy).toHaveBeenCalledOnce();
     const callArgs = chainPublishSpy.mock.calls[0][0];
 
-    // Self-signed: identityId should be the publisher's own
-    expect(callArgs.receiverSignatures).toHaveLength(1);
-    expect(callArgs.receiverSignatures[0].identityId).toBe(1n);
+    expect(callArgs.receiverSignatures).toHaveLength(0);
   });
 
   it('publish() emits PUBLISH_FAILED event when receiver sigs insufficient', async () => {
@@ -366,8 +368,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
       receiverSignatureProvider: async () => [],
     });
 
-    // Should be tentative since on-chain failed
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('failed');
   });
 });
 
@@ -581,7 +582,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
 });
 
 describe('Regression: complete publish result fields', () => {
-  it('confirmed publish result includes txHash, blockNumber, batchId, publisherAddress', async () => {
+  it('tentative publish result includes txHash, blockNumber, batchId, publisherAddress', async () => {
     const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', wallet.address);
@@ -601,7 +602,7 @@ describe('Regression: complete publish result fields', () => {
       quads: [q('urn:test:result:1', 'http://schema.org/name', '"ResultTest"')],
     });
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
     expect(result.onChainResult).toBeDefined();
     expect(result.onChainResult!.txHash).toBeTruthy();
     expect(typeof result.onChainResult!.txHash).toBe('string');
@@ -614,7 +615,7 @@ describe('Regression: complete publish result fields', () => {
 });
 
 describe('Regression: fail-fast when receiver signatures are insufficient', () => {
-  it('publish returns tentative (not crash) when chain rejects insufficient sigs', async () => {
+  it('publish returns failed (not crash) when chain rejects insufficient sigs', async () => {
     const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', wallet.address);
@@ -640,7 +641,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
       receiverSignatureProvider: async () => [],
     });
 
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('failed');
     expect(result.onChainResult).toBeUndefined();
   });
 

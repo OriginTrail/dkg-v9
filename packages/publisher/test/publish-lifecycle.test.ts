@@ -1,7 +1,7 @@
 /**
  * E2E tests for the full publish lifecycle aligned with publish-flow.md:
  *
- * 1. Publish with two-level merkle (flat + entityProofs modes)
+ * 1. Publish with flat KC merkle roots only
  * 2. N-Triples (not N-Quads) over P2P
  * 3. Tentative → confirmed via ChainEventPoller
  * 4. confirmByMerkleRoot matching
@@ -23,7 +23,7 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
-import { computeTripleHash } from '../src/merkle.js';
+import { computeFlatCollectionRoot, computeTripleHash } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-lifecycle';
@@ -36,7 +36,7 @@ function q(s: string, p: string, o: string, g = GRAPH): Quad {
 }
 
 describe('Publish lifecycle (aligned with diagram)', () => {
-  it('produces a flat kcMerkleRoot by default (entityProofs=false)', async () => {
+  it('produces a flat kcMerkleRoot by default', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -59,7 +59,8 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     });
 
     expect(result.merkleRoot).toHaveLength(32);
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
 
     const hashes = triples.map(computeTripleHash);
     const flatTree = new MerkleTree(hashes);
@@ -67,7 +68,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
 
-  it('produces entityProofs kcMerkleRoot when enabled', async () => {
+  it('uses a single flat kcMerkleRoot across multiple entities', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -89,32 +90,17 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       q(entityB, 'http://schema.org/version', '"2"'),
     ];
 
-    const resultDefault = await publisher.publish({
+    const result = await publisher.publish({
       paranetId: PARANET,
       quads: triples,
     });
 
-    const store2 = new OxigraphStore();
-    const chain2 = new MockChainAdapter('mock:31337', TEST_WALLET.address);
-    const publisher2 = new DKGPublisher({
-      store: store2, chain: chain2, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
-    });
+    const manifest = Array.from(autoPartition(triples).keys()).map((rootEntity) => ({ rootEntity }));
+    const expectedRoot = computeFlatCollectionRoot(triples, manifest);
 
-    const resultEntity = await publisher2.publish({
-      paranetId: PARANET,
-      quads: triples,
-      entityProofs: true,
-    });
-
-    expect(resultDefault.merkleRoot).toHaveLength(32);
-    expect(resultEntity.merkleRoot).toHaveLength(32);
-    // The flat mode hashes all triples into one tree; entityProofs
-    // builds per-entity roots first, then a tree of those roots.
-    // With multiple triples per entity the two strategies diverge.
-    expect(Buffer.from(resultDefault.merkleRoot).toString('hex'))
-      .not.toBe(Buffer.from(resultEntity.merkleRoot).toString('hex'));
+    expect(result.merkleRoot).toHaveLength(32);
+    expect(Buffer.from(result.merkleRoot).toString('hex'))
+      .toBe(Buffer.from(expectedRoot).toString('hex'));
   });
 
   it('full-pipeline golden: fixed quads produce known merkle root', async () => {
@@ -196,7 +182,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     );
   });
 
-  it('anchors privateMerkleRoot as a synthetic triple', async () => {
+  it('includes privateMerkleRoot commitments in the flat KC root', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -208,25 +194,24 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    await publisher.publish({
+    const result = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"PrivBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/secret', '"s3cret"')],
     });
 
-    const result = await store.query(
-      `SELECT ?root WHERE {
-        GRAPH <${GRAPH}> {
-          <urn:dkg:kc> <http://dkg.io/ontology/privateContentRoot> ?root
-        }
-      }`,
+    const recomputedRoot = computeFlatCollectionRoot(
+      result.publicQuads ?? [],
+      result.kaManifest.map((entry) => ({
+        rootEntity: entry.rootEntity,
+        privateMerkleRoot: entry.privateMerkleRoot,
+      })),
     );
 
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      expect(result.bindings).toHaveLength(1);
-      expect(result.bindings[0]['root']).toMatch(/0x[0-9a-f]+/);
-    }
+    expect(Buffer.from(recomputedRoot).toString('hex')).toBe(
+      Buffer.from(result.merkleRoot).toString('hex'),
+    );
+    expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
   });
 
   it('sends N-Triples (no graph component) in publish request', () => {
@@ -609,7 +594,7 @@ describe('Update flow', () => {
       quads: initialTriples,
     });
 
-    expect(publishResult.status).toBe('confirmed');
+    expect(publishResult.status).toBe('tentative');
     const kcId = publishResult.kcId;
 
     const before = await store.query(
@@ -744,7 +729,7 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(uals.size).toBe(5);
   });
 
-  it('includes ual field in confirmed publish results', async () => {
+  it('includes ual field in tentative publish results', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -761,7 +746,7 @@ describe('Tentative publish UAL uniqueness', () => {
       quads: [q(ENTITY, 'http://schema.org/name', '"ConfirmedUAL"')],
     });
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
     expect(result.ual).toBeTruthy();
     expect(result.ual).toContain('did:dkg:');
   });

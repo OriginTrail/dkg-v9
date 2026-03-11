@@ -50,7 +50,8 @@ describe('DKGPublisher', () => {
     expect(result.merkleRoot).toHaveLength(32);
     expect(result.kaManifest).toHaveLength(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
 
     const count = await store.countQuads(GRAPH);
     expect(count).toBe(2);
@@ -73,7 +74,8 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest.map((m) => m.rootEntity).sort()).toEqual(
       [ENTITY, ENTITY2].sort(),
     );
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
   });
 
   it('publishes with blank nodes (auto-skolemized)', async () => {
@@ -87,7 +89,8 @@ describe('DKGPublisher', () => {
     });
 
     expect(result.kaManifest).toHaveLength(1);
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
 
     const queryResult = await store.query(
       `SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`,
@@ -111,7 +114,8 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest[0].privateTripleCount).toBe(1);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot!).toHaveLength(32);
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeDefined();
   });
 
   it('rejects duplicate entity (exclusivity)', async () => {
@@ -165,13 +169,13 @@ describe('DKGPublisher', () => {
     expect(emitted).toBe(true);
   });
 
-  it('publishes with confirmed status and onChainResult', async () => {
+  it('publishes with tentative status and onChainResult', async () => {
     const result = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
     expect(result.onChainResult).toBeDefined();
     expect(result.onChainResult!.batchId).toBeTypeOf('bigint');
     expect(result.onChainResult!.txHash).toBeTypeOf('string');
@@ -197,8 +201,7 @@ describe('DKGPublisher', () => {
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings).toHaveLength(1);
       const ual = metaResult.bindings[0]['ual'];
-      // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{startKAId}
-      expect(ual).toMatch(/^did:dkg:mock:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
+      expect(ual).toMatch(/^did:dkg:mock:31337\/0x[0-9a-fA-F]{40}\/t/);
       expect(ual).toContain(result.onChainResult!.publisherAddress);
     }
   });
@@ -214,7 +217,7 @@ describe('DKGPublisher', () => {
     );
   });
 
-  it('stores only confirmed status in meta graph on successful publish', async () => {
+  it('stores only tentative status in meta graph until poller confirmation', async () => {
     await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
@@ -228,10 +231,10 @@ describe('DKGPublisher', () => {
     expect(statusResult.type).toBe('bindings');
     if (statusResult.type === 'bindings') {
       const statuses = statusResult.bindings.map((b) => b['status']);
-      // Clean model: either tentative or confirmed, never both. On success we have only confirmed.
+      // Pre-chain publish stores only tentative metadata. Canonical confirmation is poller-driven.
       expect(statuses).toHaveLength(1);
-      expect(statuses.some((s) => s.includes('confirmed'))).toBe(true);
-      expect(statuses.some((s) => s.includes('tentative'))).toBe(false);
+      expect(statuses.some((s) => s.includes('tentative'))).toBe(true);
+      expect(statuses.some((s) => s.includes('confirmed'))).toBe(false);
     }
   });
 });

@@ -49,8 +49,8 @@ export class MockChainAdapter implements ChainAdapter {
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
 
-  /** Configurable minimum receiver signatures. When > 0, publishKnowledgeAssets will check the count. Default: 1. */
-  minimumRequiredSignatures = 1;
+  /** Configurable minimum receiver signatures. When > 0, publishKnowledgeAssets will check the count. Default: 0 for legacy mock/no-chain flow. */
+  minimumRequiredSignatures = 0;
 
   constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
     this.chainId = chainId;
@@ -121,6 +121,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: params.publicByteSize.toString(),
       startKAId: params.startKAId.toString(),
       endKAId: params.endKAId.toString(),
       kaCount,
@@ -151,6 +152,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: params.publicByteSize.toString(),
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,
@@ -173,6 +175,14 @@ export class MockChainAdapter implements ChainAdapter {
     return 1n;
   }
 
+  async getMinimumRequiredSignatures(): Promise<number> {
+    return this.minimumRequiredSignatures;
+  }
+
+  async getBlockNumber(): Promise<number> {
+    return Math.max(0, this.nextBlock - 1);
+  }
+
   async publishKnowledgeAssetsPermanent(params: PermanentPublishParams): Promise<OnChainPublishResult> {
     const { startId, endId } = await this.reserveUALRange(params.kaCount);
 
@@ -187,6 +197,7 @@ export class MockChainAdapter implements ChainAdapter {
       batchId: batchId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: params.publicByteSize.toString(),
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,

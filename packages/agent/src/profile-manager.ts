@@ -17,7 +17,10 @@ export class ProfileManager {
     this.store = store;
   }
 
-  async publishProfile(config: AgentProfileConfig): Promise<PublishResult> {
+  async publishProfile(
+    config: AgentProfileConfig,
+    publishOptions?: Partial<PublishOptions>,
+  ): Promise<PublishResult> {
     const { quads, rootEntity } = buildAgentProfile(config);
 
     // Remove stale triples from prior profile publishes so the data graph
@@ -28,6 +31,7 @@ export class ProfileManager {
     const options: PublishOptions = {
       paranetId: AGENT_REGISTRY_PARANET,
       quads,
+      ...publishOptions,
     };
 
     if (this.currentKcId) {

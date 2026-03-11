@@ -1,6 +1,14 @@
 import { sha256, MerkleTree, hashTriple } from '@dkg/core';
 import type { Quad } from '@dkg/storage';
 
+const DKG_PRIVATE_COMMITMENT_PREDICATE = 'http://dkg.io/ontology/privateMerkleRootCommitment';
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 /**
  * Compute SHA-256 hash of a single triple (s, p, o).
  * Graph component is excluded per spec.
@@ -32,4 +40,37 @@ export function computeKARoot(
 
 export function computeKCRoot(kaRoots: Uint8Array[]): Uint8Array {
   return MerkleTree.computeKCRoot(kaRoots);
+}
+
+export function computeSyntheticPrivateCommitmentHash(
+  rootEntity: string,
+  privateMerkleRoot: Uint8Array,
+): Uint8Array {
+  return computeTripleHash({
+    subject: rootEntity,
+    predicate: DKG_PRIVATE_COMMITMENT_PREDICATE,
+    object: `"0x${toHex(privateMerkleRoot)}"`,
+    graph: '',
+  });
+}
+
+export function computeFlatCollectionRoot(
+  publicQuads: Quad[],
+  manifest: Array<{ rootEntity: string; privateMerkleRoot?: Uint8Array }>,
+): Uint8Array {
+  const leaves = publicQuads.map(computeTripleHash);
+
+  for (const entry of manifest) {
+    if (!entry.privateMerkleRoot || entry.privateMerkleRoot.length === 0) {
+      continue;
+    }
+    leaves.push(
+      computeSyntheticPrivateCommitmentHash(
+        entry.rootEntity,
+        entry.privateMerkleRoot,
+      ),
+    );
+  }
+
+  return new MerkleTree(leaves).root;
 }

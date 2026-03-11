@@ -8,6 +8,7 @@ import { EditorState, type Extension } from '@codemirror/state';
 import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view';
 import { sql } from '@codemirror/lang-sql';
 import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { buildTripleRowsWithProvenance, deriveGraphTriples } from '../sparql-utils.js';
 
 export function ExplorerPage() {
   return (
@@ -727,6 +728,7 @@ function SparqlTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialQuery = searchParams.get('q') || TEMPLATES['All triples + provenance (SPOG, limit 100)'];
   const [sparql, setSparql] = useState(initialQuery);
+  const [executedQuery, setExecutedQuery] = useState(initialQuery);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -758,6 +760,7 @@ function SparqlTab() {
       setExecTime(duration);
       const raw = res.result;
       setResult(raw?.bindings ?? raw);
+      setExecutedQuery(query);
     } catch (err: any) {
       setError(err.message);
       setResult(null);
@@ -780,8 +783,8 @@ function SparqlTab() {
   }, [searchParams, autoRan, runQuery, setSearchParams, sparql]);
 
   const derivedTriples = useMemo(
-    () => deriveGraphTriples(result, sparql),
-    [result, sparql],
+    () => deriveGraphTriples(result, executedQuery),
+    [result, executedQuery],
   );
 
   useEffect(() => {
@@ -934,7 +937,7 @@ ${values}
               {resultsTab === 'triples' && (
                 <ResultTriples
                   result={result}
-                  sparql={sparql}
+                  triples={derivedTriples}
                   rows={provenanceRows}
                   loading={provenanceLoading}
                   onFocusSubject={setFocusedSubject}
@@ -946,7 +949,7 @@ ${values}
           </div>
         </div>
       <div className="sparql-graph-pane">
-        <ResultGraph result={result} sparql={sparql} focusedSubject={focusedSubject} />
+        <ResultGraph result={result} sparql={executedQuery} focusedSubject={focusedSubject} />
       </div>
     </div>
   );
@@ -954,13 +957,13 @@ ${values}
 
 function ResultTriples({
   result,
-  sparql,
+  triples,
   rows,
   loading,
   onFocusSubject,
 }: {
   result: any;
-  sparql: string;
+  triples: Array<{ s: string; p: string; o: string }>;
   rows: Array<{
     s: string;
     p: string;
@@ -977,13 +980,16 @@ function ResultTriples({
   onFocusSubject: (subject: string) => void;
 }) {
   if (!Array.isArray(result) || result.length === 0) return <div className="empty-state">Run a query to see triples</div>;
-  const triples = deriveGraphTriples(result, sparql);
   if (!triples.length) return <div className="empty-state">No triple-shaped rows in this result set</div>;
-  if (loading) return <div className="empty-state">Loading provenance metadata…</div>;
-  if (!rows.length) return <div className="empty-state">No provenance metadata found in named graphs for these triples</div>;
+  const displayRows = buildTripleRowsWithProvenance(triples, rows);
 
   return (
     <div style={{ overflow: 'auto' }}>
+      {loading && (
+        <div className="empty-state" style={{ borderBottom: '1px solid var(--border)' }}>
+          Loading provenance metadata…
+        </div>
+      )}
       <table className="data-table">
         <thead>
           <tr>
@@ -1000,7 +1006,7 @@ function ResultTriples({
           </tr>
         </thead>
         <tbody>
-          {rows.map((t, i) => (
+          {displayRows.map((t, i) => (
             <tr key={`${t.s}-${t.p}-${t.o}-${i}`}>
               <CellWithCopy value={t.s} clickable onClick={() => onFocusSubject(t.s)} />
               <CellWithCopy value={t.p} />
@@ -1105,7 +1111,16 @@ function isLikelyResource(value: string): boolean {
   return value.startsWith('http://') || value.startsWith('https://') || value.startsWith('urn:') || value.startsWith('did:') || value.startsWith('_:');
 }
 
+function isSerializedRdfTerm(value: string): boolean {
+  return (
+    /^<[^>]+>$/.test(value) ||
+    /^_:[A-Za-z][\w-]*$/.test(value) ||
+    /^"((?:[^"\\]|\\.)*)"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|[A-Za-z][\w+.-]*:[^\s]+))?$/.test(value)
+  );
+}
+
 function toNQuadTerm(value: string): string {
+  if (isSerializedRdfTerm(value)) return value;
   if (value.startsWith('_:')) return value;
   if (isLikelyResource(value)) return `<${value}>`;
   const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
@@ -1113,6 +1128,7 @@ function toNQuadTerm(value: string): string {
 }
 
 function toSparqlTerm(value: string): string {
+  if (isSerializedRdfTerm(value)) return value;
   if (value.startsWith('_:')) return value;
   if (isLikelyResource(value)) return `<${value}>`;
   const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
@@ -1132,11 +1148,20 @@ function dedupeTriples(triples: Array<{ s: string; p: string; o: string }>): Arr
 }
 
 function normalizeNodeSource(raw: string): string {
-  const v = (raw || '').trim();
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  let v = trimmed;
+  const literalMatch = v.match(/^"((?:[^"\\]|\\.)*)"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|[A-Za-z][\w+.-]*:[^\s]+))?$/);
+  if (literalMatch) {
+    v = literalMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  } else if (v.startsWith('<') && v.endsWith('>')) {
+    v = v.slice(1, -1);
+  }
   if (!v) return '';
   if (v.startsWith('did:dkg:agent:')) return v.replace('did:dkg:agent:', '');
   if (/^12D3[A-Za-z0-9]+/.test(v)) return v;
   if (/^Qm[A-Za-z0-9]+/.test(v)) return v; // legacy peer id style
+  if (/^0x[a-fA-F0-9]{40}$/.test(v)) return v;
   return '';
 }
 
@@ -1197,83 +1222,6 @@ function CellWithCopy({
       )}
     </td>
   );
-}
-
-type TriplePattern = { s: string; p: string; o: string };
-
-function parseTriplePatternFromQuery(sparql: string): TriplePattern | null {
-  const withoutComments = sparql.replace(/#[^\n\r]*/g, ' ');
-  const whereMatch = withoutComments.match(/where\s*\{([\s\S]+)\}/i);
-  const source = whereMatch ? whereMatch[1] : withoutComments;
-  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|[A-Za-z][\w+.-]*:[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?)`;
-  const tripleRegex = new RegExp(`(${term})\\s+(${term})\\s+(${term})\\s*\\.?`, 'ig');
-  const match = tripleRegex.exec(source);
-  if (!match) return null;
-  return { s: match[1], p: match[2], o: match[3] };
-}
-
-function normalizeSparqlToken(token: string): string {
-  const trimmed = token.trim().replace(/[.;]$/, '');
-  if (trimmed === 'a') return RDF_TYPE;
-  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
-    return trimmed.slice(1, -1);
-  }
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function coerceBindingValue(value: unknown): string | null {
-  if (value == null) return null;
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (value && typeof value === 'object' && 'value' in (value as Record<string, unknown>)) {
-    return coerceBindingValue((value as Record<string, unknown>).value);
-  }
-  return String(value);
-}
-
-function resolveTermValue(row: Record<string, unknown>, token: string): string | null {
-  if (token.startsWith('?')) {
-    return coerceBindingValue(row[token.slice(1)]);
-  }
-  return normalizeSparqlToken(token);
-}
-
-function deriveGraphTriples(result: any, sparql: string): Array<{ s: string; p: string; o: string }> {
-  if (!Array.isArray(result) || result.length === 0) return [];
-
-  if ('s' in result[0] && 'p' in result[0] && 'o' in result[0]) {
-    return result
-      .map((row: any) => ({
-        s: coerceBindingValue(row.s),
-        p: coerceBindingValue(row.p),
-        o: coerceBindingValue(row.o),
-      }))
-      .filter((row: any) => row.s && row.p && row.o);
-  }
-  if ('subject' in result[0] && 'predicate' in result[0] && 'object' in result[0]) {
-    return result
-      .map((row: any) => ({
-        s: coerceBindingValue(row.subject),
-        p: coerceBindingValue(row.predicate),
-        o: coerceBindingValue(row.object),
-      }))
-      .filter((row: any) => row.s && row.p && row.o);
-  }
-
-  const triplePattern = parseTriplePatternFromQuery(sparql);
-  if (!triplePattern) return [];
-
-  return result
-    .map((row: any) => ({
-      s: resolveTermValue(row, triplePattern.s),
-      p: resolveTermValue(row, triplePattern.p),
-      o: resolveTermValue(row, triplePattern.o),
-    }))
-    .filter((row: any) => row.s && row.p && row.o);
 }
 
 function GraphFocusBridge({ focusedSubject }: { focusedSubject: string | null }) {

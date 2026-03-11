@@ -237,8 +237,12 @@ describe('SPARQL helper cards', () => {
   const explorer = readFile('pages/Explorer.tsx');
 
   it('defines exactly 4 query helper cards', () => {
-    const titleMatches = explorer.match(/title:\s*'/g) ?? [];
-    // QUERY_HELPERS contains the 4 clickable cards shown in UI.
+    const helperBlockMatch = explorer.match(
+      /const QUERY_HELPERS:\s*Array<\{[^}]+\}>\s*=\s*\[([\s\S]*?)\n\];/,
+    );
+    expect(helperBlockMatch).not.toBeNull();
+    const helperBlock = helperBlockMatch?.[1] ?? '';
+    const titleMatches = helperBlock.match(/title:\s*['"]/g) ?? [];
     expect(titleMatches.length).toBe(4);
   });
 
@@ -254,6 +258,32 @@ describe('SPARQL helper cards', () => {
   it('auto-runs default query on first page load', () => {
     expect(explorer).toContain('if (autoRan) return;');
     expect(explorer).toContain('runQuery(sparql)');
+  });
+
+  it('derives triples from executed query, not live editor text', () => {
+    expect(explorer).toContain('const [executedQuery, setExecutedQuery] = useState(initialQuery);');
+    expect(explorer).toContain('setExecutedQuery(query);');
+    expect(explorer).toContain('deriveGraphTriples(result, executedQuery)');
+  });
+
+  it('uses token-aware SPARQL comment stripping (keeps # inside IRIs)', () => {
+    expect(explorer).toContain("from '../sparql-utils.js'");
+    expect(explorer).not.toContain("sparql.replace(/#[^\\n\\r]*/g, ' ')");
+  });
+
+  it('expands triples to one row per (s,p,o,g) when provenance exists', () => {
+    expect(explorer).toContain('buildTripleRowsWithProvenance(triples, rows)');
+    expect(explorer).not.toContain('No provenance metadata found in named graphs for these triples');
+  });
+
+  it('does not double-encode already serialized RDF terms in VALUES/N-Quads rendering', () => {
+    expect(explorer).toContain('function isSerializedRdfTerm');
+    expect(explorer).toContain('if (isSerializedRdfTerm(value)) return value;');
+  });
+
+  it('normalizes quoted source literals and keeps EVM addresses when present', () => {
+    expect(explorer).toContain('const literalMatch = v.match(');
+    expect(explorer).toContain('/^0x[a-fA-F0-9]{40}$/');
   });
 });
 

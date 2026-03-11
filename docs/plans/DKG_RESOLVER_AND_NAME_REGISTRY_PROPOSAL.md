@@ -42,12 +42,12 @@ This proposal introduces:
 
 Relevant code and current capabilities:
 
-- System paranets: `agents`, `ontology` in [packages/core/src/genesis.ts](/Users/aleatoric/dev/dkg-v9/packages/core/src/genesis.ts)
-- Agent profiles and agent graph schema in [packages/agent/src/profile.ts](/Users/aleatoric/dev/dkg-v9/packages/agent/src/profile.ts)
-- Metadata generation in [packages/publisher/src/metadata.ts](/Users/aleatoric/dev/dkg-v9/packages/publisher/src/metadata.ts)
+- System paranets: `agents`, `ontology` in [packages/core/src/genesis.ts](../../packages/core/src/genesis.ts)
+- Agent profiles and agent graph schema in [packages/agent/src/profile.ts](../../packages/agent/src/profile.ts)
+- Metadata generation in [packages/publisher/src/metadata.ts](../../packages/publisher/src/metadata.ts)
 - Publish/update call paths:
-  - [packages/agent/src/dkg-agent.ts](/Users/aleatoric/dev/dkg-v9/packages/agent/src/dkg-agent.ts)
-  - [packages/publisher/src/dkg-publisher.ts](/Users/aleatoric/dev/dkg-v9/packages/publisher/src/dkg-publisher.ts)
+  - [packages/agent/src/dkg-agent.ts](../../packages/agent/src/dkg-agent.ts)
+  - [packages/publisher/src/dkg-publisher.ts](../../packages/publisher/src/dkg-publisher.ts)
 
 ## 4) Identity model (dual provenance)
 
@@ -406,24 +406,24 @@ Release gating checklist:
 
 Core/ontology:
 
-- [packages/core/src/genesis.ts](/Users/aleatoric/dev/dkg-v9/packages/core/src/genesis.ts)
+- [packages/core/src/genesis.ts](../../packages/core/src/genesis.ts)
 - potential new ontology/schema constants near genesis/core exports
 
 Publisher/agent metadata enforcement:
 
-- [packages/publisher/src/metadata.ts](/Users/aleatoric/dev/dkg-v9/packages/publisher/src/metadata.ts)
-- [packages/publisher/src/dkg-publisher.ts](/Users/aleatoric/dev/dkg-v9/packages/publisher/src/dkg-publisher.ts)
-- [packages/agent/src/dkg-agent.ts](/Users/aleatoric/dev/dkg-v9/packages/agent/src/dkg-agent.ts)
+- [packages/publisher/src/metadata.ts](../../packages/publisher/src/metadata.ts)
+- [packages/publisher/src/dkg-publisher.ts](../../packages/publisher/src/dkg-publisher.ts)
+- [packages/agent/src/dkg-agent.ts](../../packages/agent/src/dkg-agent.ts)
 
 Resolver runtime/API:
 
-- [packages/query](../packages/query) (library placement candidate)
-- [packages/cli/src/daemon.ts](/Users/aleatoric/dev/dkg-v9/packages/cli/src/daemon.ts)
-- [packages/cli/src/cli.ts](/Users/aleatoric/dev/dkg-v9/packages/cli/src/cli.ts)
+- [packages/query](../../packages/query) (library placement candidate)
+- [packages/cli/src/daemon.ts](../../packages/cli/src/daemon.ts)
+- [packages/cli/src/cli.ts](../../packages/cli/src/cli.ts)
 
 UI support:
 
-- [packages/node-ui/src/ui](../packages/node-ui/src/ui)
+- [packages/node-ui/src/ui](../../packages/node-ui/src/ui)
 
 ---
 

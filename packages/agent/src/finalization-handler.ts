@@ -199,7 +199,7 @@ export class FinalizationHandler {
         for await (const event of this.chain.listenForEvents(cgFilter)) {
           const eventCGId = String(event.data['contextGraphId'] ?? '');
           const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
-          if (eventCGId === ctxGraphId && (!expectedBatchId || eventBatchId === expectedBatchId)) return true;
+          if (eventCGId === ctxGraphId && (expectedBatchId === undefined || eventBatchId === expectedBatchId)) return true;
         }
         return false;
       }

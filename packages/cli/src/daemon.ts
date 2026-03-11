@@ -598,8 +598,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         try {
           const bodyStr = await readBody(req);
           const { ttlDays } = JSON.parse(bodyStr ?? '{}') as { ttlDays?: number };
-          if (typeof ttlDays !== 'number' || ttlDays < 0) {
-            return jsonResponse(res, 400, { error: 'ttlDays must be a non-negative number' });
+          if (typeof ttlDays !== 'number' || !Number.isFinite(ttlDays) || ttlDays < 0) {
+            return jsonResponse(res, 400, { error: 'ttlDays must be a finite non-negative number' });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
           config.workspaceTtlMs = ttlMs;
@@ -1589,6 +1589,22 @@ async function handleRequest(
     const { participantIdentityIds, requiredSignatures } = JSON.parse(body);
     if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
       return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
+    }
+    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 0) {
+      return jsonResponse(res, 400, { error: 'requiredSignatures must be a non-negative integer' });
+    }
+    if (requiredSignatures > participantIdentityIds.length) {
+      return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
+    }
+    for (let i = 0; i < participantIdentityIds.length; i++) {
+      const id = participantIdentityIds[i];
+      if (typeof id !== 'number' && typeof id !== 'string') {
+        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
+      }
+      const n = Number(id);
+      if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
+        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive integer` });
+      }
     }
     try {
       const result = await agent.createContextGraph({

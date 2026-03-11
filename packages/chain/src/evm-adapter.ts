@@ -634,6 +634,29 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
 
+      if (eventType === 'ContextGraphExpanded') {
+        const cgStorage = this.contracts.contextGraphStorage;
+        if (cgStorage) {
+          const eventFilter = cgStorage.filters.ContextGraphExpanded();
+          const logs = await cgStorage.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+
+          for (const log of logs) {
+            const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed) {
+              yield {
+                type: 'ContextGraphExpanded',
+                blockNumber: log.blockNumber,
+                data: {
+                  contextGraphId: parsed.args.contextGraphId.toString(),
+                  batchId: parsed.args.batchId?.toString(),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
+          }
+        }
+      }
+
       // V8 backward compat
       if (eventType === 'KCCreated' || eventType === 'KnowledgeCollectionCreated') {
         const kcStorage = this.contracts.knowledgeCollectionStorage;
@@ -871,7 +894,20 @@ export class EVMChainAdapter implements ChainAdapter {
     );
     const receipt = await tx.wait();
 
-    const batchId = BigInt(receipt.logs[0]?.topics?.[1] ?? 0);
+    let batchId = 0n;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+
     return {
       batchId,
       txHash: receipt.hash,

@@ -368,6 +368,10 @@ export class DKGPublisher implements Publisher {
               contextGraphId: ctxGraphId,
               error: msg,
             });
+            return {
+              ...publishResult,
+              status: 'failed' as const,
+            };
           }
         }
       }

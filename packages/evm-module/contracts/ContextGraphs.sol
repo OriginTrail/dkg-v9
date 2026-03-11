@@ -105,7 +105,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
         bytes32 digest = keccak256(abi.encodePacked(contextGraphId, merkleRoot));
 
+        uint72 prevId = 0;
         for (uint256 i; i < signerIdentityIds.length; i++) {
+            require(signerIdentityIds[i] > prevId, "Duplicate or unsorted signer");
+            prevId = signerIdentityIds[i];
+
             require(
                 contextGraphStorage.isParticipant(contextGraphId, signerIdentityIds[i]),
                 "Signer not a participant"

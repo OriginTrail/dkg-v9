@@ -24,23 +24,38 @@ export interface FinalizationMessageMsg {
   paranetId: string;
   kcMerkleRoot: Uint8Array;
   txHash: string;
-  blockNumber: number | Long;
-  batchId: number | Long;
-  startKAId: number | Long;
-  endKAId: number | Long;
+  blockNumber: number | bigint | Long;
+  batchId: number | bigint | Long;
+  startKAId: number | bigint | Long;
+  endKAId: number | bigint | Long;
   publisherAddress: string;
   rootEntities: string[];
-  timestampMs: number | Long;
+  timestampMs: number | bigint | Long;
   /** Originator's operation ID for cross-node log correlation. */
   operationId?: string;
   /** When set, the enshrine targeted a context graph instead of the paranet data graph. */
   contextGraphId?: string;
 }
 
+function bigIntToProtoSafe(val: number | bigint | Long): number | Long {
+  if (typeof val === 'bigint') {
+    const low = Number(val & 0xFFFFFFFFn);
+    const high = Number((val >> 32n) & 0xFFFFFFFFn);
+    return { low, high, unsigned: true };
+  }
+  return val as number | Long;
+}
+
 export function encodeFinalizationMessage(msg: FinalizationMessageMsg): Uint8Array {
-  const ts = typeof msg.timestampMs === 'object' ? msg.timestampMs : msg.timestampMs;
   return FinalizationMessageSchema.encode(
-    FinalizationMessageSchema.create({ ...msg, timestampMs: ts }),
+    FinalizationMessageSchema.create({
+      ...msg,
+      blockNumber: bigIntToProtoSafe(msg.blockNumber),
+      batchId: bigIntToProtoSafe(msg.batchId),
+      startKAId: bigIntToProtoSafe(msg.startKAId),
+      endKAId: bigIntToProtoSafe(msg.endKAId),
+      timestampMs: bigIntToProtoSafe(msg.timestampMs),
+    }),
   ).finish();
 }
 

@@ -131,6 +131,7 @@ describe('FinalizationHandler', () => {
       chainId: 'mock:31337',
       listenForEvents: async function* () {
         yield {
+          type: 'KnowledgeBatchCreated',
           blockNumber: 100,
           data: {
             txHash: '0xabc123',
@@ -281,6 +282,7 @@ describe('FinalizationHandler', () => {
       chainId: 'mock:31337',
       listenForEvents: async function* () {
         yield {
+          type: 'KnowledgeBatchCreated',
           blockNumber: 100,
           data: {
             txHash: '0xabc123',
@@ -289,6 +291,11 @@ describe('FinalizationHandler', () => {
             startKAId: '1',
             endKAId: '1',
           },
+        };
+        yield {
+          type: 'ContextGraphExpanded',
+          blockNumber: 100,
+          data: { contextGraphId: ctxGraphId },
         };
       },
     } as any;

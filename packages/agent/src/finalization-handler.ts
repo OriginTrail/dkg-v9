@@ -66,7 +66,7 @@ export class FinalizationHandler {
         if (merkleMatch) {
           const verified = await this.verifyOnChain(
             msg.txHash, blockNumber, msg.kcMerkleRoot,
-            msg.publisherAddress, startKAId, endKAId, ctx,
+            msg.publisherAddress, startKAId, endKAId, ctx, ctxGraphId,
           );
 
           if (verified) {
@@ -151,17 +151,21 @@ export class FinalizationHandler {
     expectedStartKAId: bigint,
     expectedEndKAId: bigint,
     ctx: OperationContext,
+    ctxGraphId?: string,
   ): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none') return false;
     if (blockNumber <= 0) return false;
 
     try {
-      const filter: EventFilter = {
+      // Verify KnowledgeBatchCreated at the specific block
+      const batchFilter: EventFilter = {
         eventTypes: ['KnowledgeBatchCreated'],
         fromBlock: blockNumber,
         toBlock: blockNumber,
       };
-      for await (const event of this.chain.listenForEvents(filter)) {
+
+      let batchVerified = false;
+      for await (const event of this.chain.listenForEvents(batchFilter)) {
         if (event.blockNumber !== blockNumber) continue;
         if (txHash && (!event.data['txHash'] || (event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase())) {
           continue;
@@ -178,8 +182,26 @@ export class FinalizationHandler {
         const publisherMatch = eventPublisher.toLowerCase() === expectedPublisher.toLowerCase();
         const rangeMatch = eventStartKAId === expectedStartKAId && eventEndKAId === expectedEndKAId;
 
-        if (merkleMatch && publisherMatch && rangeMatch) return true;
+        if (merkleMatch && publisherMatch && rangeMatch) { batchVerified = true; break; }
       }
+
+      if (!batchVerified) return false;
+
+      // For context graph finalizations, also verify ContextGraphExpanded
+      // (may be at a later block since addBatchToContextGraph is a separate tx)
+      if (ctxGraphId) {
+        const cgFilter: EventFilter = {
+          eventTypes: ['ContextGraphExpanded'],
+          fromBlock: blockNumber,
+        };
+        for await (const event of this.chain.listenForEvents(cgFilter)) {
+          const eventCGId = String(event.data['contextGraphId'] ?? '');
+          if (eventCGId === ctxGraphId) return true;
+        }
+        return false;
+      }
+
+      return true;
     } catch (err) {
       this.log.info(ctx, `Finalization on-chain verification pending (RPC may be lagging): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -212,9 +234,11 @@ export class FinalizationHandler {
     const partitioned = autoPartition(canonicalQuads);
     const kaMetadata: KAMetadata[] = [];
     const kaRoots: Uint8Array[] = [];
-    let tokenIdx = 0;
 
-    for (const [rootEntity, entityQuads] of partitioned) {
+    for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
+      const rootEntity = rootEntities[tokenIdx];
+      const entityQuads = partitioned.get(rootEntity) ?? [];
+      if (entityQuads.length === 0) continue;
       const publicRoot = computePublicRoot(entityQuads);
       kaRoots.push(computeKARoot(publicRoot, undefined));
       kaMetadata.push({
@@ -225,7 +249,6 @@ export class FinalizationHandler {
         privateTripleCount: 0,
         privateMerkleRoot: undefined,
       });
-      tokenIdx++;
     }
 
     const merkleRoot = computeKCRoot(kaRoots);
@@ -264,14 +287,43 @@ export class FinalizationHandler {
     for (const rootEntity of rootEntities) {
       await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
-      await this.store.deleteByPattern({ graph: wsMetaGraph, subject: rootEntity });
+      await this.store.deleteByPattern({
+        graph: wsMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+      });
+      await this.deleteMetaForRoot(wsMetaGraph, rootEntity);
     }
 
     this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from workspace to canonical for ${ual}`);
   }
+
+  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+    );
+    if (result.type !== 'bindings') return;
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (!op) continue;
+      await this.store.delete([{
+        subject: op, predicate: `${DKG}rootEntity`, object: rootEntity, graph: metaGraph,
+      }]);
+      const remaining = await this.store.query(
+        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
+      );
+      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      const countVal = typeof rawCount === 'string'
+        ? Number(rawCount.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, ''))
+        : NaN;
+      if (countVal === 0) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+      }
+    }
+  }
 }
 
-function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
+function protoToNumber(val: number | bigint | { low: number; high: number; unsigned: boolean }): number {
+  if (typeof val === 'bigint') return Number(val);
   if (typeof val === 'number') return val;
   return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
 }

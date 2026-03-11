@@ -812,7 +812,9 @@ export class DKGAgent {
     // Keep runtime sync scope up to date so future peer:connect syncs include this paranet.
     this.trackSyncParanet(paranetId);
 
-    const peers = this.node.libp2p.getPeers();
+    const peers = [...new Map(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
     let syncCapablePeers = 0;
     let peersTried = 0;
     let dataSynced = 0;

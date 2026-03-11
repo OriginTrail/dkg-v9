@@ -66,7 +66,7 @@ function parseTriplePatternFromQuery(sparql: string): TriplePattern | null {
   const withoutComments = stripSparqlComments(sparql);
   const whereMatch = withoutComments.match(/where\s*\{([\s\S]+)\}/i);
   const source = whereMatch ? whereMatch[1] : withoutComments;
-  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|[A-Za-z][\w+.-]*:[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|[A-Za-z][\w+.-]*:[^\s{};,.]+))?)`;
+  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|(?:[A-Za-z][\w+.-]*|):[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|(?:[A-Za-z][\w+.-]*|):[^\s{};,.]+))?)`;
   const tripleRegex = new RegExp(`(${term})\\s+(${term})\\s+(${term})\\s*\\.?`, 'ig');
   const match = tripleRegex.exec(source);
   if (!match) return null;
@@ -76,10 +76,10 @@ function parseTriplePatternFromQuery(sparql: string): TriplePattern | null {
 function parseSparqlPrefixes(sparql: string): PrefixMap {
   const prefixes: PrefixMap = new Map();
   const withoutComments = stripSparqlComments(sparql);
-  const prefixRegex = /(?:^|\s)PREFIX\s+([A-Za-z][\w-]*)\s*:\s*<([^>]+)>/gim;
+  const prefixRegex = /(?:^|\s)PREFIX\s+([A-Za-z][\w-]*)?\s*:\s*<([^>]+)>/gim;
   let match: RegExpExecArray | null;
   while ((match = prefixRegex.exec(withoutComments)) !== null) {
-    prefixes.set(match[1], match[2]);
+    prefixes.set(match[1] ?? '', match[2]);
   }
   return prefixes;
 }
@@ -91,7 +91,7 @@ function normalizeSparqlToken(token: string, prefixes: PrefixMap): string {
     return trimmed.slice(1, -1);
   }
 
-  const literalMatch = trimmed.match(/^"((?:[^"\\]|\\.)*)"(?:(@[A-Za-z-]+)|\^\^(<[^>]+>|[A-Za-z][\w+.-]*:[^\s]+))?$/);
+  const literalMatch = trimmed.match(/^"((?:[^"\\]|\\.)*)"(?:(@[A-Za-z-]+)|\^\^(<[^>]+>|(?:[A-Za-z][\w+.-]*|):[^\s]+))?$/);
   if (literalMatch) {
     const lexical = literalMatch[1];
     const langTag = literalMatch[2] ?? '';
@@ -99,7 +99,7 @@ function normalizeSparqlToken(token: string, prefixes: PrefixMap): string {
     if (langTag) return `"${lexical}"${langTag}`;
     if (!datatype) return `"${lexical}"`;
     if (datatype.startsWith('<') && datatype.endsWith('>')) return `"${lexical}"^^${datatype}`;
-    const curieMatch = datatype.match(/^([A-Za-z][\w-]*):(.+)$/);
+    const curieMatch = datatype.match(/^([A-Za-z][\w-]*|):(.+)$/);
     if (curieMatch) {
       const iriBase = prefixes.get(curieMatch[1]);
       if (iriBase) return `"${lexical}"^^<${iriBase}${curieMatch[2]}>`;
@@ -107,7 +107,7 @@ function normalizeSparqlToken(token: string, prefixes: PrefixMap): string {
     return `"${lexical}"^^${datatype}`;
   }
 
-  const curieMatch = trimmed.match(/^([A-Za-z][\w-]*):(.+)$/);
+  const curieMatch = trimmed.match(/^([A-Za-z][\w-]*|):(.+)$/);
   if (curieMatch) {
     const iriBase = prefixes.get(curieMatch[1]);
     if (iriBase) return `${iriBase}${curieMatch[2]}`;

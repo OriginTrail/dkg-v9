@@ -749,22 +749,27 @@ function SparqlTab() {
   }>>([]);
   const [provenanceLoading, setProvenanceLoading] = useState(false);
   const [focusedSubject, setFocusedSubject] = useState<string | null>(null);
+  const runSeqRef = useRef(0);
 
   const runQuery = useCallback(async (query: string) => {
+    const runSeq = ++runSeqRef.current;
     setLoading(true);
     setError(null);
     const start = performance.now();
     try {
       const res = await executeQuery(query);
+      if (runSeq !== runSeqRef.current) return;
       const duration = Math.round(performance.now() - start);
       setExecTime(duration);
       const raw = res.result;
       setResult(raw?.bindings ?? raw);
       setExecutedQuery(query);
     } catch (err: any) {
+      if (runSeq !== runSeqRef.current) return;
       setError(err.message);
       setResult(null);
     } finally {
+      if (runSeq !== runSeqRef.current) return;
       setLoading(false);
     }
   }, []);

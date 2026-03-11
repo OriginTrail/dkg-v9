@@ -291,6 +291,11 @@ describe('SPARQL helper cards', () => {
     expect(explorer).toContain('?workspaceOwner');
     expect(explorer).toContain('?publisherPeerId');
   });
+
+  it('guards runQuery state updates against out-of-order responses', () => {
+    expect(explorer).toContain('const runSeqRef = useRef(0);');
+    expect(explorer).toContain('if (runSeq !== runSeqRef.current) return;');
+  });
 });
 
 describe('Apps.tsx iframe embedding', () => {

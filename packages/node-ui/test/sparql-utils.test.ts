@@ -40,6 +40,21 @@ SELECT ?s WHERE {
     ]);
   });
 
+  it('supports default PREFIX for :curie tokens and datatypes', () => {
+    const query = `PREFIX : <http://schema.org/>
+SELECT ?s WHERE {
+  ?s :name "1"^^:Integer
+}`;
+    const row = [{ s: { value: 'did:dkg:agent:12D3KooWDefaultPrefix' } }];
+    expect(deriveGraphTriples(row, query)).toEqual([
+      {
+        s: 'did:dkg:agent:12D3KooWDefaultPrefix',
+        p: 'http://schema.org/name',
+        o: '"1"^^<http://schema.org/Integer>',
+      },
+    ]);
+  });
+
   it('preserves language-tagged and CURIE-typed literal constants', () => {
     const queryWithLang = `SELECT ?s WHERE {
   ?s <http://schema.org/name> "chat"@en

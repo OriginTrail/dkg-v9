@@ -278,18 +278,28 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'GET' && path === '/api/node-log') {
     const logFilePath = join(db.dataDir, 'daemon.log');
-    const tailLines = Math.min(parseInt(url.searchParams.get('lines') ?? '500', 10), 5000);
+    const rawLines = parseInt(url.searchParams.get('lines') ?? '500', 10);
+    const tailLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(rawLines, 5000) : 500;
     const search = url.searchParams.get('q') ?? '';
     try {
-      const raw = await readFile(logFilePath, 'utf-8');
-      let lines = raw.split('\n');
-      // Take last N lines
+      const fileStat = await stat(logFilePath);
+      const TAIL_BYTES = Math.min(tailLines * 300, fileStat.size);
+      const { createReadStream } = await import('node:fs');
+      const start = Math.max(0, fileStat.size - TAIL_BYTES);
+      const chunk = await new Promise<string>((resolve, reject) => {
+        const parts: string[] = [];
+        createReadStream(logFilePath, { start, encoding: 'utf-8' })
+          .on('data', (d: string | Buffer) => parts.push(typeof d === 'string' ? d : d.toString('utf-8')))
+          .on('end', () => resolve(parts.join('')))
+          .on('error', reject);
+      });
+      let lines = chunk.split('\n');
+      if (start > 0) lines = lines.slice(1);
       lines = lines.slice(-tailLines);
       if (search) {
         const lower = search.toLowerCase();
         lines = lines.filter(l => l.toLowerCase().includes(lower));
       }
-      const fileStat = await stat(logFilePath);
       return json(res, 200, { lines, totalSize: fileStat.size });
     } catch {
       return json(res, 200, { lines: [], totalSize: 0 });

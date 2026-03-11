@@ -43,6 +43,11 @@ interface LogEntry {
   message: string;
 }
 
+/** Escape RFC 5424 SD-PARAM values: \, ", ] must be backslash-escaped. */
+function sdEscape(val: string): string {
+  return val.replace(/[\\\]"]/g, c => '\\' + c);
+}
+
 export class LogPushWorker {
   private buffer: LogEntry[] = [];
   private socket: Socket | null = null;
@@ -125,9 +130,9 @@ export class LogPushWorker {
 
     for (const entry of batch) {
       const pri = FACILITY_LOCAL0 * 8 + (SYSLOG_SEVERITY[entry.level] ?? 6);
-      // RFC 5424 with structured data for DKG fields
-      const sd = `[dkg@0 peer="${this.peerId}" op="${entry.operationName}" opid="${entry.operationId}" mod="${entry.module}" net="${this.network}"]`;
-      const line = `<${pri}>1 ${ts} ${this.nodeName} dkg-v9 - - ${sd} ${entry.message}\n`;
+      const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}"]`;
+      const msg = entry.message.replace(/[\r\n]+/g, ' ').slice(0, 8192);
+      const line = `<${pri}>1 ${ts} ${sdEscape(this.nodeName)} dkg-v9 - - ${sd} ${msg}\n`;
 
       try {
         this.socket.write(line);

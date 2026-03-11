@@ -303,6 +303,7 @@ function StatsTab() {
   const [period, setPeriod] = useState('3h');
   const [subTab, setSubTab] = useState<'operations' | 'hardware'>('operations');
   const [granularity, setGranularity] = useState('0');
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
 
   const pMs = periodToMs(period);
   const bucketMs = granularity === '0' ? undefined : parseInt(granularity, 10);
@@ -349,6 +350,23 @@ function StatsTab() {
 
   const types = perType?.types ?? [];
   const hasCharts = perTypeChartData.length > 1;
+
+  const handleLegendClick = useCallback((e: any) => {
+    const name = e.value ?? e.dataKey;
+    if (!name) return;
+    setHiddenSeries(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) { next.delete(name); } else { next.add(name); }
+      return next;
+    });
+  }, []);
+
+  const visibleTypes = types.filter((t: string) => !hiddenSeries.has(t));
+
+  const legendFormatter = useCallback((value: string) => {
+    const dimmed = hiddenSeries.has(value);
+    return <span style={{ color: dimmed ? '#555' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
+  }, [hiddenSeries]);
 
   return (
     <div>
@@ -429,8 +447,8 @@ function StatsTab() {
                     <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    {types.map(t => (
+                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    {visibleTypes.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} />
                     ))}
                   </BarChart>
@@ -445,8 +463,8 @@ function StatsTab() {
                     <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    {types.map(t => (
+                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    {visibleTypes.map((t: string) => (
                       <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} />
                     ))}
                   </AreaChart>
@@ -461,8 +479,8 @@ function StatsTab() {
                     <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
                     <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    {types.map(t => (
+                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    {visibleTypes.map((t: string) => (
                       <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} />
                     ))}
                   </AreaChart>
@@ -477,8 +495,8 @@ function StatsTab() {
                     <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    {types.map(t => (
+                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    {visibleTypes.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} />
                     ))}
                   </BarChart>
@@ -816,7 +834,8 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
 
           return (
             <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', height: 22, padding: '0 8px', position: 'relative' }}>
-              <div style={{ width: 65, fontSize: 10, fontWeight: 600, color, flexShrink: 0 }}>{p.phase}</div>
+              <div style={{ width: 140, minWidth: 140, fontSize: 10, fontWeight: 600, color, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                title={p.phase}>{p.phase}</div>
               <div style={{ flex: 1, position: 'relative', height: 12 }}>
                 <div
                   title={`${p.phase}: ${formatDuration(phaseDuration)}${isError ? ' — FAILED: ' + (p.details ?? '') : ''}`}
@@ -827,7 +846,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }}
                 />
               </div>
-              <div style={{ width: 55, textAlign: 'right', fontSize: 10, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>
+              <div style={{ width: 55, textAlign: 'right', fontSize: 10, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
                 {formatDuration(phaseDuration)}
               </div>
             </div>

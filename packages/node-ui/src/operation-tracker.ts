@@ -60,10 +60,11 @@ export class OperationTracker {
     this.starts.delete(ctx.operationId);
     const message = err instanceof Error ? err.message : String(err);
     try {
-      const activePhaseKey = [...this.phaseStarts.keys()].find(k => k.startsWith(ctx.operationId + ':'));
-      if (activePhaseKey) {
-        const phaseStartedAt = this.phaseStarts.get(activePhaseKey);
-        this.phaseStarts.delete(activePhaseKey);
+      const prefix = ctx.operationId + ':';
+      const activeKeys = [...this.phaseStarts.keys()].filter(k => k.startsWith(prefix));
+      for (const key of activeKeys) {
+        const phaseStartedAt = this.phaseStarts.get(key);
+        this.phaseStarts.delete(key);
         this.db.failPhase({
           operation_id: ctx.operationId,
           duration_ms: phaseStartedAt ? now - phaseStartedAt : 0,

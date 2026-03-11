@@ -891,10 +891,14 @@ async function handleRequest(
     if (!kcId || !paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "kcId", "paranetId", or "quads"' });
     }
+    let kcIdBigInt: bigint;
+    try { kcIdBigInt = BigInt(kcId); } catch {
+      return jsonResponse(res, 400, { error: `Invalid "kcId": ${String(kcId).slice(0, 50)}` });
+    }
     const ctx = createOperationContext('update');
     tracker.start(ctx, { paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
     try {
-      const result = await agent.update(BigInt(kcId), paranetId, quads, privateQuads, {
+      const result = await agent.update(kcIdBigInt, paranetId, quads, privateQuads, {
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
       });
@@ -904,7 +908,11 @@ async function handleRequest(
         const chainId = (config.chain ?? network?.chain)?.chainId;
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
-      tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      if (result.status === 'failed') {
+        tracker.fail(ctx, new Error(`Update failed on-chain (kcId=${kcId})`));
+      } else {
+        tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      }
       return jsonResponse(res, 200, {
         kcId: String(result.kcId),
         status: result.status,

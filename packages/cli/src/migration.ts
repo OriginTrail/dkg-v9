@@ -25,16 +25,20 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
+  const slotEntry = (slotDir: string) => join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
+  const slotReady = (slotDir: string) => existsSync(join(slotDir, '.git')) && existsSync(slotEntry(slotDir));
 
-  if (!existsSync(slotA)) {
+  if (!slotReady(slotA)) {
+    await rm(slotA, { recursive: true, force: true });
     execSync(`git clone --local "${repo}" "${slotA}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
     execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
     execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
     log(`  Slot a: cloned and built from ${repo}`);
   }
 
-  if (!existsSync(slotB)) {
+  if (!slotReady(slotB)) {
     try {
+      await rm(slotB, { recursive: true, force: true });
       const repoUrl = execSync('git remote get-url origin', { cwd: repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
       execSync(`git clone --reference "${slotA}" --dissociate "${repoUrl}" "${slotB}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
       execSync('pnpm install --frozen-lockfile', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });

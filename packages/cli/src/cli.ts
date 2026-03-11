@@ -1194,26 +1194,31 @@ program
     }
 
     console.log('Checking for updates and applying...');
-    const updated = await performUpdate(au, (msg) => console.log(msg), {
-      refOverride,
-      allowPrerelease: opts.allowPrerelease ? true : undefined,
-      verifyTagSignature,
-    });
-    if (updated) {
-      const pid = await readPid();
-      if (pid && isProcessRunning(pid)) {
-        console.log('Stopping daemon...');
-        process.kill(pid, 'SIGTERM');
-        for (let i = 0; i < 20; i++) {
-          await sleep(500);
-          if (!isProcessRunning(pid)) break;
+    try {
+      const updated = await performUpdate(au, (msg) => console.log(msg), {
+        refOverride,
+        allowPrerelease: opts.allowPrerelease ? true : undefined,
+        verifyTagSignature,
+      });
+      if (updated) {
+        const pid = await readPid();
+        if (pid && isProcessRunning(pid)) {
+          console.log('Stopping daemon...');
+          process.kill(pid, 'SIGTERM');
+          for (let i = 0; i < 20; i++) {
+            await sleep(500);
+            if (!isProcessRunning(pid)) break;
+          }
+          console.log('Update applied. Run "dkg start" to start with the new version.');
+        } else {
+          console.log('Update applied. Start the daemon with: dkg start');
         }
-        console.log('Update applied. Run "dkg start" to start with the new version.');
       } else {
-        console.log('Update applied. Start the daemon with: dkg start');
+        console.log('No update needed — already on latest.');
       }
-    } else {
-      console.log('No update needed — already on latest.');
+    } catch (err: any) {
+      console.error(`Update failed: ${err?.message ?? String(err)}`);
+      process.exit(1);
     }
   });
 
@@ -1221,7 +1226,7 @@ program
 
 program
   .command('rollback')
-  .description('Roll back to the previous release slot and restart')
+  .description('Roll back to the previous release slot and stop the daemon')
   .action(async () => {
     const current = await activeSlot();
     if (!current) {

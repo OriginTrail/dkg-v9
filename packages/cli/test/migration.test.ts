@@ -142,4 +142,20 @@ describe('migrateToBlueGreen', () => {
       expect(cloneCalls[0]).toContain('--dissociate');
     }
   });
+
+  it('rebuilds slot A when directory exists but is incomplete', async () => {
+    const rDir = join(dkgHome, 'releases');
+    const slotA = join(rDir, 'a');
+    await mkdir(slotA, { recursive: true }); // create incomplete slot
+
+    const { execSync } = await import('node:child_process');
+    const mockedExecSync = vi.mocked(execSync);
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
+    expect(allCmds.some(cmd => cmd.includes('git clone --local'))).toBe(true);
+    expect(allCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
+  });
 });

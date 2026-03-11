@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const INSTALL_SCRIPT = join(__dirname, '..', '..', '..', 'install.sh');
 
 describe('install.sh validation', () => {

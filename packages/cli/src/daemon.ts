@@ -1195,29 +1195,38 @@ export async function checkForNewCommit(
 }
 
 let _updateInProgress = false;
+let _lockToken: string | null = null;
 
 async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
   const lockPath = join(releasesDir(), '.update.lock');
   try {
     await mkdir(releasesDir(), { recursive: true });
     const { openSync, closeSync, writeFileSync } = await import('node:fs');
+    const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
     const fd = openSync(lockPath, 'wx');
-    writeFileSync(fd, String(process.pid));
+    writeFileSync(fd, token);
     closeSync(fd);
+    _lockToken = token;
     return true;
   } catch (err: any) {
     if (err.code === 'EEXIST') {
       try {
-        const pidStr = (await readFile(lockPath, 'utf-8')).trim();
+        const { readFileSync, unlinkSync } = await import('node:fs');
+        const raw = String(readFileSync(lockPath, 'utf-8')).trim();
+        const pidStr = raw.split(':')[0] ?? raw;
         const lockPid = parseInt(pidStr, 10);
-        if (lockPid && lockPid !== process.pid) {
+        if (lockPid === process.pid) {
+          _lockToken = raw;
+          return true;
+        }
+        if (lockPid) {
           try {
             process.kill(lockPid, 0);
             log('Auto-update: another update process holds the lock, skipping');
             return false;
           } catch {
             // Lock holder is dead, remove stale lock
-            try { const { unlinkSync } = await import('node:fs'); unlinkSync(lockPath); } catch {}
+            try { unlinkSync(lockPath); } catch {}
             return acquireUpdateLock(log);
           }
         }
@@ -1232,9 +1241,13 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
 async function releaseUpdateLock(): Promise<void> {
   const lockPath = join(releasesDir(), '.update.lock');
   try {
-    const { unlinkSync } = await import('node:fs');
+    if (!_lockToken) return;
+    const { readFileSync, unlinkSync } = await import('node:fs');
+    const raw = String(readFileSync(lockPath, 'utf-8')).trim();
+    if (raw !== _lockToken) return;
     unlinkSync(lockPath);
   } catch { /* ok */ }
+  _lockToken = null;
 }
 
 /**

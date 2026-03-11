@@ -14,6 +14,7 @@ import {
   handleNodeUIRequest,
   ChatAssistant,
   ChatMemoryManager,
+  LogPushWorker,
   type MetricsSource,
 } from '@dkg/node-ui';
 import {
@@ -27,11 +28,39 @@ import {
   removeApiPort,
   logPath,
   ensureDkgDir,
+  TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
+
+type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
+
+interface CatchupJobResult {
+  connectedPeers: number;
+  syncCapablePeers: number;
+  peersTried: number;
+  dataSynced: number;
+  workspaceSynced: number;
+}
+
+interface CatchupJob {
+  jobId: string;
+  paranetId: string;
+  includeWorkspace: boolean;
+  status: CatchupJobState;
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: CatchupJobResult;
+  error?: string;
+}
+
+interface CatchupTracker {
+  jobs: Map<string, CatchupJob>;
+  latestByParanet: Map<string, string>;
+}
 
 
 export async function runDaemon(foreground: boolean): Promise<void> {
@@ -97,6 +126,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log(`Starting DKG ${role} node "${config.name}"...`);
 
   const network = await loadNetworkConfig();
+  const syncParanets = [...new Set([
+    ...(config.paranets ?? []),
+    ...(network?.defaultParanets ?? []),
+  ])];
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());
@@ -135,7 +168,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    syncParanets: config.paranets ?? [],
+    syncParanets,
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -196,10 +229,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   // Ensure configured paranets + network defaults are subscribed and available.
   // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
   // duplicate creator claims and to survive "already exists" gracefully.
-  const paranetsToSubscribe = new Set([
-    ...(config.paranets ?? []),
-    ...(network?.defaultParanets ?? []),
-  ]);
+  const paranetsToSubscribe = new Set(syncParanets);
   for (const p of paranetsToSubscribe) {
     try {
       await agent.ensureParanetLocal({
@@ -268,6 +298,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         message: entry.message,
       });
     } catch { /* DB write must never break the node */ }
+    logPusher?.push(entry);
   });
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
@@ -320,6 +351,64 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const metricsCollector = new MetricsCollector(dashDb, metricsSource, dkgDir());
   metricsCollector.start();
   log('Metrics collector started (2min interval)');
+
+  // --- Telemetry: syslog log streaming (opt-in) ---
+  const networkKey = network?.networkName?.toLowerCase().includes('testnet') ? 'testnet' : 'mainnet';
+  const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
+  let logPusher: LogPushWorker | null = null;
+
+  function startLogPusher(): { ok: boolean; error?: string } {
+    if (logPusher) return { ok: true };
+    if (!syslogEndpoint || !syslogEndpoint.port) {
+      return { ok: false, error: `Telemetry streaming is not available for ${networkKey} (no syslog endpoint configured)` };
+    }
+    logPusher = new LogPushWorker({
+      host: syslogEndpoint.host,
+      port: syslogEndpoint.port,
+      peerId: agent.peerId,
+      network: networkKey,
+      nodeName: config.name,
+    });
+    logPusher.start();
+    log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
+    return { ok: true };
+  }
+
+  function stopLogPusher(): void {
+    if (!logPusher) return;
+    logPusher.stop();
+    logPusher = null;
+    log('Telemetry: log streaming disabled');
+  }
+
+  if (config.telemetry?.enabled) {
+    const r = startLogPusher();
+    if (!r.ok) {
+      log(`Telemetry: ${r.error}`);
+      config.telemetry.enabled = false;
+    }
+  }
+
+  const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB
+  const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
+  const pruneTimer = setInterval(async () => {
+    try {
+      dashDb.prune();
+      const st = await stat(logFile).catch(() => null);
+      if (st && st.size > MAX_LOG_BYTES) {
+        const tail = await readFile(logFile, 'utf8');
+        const keepFrom = tail.length - Math.floor(MAX_LOG_BYTES * 0.7);
+        const newlineIdx = tail.indexOf('\n', keepFrom);
+        if (newlineIdx > 0) {
+          await writeFile(logFile, tail.slice(newlineIdx + 1));
+        } else {
+          await writeFile(logFile, tail.slice(keepFrom));
+        }
+        log(`Rotated daemon.log (was ${(st.size / 1024 / 1024).toFixed(1)} MB)`);
+      }
+    } catch { /* never crash the daemon */ }
+  }, PRUNE_INTERVAL_MS);
+  pruneTimer.unref();
 
   const tracker = new OperationTracker(dashDb);
 
@@ -410,6 +499,21 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     },
   };
 
+  const telemetrySettings = {
+    getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
+    setTelemetryEnabled: async (enabled: boolean): Promise<{ ok: boolean; error?: string }> => {
+      if (enabled) {
+        const r = startLogPusher();
+        if (!r.ok) return r;
+      } else {
+        stopLogPusher();
+      }
+      config.telemetry = { ...config.telemetry, enabled };
+      await saveConfig(config);
+      return { ok: true };
+    },
+  };
+
   // Resolve the static UI directory (built by @dkg/node-ui)
   let nodeUiStaticDir: string;
   try {
@@ -458,6 +562,11 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     }
   }
 
+  const catchupTracker: CatchupTracker = {
+    jobs: new Map(),
+    latestByParanet: new Map(),
+  };
+
   // --- HTTP API ---
 
   const server = createServer(async (req, res) => {
@@ -480,7 +589,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings);
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
@@ -516,6 +625,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         tracker,
         memoryManager,
         bridgeAuthToken,
+        catchupTracker,
       );
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
@@ -738,6 +848,7 @@ async function handleRequest(
   tracker: OperationTracker,
   memoryManager: ChatMemoryManager,
   bridgeAuthToken: string | undefined,
+  catchupTracker: CatchupTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -1251,19 +1362,10 @@ async function handleRequest(
     }
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
-    const phases: Record<string, number> = {};
-    const phaseStarts: Record<string, number> = {};
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
-        onPhase: (phase, status) => {
-          if (status === 'start') {
-            tracker.startPhase(ctx, phase);
-            phaseStarts[phase] = Date.now();
-          } else {
-            tracker.completePhase(ctx, phase);
-            if (phaseStarts[phase]) phases[phase] = Date.now() - phaseStarts[phase];
-          }
-        },
+        operationCtx: ctx,
+        onPhase: tracker.phaseCallback(ctx),
       });
       const chain = result.onChainResult;
       if (chain) {
@@ -1277,7 +1379,7 @@ async function handleRequest(
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
-      phases.serverTotal = Date.now() - serverT0;
+      const opDetail = dashDb.getOperation(ctx.operationId);
       return jsonResponse(res, 200, {
         kcId: String(result.kcId),
         status: result.status,
@@ -1285,13 +1387,57 @@ async function handleRequest(
           tokenId: String(ka.tokenId),
           rootEntity: ka.rootEntity,
         })),
-        phases,
-        ...(chain && {
-          txHash: chain.txHash,
-          blockNumber: chain.blockNumber,
-          batchId: String(chain.batchId),
-          publisherAddress: chain.publisherAddress,
+        ...(result.onChainResult && {
+          txHash: result.onChainResult.txHash,
+          blockNumber: result.onChainResult.blockNumber,
+          batchId: String(result.onChainResult.batchId),
+          publisherAddress: result.onChainResult.publisherAddress,
         }),
+        phases: opDetail.phases,
+        serverTotal: Date.now() - serverT0,
+      });
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
+  }
+
+  // POST /api/update  { kcId: "...", paranetId: "...", quads: [...], privateQuads?: [...] }
+  if (req.method === 'POST' && path === '/api/update') {
+    const body = await readBody(req);
+    const { kcId, paranetId, quads, privateQuads } = JSON.parse(body);
+    if (!kcId || !paranetId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "kcId", "paranetId", or "quads"' });
+    }
+    let kcIdBigInt: bigint;
+    try { kcIdBigInt = BigInt(kcId); } catch {
+      return jsonResponse(res, 400, { error: `Invalid "kcId": ${String(kcId).slice(0, 50)}` });
+    }
+    const ctx = createOperationContext('update');
+    tracker.start(ctx, { paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
+    try {
+      const result = await agent.update(kcIdBigInt, paranetId, quads, privateQuads, {
+        operationCtx: ctx,
+        onPhase: tracker.phaseCallback(ctx),
+      });
+      const chain = result.onChainResult;
+      if (chain) {
+        tracker.setCost(ctx, { gasUsed: chain.gasUsed, gasPrice: chain.effectiveGasPrice, gasCost: chain.gasCostWei, tracCost: chain.tokenAmount });
+        const chainId = (config.chain ?? network?.chain)?.chainId;
+        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
+      }
+      if (result.status === 'failed') {
+        tracker.fail(ctx, new Error(`Update failed on-chain (kcId=${kcId})`));
+      } else {
+        tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      }
+      const opDetail = dashDb.getOperation(ctx.operationId);
+      return jsonResponse(res, 200, {
+        kcId: String(result.kcId),
+        status: result.status,
+        kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
+        ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
+        phases: opDetail.phases,
       });
     } catch (err) {
       tracker.fail(ctx, err);
@@ -1301,7 +1447,6 @@ async function handleRequest(
 
   // POST /api/workspace/write  { paranetId: "...", quads: [...] }
   if (req.method === 'POST' && path === '/api/workspace/write') {
-    const serverT0 = Date.now();
     const body = await readBody(req);
     const { paranetId, quads } = JSON.parse(body);
     if (!paranetId || !quads?.length) {
@@ -1309,12 +1454,16 @@ async function handleRequest(
     }
     const ctx = createOperationContext('workspace');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
-    const storeT0 = Date.now();
     try {
-      const result = await agent.writeToWorkspace(paranetId, quads);
-      const storeDur = Date.now() - storeT0;
+      await tracker.trackPhase(ctx, 'validate', async () => {
+        // validation happens inside writeToWorkspace
+      });
+      const result = await tracker.trackPhase(ctx, 'store', () =>
+        agent.writeToWorkspace(paranetId, quads, { operationCtx: ctx }),
+      );
       tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
-      return jsonResponse(res, 200, { ...result, phases: { store: storeDur, serverTotal: Date.now() - serverT0 } });
+      const opDetail = dashDb.getOperation(ctx.operationId);
+      return jsonResponse(res, 200, { ...result, phases: opDetail.phases });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
@@ -1329,14 +1478,14 @@ async function handleRequest(
     const ctx = createOperationContext('enshrine');
     tracker.start(ctx, { paranetId, details: { source: 'api' } });
     try {
-      const result = await agent.enshrineFromWorkspace(
-        paranetId,
-        selection || 'all',
-        { clearWorkspaceAfter: clearAfter ?? true },
+      const result = await tracker.trackPhase(ctx, 'read-workspace', () =>
+        agent.enshrineFromWorkspace(paranetId, selection || 'all', { clearWorkspaceAfter: clearAfter ?? true, operationCtx: ctx }),
       );
       const chain = result.onChainResult;
       if (chain) {
         tracker.setCost(ctx, { gasUsed: chain.gasUsed, gasPrice: chain.effectiveGasPrice });
+        const chainId = (config.chain ?? network?.chain)?.chainId;
+        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
       return jsonResponse(res, 200, {
@@ -1364,7 +1513,7 @@ async function handleRequest(
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { paranetId, graphSuffix, includeWorkspace });
+      const result = await agent.query(sparql, { paranetId, graphSuffix, includeWorkspace, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
@@ -1381,23 +1530,106 @@ async function handleRequest(
     const { peerId: rawPeerId, lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout } = JSON.parse(body);
     if (!rawPeerId) return jsonResponse(res, 400, { error: 'Missing "peerId"' });
     if (!lookupType) return jsonResponse(res, 400, { error: 'Missing "lookupType"' });
-
-    const peerId = await resolveNameToPeerId(agent, rawPeerId);
-    if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
-
-    const response = await agent.queryRemote(peerId, {
-      lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout,
-    });
-    return jsonResponse(res, 200, response);
+    const ctx = createOperationContext('query');
+    tracker.start(ctx, { paranetId, details: { lookupType, remotePeer: rawPeerId, source: 'api-remote' } });
+    try {
+      const peerId = await tracker.trackPhase(ctx, 'resolve', () => resolveNameToPeerId(agent, rawPeerId));
+      if (!peerId) {
+        tracker.fail(ctx, new Error(`Agent "${rawPeerId}" not found`));
+        return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+      }
+      const response = await tracker.trackPhase(ctx, 'execute', () =>
+        agent.queryRemote(peerId, { lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout }),
+      );
+      tracker.complete(ctx, { details: { lookupType, remotePeer: rawPeerId } });
+      return jsonResponse(res, 200, response);
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
   }
 
-  // POST /api/subscribe  { paranetId: "..." }
+  // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
   if (req.method === 'POST' && path === '/api/subscribe') {
     const body = await readBody(req);
-    const { paranetId } = JSON.parse(body);
+    const { paranetId, includeWorkspace } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const shouldSyncWorkspace = includeWorkspace !== false;
     agent.subscribeToParanet(paranetId);
-    return jsonResponse(res, 200, { subscribed: paranetId });
+
+    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const job: CatchupJob = {
+      jobId,
+      paranetId,
+      includeWorkspace: shouldSyncWorkspace,
+      status: 'queued',
+      queuedAt: Date.now(),
+    };
+    catchupTracker.jobs.set(jobId, job);
+    catchupTracker.latestByParanet.set(paranetId, jobId);
+
+    while (catchupTracker.jobs.size > 100) {
+      let oldestId: string | undefined;
+      let oldestQueuedAt = Number.POSITIVE_INFINITY;
+      for (const [id, entry] of catchupTracker.jobs.entries()) {
+        if (entry.queuedAt < oldestQueuedAt) {
+          oldestQueuedAt = entry.queuedAt;
+          oldestId = id;
+        }
+      }
+      if (!oldestId) break;
+      const removed = catchupTracker.jobs.get(oldestId);
+      catchupTracker.jobs.delete(oldestId);
+      if (removed && catchupTracker.latestByParanet.get(removed.paranetId) === oldestId) {
+        catchupTracker.latestByParanet.delete(removed.paranetId);
+      }
+    }
+
+    void (async () => {
+      job.status = 'running';
+      job.startedAt = Date.now();
+      try {
+        const result = await agent.syncParanetFromConnectedPeers(paranetId, {
+          includeWorkspace: shouldSyncWorkspace,
+        });
+        job.result = result;
+        job.status = 'done';
+      } catch (err) {
+        job.error = err instanceof Error ? err.message : String(err);
+        job.status = 'failed';
+      } finally {
+        job.finishedAt = Date.now();
+      }
+    })();
+
+    return jsonResponse(res, 200, {
+      subscribed: paranetId,
+      catchup: {
+        status: 'queued',
+        includeWorkspace: shouldSyncWorkspace,
+        jobId,
+      },
+    });
+  }
+
+  // GET /api/sync/catchup-status?paranetId=<id> | ?jobId=<id>
+  if (req.method === 'GET' && path === '/api/sync/catchup-status') {
+    const paranetId = url.searchParams.get('paranetId');
+    const jobIdParam = url.searchParams.get('jobId');
+    if (!paranetId && !jobIdParam) {
+      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "jobId" query param' });
+    }
+
+    const jobId = jobIdParam ?? (paranetId ? catchupTracker.latestByParanet.get(paranetId) : undefined);
+    if (!jobId) {
+      return jsonResponse(res, 404, { error: 'No catch-up job found' });
+    }
+    const job = catchupTracker.jobs.get(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: `Catch-up job "${jobId}" not found` });
+    }
+
+    return jsonResponse(res, 200, job);
   }
 
   // POST /api/paranet/create  { id, name, description? }

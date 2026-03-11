@@ -817,12 +817,33 @@ ${values}
         const graphUris = Array.from(new Set(rows.map((r: any) => String(r.g ?? '')).filter(Boolean)));
         let graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
         if (graphUris.length > 0) {
-          const graphMetaPairs = graphUris.flatMap((g) => metaGraphsForDataGraph(g).map((metaGraph) => [g, metaGraph] as const));
-          const pairValues = graphMetaPairs.map(([g, metaGraph]) => `(<${g}> <${metaGraph}>)`).join(' ');
-          const metaQuery = `SELECT ?g ?metaGraph ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp WHERE {
-  VALUES (?g ?metaGraph) { ${pairValues} }
+          const graphMetaRows = rows.flatMap((r: any) => {
+            const g = String(r.g ?? '');
+            const s = String(r.s ?? '');
+            const o = String(r.o ?? '');
+            if (!g || !s) return [];
+            return metaGraphsForDataGraph(g).map((metaGraph) => [g, metaGraph, s, o] as const);
+          });
+          const uniqueGraphMetaRows = Array.from(
+            new Map(graphMetaRows.map((entry) => [entry.join('\u0000'), entry])).values(),
+          );
+          if (uniqueGraphMetaRows.length === 0) {
+            graphMeta = new Map();
+          } else {
+            const pairValues = uniqueGraphMetaRows
+              .map(([g, metaGraph, s, o]) => `(<${g}> <${metaGraph}> ${toSparqlTerm(s)} ${toSparqlTerm(o)})`)
+              .join(' ');
+            const metaQuery = `SELECT ?g ?metaGraph ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp WHERE {
+  VALUES (?g ?metaGraph ?s ?o) { ${pairValues} }
   OPTIONAL {
     GRAPH ?metaGraph {
+      OPTIONAL {
+        { ?s <http://dkg.io/ontology/partOf> ?metaEntity }
+        UNION
+        { ?metaEntity <http://dkg.io/ontology/rootEntity> ?s }
+        UNION
+        { ?metaEntity <http://dkg.io/ontology/rootEntity> ?o }
+      }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/workspaceOwner> ?workspaceOwner }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/creator> ?creator }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherPeerId> ?publisherPeerId }
@@ -838,51 +859,52 @@ ${values}
     }
   }
 }`;
-          try {
-            const metaRes = await executeQuery(metaQuery);
-            const metaRows = Array.isArray(metaRes?.result?.bindings) ? metaRes.result.bindings : [];
-            graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
-            const candidateByGraph = new Map<string, {
-              source: Set<string>;
-              ual: Set<string>;
-              txHash: Set<string>;
-              timestamp: Set<string>;
-            }>();
-            for (const r of metaRows) {
-              const g = String(r.g ?? '');
-              if (!g) continue;
-              const bucket = candidateByGraph.get(g) ?? {
-                source: new Set<string>(),
-                ual: new Set<string>(),
-                txHash: new Set<string>(),
-                timestamp: new Set<string>(),
-              };
-              const sourceCandidate =
-                normalizeNodeSource(String(r.publisherPeerId ?? '')) ||
-                normalizeNodeSource(String(r.creator ?? '')) ||
-                normalizeNodeSource(String(r.workspaceOwner ?? '')) ||
-                normalizeNodeSource(String(r.publisher ?? '')) ||
-                normalizeNodeSource(String(r.publisherAddress ?? ''));
-              const ualCandidate = String(r.ual ?? '').trim();
-              const txCandidate = String(r.txHash ?? '').trim();
-              const tsCandidate = String(r.timestamp ?? '').trim();
-              if (sourceCandidate) bucket.source.add(sourceCandidate);
-              if (ualCandidate) bucket.ual.add(ualCandidate);
-              if (txCandidate) bucket.txHash.add(txCandidate);
-              if (tsCandidate) bucket.timestamp.add(tsCandidate);
-              candidateByGraph.set(g, bucket);
+            try {
+              const metaRes = await executeQuery(metaQuery);
+              const metaRows = Array.isArray(metaRes?.result?.bindings) ? metaRes.result.bindings : [];
+              graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
+              const candidateByGraph = new Map<string, {
+                source: Set<string>;
+                ual: Set<string>;
+                txHash: Set<string>;
+                timestamp: Set<string>;
+              }>();
+              for (const r of metaRows) {
+                const g = String(r.g ?? '');
+                if (!g) continue;
+                const bucket = candidateByGraph.get(g) ?? {
+                  source: new Set<string>(),
+                  ual: new Set<string>(),
+                  txHash: new Set<string>(),
+                  timestamp: new Set<string>(),
+                };
+                const sourceCandidate =
+                  normalizeNodeSource(String(r.publisherPeerId ?? '')) ||
+                  normalizeNodeSource(String(r.creator ?? '')) ||
+                  normalizeNodeSource(String(r.workspaceOwner ?? '')) ||
+                  normalizeNodeSource(String(r.publisher ?? '')) ||
+                  normalizeNodeSource(String(r.publisherAddress ?? ''));
+                const ualCandidate = String(r.ual ?? '').trim();
+                const txCandidate = String(r.txHash ?? '').trim();
+                const tsCandidate = String(r.timestamp ?? '').trim();
+                if (sourceCandidate) bucket.source.add(sourceCandidate);
+                if (ualCandidate) bucket.ual.add(ualCandidate);
+                if (txCandidate) bucket.txHash.add(txCandidate);
+                if (tsCandidate) bucket.timestamp.add(tsCandidate);
+                candidateByGraph.set(g, bucket);
+              }
+              for (const [g, bucket] of candidateByGraph.entries()) {
+                const onlyOrBlank = (set: Set<string>) => (set.size === 1 ? Array.from(set)[0] : '');
+                graphMeta.set(g, {
+                  source: onlyOrBlank(bucket.source),
+                  ual: onlyOrBlank(bucket.ual),
+                  txHash: onlyOrBlank(bucket.txHash),
+                  timestamp: onlyOrBlank(bucket.timestamp),
+                });
+              }
+            } catch {
+              graphMeta = new Map();
             }
-            for (const [g, bucket] of candidateByGraph.entries()) {
-              const onlyOrBlank = (set: Set<string>) => (set.size === 1 ? Array.from(set)[0] : '');
-              graphMeta.set(g, {
-                source: onlyOrBlank(bucket.source),
-                ual: onlyOrBlank(bucket.ual),
-                txHash: onlyOrBlank(bucket.txHash),
-                timestamp: onlyOrBlank(bucket.timestamp),
-              });
-            }
-          } catch {
-            graphMeta = new Map();
           }
         }
         if (cancelled) return;

@@ -295,8 +295,10 @@ describe('SPARQL helper cards', () => {
 
   it('queries provenance from companion meta graphs mapped per data graph', () => {
     expect(explorer).toContain('metaGraphsForDataGraph');
-    expect(explorer).toContain('VALUES (?g ?metaGraph)');
+    expect(explorer).toContain('VALUES (?g ?metaGraph ?s ?o)');
     expect(explorer).toContain('GRAPH ?metaGraph');
+    expect(explorer).toContain('<http://dkg.io/ontology/partOf>');
+    expect(explorer).toContain('<http://dkg.io/ontology/rootEntity>');
   });
 
   it('uses _workspace suffix when deriving companion meta graphs', () => {

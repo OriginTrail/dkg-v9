@@ -798,12 +798,41 @@ async function ensureOpenClawBridgeAvailable(
 }
 
 type OpenClawStreamRequest = Pick<IncomingMessage, 'on'>;
-type OpenClawStreamResponse = Pick<ServerResponse, 'on' | 'writeHead' | 'write' | 'end' | 'writableEnded'>;
+type OpenClawStreamResponse = Pick<ServerResponse, 'on' | 'off' | 'writeHead' | 'write' | 'end' | 'writableEnded'>;
 type OpenClawStreamReader = {
   read: () => Promise<{ done: boolean; value?: Uint8Array }>;
   cancel: () => Promise<unknown>;
   releaseLock: () => void;
 };
+
+async function writeOpenClawStreamChunk(
+  res: OpenClawStreamResponse,
+  chunk: Uint8Array,
+): Promise<void> {
+  if (res.write(chunk)) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: unknown) => {
+      cleanup();
+      reject(err);
+    };
+    res.on('drain', onDrain);
+    res.on('close', onClose);
+    res.on('error', onError);
+  });
+}
 
 export async function pipeOpenClawStream(
   req: OpenClawStreamRequest,
@@ -818,7 +847,7 @@ export async function pipeOpenClawStream(
   };
 
   req.on('aborted', cancelUpstream);
-  req.on('close', () => {
+  res.on('close', () => {
     if (!res.writableEnded) cancelUpstream();
   });
   res.on('error', cancelUpstream);
@@ -828,12 +857,30 @@ export async function pipeOpenClawStream(
       const { done, value } = await reader.read();
       if (done || clientGone) break;
       if (value !== undefined) {
-        res.write(value);
+        await writeOpenClawStreamChunk(res, value);
+        if (clientGone) break;
       }
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+export function isValidOpenClawPersistTurnPayload(payload: {
+  sessionId?: unknown;
+  userMessage?: unknown;
+  assistantReply?: unknown;
+}): payload is {
+  sessionId: string;
+  userMessage: string;
+  assistantReply: string;
+  turnId?: unknown;
+  toolCalls?: unknown;
+} {
+  return typeof payload.sessionId === 'string'
+    && payload.sessionId.trim().length > 0
+    && typeof payload.userMessage === 'string'
+    && typeof payload.assistantReply === 'string';
 }
 
 async function handleRequest(
@@ -1250,17 +1297,21 @@ async function handleRequest(
     let payload: any;
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls } = payload;
-    if (!sessionId || !userMessage || !assistantReply) {
+    if (!isValidOpenClawPersistTurnPayload(payload)) {
       return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
     }
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls } = payload;
+    const normalizedToolCalls = Array.isArray(toolCalls)
+      ? toolCalls as Array<{ name: string; args: Record<string, unknown>; result: unknown }>
+      : undefined;
+    const normalizedTurnId = typeof turnId === 'string' ? turnId : crypto.randomUUID();
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
-        toolCalls,
-        { turnId: turnId ?? crypto.randomUUID(), persistenceState: 'stored' },
+        normalizedToolCalls,
+        { turnId: normalizedTurnId, persistenceState: 'stored' },
       );
       return jsonResponse(res, 200, { ok: true });
     } catch (err: any) {

@@ -147,6 +147,11 @@ describe('Agent Hub UI — OpenClaw tab', () => {
     expect(agentHub).toContain('historyLoaded');
   });
 
+  it('OpenClawChatView merges reloaded history with in-flight local messages instead of replacing state', () => {
+    expect(agentHub).toContain('function mergeOcMessages');
+    expect(agentHub).toContain('setMessages(prev => mergeOcMessages(prev, loaded))');
+  });
+
   it('OpenClawChatView has graph toggle', () => {
     expect(agentHub).toContain('Knowledge Graph');
     expect(agentHub).toContain('showGraph');

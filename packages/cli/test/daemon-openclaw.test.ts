@@ -1,6 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { buildOpenClawChannelHeaders, getOpenClawChannelTargets, pipeOpenClawStream } from '../src/daemon.js';
+import {
+  buildOpenClawChannelHeaders,
+  getOpenClawChannelTargets,
+  isValidOpenClawPersistTurnPayload,
+  pipeOpenClawStream,
+} from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
@@ -83,7 +88,7 @@ describe('OpenClaw channel routing helpers', () => {
     expect(gatewayHeaders).toEqual({ 'Content-Type': 'application/json' });
   });
 
-  it('does not cancel the upstream stream on response close events', async () => {
+  it('does not cancel the upstream stream on request close events after the body is consumed', async () => {
     const req = new EventEmitter() as any;
     const res = new EventEmitter() as any;
     const writes: string[] = [];
@@ -97,7 +102,7 @@ describe('OpenClaw channel routing helpers', () => {
     const reader = {
       read: async () => {
         if (writes.length === 0) {
-          res.emit('close');
+          req.emit('close');
           return { done: false, value: Buffer.from('data: {"type":"text_delta","delta":"pong"}\n\n') };
         }
         return { done: true, value: undefined };
@@ -116,7 +121,7 @@ describe('OpenClaw channel routing helpers', () => {
     expect(releaseSpy).toHaveBeenCalledOnce();
   });
 
-  it('cancels the upstream stream when the downstream client closes before the response finishes', async () => {
+  it('cancels the upstream stream when the downstream response closes before it finishes', async () => {
     const req = new EventEmitter() as any;
     const res = new EventEmitter() as any;
     let resolveRead!: (value: { done: boolean; value?: Uint8Array }) => void;
@@ -135,11 +140,73 @@ describe('OpenClaw channel routing helpers', () => {
     const releaseSpy = vi.spyOn(reader, 'releaseLock');
 
     const proxyPromise = pipeOpenClawStream(req, res, reader);
-    req.emit('close');
+    res.emit('close');
     resolveRead({ done: true });
     await proxyPromise;
 
     expect(cancelSpy).toHaveBeenCalledOnce();
     expect(releaseSpy).toHaveBeenCalledOnce();
+  });
+
+  it('waits for downstream drain before reading more stream data', async () => {
+    const req = new EventEmitter() as any;
+    const res = new EventEmitter() as any;
+    const writes: string[] = [];
+    let readCount = 0;
+    let secondReadCalled = false;
+
+    res.writableEnded = false;
+    res.write = (chunk: Uint8Array) => {
+      writes.push(Buffer.from(chunk).toString('utf8'));
+      return writes.length > 1;
+    };
+    res.end = () => { res.writableEnded = true; };
+
+    const reader = {
+      read: vi.fn(async () => {
+        readCount += 1;
+        if (readCount === 1) {
+          return { done: false, value: Buffer.from('data: first\n\n') };
+        }
+        secondReadCalled = true;
+        return { done: true, value: undefined };
+      }),
+      cancel: async () => undefined,
+      releaseLock: () => undefined,
+    };
+
+    const proxyPromise = pipeOpenClawStream(req, res, reader);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(writes).toEqual(['data: first\n\n']);
+    expect(secondReadCalled).toBe(false);
+
+    res.emit('drain');
+    await proxyPromise;
+
+    expect(secondReadCalled).toBe(true);
+  });
+});
+
+describe('OpenClaw persist-turn validation', () => {
+  it('accepts empty-string user and assistant messages when sessionId is present', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: '',
+      assistantReply: '',
+    })).toBe(true);
+  });
+
+  it('rejects missing or blank session ids', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: '',
+      userMessage: '',
+      assistantReply: '',
+    })).toBe(false);
+    expect(isValidOpenClawPersistTurnPayload({
+      userMessage: '',
+      assistantReply: '',
+    })).toBe(false);
   });
 });

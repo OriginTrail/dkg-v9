@@ -689,7 +689,7 @@ function PeerChatView() {
 }
 
 interface OcMessage {
-  id: number;
+  id: string | number;
   role: 'user' | 'assistant' | 'system';
   content: string;
   ts: string;
@@ -699,6 +699,18 @@ let _ocMid = 1000;
 
 const OC_SESSION_URI = 'urn:dkg:chat:session:openclaw:dkg-ui';
 const OC_SESSION_ID = 'openclaw:dkg-ui';
+
+function mergeOcMessages(existing: OcMessage[], incoming: OcMessage[]): OcMessage[] {
+  const seen = new Set<string>();
+  const merged: OcMessage[] = [];
+  for (const message of [...incoming, ...existing]) {
+    const dedupeKey = `${message.role}\u0000${message.ts}\u0000${message.content}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    merged.push(message);
+  }
+  return merged;
+}
 
 function OpenClawChatView() {
   const [messages, setMessages] = useState<OcMessage[]>([]);
@@ -772,12 +784,12 @@ function OpenClawChatView() {
           fetchOpenClawLocalHistory(100).then(history => {
             if (cancelled) return;
             const loaded: OcMessage[] = history.map(h => ({
-              id: _ocMid++,
+              id: h.uri || `oc-history:${_ocMid++}`,
               role: h.author.includes('agent') ? 'assistant' as const : 'user' as const,
               content: h.text,
               ts: h.ts ? new Date(h.ts).toLocaleTimeString() : '',
             }));
-            if (loaded.length > 0) setMessages(loaded);
+            if (loaded.length > 0) setMessages(prev => mergeOcMessages(prev, loaded));
           }).catch(() => {});
         }
         lastHealthOnlineRef.current = online;
@@ -802,14 +814,13 @@ function OpenClawChatView() {
         const history = await fetchOpenClawLocalHistory(100);
         if (cancelled) return;
         const loaded: OcMessage[] = history.map(h => ({
-          id: _ocMid++,
+          id: h.uri || `oc-history:${_ocMid++}`,
           role: h.author.includes('agent') ? 'assistant' as const : 'user' as const,
           content: h.text,
           ts: h.ts ? new Date(h.ts).toLocaleTimeString() : '',
         }));
         if (loaded.length > 0) {
-          // Prepend history before any messages the user may have sent while loading
-          setMessages(prev => prev.length > 0 ? [...loaded, ...prev] : loaded);
+          setMessages(prev => mergeOcMessages(prev, loaded));
         }
       } catch { /* no history available */ }
       if (!cancelled) setHistoryLoaded(true);

@@ -64,9 +64,10 @@ export class FinalizationHandler {
         const merkleMatch = this.verifyMerkleMatch(workspaceQuads, paranetId, msg.kcMerkleRoot, ctxGraphId);
 
         if (merkleMatch) {
+          const batchId = protoToBigInt(msg.batchId);
           const verified = await this.verifyOnChain(
             msg.txHash, blockNumber, msg.kcMerkleRoot,
-            msg.publisherAddress, startKAId, endKAId, ctx, ctxGraphId,
+            msg.publisherAddress, startKAId, endKAId, ctx, ctxGraphId, batchId,
           );
 
           if (verified) {
@@ -152,6 +153,7 @@ export class FinalizationHandler {
     expectedEndKAId: bigint,
     ctx: OperationContext,
     ctxGraphId?: string,
+    expectedBatchId?: bigint,
   ): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none') return false;
     if (blockNumber <= 0) return false;
@@ -196,7 +198,8 @@ export class FinalizationHandler {
         };
         for await (const event of this.chain.listenForEvents(cgFilter)) {
           const eventCGId = String(event.data['contextGraphId'] ?? '');
-          if (eventCGId === ctxGraphId) return true;
+          const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
+          if (eventCGId === ctxGraphId && (!expectedBatchId || eventBatchId === expectedBatchId)) return true;
         }
         return false;
       }

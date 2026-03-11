@@ -8,6 +8,7 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
+import {KnowledgeAssetsStorageLike} from "./interfaces/KnowledgeAssetsStorageLike.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
@@ -22,6 +23,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
     ContextGraphStorage public contextGraphStorage;
     IdentityStorage public identityStorage;
+    KnowledgeAssetsStorageLike public knowledgeAssetsStorage;
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -31,6 +33,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         );
         identityStorage = IdentityStorage(
             hub.getContractAddress("IdentityStorage")
+        );
+        knowledgeAssetsStorage = KnowledgeAssetsStorageLike(
+            hub.getAssetStorageAddress("KnowledgeAssetsStorage")
         );
     }
 
@@ -81,6 +86,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32[] calldata signatureRs,
         bytes32[] calldata signatureVss
     ) external {
+        bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
+        require(onChainRoot == bytes32(0) || onChainRoot == merkleRoot, "MerkleRoot does not match batch");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
         contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
     }

@@ -168,6 +168,19 @@
   },
   {
     "inputs": [],
+    "name": "knowledgeAssetsStorage",
+    "outputs": [
+      {
+        "internalType": "contract KnowledgeAssetsStorageLike",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "name",
     "outputs": [
       {

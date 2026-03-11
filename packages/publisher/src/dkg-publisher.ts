@@ -353,11 +353,15 @@ export class DKGPublisher implements Publisher {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
             if (targetGraphUri) {
               try {
-                await this.store.deleteByPattern({ graph: targetGraphUri });
-                if (targetMetaGraphUri) {
-                  await this.store.deleteByPattern({ graph: targetMetaGraphUri });
+                const publishedRoots = autoPartition(quads).keys();
+                for (const rootEntity of publishedRoots) {
+                  await this.store.deleteByPattern({ graph: targetGraphUri, subject: rootEntity });
+                  await this.store.deleteBySubjectPrefix(targetGraphUri, rootEntity + '/.well-known/genid/');
                 }
-                this.log.info(ctx, `Cleaned up context graph data from ${targetGraphUri}`);
+                if (targetMetaGraphUri && publishResult.ual) {
+                  await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: publishResult.ual });
+                }
+                this.log.info(ctx, `Rolled back this publish's quads from ${targetGraphUri}`);
               } catch (cleanErr) {
                 this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
               }
@@ -410,7 +414,12 @@ export class DKGPublisher implements Publisher {
     minimumRequired: number;
     timeoutMs: number;
   }): Promise<Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>> {
-    const sigs = await params.peerResponder('*', params.merkleRoot, params.publicByteSize);
+    const sigs = await Promise.race([
+      params.peerResponder('*', params.merkleRoot, params.publicByteSize),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Receiver signature collection timed out after ${params.timeoutMs}ms`)), params.timeoutMs),
+      ),
+    ]);
 
     // Deduplicate by identityId
     const seen = new Set<bigint>();
@@ -440,7 +449,12 @@ export class DKGPublisher implements Publisher {
     minimumRequired: number;
     timeoutMs: number;
   }): Promise<Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>> {
-    const sigs = await params.participantResponder();
+    const sigs = await Promise.race([
+      params.participantResponder(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Participant signature collection timed out after ${params.timeoutMs}ms`)), params.timeoutMs),
+      ),
+    ]);
 
     const seen = new Set<bigint>();
     const unique = sigs.filter((s) => {

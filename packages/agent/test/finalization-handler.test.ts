@@ -295,7 +295,7 @@ describe('FinalizationHandler', () => {
         yield {
           type: 'ContextGraphExpanded',
           blockNumber: 100,
-          data: { contextGraphId: ctxGraphId },
+          data: { contextGraphId: ctxGraphId, batchId: '1' },
         };
       },
     } as any;

@@ -1167,6 +1167,7 @@ export class DKGAgent {
   async addBatchToContextGraph(params: {
     contextGraphId: string | bigint;
     batchId: bigint;
+    merkleRoot?: Uint8Array;
     participantSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   }): Promise<{ success: boolean }> {
     const ctx = createOperationContext('system');
@@ -1174,13 +1175,22 @@ export class DKGAgent {
       throw new Error('addBatchToContextGraph not available on chain adapter');
     }
 
-    const batch = (this.chain as any).getBatch?.(params.batchId);
-    const merkleRoot = batch?.merkleRoot ?? new Uint8Array(32);
+    let merkleRoot = params.merkleRoot;
+    if (!merkleRoot) {
+      const batch = (this.chain as any).getBatch?.(params.batchId);
+      if (!batch?.merkleRoot) {
+        throw new Error(
+          `Cannot resolve merkle root for batch ${params.batchId}. ` +
+          `Provide merkleRoot explicitly or use a chain adapter that supports getBatch.`,
+        );
+      }
+      merkleRoot = batch.merkleRoot;
+    }
 
     const result = await this.chain.addBatchToContextGraph({
       contextGraphId: BigInt(params.contextGraphId),
       batchId: params.batchId,
-      merkleRoot,
+      merkleRoot: merkleRoot!,
       signerSignatures: params.participantSignatures ?? [],
     });
     this.log.info(ctx, `addBatchToContextGraph: batch=${params.batchId} → ctxGraph=${params.contextGraphId} success=${result.success}`);

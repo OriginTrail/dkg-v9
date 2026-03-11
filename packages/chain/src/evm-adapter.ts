@@ -874,6 +874,17 @@ export class EVMChainAdapter implements ChainAdapter {
     const participantVSs = params.participantSignatures.map((s) => ethers.hexlify(s.vs));
 
     const ka = this.contracts.knowledgeAssets.connect(signer) as any;
+    const kaAddress = await this.contracts.knowledgeAssets.getAddress();
+
+    if (this.contracts.token && params.tokenAmount > 0n) {
+      const token = this.contracts.token.connect(signer) as Contract;
+      const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
     const tx = await ka.publishToContextGraph(
       params.kaCount,
       params.publisherNodeIdentityId,

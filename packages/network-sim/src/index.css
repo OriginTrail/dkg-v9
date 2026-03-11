@@ -1468,6 +1468,136 @@ select {
   color: var(--text-muted);
 }
 
+/* ─── Graph + Timeline wrapper ─── */
+.graph-and-timeline {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.graph-and-timeline .graph-area {
+  flex: 1;
+}
+
+/* ─── Timeline Slider ─── */
+.timeline-slider {
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  padding: 6px 12px 8px;
+}
+
+.timeline-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 4px 0;
+  opacity: 0.5;
+}
+
+.timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.timeline-btn {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  color: #818cf8;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.4;
+}
+
+.timeline-btn:hover {
+  background: rgba(99, 102, 241, 0.25);
+}
+
+.timeline-btn-exit {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #10b981;
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.timeline-current-event {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.timeline-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  flex-shrink: 0;
+}
+
+.timeline-track {
+  position: relative;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.timeline-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: rgba(99, 102, 241, 0.12);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.timeline-marker {
+  position: absolute;
+  top: 3px;
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  opacity: 0.5;
+  pointer-events: none;
+  transform: translateX(-1px);
+}
+
+.timeline-thumb {
+  position: absolute;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #818cf8;
+  border: 2px solid #0a0a1a;
+  pointer-events: none;
+  transform: translateX(-6px);
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.5);
+}
+
 /* Responsive */
 @media (max-width: 1100px) {
   .feed-area {

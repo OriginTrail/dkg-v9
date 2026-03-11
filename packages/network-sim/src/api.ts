@@ -104,17 +104,55 @@ export async function enshrineFromWorkspace(
   paranetId: string,
   selection: 'all' | { rootEntities: string[] } = 'all',
   clearAfter = true,
+  contextGraphId?: string,
 ) {
   return post<{
     kcId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
+    contextGraphId?: string;
   }>(`${nodeBase(nodeId)}/api/workspace/enshrine`, {
     paranetId,
     selection,
     clearAfter,
+    ...(contextGraphId ? { contextGraphId } : {}),
   });
+}
+
+export async function createContextGraph(
+  nodeId: number,
+  participantIdentityIds: number[],
+  requiredSignatures: number,
+) {
+  return post<{ contextGraphId: string; success: boolean }>(
+    `${nodeBase(nodeId)}/api/context-graph/create`,
+    { participantIdentityIds, requiredSignatures },
+  );
+}
+
+export async function fetchIdentity(nodeId: number) {
+  return get<{ identityId: string; hasIdentity: boolean }>(
+    `${nodeBase(nodeId)}/api/identity`,
+  );
+}
+
+export async function ensureIdentity(nodeId: number) {
+  return post<{ identityId: string; hasIdentity: boolean; error?: string }>(
+    `${nodeBase(nodeId)}/api/identity/ensure`,
+    {},
+  );
+}
+
+export async function fetchLogs(
+  nodeId: number,
+  lines = 200,
+  afterByte = 0,
+): Promise<{ lines: string[]; fileSize: number; nodeId: number }> {
+  const params = new URLSearchParams({ lines: String(lines), after: String(afterByte) });
+  return get<{ lines: string[]; fileSize: number; nodeId: number }>(
+    `/devnet/logs/${nodeId}?${params}`,
+  );
 }
 
 export async function sendChat(nodeId: number, to: string, text: string) {

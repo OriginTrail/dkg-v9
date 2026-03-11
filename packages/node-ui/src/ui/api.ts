@@ -71,6 +71,15 @@ export interface LlmSettingsResponse {
 export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
 export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseURL?: string; clear?: boolean }) =>
   put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
+// --- Workspace TTL ---
+export interface WorkspaceTtlResponse {
+  ttlMs: number;
+  ttlDays: number;
+}
+export const fetchWorkspaceTtl = () => get<WorkspaceTtlResponse>('/api/settings/workspace-ttl');
+export const updateWorkspaceTtl = (ttlDays: number) =>
+  put<WorkspaceTtlResponse & { ok: boolean }>('/api/settings/workspace-ttl', { ttlDays });
+
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
 

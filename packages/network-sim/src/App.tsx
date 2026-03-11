@@ -4,6 +4,7 @@ import { NetworkGraph } from './components/NetworkGraph';
 import { ControlPanel } from './components/ControlPanel';
 import { ActivityFeed } from './components/ActivityFeed';
 import { StatsDashboard } from './components/StatsDashboard';
+import { TimelineSlider } from './components/TimelineSlider';
 
 type Page = 'simulator' | 'stats';
 
@@ -60,14 +61,22 @@ function AppInner() {
         <aside className="sidebar">
           <ControlPanel />
         </aside>
-        <section className="graph-area">
-          <NetworkGraph
-            nodes={state.nodes}
-            animations={state.animations}
-            selectedNode={state.selectedNode}
-            onSelectNode={(id) => dispatch({ type: 'SELECT_NODE', id })}
+        <div className="graph-and-timeline">
+          <section className="graph-area">
+            <NetworkGraph
+              nodes={state.nodes}
+              animations={state.animations}
+              selectedNode={state.selectedNode}
+              onSelectNode={(id) => dispatch({ type: 'SELECT_NODE', id })}
+              nodeLabels={state.nodeLabels}
+            />
+          </section>
+          <TimelineSlider
+            events={state.timeline}
+            playbackTs={state.timelinePlaybackTs}
+            onSeek={(ts) => dispatch({ type: 'SET_PLAYBACK_TS', ts })}
           />
-        </section>
+        </div>
         <aside className="feed-area">
           <ActivityFeed activities={state.activities} />
         </aside>

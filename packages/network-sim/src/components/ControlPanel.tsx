@@ -2,8 +2,9 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import * as api from '../api';
 import { OP_COLORS, type OperationType } from '../types';
+import { CHAIN_NODE_ID } from './NetworkGraph';
 
-type Tab = 'setup' | 'simulate' | 'workspace' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction';
+type Tab = 'setup' | 'simulate' | 'workspace' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction' | 'logs';
 
 const MANUAL_TABS: { id: Tab; label: string; op: OperationType }[] = [
   { id: 'setup', label: 'Setup', op: 'connect' },
@@ -15,6 +16,7 @@ const MANUAL_TABS: { id: Tab; label: string; op: OperationType }[] = [
   { id: 'stake', label: 'Stake', op: 'stake' },
   { id: 'conviction', label: 'Conviction', op: 'conviction' },
   { id: 'fairswap', label: 'FairSwap', op: 'fairswap' },
+  { id: 'logs', label: 'Logs', op: 'connect' },
 ];
 
 const SIM_TAB: { id: Tab; label: string; op: OperationType } = { id: 'simulate', label: 'Simulate', op: 'connect' };
@@ -78,6 +80,7 @@ export function ControlPanel() {
         {activeTab === 'stake' && <StakeTab />}
         {activeTab === 'conviction' && <ConvictionTab />}
         {activeTab === 'fairswap' && <FairSwapTab />}
+        {activeTab === 'logs' && <LogsTab />}
       </div>
     </div>
   );
@@ -99,12 +102,48 @@ function useParanets() {
 }
 
 function SetupTab() {
-  const { state, addOperation, completeOperation } = useStore();
+  const { state, addOperation, completeOperation, addTimelineStep } = useStore();
   const [paranetId, setParanetId] = useState('devnet-test');
   const [paranetName, setParanetName] = useState('Devnet Test Paranet');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const [identityResult, setIdentityResult] = useState('');
   const paranets = useParanets();
+
+  const identityStatus = state.nodes.map(n => ({
+    id: n.id,
+    online: n.online,
+    hasIdentity: n.status?.hasIdentity ?? false,
+    identityId: n.status?.identityId ?? '0',
+  }));
+
+  const doEnsureAllIdentities = useCallback(async () => {
+    setIdentityBusy(true);
+    setIdentityResult('');
+    const lines: string[] = [];
+    for (const node of state.nodes) {
+      if (!node.online) {
+        lines.push(`N${node.id}: offline, skipped`);
+        continue;
+      }
+      try {
+        addTimelineStep(node.id, 'connect', 'identity', 'Creating on-chain identity', { status: 'start' });
+        const res = await api.ensureIdentity(node.id);
+        if (res.hasIdentity) {
+          lines.push(`N${node.id}: identity=${res.identityId}`);
+          addTimelineStep(node.id, 'connect', 'identity', `Identity #${res.identityId} ready`, { status: 'done' });
+        } else {
+          lines.push(`N${node.id}: failed — ${res.error || 'unknown'}`);
+          addTimelineStep(node.id, 'connect', 'identity', `Identity failed`, { status: 'error' });
+        }
+      } catch (e: any) {
+        lines.push(`N${node.id}: ${e.message}`);
+      }
+    }
+    setIdentityResult(lines.join('\n'));
+    setIdentityBusy(false);
+  }, [state.nodes, addTimelineStep]);
 
   const doQuickSetup = useCallback(async () => {
     setBusy(true);
@@ -121,6 +160,22 @@ function SetupTab() {
     const opId = addOperation('connect', firstOnline.id, `quick setup: create & subscribe "${paranetId}"`);
 
     try {
+      // Step 1: Ensure identities on all online nodes
+      addTimelineStep(firstOnline.id, 'connect', 'setup', 'Quick Setup: ensuring identities', { status: 'start' });
+      for (const node of state.nodes) {
+        if (!node.online) continue;
+        try {
+          addTimelineStep(node.id, 'connect', 'identity', 'Registering on-chain identity');
+          await api.ensureIdentity(node.id);
+          addTimelineStep(node.id, 'connect', 'identity', 'Identity ready', { status: 'done' });
+          lines.push(`N${node.id}: identity ensured`);
+        } catch (e: any) {
+          lines.push(`N${node.id}: identity error: ${e.message}`);
+        }
+      }
+
+      // Step 2: Create paranet
+      addTimelineStep(firstOnline.id, 'connect', 'paranet', `Creating paranet "${paranetId}"`);
       try {
         await api.createParanet(firstOnline.id, paranetId, paranetName);
         lines.push(`Created paranet "${paranetId}" on Node ${firstOnline.id}`);
@@ -132,12 +187,14 @@ function SetupTab() {
         }
       }
 
+      // Step 3: Subscribe all
       for (const node of state.nodes) {
         if (!node.online) {
           lines.push(`Node ${node.id}: offline, skipped`);
           continue;
         }
         try {
+          addTimelineStep(node.id, 'connect', 'subscribe', `Subscribing to "${paranetId}"`);
           await api.subscribeParanet(node.id, paranetId);
           lines.push(`Node ${node.id}: subscribed`);
         } catch (e: any) {
@@ -146,6 +203,7 @@ function SetupTab() {
       }
 
       completeOperation(opId, 'success', `${paranetId} ready`);
+      addTimelineStep(firstOnline.id, 'connect', 'setup', 'Quick Setup complete', { status: 'done' });
       setResult(lines.join('\n'));
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
@@ -153,7 +211,7 @@ function SetupTab() {
     } finally {
       setBusy(false);
     }
-  }, [paranetId, paranetName, state.nodes, addOperation, completeOperation]);
+  }, [paranetId, paranetName, state.nodes, addOperation, completeOperation, addTimelineStep]);
 
   const doCreateParanet = useCallback(async () => {
     setBusy(true);
@@ -196,11 +254,39 @@ function SetupTab() {
       <div className="setup-section">
         <div className="setup-section-title">Quick Setup</div>
         <p className="setup-hint">
-          Creates a paranet and subscribes all online nodes. Run this once after starting the devnet.
+          Creates identities, paranet, and subscribes all nodes. Run this once after starting the devnet.
         </p>
         <button className="btn btn-primary btn-wide" disabled={busy} onClick={doQuickSetup}>
           {busy ? 'Setting up...' : 'Initialize Devnet'}
         </button>
+      </div>
+
+      <div className="setup-divider" />
+
+      {/* ─── Identity Status ─── */}
+      <div className="setup-section">
+        <div className="setup-section-title">On-Chain Identity</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+          {identityStatus.map(n => (
+            <div
+              key={n.id}
+              style={{
+                fontSize: 10,
+                padding: '2px 6px',
+                borderRadius: 4,
+                background: !n.online ? 'rgba(100,100,100,0.2)' : n.hasIdentity ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                color: !n.online ? '#64748b' : n.hasIdentity ? '#10b981' : '#ef4444',
+                fontFamily: 'JetBrains Mono, monospace',
+              }}
+            >
+              N{n.id}: {!n.online ? 'offline' : n.hasIdentity ? `ID ${n.identityId}` : 'no identity'}
+            </div>
+          ))}
+        </div>
+        <button className="btn btn-secondary btn-wide" disabled={identityBusy} onClick={doEnsureAllIdentities}>
+          {identityBusy ? 'Registering...' : 'Register All Identities'}
+        </button>
+        {identityResult && <pre className="result-box code" style={{ fontSize: 11, marginTop: 6 }}>{identityResult}</pre>}
       </div>
 
       <div className="setup-divider" />
@@ -519,7 +605,7 @@ function SimulateTab() {
 }
 
 function WorkspaceTab() {
-  const { state, addBroadcast, completeOperation } = useStore();
+  const { state, addBroadcast, completeOperation, addTimelineStep, addChainAnimation } = useStore();
   const paranets = useParanets();
   const [paranet, setParanet] = useState('devnet-test');
   const [subject, setSubject] = useState('did:dkg:entity:ws-001');
@@ -528,6 +614,13 @@ function WorkspaceTab() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
   const [wsContents, setWsContents] = useState('');
+
+  // Context graph state
+  const [enshrineMode, setEnshrineMode] = useState<'paranet' | 'contextGraph'>('paranet');
+  const [contextGraphId, setContextGraphId] = useState('');
+  const [participantIds, setParticipantIds] = useState('1, 2');
+  const [requiredSigs, setRequiredSigs] = useState(1);
+  const [createCtxResult, setCreateCtxResult] = useState('');
 
   const fmtObj = (v: string) =>
     v.startsWith('http') || v.startsWith('did:') || v.startsWith('urn:') ? v : `"${v}"`;
@@ -538,17 +631,32 @@ function WorkspaceTab() {
     const graph = paranet.startsWith('did:') ? paranet : `did:dkg:paranet:${paranet}`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
     const opId = addBroadcast('workspace', state.selectedNode, 'workspace write');
+    addTimelineStep(state.selectedNode, 'workspace', 'write', 'Writing quads to workspace', { status: 'start' });
     try {
       const res = await api.writeToWorkspace(state.selectedNode, paranet, quads);
+      addTimelineStep(state.selectedNode, 'workspace', 'store', 'Quads stored in workspace');
       completeOperation(opId, 'success', res.workspaceOperationId);
+
+      const peers = state.nodes.filter(n => n.id !== state.selectedNode && n.online);
+      addTimelineStep(state.selectedNode, 'workspace', 'gossip', 'Broadcasting via GossipSub', { status: 'done' });
+      peers.forEach((n, i) => {
+        setTimeout(() => {
+          addTimelineStep(n.id, 'workspace', 'receive', `Workspace sync from N${state.selectedNode}`);
+        }, 300 + i * 250);
+        setTimeout(() => {
+          addTimelineStep(n.id, 'workspace', 'store', 'Stored in local workspace', { status: 'done' });
+        }, 800 + i * 250);
+      });
+
       setResult(`Written to workspace.\nOperation: ${res.workspaceOperationId}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
+      addTimelineStep(state.selectedNode, 'workspace', 'error', e.message, { status: 'error' });
       setResult(`Error: ${e.message}`);
     } finally {
       setBusy(false);
     }
-  }, [subject, predicate, object, paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [subject, predicate, object, paranet, state.selectedNode, state.nodes, addBroadcast, completeOperation, addTimelineStep]);
 
   const doQueryWorkspace = useCallback(async () => {
     setBusy(true);
@@ -569,73 +677,189 @@ function WorkspaceTab() {
   const doEnshrine = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const opId = addBroadcast('publish', state.selectedNode, 'enshrine workspace');
+    const isCtx = enshrineMode === 'contextGraph' && contextGraphId.trim();
+    const label = isCtx ? `enshrine → context graph ${contextGraphId}` : 'enshrine → paranet';
+    const opType = isCtx ? 'contextGraph' as OperationType : 'publish' as OperationType;
+    const opId = addBroadcast(opType, state.selectedNode, label);
+
+    addTimelineStep(state.selectedNode, opType, 'start', 'Collecting workspace triples', { status: 'start' });
+    addTimelineStep(state.selectedNode, opType, 'merkle', 'Computing merkle root');
     try {
-      const res = await api.enshrineFromWorkspace(state.selectedNode, paranet, 'all', true);
+      addTimelineStep(state.selectedNode, opType, 'chain-tx', 'Submitting chain tx...');
+      addChainAnimation(state.selectedNode, opType, 'toChain');
+      addTimelineStep(CHAIN_NODE_ID, opType, 'tx-pending', `Tx from N${state.selectedNode}`, { status: 'start' });
+      const res = await api.enshrineFromWorkspace(
+        state.selectedNode,
+        paranet,
+        'all',
+        true,
+        isCtx ? contextGraphId.trim() : undefined,
+      );
+      addChainAnimation(state.selectedNode, opType, 'fromChain');
+      addTimelineStep(CHAIN_NODE_ID, opType, 'confirmed', `KC ${res.kcId} mined`, { status: 'done' });
+      addTimelineStep(state.selectedNode, opType, 'confirmed', `On-chain confirmed: KC ${res.kcId}`);
+
+      const peers = state.nodes.filter(n => n.id !== state.selectedNode && n.online);
+      peers.forEach((n, i) => {
+        setTimeout(() => {
+          addTimelineStep(state.selectedNode, opType, 'gossip', `Finalization → N${n.id}`, { targetNodeId: n.id });
+          addTimelineStep(n.id, opType, 'receive', `Finalization from N${state.selectedNode}`);
+        }, 200 + i * 300);
+      });
+
+      peers.forEach((n, i) => {
+        setTimeout(() => {
+          addChainAnimation(n.id, opType, 'toChain');
+          addTimelineStep(n.id, opType, 'verify', 'Verifying on-chain proof');
+          addTimelineStep(CHAIN_NODE_ID, opType, 'read', `N${n.id} reading proof`, { status: 'progress' });
+        }, 800 + i * 400);
+        setTimeout(() => {
+          addChainAnimation(n.id, opType, 'fromChain');
+          addTimelineStep(n.id, opType, 'finalize', 'Verified & promoted to graph', { status: 'done' });
+        }, 1600 + i * 400);
+      });
+
       completeOperation(opId, 'success', `KC: ${res.kcId}`);
       setResult(
-        `Enshrined to chain.\nKC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
+        `Enshrined to ${isCtx ? `context graph ${contextGraphId}` : 'paranet data graph'}.\n` +
+        `KC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
         (res.txHash ? `\nTx: ${res.txHash}` : ''),
       );
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
+      addTimelineStep(state.selectedNode, opType, 'error', e.message, { status: 'error' });
       setResult(`Error: ${e.message}`);
     } finally {
       setBusy(false);
     }
-  }, [paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [paranet, enshrineMode, contextGraphId, state.selectedNode, state.nodes, addBroadcast, completeOperation, addTimelineStep]);
+
+  const doCreateContextGraph = useCallback(async () => {
+    setBusy(true);
+    setCreateCtxResult('');
+    try {
+      const ids = participantIds.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      if (ids.length === 0) throw new Error('Provide at least one participant identity ID');
+      const res = await api.createContextGraph(state.selectedNode, ids, requiredSigs);
+      setContextGraphId(res.contextGraphId);
+      setCreateCtxResult(`Context graph created: ID = ${res.contextGraphId}`);
+    } catch (e: any) {
+      setCreateCtxResult(`Error: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [participantIds, requiredSigs, state.selectedNode]);
+
+  const paranetSelect = paranets.length > 0 ? (
+    <select value={paranet} onChange={(e) => setParanet(e.target.value)}>
+      {paranets.map((p) => <option key={p} value={p}>{p}</option>)}
+      {!paranets.includes(paranet) && <option value={paranet}>{paranet}</option>}
+    </select>
+  ) : (
+    <input value={paranet} onChange={(e) => setParanet(e.target.value)} />
+  );
 
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write draft triples to the workspace (free, no gas). When ready, enshrine them to the chain with full finality.
+        Workspace-first publishing: write drafts (free), then enshrine to paranet or a context graph with on-chain finality.
       </div>
 
       <div className="form-group">
         <label>Paranet</label>
-        {paranets.length > 0 ? (
-          <select value={paranet} onChange={(e) => setParanet(e.target.value)}>
-            {paranets.map((p) => <option key={p} value={p}>{p}</option>)}
-            {!paranets.includes(paranet) && <option value={paranet}>{paranet}</option>}
-          </select>
-        ) : (
-          <input value={paranet} onChange={(e) => setParanet(e.target.value)} />
-        )}
+        {paranetSelect}
       </div>
 
-      <div className="setup-section-title">Write to Workspace</div>
-      <div className="form-group">
-        <label>Subject</label>
-        <input value={subject} onChange={(e) => setSubject(e.target.value)} />
+      {/* ─── Step 1: Write to Workspace ─── */}
+      <div className="setup-section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ background: OP_COLORS.workspace, width: 8, height: 8, borderRadius: '50%', display: 'inline-block' }} />
+        Step 1 — Write to Workspace
       </div>
-      <div className="form-group">
-        <label>Predicate</label>
-        <input value={predicate} onChange={(e) => setPredicate(e.target.value)} />
-      </div>
-      <div className="form-group">
-        <label>Object</label>
-        <input value={object} onChange={(e) => setObject(e.target.value)} />
-      </div>
+      <div className="form-group"><label>Subject</label><input value={subject} onChange={(e) => setSubject(e.target.value)} /></div>
+      <div className="form-group"><label>Predicate</label><input value={predicate} onChange={(e) => setPredicate(e.target.value)} /></div>
+      <div className="form-group"><label>Object</label><input value={object} onChange={(e) => setObject(e.target.value)} /></div>
       <button className="btn btn-primary btn-wide" disabled={busy} onClick={doWrite}>
         {busy ? 'Writing...' : 'Write to Workspace (Free)'}
       </button>
 
       <div className="setup-divider" />
 
+      {/* ─── Workspace contents ─── */}
       <div className="setup-section-title">Workspace Contents</div>
       <button className="btn btn-secondary btn-wide" disabled={busy} onClick={doQueryWorkspace}>
         Query Workspace
       </button>
-      {wsContents && <pre className="result-box code">{wsContents}</pre>}
+      {wsContents && <pre className="result-box code" style={{ maxHeight: 150 }}>{wsContents}</pre>}
 
       <div className="setup-divider" />
 
-      <div className="setup-section-title">Enshrine to Chain</div>
+      {/* ─── Step 2: Enshrine ─── */}
+      <div className="setup-section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ background: OP_COLORS.publish, width: 8, height: 8, borderRadius: '50%', display: 'inline-block' }} />
+        Step 2 — Enshrine (On-Chain Finality)
+      </div>
+
+      <div className="form-group">
+        <label>Target</label>
+        <div className="graph-target-pills">
+          <button
+            className={`target-pill ${enshrineMode === 'paranet' ? 'active' : ''}`}
+            style={enshrineMode === 'paranet' ? { background: OP_COLORS.publish } : undefined}
+            onClick={() => setEnshrineMode('paranet')}
+          >
+            Paranet Data Graph
+          </button>
+          <button
+            className={`target-pill ${enshrineMode === 'contextGraph' ? 'active' : ''}`}
+            style={enshrineMode === 'contextGraph' ? { background: OP_COLORS.contextGraph } : undefined}
+            onClick={() => setEnshrineMode('contextGraph')}
+          >
+            Context Graph
+          </button>
+        </div>
+      </div>
+
+      {enshrineMode === 'contextGraph' && (
+        <>
+          <div className="form-group">
+            <label>Context Graph ID</label>
+            <input
+              value={contextGraphId}
+              onChange={(e) => setContextGraphId(e.target.value)}
+              placeholder="Enter ID or create one below"
+            />
+          </div>
+          <details style={{ marginBottom: 8 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, opacity: 0.7 }}>Create new context graph...</summary>
+            <div style={{ padding: '8px 0 0' }}>
+              <div className="form-group">
+                <label>Participant Identity IDs (comma-separated)</label>
+                <input value={participantIds} onChange={(e) => setParticipantIds(e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Required Signatures (M of N)</label>
+                <input type="number" min={0} value={requiredSigs} onChange={(e) => setRequiredSigs(parseInt(e.target.value) || 0)} />
+              </div>
+              <button className="btn btn-secondary btn-wide" disabled={busy} onClick={doCreateContextGraph}>
+                {busy ? 'Creating...' : 'Create Context Graph On-Chain'}
+              </button>
+              {createCtxResult && <div className="result-box" style={{ marginTop: 6, fontSize: 12 }}>{createCtxResult}</div>}
+            </div>
+          </details>
+        </>
+      )}
+
       <p className="setup-hint">
-        Publish all workspace content with full on-chain finality (costs TRAC + gas). Clears workspace after.
+        {enshrineMode === 'paranet'
+          ? 'Publishes all workspace content to the paranet data graph with on-chain finality.'
+          : 'Publishes workspace content to a bounded context graph (M/N signature-gated subgraph).'}
       </p>
       <button className="btn btn-primary btn-wide" disabled={busy} onClick={doEnshrine}>
-        {busy ? 'Enshrining...' : 'Enshrine All to Chain'}
+        {busy
+          ? 'Enshrining...'
+          : enshrineMode === 'contextGraph'
+            ? `Enshrine to Context Graph${contextGraphId ? ` #${contextGraphId}` : ''}`
+            : 'Enshrine All to Paranet'}
       </button>
 
       {result && <pre className="result-box code">{result}</pre>}
@@ -644,7 +868,7 @@ function WorkspaceTab() {
 }
 
 function PublishTab() {
-  const { state, addBroadcast, completeOperation } = useStore();
+  const { state, addBroadcast, completeOperation, addTimelineStep, addChainAnimation } = useStore();
   const paranets = useParanets();
   const [subject, setSubject] = useState('did:dkg:entity:001');
   const [predicate, setPredicate] = useState('http://schema.org/name');
@@ -669,17 +893,47 @@ function PublishTab() {
     const label = privQuads ? 'publish (private)' : 'publish';
     const opId = addBroadcast('publish', state.selectedNode, label);
 
+    addTimelineStep(state.selectedNode, 'publish', 'prepare', 'Preparing knowledge asset', { status: 'start' });
+    addTimelineStep(state.selectedNode, 'publish', 'merkle', 'Computing merkle proofs');
     try {
+      addTimelineStep(state.selectedNode, 'publish', 'chain-tx', 'Submitting chain tx...');
+      addChainAnimation(state.selectedNode, 'publish', 'toChain');
+      addTimelineStep(CHAIN_NODE_ID, 'publish', 'tx-pending', `Tx from N${state.selectedNode}`, { status: 'start' });
       const res = await api.publishKA(state.selectedNode, paranet, quads, privQuads);
+      addChainAnimation(state.selectedNode, 'publish', 'fromChain');
+      addTimelineStep(CHAIN_NODE_ID, 'publish', 'confirmed', `KC ${res.kcId} mined`, { status: 'done' });
+      addTimelineStep(state.selectedNode, 'publish', 'confirmed', `On-chain confirmed: KC ${res.kcId}`);
+
+      const peers = state.nodes.filter(n => n.id !== state.selectedNode && n.online);
+      peers.forEach((n, i) => {
+        setTimeout(() => {
+          addTimelineStep(state.selectedNode, 'publish', 'gossip', `Broadcasting → N${n.id}`, { targetNodeId: n.id });
+          addTimelineStep(n.id, 'publish', 'receive', `Receiving from N${state.selectedNode}`);
+        }, 200 + i * 300);
+      });
+
+      peers.forEach((n, i) => {
+        setTimeout(() => {
+          addChainAnimation(n.id, 'publish', 'toChain');
+          addTimelineStep(n.id, 'publish', 'verify', 'Verifying on-chain proof');
+          addTimelineStep(CHAIN_NODE_ID, 'publish', 'read', `N${n.id} reading proof`, { status: 'progress' });
+        }, 800 + i * 400);
+        setTimeout(() => {
+          addChainAnimation(n.id, 'publish', 'fromChain');
+          addTimelineStep(n.id, 'publish', 'finalize', 'Verified & promoted to graph', { status: 'done' });
+        }, 1600 + i * 400);
+      });
+
       completeOperation(opId, 'success', `KC: ${res.kcId}`);
       setResult(`KC: ${res.kcId} | Status: ${res.status} | KAs: ${res.kas?.length ?? 0}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
+      addTimelineStep(state.selectedNode, 'publish', 'error', e.message, { status: 'error' });
       setResult(`Error: ${e.message}`);
     } finally {
       setBusy(false);
     }
-  }, [subject, predicate, object, privateObj, paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [subject, predicate, object, privateObj, paranet, state.selectedNode, state.nodes, addBroadcast, completeOperation, addTimelineStep]);
 
   return (
     <div className="tab-form">
@@ -1078,6 +1332,135 @@ function ConvictionTab() {
         Create Conviction Account
       </button>
       {result && <pre className="result-box code">{result}</pre>}
+    </div>
+  );
+}
+
+function LogsTab() {
+  const { state } = useStore();
+  const [logs, setLogs] = useState<string[]>([]);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [filterText, setFilterText] = useState('');
+  const [logLevel, setLogLevel] = useState<'all' | 'info' | 'warn' | 'error'>('all');
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const fileSizeRef = useRef(0);
+
+  const fetchLatest = useCallback(async () => {
+    try {
+      const res = await api.fetchLogs(state.selectedNode, 300, 0);
+      setLogs(res.lines);
+      fileSizeRef.current = res.fileSize;
+    } catch {
+      setLogs(['Error fetching logs']);
+    }
+  }, [state.selectedNode]);
+
+  useEffect(() => {
+    fetchLatest();
+  }, [fetchLatest]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const iv = setInterval(async () => {
+      try {
+        const res = await api.fetchLogs(state.selectedNode, 300, 0);
+        setLogs(res.lines);
+        fileSizeRef.current = res.fileSize;
+      } catch { /* ignore polling errors */ }
+    }, 2000);
+    return () => clearInterval(iv);
+  }, [autoRefresh, state.selectedNode]);
+
+  useEffect(() => {
+    if (autoRefresh) {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs, autoRefresh]);
+
+  const filtered = logs.filter((line) => {
+    if (filterText && !line.toLowerCase().includes(filterText.toLowerCase())) return false;
+    if (logLevel === 'error' && !line.includes('[ERROR]') && !line.includes('Error') && !line.includes('FAIL')) return false;
+    if (logLevel === 'warn' && !line.includes('[WARN]') && !line.includes('WARNING') && !line.includes('[ERROR]') && !line.includes('Error')) return false;
+    return true;
+  });
+
+  const colorize = (line: string) => {
+    if (line.includes('[ERROR]') || line.includes('Error') || line.includes('FAIL')) return '#ef4444';
+    if (line.includes('[WARN]') || line.includes('WARNING')) return '#f59e0b';
+    if (line.includes('publish') || line.includes('enshrine') || line.includes('Publish')) return '#10b981';
+    if (line.includes('workspace') || line.includes('Workspace')) return '#f97316';
+    if (line.includes('query') || line.includes('Query')) return '#3b82f6';
+    if (line.includes('gossip') || line.includes('Gossip') || line.includes('Finalization')) return '#a855f7';
+    return undefined;
+  };
+
+  return (
+    <div className="tab-form" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <input
+          value={filterText}
+          onChange={(e) => setFilterText(e.target.value)}
+          placeholder="Filter logs..."
+          style={{ flex: 1 }}
+        />
+        <select value={logLevel} onChange={(e) => setLogLevel(e.target.value as any)} style={{ width: 80 }}>
+          <option value="all">All</option>
+          <option value="info">Info+</option>
+          <option value="warn">Warn+</option>
+          <option value="error">Errors</option>
+        </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, fontSize: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={autoRefresh}
+            onChange={(e) => setAutoRefresh(e.target.checked)}
+          />
+          Auto-refresh
+        </label>
+        <span style={{ opacity: 0.5 }}>
+          Node {state.selectedNode} &middot; {filtered.length} lines
+        </span>
+        <button
+          className="btn btn-secondary"
+          style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: 11 }}
+          onClick={fetchLatest}
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div
+        className="logs-container"
+        style={{
+          flex: 1,
+          minHeight: 300,
+          maxHeight: 500,
+          overflow: 'auto',
+          background: '#0d1117',
+          borderRadius: 6,
+          padding: '8px 10px',
+          fontFamily: 'JetBrains Mono, monospace',
+          fontSize: 11,
+          lineHeight: 1.5,
+          color: '#c9d1d9',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-all',
+        }}
+      >
+        {filtered.length === 0 ? (
+          <div style={{ opacity: 0.4, textAlign: 'center', paddingTop: 40 }}>No logs yet</div>
+        ) : (
+          filtered.map((line, i) => (
+            <div key={i} style={{ color: colorize(line) }}>
+              {line}
+            </div>
+          ))
+        )}
+        <div ref={logEndRef} />
+      </div>
     </div>
   );
 }

@@ -9,6 +9,29 @@ export interface NodeStatus {
   connections: number;
   relayConnected: boolean;
   multiaddrs: string[];
+  identityId?: string;
+  hasIdentity?: boolean;
+}
+
+export interface TimelineEvent {
+  id: string;
+  ts: number;
+  nodeId: number;
+  targetNodeId?: number;
+  opType: OperationType;
+  phase: string;
+  label: string;
+  detail?: string;
+  status: 'start' | 'progress' | 'done' | 'error';
+}
+
+export interface NodeLabel {
+  id: string;
+  nodeId: number;
+  text: string;
+  color: string;
+  ts: number;
+  fadeAfterMs: number;
 }
 
 export interface DevnetNode {
@@ -46,7 +69,8 @@ export type OperationType =
   | 'stake'
   | 'fairswap'
   | 'conviction'
-  | 'connect';
+  | 'connect'
+  | 'contextGraph';
 
 export interface Activity {
   id: string;
@@ -78,4 +102,5 @@ export const OP_COLORS: Record<OperationType, string> = {
   fairswap: '#ec4899',
   conviction: '#e2e8f0',
   connect: '#6366f1',
+  contextGraph: '#a855f7',
 };

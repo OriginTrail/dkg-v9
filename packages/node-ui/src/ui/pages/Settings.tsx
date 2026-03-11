@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode } from '../api.js';
+import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode, fetchWorkspaceTtl, updateWorkspaceTtl } from '../api.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -245,6 +245,89 @@ function chainLabel(chainId: string | null | undefined): string {
   }
 }
 
+function WorkspaceSection() {
+  const { data: ws, refresh } = useFetch(fetchWorkspaceTtl, []);
+  const [ttlDays, setTtlDays] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (ws?.ttlDays != null) setTtlDays(String(ws.ttlDays));
+  }, [ws]);
+
+  const handleSave = useCallback(async () => {
+    const days = parseFloat(ttlDays);
+    if (isNaN(days) || days < 0) {
+      setMessage({ type: 'err', text: 'Enter a valid number of days (0 to disable)' });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      await updateWorkspaceTtl(days);
+      setMessage({ type: 'ok', text: 'Workspace TTL updated' });
+      refresh();
+    } catch {
+      setMessage({ type: 'err', text: 'Failed to save' });
+    } finally {
+      setSaving(false);
+    }
+  }, [ttlDays, refresh]);
+
+  return (
+    <div className="settings-card">
+      <div className="settings-title">Workspace</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        Workspace data is ephemeral pre-publish storage. The TTL controls how long workspace entries are kept before automatic cleanup.
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>TTL (days)</label>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={ttlDays}
+            onChange={(e) => setTtlDays(e.target.value)}
+            className="mono"
+            style={{
+              width: 80, padding: '6px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg)',
+              color: 'var(--text)', fontSize: 12,
+            }}
+          />
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{
+              padding: '6px 14px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--accent)',
+              color: '#fff', fontSize: 11, fontWeight: 600,
+              cursor: saving ? 'not-allowed' : 'pointer',
+              opacity: saving ? 0.5 : 1,
+            }}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+          Set to 0 to disable automatic cleanup. Default: 30 days.
+        </div>
+      </div>
+      {message && (
+        <div style={{
+          padding: '6px 10px', borderRadius: 6, fontSize: 11,
+          background: message.type === 'ok' ? 'var(--green-dim)' : 'rgba(248,113,113,.05)',
+          color: message.type === 'ok' ? 'var(--green)' : 'var(--red)',
+          border: `1px solid ${message.type === 'ok' ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}`,
+        }}>
+          {message.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { data: status } = useFetch(fetchStatus, [], 30_000);
   const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
@@ -347,6 +430,9 @@ export function SettingsPage() {
           <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} disabled />
           <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG v9." on={false} disabled />
         </div>
+
+        {/* Workspace */}
+        <WorkspaceSection />
 
         {/* Apps */}
         <div className="settings-card">

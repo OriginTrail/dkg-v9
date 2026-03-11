@@ -7,7 +7,8 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
+import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType, TimelineEvent, NodeLabel } from './types';
+import { OP_COLORS } from './types';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
 export interface PerTypeMetrics {
@@ -57,6 +58,9 @@ interface State {
   simulationRuns: SimulationRun[];
   activeSimulationId: string | null;
   networkMode: 'devnet' | 'testnet';
+  timeline: TimelineEvent[];
+  nodeLabels: NodeLabel[];
+  timelinePlaybackTs: number | null;
 }
 
 type Action =
@@ -73,7 +77,12 @@ type Action =
   | { type: 'RECORD_OP'; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
-  | { type: 'STOP_SIMULATION' };
+  | { type: 'STOP_SIMULATION' }
+  | { type: 'ADD_TIMELINE_EVENT'; event: TimelineEvent }
+  | { type: 'ADD_NODE_LABEL'; label: NodeLabel }
+  | { type: 'TICK_NODE_LABELS' }
+  | { type: 'SET_PLAYBACK_TS'; ts: number | null }
+  | { type: 'CLEAR_TIMELINE' };
 
 const MAX_ACTIVITIES = 200;
 
@@ -198,6 +207,21 @@ function reducer(state: State, action: Action): State {
       );
       return { ...state, activeSimulationId: null, simulationRuns: runs };
     }
+    case 'ADD_TIMELINE_EVENT':
+      return { ...state, timeline: [...state.timeline, action.event].slice(-2000) };
+    case 'ADD_NODE_LABEL':
+      return { ...state, nodeLabels: [...state.nodeLabels, action.label] };
+    case 'TICK_NODE_LABELS': {
+      const now = Date.now();
+      return {
+        ...state,
+        nodeLabels: state.nodeLabels.filter((l) => now - l.ts < l.fadeAfterMs),
+      };
+    }
+    case 'SET_PLAYBACK_TS':
+      return { ...state, timelinePlaybackTs: action.ts };
+    case 'CLEAR_TIMELINE':
+      return { ...state, timeline: [], nodeLabels: [] };
     default:
       return state;
   }
@@ -214,6 +238,9 @@ const initial: State = {
   simulationRuns: [],
   activeSimulationId: null,
   networkMode: 'devnet',
+  timeline: [],
+  nodeLabels: [],
+  timelinePlaybackTs: null,
 };
 
 interface StoreCtx {
@@ -231,6 +258,14 @@ interface StoreCtx {
     label: string,
   ) => string;
   completeOperation: (id: string, status: 'success' | 'error', detail?: string) => void;
+  addTimelineStep: (
+    nodeId: number,
+    opType: OperationType,
+    phase: string,
+    label: string,
+    opts?: { targetNodeId?: number; detail?: string; status?: TimelineEvent['status'] },
+  ) => void;
+  addChainAnimation: (sourceNodeId: number, type: OperationType, direction?: 'toChain' | 'fromChain') => void;
 }
 
 const Ctx = createContext<StoreCtx>(null!);
@@ -323,6 +358,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const addTimelineStep = useCallback(
+    (
+      nodeId: number,
+      opType: OperationType,
+      phase: string,
+      label: string,
+      opts?: { targetNodeId?: number; detail?: string; status?: TimelineEvent['status'] },
+    ) => {
+      const id = `tl-${++activityCounter}`;
+      const now = Date.now();
+      dispatch({
+        type: 'ADD_TIMELINE_EVENT',
+        event: {
+          id,
+          ts: now,
+          nodeId,
+          targetNodeId: opts?.targetNodeId,
+          opType,
+          phase,
+          label,
+          detail: opts?.detail,
+          status: opts?.status ?? 'progress',
+        },
+      });
+      const color = OP_COLORS[opType] || '#ffffff';
+      dispatch({
+        type: 'ADD_NODE_LABEL',
+        label: { id, nodeId, text: label, color, ts: now, fadeAfterMs: 6000 },
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     fetchDevnetConfig()
       .then((config) => {
@@ -402,20 +470,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let last = performance.now();
+    let labelTick = 0;
     let raf: number;
     const tick = () => {
       const now = performance.now();
       const dt = (now - last) / 1000;
       last = now;
       dispatch({ type: 'TICK_ANIMATIONS', dt });
+      labelTick++;
+      if (labelTick % 15 === 0) {
+        dispatch({ type: 'TICK_NODE_LABELS' });
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  const addChainAnimation = useCallback(
+    (sourceNodeId: number, type: OperationType, direction: 'toChain' | 'fromChain' = 'toChain') => {
+      const chainIdx = stateRef.current.nodes.length;
+      const nodeIdx = sourceNodeId - 1;
+      const id = `chain-${++activityCounter}`;
+      dispatch({
+        type: 'ADD_ANIMATION',
+        animation: {
+          id,
+          from: direction === 'toChain' ? nodeIdx : chainIdx,
+          to: direction === 'toChain' ? chainIdx : nodeIdx,
+          type,
+          progress: 0,
+          speed: 0.45,
+        },
+      });
+    },
+    [],
+  );
+
   return (
-    <Ctx.Provider value={{ state, dispatch, addOperation, addBroadcast, completeOperation }}>
+    <Ctx.Provider value={{ state, dispatch, addOperation, addBroadcast, completeOperation, addTimelineStep, addChainAnimation }}>
       {children}
     </Ctx.Provider>
   );

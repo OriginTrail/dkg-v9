@@ -56,6 +56,7 @@ export interface ExpeditionLaunchedMsg extends BaseMessage {
   type: 'expedition:launched';
   gameStateJson: string;
   partyOrder?: string[];
+  contextGraphId?: string;
 }
 
 export interface VoteCastMsg extends BaseMessage {

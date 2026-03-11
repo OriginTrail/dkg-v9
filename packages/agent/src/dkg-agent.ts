@@ -1,16 +1,17 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
+  encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
-import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
+import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
@@ -29,12 +30,13 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
-const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
+const DEFAULT_WORKSPACE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
 /** Health status of a peer from the last ping round. */
@@ -101,6 +103,11 @@ export interface DKGAgentConfig {
   syncParanets?: string[];
   /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   workspaceTtlMs?: number;
+  /** Publish protocol configuration for signature collection. */
+  publishConfig?: {
+    minimumReceiverSignatures?: number;
+    signatureCollectionTimeoutMs?: number;
+  };
 }
 
 /**
@@ -130,6 +137,7 @@ export class DKGAgent {
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
+  private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
@@ -1045,6 +1053,7 @@ export class DKGAgent {
           blockNumber: result.onChainResult.blockNumber,
           newMerkleRoot: result.merkleRoot,
           timestampMs: Date.now(),
+          operationId: ctx.operationId,
         });
         const topic = paranetUpdateTopic(paranetId);
         await this.gossip.publish(topic, message);
@@ -1082,16 +1091,127 @@ export class DKGAgent {
 
   /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
+   * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
+   * workspace state can promote it to canonical without re-downloading the full payload.
    */
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { clearWorkspaceAfter?: boolean },
+    options?: {
+      clearWorkspaceAfter?: boolean;
+      contextGraphId?: string | bigint;
+      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+    },
   ): Promise<PublishResult> {
-    return this.publisher.enshrineFromWorkspace(paranetId, selection, {
-      operationCtx: createOperationContext('enshrine'),
+    const ctx = createOperationContext('enshrine');
+    const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
+
+    const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
+      operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
+      contextGraphId: ctxGraphIdStr,
+      contextGraphSignatures: options?.contextGraphSignatures,
     });
+
+    if (result.status === 'confirmed' && result.onChainResult) {
+      const rootEntities = selection === 'all'
+        ? result.kaManifest.map(ka => ka.rootEntity)
+        : selection.rootEntities;
+
+      const msg: FinalizationMessageMsg = {
+        ual: result.ual,
+        paranetId,
+        kcMerkleRoot: result.merkleRoot,
+        txHash: result.onChainResult.txHash ?? '',
+        blockNumber: result.onChainResult.blockNumber ?? 0,
+        batchId: Number(result.onChainResult.batchId ?? 0),
+        startKAId: Number(result.onChainResult.startKAId ?? 0),
+        endKAId: Number(result.onChainResult.endKAId ?? 0),
+        publisherAddress: result.onChainResult.publisherAddress ?? '',
+        rootEntities,
+        timestampMs: Date.now(),
+        operationId: ctx.operationId,
+        contextGraphId: ctxGraphIdStr,
+      };
+
+      const topic = paranetFinalizationTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
+        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}`);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Create a new context graph on-chain.
+   * A context graph is a bounded, M/N signature-gated subgraph within a paranet.
+   */
+  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+    const ctx = createOperationContext('system');
+    if (typeof this.chain.createContextGraph !== 'function') {
+      throw new Error('createContextGraph not available on chain adapter');
+    }
+    const result = await this.chain.createContextGraph(params);
+    this.log.info(ctx, `Created context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
+    return result;
+  }
+
+  /**
+   * Link an already-published KC batch to a context graph.
+   * Collects participant signatures and calls addBatchToContextGraph on-chain.
+   */
+  async addBatchToContextGraph(params: {
+    contextGraphId: string | bigint;
+    batchId: bigint;
+    participantSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  }): Promise<{ success: boolean }> {
+    const ctx = createOperationContext('system');
+    if (typeof this.chain.addBatchToContextGraph !== 'function') {
+      throw new Error('addBatchToContextGraph not available on chain adapter');
+    }
+
+    const batch = (this.chain as any).getBatch?.(params.batchId);
+    const merkleRoot = batch?.merkleRoot ?? new Uint8Array(32);
+
+    const result = await this.chain.addBatchToContextGraph({
+      contextGraphId: BigInt(params.contextGraphId),
+      batchId: params.batchId,
+      merkleRoot,
+      signerSignatures: params.participantSignatures ?? [],
+    });
+    this.log.info(ctx, `addBatchToContextGraph: batch=${params.batchId} → ctxGraph=${params.contextGraphId} success=${result.success}`);
+    return { success: result.success };
+  }
+
+  /**
+   * (Re-)attempt on-chain identity registration. Safe to call multiple times.
+   * Returns the identityId (>0n on success, 0n if chain is not configured).
+   */
+  async ensureIdentity(): Promise<bigint> {
+    if (this.chain.chainId === 'none') return 0n;
+    const ctx = createOperationContext('system');
+    let identityId = 0n;
+    try {
+      identityId = await this.chain.getIdentityId();
+      if (identityId === 0n) {
+        this.log.info(ctx, 'ensureIdentity: no on-chain identity, creating profile...');
+        identityId = await this.chain.ensureProfile({ nodeName: this.config.name });
+        this.log.info(ctx, `ensureIdentity: profile created, identityId=${identityId}`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `ensureIdentity error: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        identityId = await this.chain.getIdentityId();
+      } catch { /* ignore */ }
+    }
+    if (identityId > 0n) {
+      this.publisher.setIdentityId(identityId);
+    }
+    return identityId;
   }
 
   async query(
@@ -1227,6 +1347,13 @@ export class DKGAgent {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
+
+    const finalizationTopic = paranetFinalizationTopic(paranetId);
+    this.gossip.subscribe(finalizationTopic);
+    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+      const fh = this.getOrCreateFinalizationHandler();
+      await fh.handleFinalizationMessage(data, paranetId);
+    });
   }
 
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {
@@ -1262,6 +1389,16 @@ export class DKGAgent {
       });
     }
     return this.updateHandler;
+  }
+
+  private getOrCreateFinalizationHandler(): FinalizationHandler {
+    if (!this.finalizationHandler) {
+      this.finalizationHandler = new FinalizationHandler(
+        this.store,
+        this.chain.chainId === 'none' ? undefined : this.chain,
+      );
+    }
+    return this.finalizationHandler;
   }
 
   /**
@@ -1892,6 +2029,7 @@ export class DKGAgent {
       publisherSignatureVs: new Uint8Array(0),
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
+      operationId: ctx.operationId,
     });
 
     const topic = paranetPublishTopic(paranetId);

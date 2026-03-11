@@ -25,6 +25,7 @@ docs/experiments/openclaw-benchmark/
 | Control | 1 | none | Baseline: standard file exploration |
 | Exp-A | 1 | DKG (SPARQL) | Single agent using `dkg_query` |
 | Exp-A2 | 1 | DKG (semantic wrappers) | High-level tools + SPARQL fallback |
+| **Exp-P** | **4 parallel** | **Shared markdown (no DKG)** | **Parallel control — isolates parallelism from DKG** |
 | Exp-B2 | 4 parallel | DKG (semantic wrappers) | Multi-agent with worktrees |
 | Exp-AB | 4 parallel | DKG (SPARQL) | Multi-agent with SPARQL-only MCP |
 | Exp-C1 | 4 parallel | Workspace shared log + DKG query | Multi-agent shared JSONL memory |
@@ -64,15 +65,18 @@ dkg index ../openclaw --paranet dev-coordination
 ./scripts/run-exp-a.sh
 ./scripts/run-exp-a2.sh
 
-# 4. Parallel DKG variants
+# 4. Parallel control (no DKG)
+./scripts/run-exp-p.sh
+
+# 5. Parallel DKG variants
 ./scripts/run-exp-b2.sh
 ./scripts/run-exp-ab.sh
 
-# 5. Collaborative variants
+# 6. Collaborative variants
 ./scripts/run-exp-c1.sh
 ./scripts/run-exp-c2.sh
 
-# 6. Analyze
+# 7. Analyze
 ./scripts/analyze.sh
 python ./scripts/analyze-exp-c.py --c1-run-id <run-id> --c2-run-id <run-id>
 ```

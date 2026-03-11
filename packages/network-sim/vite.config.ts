@@ -32,6 +32,50 @@ function networkDiscovery(): Plugin {
   return {
     name: 'network-discovery',
     configureServer(server) {
+      // GET /devnet/logs/:nodeId?lines=N&after=OFFSET
+      server.middlewares.use((req, res, next) => {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        const match = url.pathname.match(/^\/devnet\/logs\/(\d+)$/);
+        if (!match || req.method !== 'GET') return next();
+
+        const nodeId = parseInt(match[1], 10);
+        const maxLines = Math.min(parseInt(url.searchParams.get('lines') ?? '200', 10), 5000);
+        const afterByte = parseInt(url.searchParams.get('after') ?? '0', 10);
+        const logFile = path.join(DEVNET_DIR, `node${nodeId}`, 'daemon.log');
+
+        try {
+          const stat = fs.statSync(logFile);
+          const fileSize = stat.size;
+
+          if (afterByte > 0 && afterByte < fileSize) {
+            const buf = Buffer.alloc(Math.min(fileSize - afterByte, 512 * 1024));
+            const fd = fs.openSync(logFile, 'r');
+            fs.readSync(fd, buf, 0, buf.length, afterByte);
+            fs.closeSync(fd);
+            const text = buf.toString('utf-8');
+            const lines = text.split('\n').filter(Boolean).slice(-maxLines);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ lines, fileSize, nodeId }));
+          } else if (afterByte >= fileSize) {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ lines: [], fileSize, nodeId }));
+          } else {
+            const readSize = Math.min(fileSize, 256 * 1024);
+            const buf = Buffer.alloc(readSize);
+            const fd = fs.openSync(logFile, 'r');
+            fs.readSync(fd, buf, 0, readSize, Math.max(0, fileSize - readSize));
+            fs.closeSync(fd);
+            const text = buf.toString('utf-8');
+            const lines = text.split('\n').filter(Boolean).slice(-maxLines);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ lines, fileSize, nodeId }));
+          }
+        } catch {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ lines: [], fileSize: 0, nodeId, error: 'Log file not available' }));
+        }
+      });
+
       server.middlewares.use('/devnet/config', async (_req, res) => {
         try {
           if (SIM_TARGET === 'testnet') {
@@ -112,29 +156,37 @@ logger.error = (msg, opts) => {
   originalError(msg, opts);
 };
 
-function readDevnetToken(): string | undefined {
+let cachedToken: string | undefined;
+let tokenReadAt = 0;
+
+function getDevnetToken(): string | undefined {
+  const now = Date.now();
+  if (cachedToken && now - tokenReadAt < 5000) return cachedToken;
   try {
     const raw = fs.readFileSync(path.join(DEVNET_DIR, 'node1', 'auth.token'), 'utf-8');
     for (const line of raw.split('\n')) {
       const t = line.trim();
-      if (t.length > 0 && !t.startsWith('#')) return t;
+      if (t.length > 0 && !t.startsWith('#')) {
+        cachedToken = t;
+        tokenReadAt = now;
+        return t;
+      }
     }
   } catch { /* token file not yet created */ }
-  return undefined;
+  return cachedToken;
 }
-
-const devnetAuthToken = readDevnetToken();
 
 function makeProxyEntry(target: string, nodeId: number) {
   return {
     target,
     rewrite: (p: string) => p.replace(`/node/${nodeId}`, ''),
     configure: (proxy: { on: (event: string, handler: (...args: unknown[]) => void) => void }) => {
-      if (devnetAuthToken) {
-        proxy.on('proxyReq', (proxyReq: { setHeader: (name: string, value: string) => void }) => {
-          proxyReq.setHeader('Authorization', `Bearer ${devnetAuthToken}`);
-        });
-      }
+      proxy.on('proxyReq', (proxyReq: { setHeader: (name: string, value: string) => void }) => {
+        const token = getDevnetToken();
+        if (token) {
+          proxyReq.setHeader('Authorization', `Bearer ${token}`);
+        }
+      });
       proxy.on('error', (_err: unknown, _req: unknown, res: { writeHead?: (code: number, headers: Record<string, string>) => void; end?: (body: string) => void }) => {
         if (res.writeHead && res.end) {
           res.writeHead(502, { 'Content-Type': 'application/json' });

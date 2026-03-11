@@ -874,7 +874,7 @@ ${values}
             p: String(r.p ?? ''),
             o: String(r.o ?? ''),
             g,
-            graphType: g.endsWith('/workspace') || g.includes('_workspace') ? 'workspace' : 'data',
+            graphType: g.endsWith('/_workspace') || g.includes('_workspace') ? 'workspace' : 'data',
             paranet,
             source,
             ual: meta.ual,
@@ -991,7 +991,7 @@ function ResultTriples({
   onFocusSubject: (subject: string) => void;
 }) {
   if (!Array.isArray(result) || result.length === 0) return <div className="empty-state">Run a query to see triples</div>;
-  if (!triples.length) return <div className="empty-state">No triple-shaped rows in this result set</div>;
+  if (!triples.length) return <ResultBindingsFallback result={result} />;
   const displayRows = buildTripleRowsWithProvenance(triples, rows);
 
   return (
@@ -1029,6 +1029,51 @@ function ResultTriples({
               <CellWithCopy value={t.ual} />
               <CellWithCopy value={t.txHash} />
               <CellWithCopy value={t.timestamp} />
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatBindingCell(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object' && value && 'value' in (value as Record<string, unknown>)) {
+    return formatBindingCell((value as Record<string, unknown>).value);
+  }
+  return String(value);
+}
+
+function ResultBindingsFallback({ result }: { result: any[] }) {
+  if (!Array.isArray(result) || result.length === 0) {
+    return <div className="empty-state">Run a query to inspect results</div>;
+  }
+  const firstObject = result.find((row) => row && typeof row === 'object' && !Array.isArray(row));
+  const columns = firstObject ? Object.keys(firstObject as Record<string, unknown>) : [];
+  if (columns.length === 0) {
+    return <div className="json-view">{JSON.stringify(result, null, 2)}</div>;
+  }
+  return (
+    <div style={{ overflow: 'auto' }}>
+      <div className="empty-state" style={{ borderBottom: '1px solid var(--border)' }}>
+        Showing generic result rows (query is not triple-shaped).
+      </div>
+      <table className="data-table">
+        <thead>
+          <tr>
+            {columns.map((col) => (
+              <th key={col}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {result.map((row: any, idx: number) => (
+            <tr key={idx}>
+              {columns.map((col) => (
+                <CellWithCopy key={col} value={formatBindingCell(row?.[col])} />
+              ))}
             </tr>
           ))}
         </tbody>
@@ -1180,8 +1225,8 @@ function metaGraphsForDataGraph(graphUri: string): string[] {
   const g = (graphUri || '').trim();
   if (!g) return [];
   const out = new Set<string>();
-  if (g.endsWith('/workspace')) {
-    const base = g.slice(0, -'/workspace'.length);
+  if (g.endsWith('/_workspace')) {
+    const base = g.slice(0, -'/_workspace'.length);
     out.add(`${base}/_workspace_meta`);
     out.add(`${base}/_meta`);
   } else {

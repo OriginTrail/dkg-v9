@@ -298,9 +298,19 @@ describe('SPARQL helper cards', () => {
     expect(explorer).toContain('GRAPH ?metaGraph');
   });
 
+  it('uses _workspace suffix when deriving companion meta graphs', () => {
+    expect(explorer).toContain("g.endsWith('/_workspace')");
+    expect(explorer).not.toContain("g.endsWith('/workspace')");
+  });
+
   it('guards runQuery state updates against out-of-order responses', () => {
     expect(explorer).toContain('const runSeqRef = useRef(0);');
     expect(explorer).toContain('if (runSeq !== runSeqRef.current) return;');
+  });
+
+  it('falls back to generic row rendering for non-triple query results', () => {
+    expect(explorer).toContain('function ResultBindingsFallback');
+    expect(explorer).toContain('if (!triples.length) return <ResultBindingsFallback result={result} />;');
   });
 });
 

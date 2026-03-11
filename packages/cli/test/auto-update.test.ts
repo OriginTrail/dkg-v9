@@ -359,10 +359,24 @@ describe('blue-green checkForUpdate', () => {
 
     const result = await performUpdate(AU, vi.fn(), { refOverride: 'refs/tags/v9.0.5', verifyTagSignature: true });
     expect(result).toBe(true);
+    const fetchUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    expect(fetchUrl).toContain('/commits/v9.0.5');
+    expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allCmds = getExecCalls().map((c) => c.cmd);
     expect(allCmds.some((c) => c.includes('git fetch origin refs/tags/v9.0.5'))).toBe(true);
     expect(allCmds.some((c) => c.includes('git verify-tag "v9.0.5"'))).toBe(true);
     expect(allCmds.some((c) => c.includes('git checkout --force FETCH_HEAD'))).toBe(true);
+  });
+
+  it('logs clear error when requested tag does not exist', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 422 } as any);
+    const log = vi.fn();
+
+    const result = await performUpdate(AU, log, { refOverride: 'refs/tags/v9.0.5' });
+
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('tag "v9.0.5" not found'));
   });
 
   it('blocks pre-release versions unless allowPrerelease is true', async () => {

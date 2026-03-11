@@ -1929,8 +1929,11 @@ export async function checkForNewCommit(
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return null;
   }
+  const apiRef = ref
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/tags\//, '');
 
-  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`;
+  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(apiRef)}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -1938,6 +1941,10 @@ export async function checkForNewCommit(
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
+      if (res.status === 422 && ref.startsWith('refs/tags/')) {
+        log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
+        return null;
+      }
       log(`Auto-update: GitHub API returned ${res.status}`);
       return null;
     }
@@ -2083,19 +2090,26 @@ async function _performUpdateInner(
 
   const repo = normalizeRepo(au.repo);
   const ref = (opts.refOverride ?? au.branch).trim() || 'main';
+  const apiRef = ref
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/tags\//, '');
 
   if (!/^[\w.\-/]+$/.test(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return false;
   }
 
-  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`;
+  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(apiRef)}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   if (!res.ok) {
+    if (res.status === 422 && ref.startsWith('refs/tags/')) {
+      log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
+      return false;
+    }
     if (res.status === 404) {
       log(
         `Auto-update: GitHub returned 404 for ${repo} ref "${ref}". ` +

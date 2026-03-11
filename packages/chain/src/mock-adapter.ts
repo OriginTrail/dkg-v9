@@ -18,6 +18,10 @@ import type {
   PermanentPublishParams,
   FairSwapPurchaseInfo,
   KAUpdateVerification,
+  CreateContextGraphParams,
+  CreateContextGraphResult,
+  AddBatchToContextGraphParams,
+  PublishToContextGraphParams,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -44,6 +48,9 @@ export class MockChainAdapter implements ChainAdapter {
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
+
+  /** Configurable minimum receiver signatures. When > 0, publishKnowledgeAssets will check the count. Default: 1. */
+  minimumRequiredSignatures = 1;
 
   constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
     this.chainId = chainId;
@@ -127,6 +134,9 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult> {
+    if (params.receiverSignatures.length < this.minimumRequiredSignatures) {
+      throw new Error('MinSignaturesRequirementNotMet');
+    }
     const { startId, endId } = await this.reserveUALRange(params.kaCount);
 
     const batchId = this.nextBatchId++;
@@ -532,6 +542,85 @@ export class MockChainAdapter implements ChainAdapter {
     const lock = this.delegatorLocks.get(key);
     const lockEpochs = lock?.lockEpochs ?? 1;
     return { multiplier: computeConvictionMultiplier(lockEpochs) };
+  }
+
+  // --- Context Graphs ---
+
+  private contextGraphs = new Map<bigint, {
+    manager: string;
+    participantIdentityIds: bigint[];
+    requiredSignatures: number;
+    metadataBatchId: bigint;
+    active: boolean;
+    batches: bigint[];
+  }>();
+  private nextContextGraphId = 1n;
+
+  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+    const contextGraphId = this.nextContextGraphId++;
+    this.contextGraphs.set(contextGraphId, {
+      manager: this.signerAddress,
+      participantIdentityIds: [...params.participantIdentityIds],
+      requiredSignatures: params.requiredSignatures,
+      metadataBatchId: params.metadataBatchId ?? 0n,
+      active: true,
+      batches: [],
+    });
+
+    this.pushEvent('ContextGraphCreated', {
+      contextGraphId: contextGraphId.toString(),
+      manager: this.signerAddress,
+      participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
+      requiredSignatures: params.requiredSignatures,
+    });
+
+    return {
+      ...this.txResult(true),
+      contextGraphId,
+    };
+  }
+
+  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    return { r: new Uint8Array(32), vs: new Uint8Array(32) };
+  }
+
+  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+    const cg = this.contextGraphs.get(params.contextGraphId);
+    if (!cg || !cg.active) {
+      return this.txResult(false);
+    }
+
+    if (params.signerSignatures.length < cg.requiredSignatures) {
+      throw new Error(`Not enough signatures: need ${cg.requiredSignatures}, got ${params.signerSignatures.length}`);
+    }
+
+    cg.batches.push(params.batchId);
+
+    this.pushEvent('ContextGraphExpanded', {
+      contextGraphId: params.contextGraphId.toString(),
+      batchId: params.batchId.toString(),
+    });
+
+    return this.txResult(true);
+  }
+
+  async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
+    const result = await this.publishKnowledgeAssets(params);
+
+    const cg = this.contextGraphs.get(params.contextGraphId);
+    if (cg && cg.active) {
+      cg.batches.push(result.batchId);
+      this.pushEvent('ContextGraphExpanded', {
+        contextGraphId: params.contextGraphId.toString(),
+        batchId: result.batchId.toString(),
+      });
+    }
+
+    return result;
+  }
+
+  getContextGraph(contextGraphId: bigint) {
+    return this.contextGraphs.get(contextGraphId);
   }
 
   // --- Test helpers ---

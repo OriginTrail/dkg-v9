@@ -1145,6 +1145,7 @@ program
   .description('Check for and apply DKG node updates (blue-green swap)')
   .option('--check', 'Only check for updates, do not apply')
   .action(async (opts: ActionOpts) => {
+    await migrateToBlueGreen((msg) => console.log(msg));
     const config = await loadConfig();
     const net = await loadNetworkConfig();
     const au = config.autoUpdate ?? net?.autoUpdate ?? {
@@ -1201,6 +1202,11 @@ program
     const targetDir = join(releasesDir(), target);
     if (!existsSync(targetDir)) {
       console.error(`Slot ${target} does not exist. Cannot roll back.`);
+      process.exit(1);
+    }
+    const targetEntry = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
+    if (!existsSync(targetEntry)) {
+      console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
       process.exit(1);
     }
 

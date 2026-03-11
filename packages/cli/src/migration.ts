@@ -28,7 +28,9 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
 
   if (!existsSync(slotA)) {
     execSync(`git clone --local "${repo}" "${slotA}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-    log(`  Slot a: cloned from ${repo}`);
+    execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+    execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
+    log(`  Slot a: cloned and built from ${repo}`);
   }
 
   if (!existsSync(slotB)) {

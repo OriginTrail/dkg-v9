@@ -1152,6 +1152,46 @@ export async function checkForNewCommit(
 
 let _updateInProgress = false;
 
+async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
+  const lockPath = join(releasesDir(), '.update.lock');
+  try {
+    const { openSync, closeSync, writeFileSync } = await import('node:fs');
+    const fd = openSync(lockPath, 'wx');
+    writeFileSync(fd, String(process.pid));
+    closeSync(fd);
+    return true;
+  } catch (err: any) {
+    if (err.code === 'EEXIST') {
+      try {
+        const pidStr = (await readFile(lockPath, 'utf-8')).trim();
+        const lockPid = parseInt(pidStr, 10);
+        if (lockPid && lockPid !== process.pid) {
+          try {
+            process.kill(lockPid, 0);
+            log('Auto-update: another update process holds the lock, skipping');
+            return false;
+          } catch {
+            // Lock holder is dead, remove stale lock
+            try { const { unlinkSync } = await import('node:fs'); unlinkSync(lockPath); } catch {}
+            return acquireUpdateLock(log);
+          }
+        }
+      } catch { /* can't read lock */ }
+    }
+    // Lock acquisition failed for non-EEXIST reasons (e.g., no releases dir)
+    // Proceed without lock in graceful degradation
+    return true;
+  }
+}
+
+async function releaseUpdateLock(): Promise<void> {
+  const lockPath = join(releasesDir(), '.update.lock');
+  try {
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(lockPath);
+  } catch { /* ok */ }
+}
+
 /**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
@@ -1166,9 +1206,15 @@ export async function performUpdate(
     return false;
   }
   _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return false;
+  }
   try {
     return await _performUpdateInner(au, log);
   } finally {
+    await releaseUpdateLock();
     _updateInProgress = false;
   }
 }
@@ -1264,8 +1310,9 @@ async function _performUpdateInner(
     return false;
   }
 
-  await swapSlot(target);
+  // Write commit before swap so a crash between the two doesn't trigger a re-build
   await writeFile(commitFile, latestCommit);
+  await swapSlot(target);
   log(`Auto-update: build succeeded in slot ${target}. Swapped symlink. Restarting...`);
   return true;
 }

@@ -38,8 +38,13 @@ else
   info "Creating $DKG_HOME ..."
   mkdir -p "$RELEASES_DIR"
 
-  info "Cloning into slot a ..."
-  git clone --branch "$BRANCH" "$REPO_URL" "$SLOT_A"
+  if [ -d "$SLOT_A/.git" ]; then
+    info "Slot a already exists, skipping clone."
+  else
+    rm -rf "$SLOT_A"
+    info "Cloning into slot a ..."
+    git clone --branch "$BRANCH" "$REPO_URL" "$SLOT_A"
+  fi
 
   info "Installing dependencies in slot a ..."
   (cd "$SLOT_A" && pnpm install --frozen-lockfile)
@@ -47,13 +52,17 @@ else
   info "Building slot a ..."
   (cd "$SLOT_A" && pnpm build)
 
-  info "Cloning slot b (shared objects with a) ..."
-  git clone --reference "$SLOT_A" --dissociate --branch "$BRANCH" "$REPO_URL" "$SLOT_B"
+  if [ -d "$SLOT_B/.git" ]; then
+    info "Slot b already exists, skipping clone."
+  else
+    rm -rf "$SLOT_B"
+    info "Cloning slot b (shared objects with a) ..."
+    git clone --reference "$SLOT_A" --dissociate --branch "$BRANCH" "$REPO_URL" "$SLOT_B"
+  fi
   (cd "$SLOT_B" && pnpm install --frozen-lockfile && pnpm build)
 
-  # Atomic symlink: create tmp then rename
-  ln -sfn a "$RELEASES_DIR/current.tmp"
-  mv "$RELEASES_DIR/current.tmp" "$RELEASES_DIR/current" 2>/dev/null || mv -T "$RELEASES_DIR/current.tmp" "$RELEASES_DIR/current"
+  # Create current → a symlink (safe on initial install since 'current' doesn't exist yet)
+  ln -sfn a "$RELEASES_DIR/current"
   echo "a" > "$RELEASES_DIR/active"
 
   green "Slots created: a (active), b (standby)"

@@ -294,7 +294,8 @@ describe('@unit ContextGraphs', () => {
 
   describe('deactivation', () => {
     it('rejects addBatch to deactivated context graph', async () => {
-      const node = { operational: accounts[3], admin: accounts[4] };
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
       const { identityId } = await createProfile(ProfileContract, node);
 
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
@@ -302,12 +303,31 @@ describe('@unit ContextGraphs', () => {
         1,
         0,
       );
+      const contextGraphId = 1n;
 
-      // Deactivate via storage directly (since ContextGraphs facade doesn't expose deactivate)
-      // The storage's onlyContracts modifier allows ContextGraphs to call it
-      // but for test purposes, we can check isActive after creation
-      const isActive = await ContextGraphStorageContract.isContextGraphActive(1);
-      expect(isActive).to.be.true;
+      expect(await ContextGraphStorageContract.isContextGraphActive(contextGraphId)).to.be.true;
+
+      await ContextGraphStorageContract.connect(accounts[19]).deactivateContextGraph(contextGraphId);
+      expect(await ContextGraphStorageContract.isContextGraphActive(contextGraphId)).to.be.false;
+
+      const merkleRoot = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('deact-root'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
+      const digest = hre.ethers.solidityPackedKeccak256(
+        ['uint256', 'bytes32'],
+        [contextGraphId, merkleRoot],
+      );
+      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
+          contextGraphId,
+          batchId,
+          merkleRoot,
+          [identityId],
+          [sig.r],
+          [sig.yParityAndS],
+        ),
+      ).to.be.revertedWithCustomError(ContextGraphStorageContract, 'ContextGraphNotActive');
     });
   });
 
@@ -371,13 +391,8 @@ describe('@unit ContextGraphs', () => {
       );
       const contextGraphId = await ContextGraphStorageContract.getLatestContextGraphId();
 
-      const batchId = 42n;
-      const merkleRoot = await KnowledgeAssetsStorageContract.getBatchMerkleRoot(batchId);
-
-      if (merkleRoot === ethers.ZeroHash) {
-        // Skip if test setup doesn't have published batches
-        return;
-      }
+      const merkleRoot = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('replay-root'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
 
       const digest = ethers.solidityPackedKeccak256(
         ['uint256', 'bytes32'],
@@ -406,6 +421,54 @@ describe('@unit ContextGraphs', () => {
           [sig.yParityAndS],
         ),
       ).to.be.revertedWith('Batch already registered');
+    });
+
+    it('persists attested merkle root on registration', async () => {
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId],
+        1,
+        0,
+      );
+      const contextGraphId = await ContextGraphStorageContract.getLatestContextGraphId();
+      const merkleRoot = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('attested-root'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
+
+      const digest = ethers.solidityPackedKeccak256(
+        ['uint256', 'bytes32'],
+        [contextGraphId, merkleRoot],
+      );
+      const sig = ethers.Signature.from(
+        await signer.signMessage(ethers.getBytes(digest)),
+      );
+
+      await ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
+        contextGraphId,
+        batchId,
+        merkleRoot,
+        [identityId],
+        [sig.r],
+        [sig.yParityAndS],
+      );
+
+      const attested = await ContextGraphsContract.getAttestedMerkleRoot(contextGraphId, batchId);
+      expect(attested).to.equal(merkleRoot);
+    });
+
+    it('rejects duplicate participant IDs in createContextGraph', async () => {
+      const node = { operational: accounts[3], admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).createContextGraph(
+          [identityId, identityId],
+          2,
+          0,
+        ),
+      ).to.be.revertedWith('Duplicate or unsorted participant');
     });
   });
 });

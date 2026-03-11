@@ -59,8 +59,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         uint8 requiredSignatures,
         uint256 metadataBatchId
     ) external returns (uint256 contextGraphId) {
+        uint72 prevPid;
         for (uint256 i; i < participantIdentityIds.length; i++) {
             require(participantIdentityIds[i] != 0, "Zero participant ID");
+            require(participantIdentityIds[i] > prevPid, "Duplicate or unsorted participant");
+            prevPid = participantIdentityIds[i];
         }
         contextGraphId = contextGraphStorage.createContextGraph(
             msg.sender,
@@ -81,7 +84,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      * @param signatureRs           ECDSA signature R values
      * @param signatureVss          ECDSA compact signature (v << 255 | s) values
      */
-    mapping(uint256 => mapping(uint256 => bool)) private _batchRegistered;
+    /// @dev (contextGraphId, batchId) => attested merkle root (bytes32(0) means unregistered)
+    mapping(uint256 => mapping(uint256 => bytes32)) private _attestedRoots;
 
     function addBatchToContextGraph(
         uint256 contextGraphId,
@@ -91,13 +95,20 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32[] calldata signatureRs,
         bytes32[] calldata signatureVss
     ) external {
-        require(!_batchRegistered[contextGraphId][batchId], "Batch already registered");
+        require(_attestedRoots[contextGraphId][batchId] == bytes32(0), "Batch already registered");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
         bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
         require(onChainRoot != bytes32(0), "Batch does not exist");
         require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
-        _batchRegistered[contextGraphId][batchId] = true;
+        _attestedRoots[contextGraphId][batchId] = merkleRoot;
         contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
+    }
+
+    function getAttestedMerkleRoot(
+        uint256 contextGraphId,
+        uint256 batchId
+    ) external view returns (bytes32) {
+        return _attestedRoots[contextGraphId][batchId];
     }
 
     function _verifyParticipantSignatures(

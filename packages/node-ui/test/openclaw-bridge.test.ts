@@ -105,7 +105,7 @@ describe('Agent Hub UI — OpenClaw tab', () => {
   const agentHub = readUiFile('pages/AgentHub.tsx');
 
   it('imports local channel API functions', () => {
-    expect(agentHub).toContain('sendOpenClawLocalChat');
+    expect(agentHub).toContain('streamOpenClawLocalChat');
     expect(agentHub).toContain('fetchOpenClawLocalHealth');
     expect(agentHub).toContain('fetchOpenClawLocalHistory');
   });
@@ -152,7 +152,7 @@ describe('Agent Hub UI — OpenClaw tab', () => {
   });
 
   it('OpenClawChatView sends via local channel bridge', () => {
-    expect(agentHub).toContain('sendOpenClawLocalChat');
+    expect(agentHub).toContain('streamOpenClawLocalChat');
   });
 });
 
@@ -299,10 +299,10 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('daemon handler returns 200 for undelivered messages (not 502)', () => {
     const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
+    // Slice only the P2P chat-openclaw block (before the channel bridge section)
+    const blockStart = daemonSrc.indexOf("path === '/api/chat-openclaw'");
+    const blockEnd = daemonSrc.indexOf("// OpenClaw channel bridge", blockStart);
+    const chatOclawBlock = daemonSrc.slice(blockStart, blockEnd !== -1 ? blockEnd : daemonSrc.indexOf("// POST /api/connect"));
     expect(chatOclawBlock).not.toContain('502');
     expect(chatOclawBlock).toContain('delivered: false');
     expect(chatOclawBlock).toContain("reply: null");
@@ -311,7 +311,7 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('UI sends via local channel bridge (not P2P)', () => {
     const agentHub = readUiFile('pages/AgentHub.tsx');
-    expect(agentHub).toContain('sendOpenClawLocalChat');
-    expect(agentHub).toContain('res.text');
+    expect(agentHub).toContain('streamOpenClawLocalChat');
+    expect(agentHub).toContain('event.text');
   });
 });

@@ -12,7 +12,6 @@ import {
   fetchAgents,
   sendPeerMessage,
   fetchMessages,
-  sendOpenClawLocalChat,
   streamOpenClawLocalChat,
   fetchOpenClawLocalHealth,
   fetchOpenClawLocalHistory,
@@ -669,6 +668,7 @@ interface OcMessage {
 let _ocMid = 1000;
 
 const OC_SESSION_URI = 'urn:dkg:chat:session:openclaw:dkg-ui';
+const OC_SESSION_ID = 'openclaw:dkg-ui';
 
 function OpenClawChatView() {
   const [messages, setMessages] = useState<OcMessage[]>([]);
@@ -682,6 +682,9 @@ function OpenClawChatView() {
   const [showGraph, setShowGraph] = useState(false);
   const [graphTriples, setGraphTriples] = useState<Triple[] | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishNotice, setPublishNotice] = useState<string | null>(null);
+  const [publicationScope, setPublicationScope] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -784,6 +787,12 @@ function OpenClawChatView() {
               ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
               ?entity ?p ?o . BIND(?entity AS ?s) }
             UNION
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?srcEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?srcEntity ?rel ?targetEntity .
+              FILTER(STRSTARTS(STR(?targetEntity), "urn:dkg:entity:"))
+              ?targetEntity ?p ?o . BIND(?targetEntity AS ?s) }
+            UNION
             { ?memory <http://dkg.io/ontology/extractedFrom> <${OC_SESSION_URI}> .
               ?memory ?p ?o . BIND(?memory AS ?s) }
             UNION
@@ -815,6 +824,41 @@ function OpenClawChatView() {
   useEffect(() => {
     if (showGraph) loadGraph();
   }, [showGraph, loadGraph]);
+
+  // Fetch publication scope when graph is shown (and after sends/publishes)
+  const refreshPublicationScope = useCallback(() => {
+    fetchMemorySessionPublication(OC_SESSION_ID).then(pub => {
+      setPublicationScope(pub.scope);
+    }).catch(() => {
+      // Session may not exist yet — show 'empty' instead of stuck 'checking...'
+      setPublicationScope(prev => prev ?? 'empty');
+    });
+  }, []);
+
+  useEffect(() => {
+    if (showGraph) refreshPublicationScope();
+  }, [showGraph, refreshPublicationScope]);
+
+  const publishSession = useCallback(async () => {
+    if (publishing) return;
+    setPublishing(true);
+    setPublishNotice(null);
+    try {
+      const result = await Promise.race([
+        publishMemorySession(OC_SESSION_ID, { clearAfter: false }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Publishing timed out. Please retry.')), 45_000);
+        }),
+      ]);
+      setPublicationScope(result.publication.scope);
+      setPublishNotice(`Published ${result.rootEntityCount} root entities (${result.status})`);
+      await loadGraph();
+    } catch (err: any) {
+      setPublishNotice(`Publish failed: ${err?.message ?? 'Unknown error'}`);
+    } finally {
+      setPublishing(false);
+    }
+  }, [publishing, loadGraph]);
 
   const send = useCallback(async () => {
     if (!input.trim() || sending) return;
@@ -858,7 +902,10 @@ function OpenClawChatView() {
         },
       });
       // Refresh graph if visible (brief delay for fire-and-forget turn persistence)
-      if (showGraph) setTimeout(loadGraph, 1500);
+      if (showGraph) {
+        setTimeout(loadGraph, 1500);
+        setTimeout(refreshPublicationScope, 2000);
+      }
     } catch (err: any) {
       // User-friendly error messages
       let msg: string;
@@ -882,7 +929,7 @@ function OpenClawChatView() {
       setSending(false);
       setSendStartedAt(null);
     }
-  }, [input, sending, agentOnline, showGraph, loadGraph]);
+  }, [input, sending, agentOnline, showGraph, loadGraph, refreshPublicationScope]);
 
   const statusColor = agentOnline === true ? '#4ade80' : agentOnline === false ? '#ef4444' : '#888';
   const statusText = agentOnline === true ? 'Online' : agentOnline === false ? 'Offline' : 'Checking…';
@@ -1006,26 +1053,84 @@ function OpenClawChatView() {
       {/* Graph pane */}
       {showGraph && (
         <div style={{ display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--border)', overflow: 'hidden' }}>
-          <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ fontSize: 12, fontWeight: 700 }}>Knowledge Graph</div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              {graphTriples && (
-                <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                  {graphTriples.length} triples
+          <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'grid', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700 }}>Knowledge Graph</span>
+                {graphTriples && (
+                  <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                    {graphTriples.length} triples
+                  </span>
+                )}
+                <span
+                  className="mono"
+                  style={{
+                    borderRadius: 999,
+                    border: publicationScope === 'enshrined'
+                      ? '1px solid rgba(74,222,128,.3)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? '1px solid rgba(245,158,11,.35)'
+                      : '1px solid var(--border)',
+                    background: publicationScope === 'enshrined'
+                      ? 'rgba(74,222,128,.1)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? 'rgba(245,158,11,.12)'
+                      : 'var(--surface)',
+                    color: publicationScope === 'enshrined'
+                      ? 'var(--green)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? '#f59e0b'
+                      : 'var(--text-dim)',
+                    padding: '2px 8px',
+                    fontSize: 10,
+                  }}
+                >
+                  {publicationScope === 'enshrined' ? 'enshrined'
+                    : publicationScope === 'enshrined_with_pending' ? 'enshrined + pending'
+                    : publicationScope === 'workspace_only' ? 'workspace only'
+                    : publicationScope ? 'empty' : 'checking...'}
                 </span>
-              )}
-              <button
-                onClick={loadGraph}
-                disabled={graphLoading}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  onClick={loadGraph}
+                  disabled={graphLoading}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)',
+                    background: 'transparent', color: 'var(--text-muted)', fontSize: 10,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {graphLoading ? 'Loading…' : 'Refresh'}
+                </button>
+                <button
+                  onClick={() => { void publishSession(); }}
+                  disabled={publishing}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6,
+                    border: '1px solid rgba(74,222,128,.35)',
+                    background: 'rgba(74,222,128,.1)',
+                    color: 'var(--green)',
+                    fontSize: 10,
+                    cursor: publishing ? 'not-allowed' : 'pointer',
+                    opacity: publishing ? 0.65 : 1,
+                  }}
+                >
+                  {publishing ? 'Publishing…' : 'Publish session'}
+                </button>
+              </div>
+            </div>
+            {publishNotice && (
+              <div
+                className="mono"
                 style={{
-                  padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)',
-                  background: 'transparent', color: 'var(--text-muted)', fontSize: 10,
-                  cursor: 'pointer',
+                  fontSize: 10,
+                  color: publishNotice.toLowerCase().includes('failed') ? 'var(--red)' : 'var(--green)',
                 }}
               >
-                {graphLoading ? 'Loading…' : 'Refresh'}
-              </button>
-            </div>
+                {publishNotice}
+              </div>
+            )}
           </div>
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             {graphLoading && !graphTriples && (
@@ -1062,12 +1167,19 @@ function OpenClawChatView() {
                       'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
                       'http://dkg.io/ontology/ImportedMemory': '#a78bfa',
                       'http://dkg.io/ontology/MemoryImport': '#818cf8',
+                      'http://schema.org/Person': '#f472b6',
+                      'http://schema.org/Organization': '#fb923c',
+                      'http://schema.org/Place': '#34d399',
+                      'http://schema.org/Product': '#c084fc',
+                      'http://schema.org/Event': '#facc15',
+                      'http://schema.org/CreativeWork': '#7dd3fc',
                     },
                     defaultNodeColor: '#94a3b8',
                     defaultEdgeColor: '#5f8598',
                     edgeWidth: 0.9,
                   },
-                  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+                  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true,
+                    circleTypes: ['http://schema.org/Message'] },
                   focus: { maxNodes: 5000, hops: 999 },
                 }}
                 style={{ width: '100%', height: '100%' }}
@@ -1413,6 +1525,12 @@ export function AgentHubPage() {
             { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
               ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
               ?entity ?p ?o . BIND(?entity AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
+              ?srcEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?srcEntity ?rel ?targetEntity .
+              FILTER(STRSTARTS(STR(?targetEntity), "urn:dkg:entity:"))
+              ?targetEntity ?p ?o . BIND(?targetEntity AS ?s) }
             UNION
             { ?memory <http://dkg.io/ontology/extractedFrom> <${sessionUri}> .
               ?memory ?p ?o . BIND(?memory AS ?s) }
@@ -2201,12 +2319,19 @@ export function AgentHubPage() {
                   'http://schema.org/Message': '#22d3ee',
                   'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
                   'http://dkg.io/ontology/GraphCluster': '#a78bfa',
+                  'http://schema.org/Person': '#f472b6',
+                  'http://schema.org/Organization': '#fb923c',
+                  'http://schema.org/Place': '#34d399',
+                  'http://schema.org/Product': '#c084fc',
+                  'http://schema.org/Event': '#facc15',
+                  'http://schema.org/CreativeWork': '#7dd3fc',
                 },
                 defaultNodeColor: '#94a3b8',
                 defaultEdgeColor: '#5f8598',
                 edgeWidth: 0.9,
               },
-              hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+              hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true,
+                circleTypes: ['http://schema.org/Message'] },
               focus: { maxNodes: 5000, hops: 999 },
             }}
             viewConfig={graphViewConfig}

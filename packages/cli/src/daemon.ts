@@ -873,6 +873,16 @@ async function handleRequest(
         return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
       }
 
+      const contentType = bridgeRes.headers.get('content-type') ?? '';
+      if (!contentType.includes('text/event-stream')) {
+        const details = await bridgeRes.text().catch(() => '');
+        return jsonResponse(res, 502, { error: 'Bridge returned unexpected content-type', code: 'BRIDGE_ERROR', details });
+      }
+
+      if (!bridgeRes.body) {
+        return jsonResponse(res, 502, { error: 'Bridge returned empty body', code: 'BRIDGE_ERROR' });
+      }
+
       // Transparent pipe: stream SSE bytes from bridge to frontend
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -881,21 +891,24 @@ async function handleRequest(
         'Access-Control-Allow-Origin': '*',
       });
 
-      if (bridgeRes.body) {
-        const reader = (bridgeRes.body as any).getReader();
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            res.write(value);
-          }
-        } catch (err: any) {
-          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
-        } finally {
-          reader.releaseLock();
+      const reader = (bridgeRes.body as any).getReader();
+      let clientGone = false;
+      res.on('close', () => { clientGone = true; reader.cancel().catch(() => {}); });
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || clientGone) break;
+          res.write(value);
         }
+      } catch (err: any) {
+        if (!clientGone) {
+          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+        }
+      } finally {
+        reader.releaseLock();
       }
-      res.end();
+      if (!res.writableEnded) res.end();
     } catch (err: any) {
       if (err.name === 'TimeoutError') {
         return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });

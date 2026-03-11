@@ -479,10 +479,12 @@ export class DkgChannelPlugin {
     };
 
     // Push-based async queue: deliver() pushes, generator yields
+    let aborted = false;
     const queue: Array<{ type: 'text_delta'; delta: string } | { type: 'done' } | { type: 'error'; error: Error }> = [];
     let resolve: (() => void) | null = null;
     const waitForItem = () => new Promise<void>(r => { resolve = r; });
     const push = (item: typeof queue[0]) => {
+      if (aborted) return; // Generator exited — discard
       queue.push(item);
       if (resolve) { const r = resolve; resolve = null; r(); }
     };
@@ -554,6 +556,7 @@ export class DkgChannelPlugin {
       }
     } finally {
       clearTimeout(timer);
+      aborted = true; // Stop dangling deliver() callbacks from queuing
     }
 
     const finalText = replyChunks.join('\n') || '(no response)';
@@ -725,14 +728,22 @@ export class DkgChannelPlugin {
         'Connection': 'keep-alive',
       });
 
+      let clientDisconnected = false;
+      res.on('close', () => { clientDisconnected = true; });
+      res.on('error', () => { clientDisconnected = true; });
+
       try {
         for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner')) {
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
+          if (clientDisconnected) break;
+          const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
+          if (!ok) await new Promise<void>((r) => res.once('drain', r));
         }
       } catch (err: any) {
-        res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+        if (!clientDisconnected) {
+          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+        }
       }
-      res.end();
+      if (!res.writableEnded) res.end();
     } finally {
       this.inFlight--;
       const durationMs = Date.now() - start;
@@ -790,16 +801,19 @@ function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let settled = false;
     req.on('data', (c) => {
+      if (settled) return;
       total += c.length;
       if (total > maxBytes) {
+        settled = true;
         req.destroy();
         reject(new Error('Request body too large'));
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    req.on('error', reject);
+    req.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks).toString('utf-8')); } });
+    req.on('error', (err) => { if (!settled) { settled = true; reject(err); } });
   });
 }

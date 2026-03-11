@@ -1,20 +1,16 @@
 /**
- * DkgMemoryPlugin — Spike B: DKG-backed MemorySearchManager.
+ * DkgMemoryPlugin — DKG-backed memory search.
  *
- * Implements OpenClaw's read-only MemorySearchManager interface backed by
- * SPARQL queries against the DKG daemon's agent-memory paranet.
+ * Registers `dkg_memory_search` and `dkg_memory_import` tools that query
+ * the DKG daemon's agent-memory paranet via SPARQL.
  *
  * Memory reads go through this plugin:
- *   search(query) → SPARQL FILTER(CONTAINS) on agent-memory literals
- *   readFile(path) → SPARQL lookup by source-path predicate
+ *   search(query) → SPARQL FILTER(CONTAINS) on dkg:ImportedMemory items
+ *   readFile(path) → SPARQL text search fallback
  *   status()       → daemon health check
  *
- * Memory writes are captured separately by `write-capture.ts`.
- *
- * Spike B must validate:
- *   1. SPARQL text search quality is acceptable
- *   2. Round-trip: write → capture → DKG graph → search → result
- *   3. Performance: < 200ms typical search latency
+ * Memory writes are captured by `write-capture.ts` (file watcher →
+ * daemon's /api/memory/import pipeline with LLM entity extraction).
  */
 
 import type { DkgDaemonClient } from './dkg-client.js';
@@ -35,10 +31,6 @@ const AGENT_MEMORY_PARANET = 'agent-memory';
 const NS = {
   schema: 'http://schema.org/',
   dkg: 'http://dkg.io/ontology/',
-  rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-  xsd: 'http://www.w3.org/2001/XMLSchema#',
-  memory: 'urn:dkg:memory:',
-  chat: 'urn:dkg:chat:',
 };
 
 export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
@@ -56,26 +48,13 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
   register(api: OpenClawPluginApi): void {
     this.api = api;
 
-    // Register as the memory search manager if the slot is available
-    // This is an exclusive slot — only one memory plugin active at a time
-    if ((api as any).memory?.register) {
-      (api as any).memory.register(this);
-      api.logger.info?.('[dkg-memory] Registered as memory search manager');
-    } else {
-      api.logger.warn?.(
-        '[dkg-memory] api.memory.register not available — memory reads will use fallback file search. ' +
-        'DKG memory sync (writes) will still work.',
-      );
-    }
-
-    // Register the memory search/import tools so the agent can explicitly
-    // search DKG memory even if the memory slot is not available
     api.registerTool({
       name: 'dkg_memory_search',
       description:
-        'Search the DKG knowledge graph for memories, conversation history, and extracted entities. ' +
-        'Uses SPARQL to query the agent-memory paranet. ' +
-        'Returns matching memory items with relevance scores.',
+        'Primary memory recall tool — search the Decentralized Knowledge Graph for stored memories, ' +
+        'conversation history, decisions, preferences, and extracted entities. ' +
+        'Use this FIRST when you need to recall anything from previous sessions or stored knowledge. ' +
+        'Returns matching items with relevance scores.',
       parameters: {
         type: 'object',
         properties: {
@@ -152,7 +131,10 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
     const sparql = buildSearchSparql(query, limit);
 
     try {
-      const result = await this.client.query(sparql, { paranetId: AGENT_MEMORY_PARANET });
+      const result = await this.client.query(sparql, {
+        paranetId: AGENT_MEMORY_PARANET,
+        includeWorkspace: true,
+      });
       return formatSearchResults(result, query);
     } catch (err: any) {
       this.api?.logger.warn?.(`[dkg-memory] Search failed: ${err.message}`);
@@ -162,21 +144,27 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
   async readFile(path: string): Promise<string | null> {
     // Look up a memory by its source file path in the graph
+    // With the daemon's import pipeline, memories are individual items (not file records).
+    // Search for items whose text mentions the path as a fallback.
     const sparql = `
       PREFIX dkg: <${NS.dkg}>
       PREFIX schema: <${NS.schema}>
       SELECT ?text WHERE {
-        ?m dkg:sourcePath "${escapeSparqlString(path)}" ;
+        ?m a dkg:ImportedMemory ;
            schema:text ?text .
+        FILTER(CONTAINS(LCASE(?text), "${escapeSparqlString(path.toLowerCase())}"))
       }
       LIMIT 1
     `;
 
     try {
-      const result = await this.client.query(sparql, { paranetId: AGENT_MEMORY_PARANET });
-      const bindings = result?.results?.bindings ?? result?.bindings ?? [];
+      const result = await this.client.query(sparql, {
+        paranetId: AGENT_MEMORY_PARANET,
+        includeWorkspace: true,
+      });
+      const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
       if (bindings.length > 0) {
-        return bindings[0].text?.value ?? null;
+        return bindingValue(bindings[0].text) ?? null;
       }
       return null;
     } catch {
@@ -212,12 +200,11 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
 /**
  * Build a SPARQL query that searches across:
- * 1. Curated memory text — both dkg:Memory (ChatMemoryManager) and dkg:MemoryFile (write-capture)
- * 2. Chat message text (urn:dkg:chat:msg:*)
- * 3. Entity labels (urn:dkg:entity:*)
+ * 1. Imported memories (dkg:ImportedMemory — from daemon's /api/memory/import)
+ * 2. Chat messages (schema:Message)
+ * 3. Extracted entity labels (schema:name)
  *
  * Uses case-insensitive CONTAINS for text matching.
- * TODO: Spike B should evaluate if this needs embeddings for quality.
  */
 function buildSearchSparql(query: string, limit: number): string {
   // Split query into keywords for multi-term matching.
@@ -230,9 +217,7 @@ function buildSearchSparql(query: string, limit: number): string {
       PREFIX schema: <${NS.schema}>
       PREFIX dkg: <${NS.dkg}>
       SELECT ?uri ?text ?type ?ts WHERE {
-        { ?uri a dkg:Memory ; schema:text ?text . BIND("memory" AS ?type) }
-        UNION
-        { ?uri a dkg:MemoryFile ; schema:text ?text . BIND("memory" AS ?type) }
+        { ?uri a dkg:ImportedMemory ; schema:text ?text . OPTIONAL { ?uri schema:dateCreated ?ts } BIND("memory" AS ?type) }
         UNION
         { ?uri a schema:Message ; schema:text ?text ; schema:dateCreated ?ts . BIND("message" AS ?type) }
       }
@@ -249,21 +234,11 @@ function buildSearchSparql(query: string, limit: number): string {
   return `
     PREFIX schema: <${NS.schema}>
     PREFIX dkg: <${NS.dkg}>
-    PREFIX rdf: <${NS.rdf}>
     SELECT ?uri ?text ?type ?label ?ts WHERE {
       {
-        ?uri a dkg:Memory ;
+        ?uri a dkg:ImportedMemory ;
              schema:text ?text .
         OPTIONAL { ?uri schema:dateCreated ?ts }
-        BIND("memory" AS ?type)
-        BIND("" AS ?label)
-        FILTER(${filters})
-      }
-      UNION
-      {
-        ?uri a dkg:MemoryFile ;
-             schema:text ?text .
-        OPTIONAL { ?uri schema:dateModified ?ts }
         BIND("memory" AS ?type)
         BIND("" AS ?label)
         FILTER(${filters})
@@ -295,13 +270,14 @@ function buildSearchSparql(query: string, limit: number): string {
  * Computes a simple keyword-overlap relevance score.
  */
 function formatSearchResults(result: any, query: string): MemorySearchResult[] {
-  const bindings: any[] = result?.results?.bindings ?? result?.bindings ?? [];
+  // DKG daemon returns { result: { bindings: [...] } } (singular "result")
+  const bindings: any[] = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
   const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);
 
   return bindings.map((b: any) => {
-    const text = b.text?.value ?? b.label?.value ?? '';
-    const uri = b.uri?.value ?? '';
-    const type = b.type?.value ?? 'unknown';
+    const text = bindingValue(b.text) ?? bindingValue(b.label) ?? '';
+    const uri = bindingValue(b.uri) ?? '';
+    const type = bindingValue(b.type) ?? 'unknown';
 
     // Simple keyword-overlap score
     const lowerText = text.toLowerCase();
@@ -319,6 +295,29 @@ function formatSearchResults(result: any, query: string): MemorySearchResult[] {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Extract a plain string from a SPARQL binding value.
+ * DKG daemon returns raw N-Triples literals: `"\"hello\""` or `"urn:foo"`.
+ * Standard SPARQL JSON returns `{ type: "literal", value: "hello" }`.
+ * This handles both formats.
+ */
+function bindingValue(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  // Standard SPARQL JSON result format: { value: "..." }
+  if (typeof v === 'object' && 'value' in (v as any)) {
+    return String((v as any).value);
+  }
+  // DKG daemon raw format: N-Triples string literal "\"content\""
+  if (typeof v === 'string') {
+    // Strip surrounding quotes from N-Triples literals
+    if (v.startsWith('"') && v.endsWith('"')) {
+      return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+    }
+    return v;
+  }
+  return String(v);
+}
 
 function escapeSparqlString(s: string): string {
   return s

@@ -158,7 +158,7 @@ describe('DkgMemoryPlugin', () => {
     expect(sparql).toContain('ui');
   });
 
-  it('search should generate SPARQL matching both dkg:Memory and dkg:MemoryFile', async () => {
+  it('search should generate SPARQL matching dkg:ImportedMemory', async () => {
     const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
       results: { bindings: [] },
     });
@@ -168,8 +168,80 @@ describe('DkgMemoryPlugin', () => {
     await plugin.search('test search');
 
     const sparql = querySpy.mock.calls[0][0];
-    expect(sparql).toContain('dkg:Memory');
-    expect(sparql).toContain('dkg:MemoryFile');
+    expect(sparql).toContain('dkg:ImportedMemory');
+  });
+
+  it('search should query workspace graph with includeWorkspace: true', async () => {
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
+      results: { bindings: [] },
+    });
+
+    const api = makeApi();
+    plugin.register(api);
+    await plugin.search('test');
+
+    const opts = querySpy.mock.calls[0][1];
+    expect(opts).toEqual(
+      expect.objectContaining({
+        paranetId: 'agent-memory',
+        includeWorkspace: true,
+      }),
+    );
+  });
+
+  it('readFile should query workspace graph with includeWorkspace: true', async () => {
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
+      results: { bindings: [] },
+    });
+
+    const api = makeApi();
+    plugin.register(api);
+    await plugin.readFile('MEMORY.md');
+
+    const opts = querySpy.mock.calls[0][1];
+    expect(opts).toEqual(
+      expect.objectContaining({
+        paranetId: 'agent-memory',
+        includeWorkspace: true,
+      }),
+    );
+  });
+
+  it('search should handle DKG daemon N-Triples binding format', async () => {
+    // DKG daemon returns raw N-Triples literals, not { value: "..." } objects
+    vi.spyOn(client, 'query').mockResolvedValueOnce({
+      result: {
+        bindings: [
+          { uri: 'urn:dkg:memory:file:MEMORY.md', text: '"PostgreSQL is the preferred database"', type: '"memory"' },
+        ],
+      },
+    });
+
+    const api = makeApi();
+    plugin.register(api);
+    const results = await plugin.search('database');
+
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toBe('PostgreSQL is the preferred database');
+    expect(results[0].path).toContain('memory');
+    expect(results[0].path).toContain('urn:dkg:memory:file:MEMORY.md');
+    expect(results[0].score).toBe(1);
+  });
+
+  it('readFile should handle DKG daemon N-Triples binding format', async () => {
+    vi.spyOn(client, 'query').mockResolvedValueOnce({
+      result: {
+        bindings: [
+          { text: '"# MEMORY\\nContent here"' },
+        ],
+      },
+    });
+
+    const api = makeApi();
+    plugin.register(api);
+    const content = await plugin.readFile('MEMORY.md');
+
+    expect(content).toBe('# MEMORY\nContent here');
   });
 
   it('search should escape special characters in keywords', async () => {

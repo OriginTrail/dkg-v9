@@ -16,20 +16,9 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { DkgDaemonClient } from './dkg-client.js';
 import type { DkgOpenClawConfig, OpenClawPluginApi } from './types.js';
-
-const AGENT_MEMORY_PARANET = 'agent-memory';
-
-/** N-Quads namespace prefixes matching ChatMemoryManager's schema. */
-const NS = {
-  schema: 'http://schema.org/',
-  dkg: 'http://dkg.io/ontology/',
-  rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-  xsd: 'http://www.w3.org/2001/XMLSchema#',
-  memory: 'urn:dkg:memory:',
-};
 
 export class WriteCapture {
   private api: OpenClawPluginApi | null = null;
@@ -165,21 +154,8 @@ export class WriteCapture {
 
     if (!content.trim()) return;
 
-    // Build triples for the memory file
-    const fileName = basename(absPath);
-    let relPath = fileName;
-    if (this.memoryDir) {
-      const computed = relative(resolve(this.memoryDir), absPath);
-      // If the file is outside memoryDir, relative() returns a path starting
-      // with "..".  Fall back to just the filename to avoid odd URIs.
-      relPath = computed.startsWith('..') ? fileName : computed;
-    }
-    const quads = buildMemoryFileQuads(relPath, content);
-
-    if (quads.length === 0) return;
-
-    // Write to DKG workspace
-    await this.client.writeToWorkspace(AGENT_MEMORY_PARANET, quads, { localOnly: true });
+    // Import via the daemon's memory pipeline (entity extraction, categorization, etc.)
+    await this.client.importMemories(content, 'other', { useLlm: true });
     this.syncedMtimes.set(absPath, mtime);
   }
 
@@ -224,43 +200,4 @@ export function isMemoryPath(filePath: unknown, memoryDir: string): boolean {
   }
 
   return false;
-}
-
-/**
- * Build RDF quads for a memory file's content.
- *
- * Each memory file becomes a `dkg:MemoryFile` entity with:
- * - `dkg:sourcePath` — the relative file path
- * - `schema:text` — the full file content
- * - `schema:dateModified` — sync timestamp
- * - `dkg:syncedAt` — when this version was synced
- *
- * Individual memory items within the file could be extracted by LLM later
- * (Layer 3 entity extraction), but for Phase 0 we store the full file.
- */
-function buildMemoryFileQuads(
-  relPath: string,
-  content: string,
-): Array<{ subject: string; predicate: string; object: string }> {
-  // Sanitize the path for use as a URI component
-  const uriSafe = relPath.replace(/[\\/ ]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
-  const subject = `${NS.memory}file:${uriSafe}`;
-  const now = new Date().toISOString();
-
-  return [
-    { subject, predicate: `${NS.rdf}type`, object: `${NS.dkg}MemoryFile` },
-    { subject, predicate: `${NS.dkg}sourcePath`, object: `"${escapeLiteral(relPath)}"` },
-    { subject, predicate: `${NS.schema}text`, object: `"${escapeLiteral(content)}"` },
-    { subject, predicate: `${NS.schema}dateModified`, object: `"${now}"^^<${NS.xsd}dateTime>` },
-    { subject, predicate: `${NS.dkg}syncedAt`, object: `"${now}"^^<${NS.xsd}dateTime>` },
-  ];
-}
-
-function escapeLiteral(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t');
 }

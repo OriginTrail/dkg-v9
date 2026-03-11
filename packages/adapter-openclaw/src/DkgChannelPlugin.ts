@@ -91,10 +91,11 @@ export class DkgChannelPlugin {
     // --- Register as a first-class channel ---
     if (typeof api.registerChannel === 'function') {
       api.registerChannel({
-        id: CHANNEL_NAME,
-        name: CHANNEL_NAME,
         plugin: {
+          id: CHANNEL_NAME,
           name: CHANNEL_NAME,
+          meta: { displayName: 'DKG UI' },
+          capabilities: {},
           start: () => this.start(),
           stop: () => this.stop(),
           onOutbound: (reply) => this.handleOutboundReply(reply),
@@ -108,7 +109,7 @@ export class DkgChannelPlugin {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
-        auth: 'owner',
+        auth: 'gateway',
         handler: (req: any, res: any) => this.handleGatewayRoute(req, res),
       });
       this.useGatewayRoute = true;
@@ -202,7 +203,12 @@ export class DkgChannelPlugin {
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching via plugin-sdk for: ${correlationId}`);
       try {
-        return await this.dispatchViaPluginSdk(text, correlationId, identity);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
+        // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
+        this.persistTurn(text, reply.text, correlationId).catch((err) => {
+          api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
+        });
+        return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
         throw err;
@@ -439,6 +445,28 @@ export class DkgChannelPlugin {
       this.pendingRequests.delete(correlationId);
       pending.resolve(reply);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Chat turn persistence  (DKG graph for Agent Hub visualization)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Persist a chat turn to the DKG agent-memory graph.
+   * Fire-and-forget — errors are logged but don't affect the reply.
+   */
+  private async persistTurn(
+    userMessage: string,
+    assistantReply: string,
+    correlationId: string,
+  ): Promise<void> {
+    await this.client.storeChatTurn(
+      `openclaw:${CHANNEL_NAME}`,
+      userMessage,
+      assistantReply,
+      { turnId: correlationId },
+    );
+    this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
 
   // ---------------------------------------------------------------------------

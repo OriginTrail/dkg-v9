@@ -3,14 +3,24 @@ import { join } from 'node:path';
 import { DkgNodePlugin } from './dist/index.js';
 
 export default function (api) {
+  const log = api.logger ?? console;
+
   // Read DKG config from workspace config.json (not openclaw.json)
-  const workspaceDir = api.config?.agents?.defaults?.workspace;
+  let workspaceDir = api.config?.agents?.defaults?.workspace;
+  if (!workspaceDir) {
+    workspaceDir = api.config?.workspace ?? api.workspaceDir;
+  }
+
   let wsConfig = {};
   if (workspaceDir) {
     try {
       const raw = readFileSync(join(workspaceDir, 'config.json'), 'utf-8');
       wsConfig = JSON.parse(raw)['dkg-node'] || {};
-    } catch { /* no workspace config — rely on defaults */ }
+    } catch (err) {
+      log.warn?.(`[dkg-entry] Failed to read config.json from ${workspaceDir}: ${err.message}`);
+    }
+  } else {
+    log.warn?.('[dkg-entry] No workspace directory found — using defaults only');
   }
 
   // Build config from workspace settings
@@ -37,7 +47,6 @@ export default function (api) {
     }
   }
 
-  // --- Integration config (Phase 0) ---
   // Override daemon URL from environment if set
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -60,6 +69,9 @@ export default function (api) {
     api.workspaceDir = workspaceDir;
   }
 
+  log.info?.(`[dkg-entry] config — memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}`);
+
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
+  log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

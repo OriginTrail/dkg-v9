@@ -24,7 +24,7 @@ export interface OpenClawPluginApi {
   // --- Extended APIs (spike — may not be available in all versions) ---
 
   /** Register a bidirectional channel plugin. */
-  registerChannel?(opts: { id: string; name: string; plugin: OpenClawChannelAdapter }): void;
+  registerChannel?(opts: { plugin: OpenClawChannelAdapter; dock?: unknown }): void;
 
   /** Register an HTTP route on the gateway. */
   registerHttpRoute?(route: {
@@ -104,7 +104,13 @@ export interface ChannelOutboundReply {
  */
 export interface OpenClawChannelAdapter {
   /** Channel identifier (must be unique across registered channels). */
+  id: string;
+  /** Display name for the channel. */
   name: string;
+  /** Channel metadata. */
+  meta?: { displayName?: string; [key: string]: unknown };
+  /** Channel capabilities. */
+  capabilities?: Record<string, unknown>;
   /** Called when the gateway starts.  Set up transport here. */
   start?(): Promise<void>;
   /** Called when the gateway stops.  Tear down transport. */

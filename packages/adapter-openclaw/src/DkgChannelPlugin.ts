@@ -626,12 +626,10 @@ export class DkgChannelPlugin {
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
       // Persist turn even if the consumer cancelled early — use accumulated text
-      if (replyText) {
-        const finalText = replyText || '(no response)';
-        this.persistTurn(text, finalText, correlationId).catch(err => {
-          log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-        });
-      }
+      const persistText = replyText || '(no response)';
+      this.persistTurn(text, persistText, correlationId).catch(err => {
+        log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
+      });
     }
 
     // Only yield final if the stream completed normally (not cancelled)

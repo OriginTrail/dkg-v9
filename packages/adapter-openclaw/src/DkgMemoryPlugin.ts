@@ -67,7 +67,7 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
         try {
           const results = await this.search(
             String(params.query),
-            { limit: params.limit ? parseInt(String(params.limit), 10) : 10 },
+            { limit: Math.max(1, Math.min(100, parseInt(String(params.limit), 10) || 10)) },
           );
           return {
             content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],

@@ -30,10 +30,11 @@ export class DkgDaemonClient {
     this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile();
   }
 
-  /** Try to read the default token file (~/.dkg/auth.token). */
+  /** Try to read the default token file ($DKG_HOME/auth.token or ~/.dkg/auth.token). */
   private static loadTokenFromFile(): string | undefined {
     try {
-      const tokenPath = join(homedir(), '.dkg', 'auth.token');
+      const dkgHome = process.env.DKG_HOME ?? join(homedir(), '.dkg');
+      const tokenPath = join(dkgHome, 'auth.token');
       const raw = readFileSync(tokenPath, 'utf-8');
       // Token file may have comments (lines starting with #) and blank lines
       const token = raw.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#'));

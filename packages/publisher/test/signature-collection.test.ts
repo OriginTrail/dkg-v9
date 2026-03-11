@@ -487,3 +487,195 @@ describe('PublishToContextGraph chain adapter method', () => {
     expect(cg!.batches).toContain(result.batchId);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression tests for bugs found during PR review cycles
+// ---------------------------------------------------------------------------
+
+describe('Regression: sorted and deduplicated participant signatures', () => {
+  let store: OxigraphStore;
+  let chain: MockChainAdapter;
+  let publisher: DKGPublisher;
+  let eventBus: TypedEventBus;
+  const publisherWallet = ethers.Wallet.createRandom();
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    chain = new MockChainAdapter('mock:31337', publisherWallet.address);
+    eventBus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: publisherWallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+    await chain.createContextGraph!({
+      participantIdentityIds: [1n, 5n, 3n],
+      requiredSignatures: 1,
+    });
+  });
+
+  it('participant sigs are sorted by identityId before chain call (prevents contract revert)', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q('urn:test:sort:1', 'http://schema.org/name', '"SortTest"'),
+    ], { publisherPeerId: 'test-peer' });
+
+    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+
+    // Provide signatures in WRONG order (5n, 1n, 3n) — they must arrive sorted
+    const peer5 = new MockSignerPeer(5n);
+    const peer1 = new MockSignerPeer(1n);
+    const peer3 = new MockSignerPeer(3n);
+    const root = ethers.keccak256(ethers.toUtf8Bytes('sort-test'));
+    const sigs = [
+      await peer5.signParticipantAck(1n, root),
+      await peer1.signParticipantAck(1n, root),
+      await peer3.signParticipantAck(1n, root),
+    ];
+
+    await publisher.enshrineFromWorkspace(PARANET, {
+      rootEntities: ['urn:test:sort:1'],
+    }, {
+      contextGraphId: '1',
+      contextGraphSignatures: sigs,
+    });
+
+    expect(addBatchSpy).toHaveBeenCalled();
+    const callArgs = addBatchSpy.mock.calls[0][0];
+    const ids = callArgs.signerSignatures.map((s: any) => s.identityId);
+    // Must be ascending order
+    for (let i = 1; i < ids.length; i++) {
+      expect(ids[i]).toBeGreaterThan(ids[i - 1]);
+    }
+  });
+
+  it('duplicate identityId participant sigs are removed (prevents contract revert)', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q('urn:test:dedup:1', 'http://schema.org/name', '"DedupTest"'),
+    ], { publisherPeerId: 'test-peer' });
+
+    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+
+    const peer = new MockSignerPeer(3n);
+    const root = ethers.keccak256(ethers.toUtf8Bytes('dedup-test'));
+    const sig = await peer.signParticipantAck(1n, root);
+    // Same sig twice
+    const sigs = [sig, { ...sig }];
+
+    await publisher.enshrineFromWorkspace(PARANET, {
+      rootEntities: ['urn:test:dedup:1'],
+    }, {
+      contextGraphId: '1',
+      contextGraphSignatures: sigs,
+    });
+
+    expect(addBatchSpy).toHaveBeenCalled();
+    const callArgs = addBatchSpy.mock.calls[0][0];
+    const ids = callArgs.signerSignatures.map((s: any) => s.identityId);
+    const unique = new Set(ids.map(String));
+    expect(unique.size).toBe(ids.length);
+  });
+});
+
+describe('Regression: complete publish result fields', () => {
+  it('confirmed publish result includes txHash, blockNumber, batchId, publisherAddress', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const eventBus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:test:result:1', 'http://schema.org/name', '"ResultTest"')],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.txHash).toBeTruthy();
+    expect(typeof result.onChainResult!.txHash).toBe('string');
+    expect(result.onChainResult!.blockNumber).toBeGreaterThan(0);
+    expect(typeof result.onChainResult!.batchId).toBe('bigint');
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
+    expect(result.onChainResult!.publisherAddress).toBeTruthy();
+    expect(result.onChainResult!.publisherAddress.toLowerCase()).toBe(wallet.address.toLowerCase());
+  });
+});
+
+describe('Regression: fail-fast when receiver signatures are insufficient', () => {
+  it('publish returns tentative (not crash) when chain rejects insufficient sigs', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const eventBus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    vi.spyOn(chain, 'publishKnowledgeAssets').mockRejectedValueOnce(
+      new Error('MinSignaturesRequirementNotMet'),
+    );
+
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:test:failfast:1', 'http://schema.org/name', '"FailFast"')],
+      receiverSignatureProvider: async () => [],
+    });
+
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeUndefined();
+  });
+
+  it('publish stores data locally even when chain tx fails', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const eventBus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    vi.spyOn(chain, 'publishKnowledgeAssets').mockRejectedValueOnce(
+      new Error('InsufficientFunds'),
+    );
+
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:test:localstore:1', 'http://schema.org/name', '"LocalStore"')],
+    });
+
+    const queryResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${PARANET}> { <urn:test:localstore:1> <http://schema.org/name> ?o } }`,
+    );
+    expect(queryResult.type).toBe('bindings');
+    if (queryResult.type === 'bindings') {
+      expect(queryResult.bindings.length).toBe(1);
+      expect(queryResult.bindings[0]['o']).toContain('LocalStore');
+    }
+  });
+});

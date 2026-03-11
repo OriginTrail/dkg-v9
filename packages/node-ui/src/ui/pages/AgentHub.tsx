@@ -687,6 +687,17 @@ function OpenClawChatView() {
   const [publicationScope, setPublicationScope] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const lastHealthOnlineRef = useRef<boolean | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graphRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const publicationRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTimer = (timerRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -704,22 +715,30 @@ function OpenClawChatView() {
 
   // Abort in-flight request on unmount
   useEffect(() => {
-    return () => { abortRef.current?.abort(); };
+    return () => {
+      abortRef.current?.abort();
+      clearTimer(reconnectTimerRef);
+      clearTimer(graphRefreshTimerRef);
+      clearTimer(publicationRefreshTimerRef);
+    };
   }, []);
 
   // Periodic health polling (every 15s)
   useEffect(() => {
     let cancelled = false;
-    const prevOnline = { current: agentOnline };
     const poll = async () => {
       try {
         const h = await fetchOpenClawLocalHealth();
         if (cancelled) return;
-        const online = h.ok && !!h.bridge?.ok;
+        const online = h.ok;
         // Detect offline→online transition — reload history + show indicator
-        if (online && prevOnline.current === false) {
+        if (online && lastHealthOnlineRef.current === false) {
           setReconnectedAt(Date.now());
-          setTimeout(() => setReconnectedAt(prev => prev && Date.now() - prev >= 2900 ? null : prev), 3000);
+          clearTimer(reconnectTimerRef);
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            setReconnectedAt(prev => prev && Date.now() - prev >= 2900 ? null : prev);
+          }, 3000);
           fetchOpenClawLocalHistory(100).then(history => {
             if (cancelled) return;
             const loaded: OcMessage[] = history.map(h => ({
@@ -731,11 +750,11 @@ function OpenClawChatView() {
             if (loaded.length > 0) setMessages(loaded);
           }).catch(() => {});
         }
-        prevOnline.current = online;
+        lastHealthOnlineRef.current = online;
         setAgentOnline(online);
       } catch {
         if (!cancelled) {
-          prevOnline.current = false;
+          lastHealthOnlineRef.current = false;
           setAgentOnline(false);
         }
       }
@@ -796,13 +815,18 @@ function OpenClawChatView() {
             { ?memory <http://dkg.io/ontology/extractedFrom> <${OC_SESSION_URI}> .
               ?memory ?p ?o . BIND(?memory AS ?s) }
             UNION
-            { ?s a <http://dkg.io/ontology/ImportedMemory> . ?s ?p ?o }
-            UNION
-            { ?s a <http://dkg.io/ontology/MemoryImport> . ?s ?p ?o }
-            UNION
-            { ?entity <http://dkg.io/ontology/extractedFrom> ?batch .
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?sessionEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
               ?batch a <http://dkg.io/ontology/MemoryImport> .
-              ?entity ?p ?o . BIND(?entity AS ?s) }
+              ?batch ?p ?o . BIND(?batch AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?sessionEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
+              ?batch a <http://dkg.io/ontology/MemoryImport> .
+              ?memory <http://dkg.io/ontology/importBatch> ?batch .
+              ?memory ?p ?o . BIND(?memory AS ?s) }
           }
           ORDER BY ?s ?p ?o
           LIMIT 5000
@@ -903,8 +927,16 @@ function OpenClawChatView() {
       });
       // Refresh graph if visible (brief delay for fire-and-forget turn persistence)
       if (showGraph) {
-        setTimeout(loadGraph, 1500);
-        setTimeout(refreshPublicationScope, 2000);
+        clearTimer(graphRefreshTimerRef);
+        clearTimer(publicationRefreshTimerRef);
+        graphRefreshTimerRef.current = setTimeout(() => {
+          graphRefreshTimerRef.current = null;
+          void loadGraph();
+        }, 1500);
+        publicationRefreshTimerRef.current = setTimeout(() => {
+          publicationRefreshTimerRef.current = null;
+          refreshPublicationScope();
+        }, 2000);
       }
     } catch (err: any) {
       // User-friendly error messages

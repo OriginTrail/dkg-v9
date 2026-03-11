@@ -15,7 +15,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises';
-import { existsSync, readdirSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { DkgDaemonClient } from './dkg-client.js';
 import type { DkgOpenClawConfig, OpenClawPluginApi } from './types.js';
@@ -23,8 +23,9 @@ import type { DkgOpenClawConfig, OpenClawPluginApi } from './types.js';
 export class WriteCapture {
   private api: OpenClawPluginApi | null = null;
   private watchers: FSWatcher[] = [];
+  private readonly watchedDirs = new Set<string>();
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly memoryDir: string;
+  private memoryDir: string;
   private readonly debounceMs: number;
   /** Track files we've already synced (by mtime) to avoid duplicate work. */
   private readonly syncedMtimes = new Map<string, number>();
@@ -70,16 +71,7 @@ export class WriteCapture {
     if (this.memoryDir) {
       const absMemDir = resolve(this.memoryDir);
       if (existsSync(absMemDir)) {
-        try {
-          const w = watch(absMemDir, { recursive: true }, (eventType, filename) => {
-            if (!filename || !filename.endsWith('.md')) return;
-            this.debouncedSync(join(absMemDir, filename));
-          });
-          this.watchers.push(w);
-          log?.info?.(`[dkg-write-capture] Watching memory dir: ${absMemDir}`);
-        } catch (err: any) {
-          log?.warn?.(`[dkg-write-capture] Failed to watch memory dir: ${err.message}`);
-        }
+        this.watchMemoryDir(absMemDir);
       } else {
         log?.warn?.(`[dkg-write-capture] Memory dir does not exist yet: ${absMemDir}`);
       }
@@ -165,9 +157,9 @@ export class WriteCapture {
     // If watchers already running, skip
     if (this.watchers.length > 0) return;
     if (memoryDir) {
-      (this as any).memoryDir = memoryDir;
+      this.memoryDir = memoryDir;
     }
-    this.startWatchers();
+    void this.startWatchers();
   }
 
   private debouncedSync(fullPath: string): void {
@@ -244,10 +236,60 @@ export class WriteCapture {
       w.close();
     }
     this.watchers = [];
+    this.watchedDirs.clear();
     for (const timer of this.debounceTimers.values()) {
       clearTimeout(timer);
     }
     this.debounceTimers.clear();
+  }
+
+  private watchMemoryDir(absMemDir: string): void {
+    const log = this.api?.logger;
+    try {
+      const watcher = watch(absMemDir, { recursive: true }, (_eventType, filename) => {
+        if (!filename || !String(filename).endsWith('.md')) return;
+        this.debouncedSync(join(absMemDir, String(filename)));
+      });
+      this.watchers.push(watcher);
+      this.watchedDirs.add(absMemDir);
+      log?.info?.(`[dkg-write-capture] Watching memory dir: ${absMemDir}`);
+      return;
+    } catch (err: any) {
+      log?.warn?.(`[dkg-write-capture] Recursive watch unavailable (${err.message}) — falling back to directory watchers`);
+    }
+
+    const dirs = collectDirectories(absMemDir);
+    for (const dir of dirs) {
+      this.watchDirectory(dir);
+    }
+    log?.info?.(`[dkg-write-capture] Watching memory dir via per-directory watchers: ${absMemDir} (${dirs.length} dirs)`);
+  }
+
+  private watchDirectory(dir: string): void {
+    if (this.watchedDirs.has(dir)) return;
+    try {
+      const watcher = watch(dir, (_eventType, filename) => {
+        if (!filename) return;
+        const name = String(filename);
+        const fullPath = join(dir, name);
+
+        try {
+          if (statSync(fullPath).isDirectory()) {
+            this.watchDirectory(fullPath);
+            return;
+          }
+        } catch {
+          // File may have been removed or may not be a directory — ignore.
+        }
+
+        if (!name.endsWith('.md')) return;
+        this.debouncedSync(fullPath);
+      });
+      this.watchers.push(watcher);
+      this.watchedDirs.add(dir);
+    } catch (err: any) {
+      this.api?.logger.warn?.(`[dkg-write-capture] Failed to watch directory ${dir}: ${err.message}`);
+    }
   }
 }
 
@@ -314,8 +356,17 @@ export function isMemoryPath(filePath: unknown, memoryDir: string): boolean {
   // Match against configured memory directory (with trailing separator)
   if (memoryDir) {
     const normalizedDir = memoryDir.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '') + '/';
-    if (lower.startsWith(normalizedDir) || lower + '/' === normalizedDir) return true;
+    if (lower.startsWith(normalizedDir)) return fileName.endsWith('.md');
   }
 
   return false;
+}
+
+function collectDirectories(rootDir: string): string[] {
+  const dirs = [rootDir];
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    dirs.push(...collectDirectories(join(rootDir, entry.name)));
+  }
+  return dirs;
 }

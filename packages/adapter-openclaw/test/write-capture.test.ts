@@ -194,8 +194,8 @@ describe('isMemoryPath', () => {
     expect(isMemoryPath('C:\\workspace\\MEMORY.md', 'C:\\workspace\\memory')).toBe(true);
   });
 
-  it('should NOT match non-.md files in memory directory', () => {
-    expect(isMemoryPath('/workspace/memory/data.json', memDir)).toBe(true); // memDir prefix matches
+  it('should not match non-.md files under the configured memory directory', () => {
+    expect(isMemoryPath('/workspace/memory/data.json', memDir)).toBe(false);
   });
 
   it('should return false for non-string input', () => {

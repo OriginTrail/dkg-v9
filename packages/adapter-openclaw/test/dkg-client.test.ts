@@ -1,10 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DkgDaemonClient } from '../src/dkg-client.js';
+
+type DkgDaemonClientCtor = typeof import('../src/dkg-client.js').DkgDaemonClient;
 
 describe('DkgDaemonClient', () => {
-  let client: DkgDaemonClient;
+  let DkgDaemonClient: DkgDaemonClientCtor;
+  let client: InstanceType<DkgDaemonClientCtor>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.doUnmock('node:fs');
+    vi.doUnmock('node:os');
+    vi.doUnmock('node:path');
+    ({ DkgDaemonClient } = await import('../src/dkg-client.js'));
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
   });
 
@@ -20,6 +27,32 @@ describe('DkgDaemonClient', () => {
   it('should strip trailing slashes from base URL', () => {
     const c = new DkgDaemonClient({ baseUrl: 'http://localhost:9200///' });
     expect(c.baseUrl).toBe('http://localhost:9200');
+  });
+
+  it('auto-loads the daemon auth token from ~/.dkg/auth.token', async () => {
+    const readFileSync = vi.fn().mockReturnValue('# comment\nsecret-token\n');
+    const homedir = vi.fn().mockReturnValue('/fake-home');
+    vi.doMock('node:fs', () => ({ readFileSync }));
+    vi.doMock('node:os', () => ({ homedir }));
+    vi.resetModules();
+
+    const { DkgDaemonClient: FreshClient } = await import('../src/dkg-client.js');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ peerId: '12D3auto' }), { status: 200 }),
+    );
+
+    const authedClient = new FreshClient({ baseUrl: 'http://localhost:9200' });
+    await authedClient.getStatus();
+
+    expect(readFileSync.mock.calls[0]?.[0]).toContain('fake-home');
+    expect(readFileSync.mock.calls[0]?.[0]).toContain('.dkg');
+    expect(readFileSync.mock.calls[0]?.[0]).toContain('auth.token');
+    expect(readFileSync.mock.calls[0]?.[1]).toBe('utf-8');
+    expect(homedir).toHaveBeenCalled();
+    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Accept: 'application/json',
+      Authorization: 'Bearer secret-token',
+    });
   });
 
   it('getStatus should return ok:true on success', async () => {

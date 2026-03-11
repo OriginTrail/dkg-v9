@@ -53,6 +53,7 @@ describe('OpenClaw bridge API contract', () => {
   it('exports fetchOpenClawLocalHistory', () => {
     expect(apiSrc).toContain('fetchOpenClawLocalHistory');
     expect(apiSrc).toContain('openclaw:dkg-ui');
+    expect(apiSrc).toContain('ORDER BY DESC(?ts)');
   });
 });
 
@@ -149,6 +150,13 @@ describe('Agent Hub UI — OpenClaw tab', () => {
   it('OpenClawChatView has graph toggle', () => {
     expect(agentHub).toContain('Knowledge Graph');
     expect(agentHub).toContain('showGraph');
+  });
+
+  it('OpenClawChatView scopes imported memory graph branches to the active session', () => {
+    expect(agentHub).toContain('?memory <http://dkg.io/ontology/importBatch> ?batch');
+    expect(agentHub).toContain('?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch');
+    expect(agentHub).not.toContain('{ ?s a <http://dkg.io/ontology/ImportedMemory> . ?s ?p ?o }');
+    expect(agentHub).not.toContain('{ ?s a <http://dkg.io/ontology/MemoryImport> . ?s ?p ?o }');
   });
 
   it('OpenClawChatView sends via local channel bridge', () => {
@@ -309,9 +317,48 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(chatOclawBlock).toContain("timedOut: false");
   });
 
+  it('daemon local channel send handler includes gateway-route fallback', () => {
+    const daemonSrc = readCliFile('daemon.ts');
+    expect(daemonSrc).toContain('function getOpenClawChannelTargets');
+    expect(daemonSrc).toContain('const standaloneBridgeBase = explicitBridgeBase');
+    expect(daemonSrc).toContain("? (bridgeLooksLikeGateway ? undefined : explicitBridgeBase)");
+    expect(daemonSrc).toContain(": (!explicitGatewayBase ? 'http://127.0.0.1:9201' : undefined);");
+    expect(daemonSrc).toContain('const gatewayBase = explicitGatewayBase ?? (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);');
+    expect(daemonSrc).toContain("healthUrl: `${normalizedGatewayBase}/health`");
+    expect(daemonSrc).toContain("return value.endsWith('/api/dkg-channel') ? value : `${value}/api/dkg-channel`;");
+    expect(daemonSrc).toContain('shouldTryNextOpenClawTarget');
+  });
+
   it('UI sends via local channel bridge (not P2P)', () => {
     const agentHub = readUiFile('pages/AgentHub.tsx');
     expect(agentHub).toContain('streamOpenClawLocalChat');
     expect(agentHub).toContain('event.text');
+  });
+
+  it('fetchOpenClawLocalHistory requests newest rows first and returns chronological order', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: {
+          bindings: [
+            { uri: { value: 'urn:3' }, text: { value: 'third' }, author: { value: 'agent' }, ts: { value: '2026-03-11T10:02:00Z' } },
+            { uri: { value: 'urn:2' }, text: { value: 'second' }, author: { value: 'user' }, ts: { value: '2026-03-11T10:01:00Z' } },
+            { uri: { value: 'urn:1' }, text: { value: 'first' }, author: { value: 'user' }, ts: { value: '2026-03-11T10:00:00Z' } },
+          ],
+        },
+      }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { fetchOpenClawLocalHistory } = await import('../src/ui/api.js');
+      const history = await fetchOpenClawLocalHistory(3);
+      const [, opts] = fakeFetch.mock.calls[0];
+      const body = JSON.parse(opts.body);
+      expect(body.sparql).toContain('ORDER BY DESC(?ts)');
+      expect(history.map((row: any) => row.text)).toEqual(['first', 'second', 'third']);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

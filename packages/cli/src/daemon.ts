@@ -388,8 +388,6 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     agentToolsContext,
   );
   const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
-  // Expose memoryManager to handleRequest via config (for openclaw-channel bridge routes)
-  (config as any)._memoryManager = memoryManager;
   log('Memory manager ready');
   if (config.llm) log('Chat assistant ready (LLM + DKG tools enabled)');
   else log('Chat assistant ready');
@@ -426,6 +424,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
   const authEnabled = config.auth?.enabled !== false;
   const validTokens = await loadTokens(config.auth);
+  const bridgeAuthToken = await loadBridgeAuthToken();
   if (authEnabled) {
     log(`API authentication enabled (${validTokens.size} token${validTokens.size !== 1 ? 's' : ''} loaded)`);
     log(`Token file: ${join(dkgDir(), 'auth.token')}`);
@@ -505,7 +504,19 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);
       if (appHandled) return;
 
-      await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
+      await handleRequest(
+        req,
+        res,
+        agent,
+        config,
+        startedAt,
+        dashDb,
+        opWallets,
+        network,
+        tracker,
+        memoryManager,
+        bridgeAuthToken,
+      );
     } catch (err: any) {
       jsonResponse(res, 500, { error: err.message });
     }
@@ -550,6 +561,171 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
 const HEALTH_CACHE_TTL = 10_000; // 10 seconds
 
+export interface OpenClawChannelTarget {
+  name: 'bridge' | 'gateway';
+  inboundUrl: string;
+  streamUrl?: string;
+  healthUrl?: string;
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function buildOpenClawGatewayBase(value: string): string {
+  return value.endsWith('/api/dkg-channel') ? value : `${value}/api/dkg-channel`;
+}
+
+async function loadBridgeAuthToken(): Promise<string | undefined> {
+  try {
+    const raw = await readFile(join(dkgDir(), 'auth.token'), 'utf-8');
+    return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && !line.startsWith('#'));
+  } catch {
+    return undefined;
+  }
+}
+
+export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
+  const openclawChannel = config.openclawChannel ?? {};
+  const explicitBridgeBase = openclawChannel.bridgeUrl
+    ? trimTrailingSlashes(openclawChannel.bridgeUrl)
+    : undefined;
+  const explicitGatewayBase = openclawChannel.gatewayUrl
+    ? trimTrailingSlashes(openclawChannel.gatewayUrl)
+    : undefined;
+  const bridgeLooksLikeGateway = explicitBridgeBase?.endsWith('/api/dkg-channel') ?? false;
+  const standaloneBridgeBase = explicitBridgeBase
+    ? (bridgeLooksLikeGateway ? undefined : explicitBridgeBase)
+    : (!explicitGatewayBase ? 'http://127.0.0.1:9201' : undefined);
+  const gatewayBase = explicitGatewayBase ?? (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);
+  const targets: OpenClawChannelTarget[] = [];
+  const seenInboundUrls = new Set<string>();
+
+  const pushTarget = (target: OpenClawChannelTarget) => {
+    if (seenInboundUrls.has(target.inboundUrl)) return;
+    seenInboundUrls.add(target.inboundUrl);
+    targets.push(target);
+  };
+
+  if (standaloneBridgeBase) {
+    pushTarget({
+      name: 'bridge',
+      inboundUrl: `${standaloneBridgeBase}/inbound`,
+      streamUrl: `${standaloneBridgeBase}/inbound/stream`,
+      healthUrl: `${standaloneBridgeBase}/health`,
+    });
+  }
+
+  if (gatewayBase) {
+    const normalizedGatewayBase = buildOpenClawGatewayBase(gatewayBase);
+    pushTarget({
+      name: 'gateway',
+      inboundUrl: `${normalizedGatewayBase}/inbound`,
+      healthUrl: `${normalizedGatewayBase}/health`,
+    });
+  }
+
+  return targets;
+}
+
+function shouldTryNextOpenClawTarget(status: number): boolean {
+  return status === 404 || status === 405 || status === 501 || status === 503;
+}
+
+export function buildOpenClawChannelHeaders(
+  target: OpenClawChannelTarget,
+  bridgeAuthToken: string | undefined,
+  baseHeaders: Record<string, string> = {},
+): Record<string, string> {
+  if (target.name !== 'bridge' || !bridgeAuthToken) return baseHeaders;
+  return { ...baseHeaders, 'x-dkg-bridge-token': bridgeAuthToken };
+}
+
+async function ensureOpenClawBridgeAvailable(
+  target: OpenClawChannelTarget,
+  bridgeAuthToken: string | undefined,
+): Promise<{ ok: boolean; status?: number; details?: string; offline?: boolean }> {
+  if (target.name !== 'bridge' || !target.healthUrl) return { ok: true };
+  if (!bridgeAuthToken) {
+    return { ok: false, details: 'Bridge auth token unavailable', offline: true };
+  }
+
+  const cachedBridgeHealth = bridgeHealthCache;
+  const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
+  if (cacheValid) {
+    return cachedBridgeHealth.ok
+      ? { ok: true }
+      : { ok: false, details: 'Bridge health check cached as unavailable', offline: true };
+  }
+
+  try {
+    const healthRes = await fetch(target.healthUrl, {
+      headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
+    if (!healthRes.ok) {
+      const details = await healthRes.text().catch(() => '');
+      return {
+        ok: false,
+        status: healthRes.status,
+        details: details || `Bridge health responded ${healthRes.status}`,
+        offline: true,
+      };
+    }
+    return { ok: true };
+  } catch (err: any) {
+    bridgeHealthCache = { ok: false, ts: Date.now() };
+    return { ok: false, details: err.message, offline: true };
+  }
+}
+
+type OpenClawStreamRequest = Pick<IncomingMessage, 'on'>;
+type OpenClawStreamResponse = Pick<ServerResponse, 'on' | 'writeHead' | 'write' | 'end' | 'writableEnded'>;
+type OpenClawStreamReader = {
+  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel: () => Promise<unknown>;
+  releaseLock: () => void;
+};
+
+export async function pipeOpenClawStream(
+  req: OpenClawStreamRequest,
+  res: OpenClawStreamResponse,
+  reader: OpenClawStreamReader,
+): Promise<void> {
+  let clientGone = false;
+  const cancelUpstream = () => {
+    if (clientGone) return;
+    clientGone = true;
+    void reader.cancel().catch(() => {});
+  };
+
+  req.on('aborted', cancelUpstream);
+  req.on('close', () => {
+    if (!res.writableEnded) cancelUpstream();
+  });
+  res.on('error', cancelUpstream);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || clientGone) break;
+      if (value !== undefined) {
+        res.write(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -560,6 +736,8 @@ async function handleRequest(
   opWallets: import('@dkg/agent').OpWalletsConfig,
   network: Awaited<ReturnType<typeof loadNetworkConfig>>,
   tracker: OperationTracker,
+  memoryManager: ChatMemoryManager,
+  bridgeAuthToken: string | undefined,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -788,47 +966,64 @@ async function handleRequest(
     if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
     const corrId = correlationId ?? crypto.randomUUID();
 
-    // Determine the adapter channel bridge URL.
-    // Priority: config.openclawChannel.bridgeUrl > default localhost:9201
-    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+    const targets = getOpenClawChannelTargets(config);
+    let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    // --- Bridge connectivity pre-check ---
-    const cacheValid = bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL);
-    if (!(cacheValid && bridgeHealthCache!.ok)) {
+    for (const target of targets) {
+      const availability = await ensureOpenClawBridgeAvailable(target, bridgeAuthToken);
+      if (!availability.ok) {
+        lastFailure = availability;
+        continue;
+      }
+
       try {
-        const hRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(3_000) });
-        bridgeHealthCache = { ok: hRes.ok, ts: Date.now() };
-        if (!hRes.ok) {
-          return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+        const forwardRes = await fetch(target.inboundUrl, {
+          method: 'POST',
+          headers: buildOpenClawChannelHeaders(
+            target,
+            bridgeAuthToken,
+            { 'Content-Type': 'application/json' },
+          ),
+          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          signal: AbortSignal.timeout(120_000),
+        });
+        if (!forwardRes.ok) {
+          const details = await forwardRes.text().catch(() => '');
+          if (shouldTryNextOpenClawTarget(forwardRes.status)) {
+            lastFailure = {
+              status: forwardRes.status,
+              details: details || `${target.name} transport unavailable`,
+              offline: forwardRes.status === 503,
+            };
+            continue;
+          }
+          return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
         }
-      } catch {
-        bridgeHealthCache = { ok: false, ts: Date.now() };
-        return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: true, ts: Date.now() };
+        }
+        const reply = await forwardRes.json();
+        return jsonResponse(res, 200, reply);
+      } catch (err: any) {
+        if (err.name === 'TimeoutError') {
+          return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
+        }
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: false, ts: Date.now() };
+        }
+        lastFailure = { details: err.message, offline: true };
       }
     }
 
-    // --- Forward to bridge ---
-    try {
-      const bridgeRes = await fetch(`${bridgeUrl}/inbound`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-        signal: AbortSignal.timeout(120_000), // 2 min for agent processing
-      });
-      if (!bridgeRes.ok) {
-        const details = await bridgeRes.text().catch(() => '');
-        return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
-      }
-      const reply = await bridgeRes.json();
-      return jsonResponse(res, 200, reply);
-    } catch (err: any) {
-      if (err.name === 'TimeoutError') {
-        return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
-      }
-      // Network error (ECONNREFUSED, etc.) — invalidate health cache
-      bridgeHealthCache = { ok: false, ts: Date.now() };
-      return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE', details: err.message });
-    }
+    return jsonResponse(
+      res,
+      lastFailure?.offline ? 503 : 502,
+      {
+        error: lastFailure?.offline ? 'OpenClaw bridge unreachable' : 'Bridge error',
+        code: lastFailure?.offline ? 'BRIDGE_OFFLINE' : 'BRIDGE_ERROR',
+        details: lastFailure?.details,
+      },
+    );
   }
 
   // POST /api/openclaw-channel/stream  { text, correlationId, identity? }
@@ -842,80 +1037,98 @@ async function handleRequest(
     if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
     const corrId = correlationId ?? crypto.randomUUID();
 
-    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+    const targets = getOpenClawChannelTargets(config);
+    let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    // Bridge connectivity pre-check (reuse cached health)
-    const cacheValid = bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL);
-    if (!(cacheValid && bridgeHealthCache!.ok)) {
-      try {
-        const hRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(3_000) });
-        bridgeHealthCache = { ok: hRes.ok, ts: Date.now() };
-        if (!hRes.ok) {
-          return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
-        }
-      } catch {
-        bridgeHealthCache = { ok: false, ts: Date.now() };
-        return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+    for (const target of targets) {
+      const availability = await ensureOpenClawBridgeAvailable(target, bridgeAuthToken);
+      if (!availability.ok) {
+        lastFailure = availability;
+        continue;
       }
-    }
-
-    // Forward to bridge streaming endpoint and pipe SSE through
-    try {
-      const bridgeRes = await fetch(`${bridgeUrl}/inbound/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-        signal: AbortSignal.timeout(120_000),
-      });
-
-      if (!bridgeRes.ok) {
-        const details = await bridgeRes.text().catch(() => '');
-        return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
-      }
-
-      const contentType = bridgeRes.headers.get('content-type') ?? '';
-      if (!contentType.includes('text/event-stream')) {
-        const details = await bridgeRes.text().catch(() => '');
-        return jsonResponse(res, 502, { error: 'Bridge returned unexpected content-type', code: 'BRIDGE_ERROR', details });
-      }
-
-      if (!bridgeRes.body) {
-        return jsonResponse(res, 502, { error: 'Bridge returned empty body', code: 'BRIDGE_ERROR' });
-      }
-
-      // Transparent pipe: stream SSE bytes from bridge to frontend
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-      });
-
-      const reader = (bridgeRes.body as any).getReader();
-      let clientGone = false;
-      res.on('close', () => { clientGone = true; reader.cancel().catch(() => {}); });
 
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || clientGone) break;
-          res.write(value);
+        const transportRes = await fetch(target.streamUrl ?? target.inboundUrl, {
+          method: 'POST',
+          headers: buildOpenClawChannelHeaders(
+            target,
+            bridgeAuthToken,
+            {
+              'Content-Type': 'application/json',
+              'Accept': 'text/event-stream',
+            },
+          ),
+          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          signal: AbortSignal.timeout(120_000),
+        });
+
+        if (!transportRes.ok) {
+          const details = await transportRes.text().catch(() => '');
+          if (shouldTryNextOpenClawTarget(transportRes.status)) {
+            lastFailure = {
+              status: transportRes.status,
+              details: details || `${target.name} transport unavailable`,
+              offline: transportRes.status === 503,
+            };
+            continue;
+          }
+          return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
         }
+
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: true, ts: Date.now() };
+        }
+
+        const contentType = (transportRes.headers.get('content-type') ?? '').toLowerCase();
+        if (contentType.includes('text/event-stream') && transportRes.body) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+          });
+
+          try {
+            await pipeOpenClawStream(req, res, (transportRes.body as any).getReader());
+          } catch (err: any) {
+            if (!res.writableEnded) {
+              res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+            }
+          }
+          if (!res.writableEnded) res.end();
+          return;
+        }
+
+        const reply = await transportRes.json();
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.write(`data: ${JSON.stringify({ type: 'final', text: reply.text ?? '', correlationId: reply.correlationId ?? corrId })}\n\n`);
+        res.end();
+        return;
       } catch (err: any) {
-        if (!clientGone) {
-          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+        if (err.name === 'TimeoutError') {
+          return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
         }
-      } finally {
-        reader.releaseLock();
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: false, ts: Date.now() };
+        }
+        lastFailure = { details: err.message, offline: true };
       }
-      if (!res.writableEnded) res.end();
-    } catch (err: any) {
-      if (err.name === 'TimeoutError') {
-        return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
-      }
-      bridgeHealthCache = { ok: false, ts: Date.now() };
-      return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE', details: err.message });
     }
+
+    return jsonResponse(
+      res,
+      lastFailure?.offline ? 503 : 502,
+      {
+        error: lastFailure?.offline ? 'OpenClaw bridge unreachable' : 'Bridge error',
+        code: lastFailure?.offline ? 'BRIDGE_OFFLINE' : 'BRIDGE_ERROR',
+        details: lastFailure?.details,
+      },
+    );
   }
 
   // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
@@ -931,10 +1144,6 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
     }
     try {
-      const memoryManager = (config as any)._memoryManager as import('@dkg/node-ui').ChatMemoryManager | undefined;
-      if (!memoryManager) {
-        return jsonResponse(res, 503, { error: 'Memory manager not available' });
-      }
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
@@ -950,21 +1159,77 @@ async function handleRequest(
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable
   if (req.method === 'GET' && path === '/api/openclaw-channel/health') {
-    // Return cached result if fresh
-    if (bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL)) {
-      return jsonResponse(res, 200, { ok: bridgeHealthCache.ok, cached: true });
+    const targets = getOpenClawChannelTargets(config);
+    let bridge: Record<string, unknown> | undefined;
+    let gateway: Record<string, unknown> | undefined;
+    let lastError = 'No OpenClaw channel health endpoint configured';
+
+    for (const target of targets) {
+      if (!target.healthUrl) continue;
+
+      if (target.name === 'bridge') {
+        if (!bridgeAuthToken) {
+          bridge = { ok: false, error: 'Bridge auth token unavailable' };
+          lastError = 'Bridge auth token unavailable';
+          continue;
+        }
+
+        const cachedBridgeHealth = bridgeHealthCache;
+        const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
+        if (cacheValid) {
+          bridge = { ok: cachedBridgeHealth.ok, cached: true };
+          if (cachedBridgeHealth.ok) {
+            return jsonResponse(res, 200, { ok: true, target: 'bridge', bridge });
+          }
+          continue;
+        }
+      }
+
+      try {
+        const healthRes = await fetch(target.healthUrl, {
+          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = await healthRes.text().catch(() => '');
+        let parsed: Record<string, unknown> = {};
+        if (body) {
+          try {
+            parsed = JSON.parse(body) as Record<string, unknown>;
+          } catch {
+            parsed = { body };
+          }
+        }
+        const result: Record<string, unknown> & { ok: boolean } = { ok: healthRes.ok, ...parsed };
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
+          bridge = result;
+        } else {
+          gateway = result;
+        }
+        if (healthRes.ok) {
+          return jsonResponse(res, 200, {
+            ok: true,
+            target: target.name,
+            bridge,
+            gateway,
+          });
+        }
+        lastError = typeof result.error === 'string'
+          ? result.error
+          : `Health endpoint responded ${healthRes.status}`;
+      } catch (err: any) {
+        const result = { ok: false, error: err.message };
+        if (target.name === 'bridge') {
+          bridgeHealthCache = { ok: false, ts: Date.now() };
+          bridge = result;
+        } else {
+          gateway = result;
+        }
+        lastError = err.message;
+      }
     }
 
-    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
-    try {
-      const healthRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(5_000) });
-      const data = await healthRes.json();
-      bridgeHealthCache = { ok: true, ts: Date.now() };
-      return jsonResponse(res, 200, { ok: true, bridge: data });
-    } catch (err: any) {
-      bridgeHealthCache = { ok: false, ts: Date.now() };
-      return jsonResponse(res, 200, { ok: false, error: err.message });
-    }
+    return jsonResponse(res, 200, { ok: false, bridge, gateway, error: lastError });
   }
 
   // POST /api/connect  { multiaddr: "..." }

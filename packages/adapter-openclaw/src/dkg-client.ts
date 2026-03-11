@@ -6,6 +6,10 @@
  * triple store, and Node UI.
  */
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 export interface DkgClientOptions {
   /** Base URL of the DKG daemon (default: "http://127.0.0.1:9200"). */
   baseUrl?: string;
@@ -21,7 +25,7 @@ export class DkgDaemonClient {
   private readonly apiToken: string | undefined;
 
   constructor(opts?: DkgClientOptions) {
-    this.baseUrl = (opts?.baseUrl ?? 'http://127.0.0.1:9200').replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
     this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile();
   }
@@ -29,12 +33,8 @@ export class DkgDaemonClient {
   /** Try to read the default token file (~/.dkg/auth.token). */
   private static loadTokenFromFile(): string | undefined {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fs = require('node:fs');
-      const os = require('node:os');
-      const path = require('node:path');
-      const tokenPath = path.join(os.homedir(), '.dkg', 'auth.token');
-      const raw: string = fs.readFileSync(tokenPath, 'utf-8');
+      const tokenPath = join(homedir(), '.dkg', 'auth.token');
+      const raw = readFileSync(tokenPath, 'utf-8');
       // Token file may have comments (lines starting with #) and blank lines
       const token = raw.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#'));
       return token || undefined;
@@ -46,6 +46,10 @@ export class DkgDaemonClient {
   private authHeaders(): Record<string, string> {
     if (!this.apiToken) return {};
     return { Authorization: `Bearer ${this.apiToken}` };
+  }
+
+  getAuthToken(): string | undefined {
+    return this.apiToken;
   }
 
   // ---------------------------------------------------------------------------
@@ -163,4 +167,12 @@ export class DkgDaemonClient {
     }
     return res.json() as Promise<T>;
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }

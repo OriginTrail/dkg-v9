@@ -18,6 +18,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createRequire } from 'node:module';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
@@ -26,6 +27,7 @@ import type {
 import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
+const moduleRequire = createRequire(import.meta.url);
 
 interface PendingRequest {
   resolve: (reply: ChannelOutboundReply) => void;
@@ -42,6 +44,7 @@ export class DkgChannelPlugin {
   /** Plugin-sdk helpers — lazily loaded at first dispatch. */
   private sdk: any = null;
   private server: Server | null = null;
+  private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly port: number;
   private useGatewayRoute = false;
@@ -112,10 +115,23 @@ export class DkgChannelPlugin {
         method: 'POST',
         path: '/api/dkg-channel/inbound',
         auth: 'gateway',
-        handler: (req: any, res: any) => this.handleGatewayRoute(req, res),
+        handler: (req: any, res: any) => {
+          void this.handleGatewayRoute(req, res).catch((err) => {
+            this.handleUnexpectedGatewayError(res, err);
+          });
+        },
+      });
+      api.registerHttpRoute({
+        method: 'GET',
+        path: '/api/dkg-channel/health',
+        auth: 'gateway',
+        handler: (_req: any, res: any) => {
+          res.writeHead?.(200, { 'Content-Type': 'application/json' });
+          res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
+        },
       });
       this.useGatewayRoute = true;
-      log.info?.('[dkg-channel] Registered HTTP route on gateway: POST /api/dkg-channel/inbound');
+      log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
 
     // Start the bridge server immediately so it's ready to receive
@@ -130,17 +146,38 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
-    if (this.server) return;
+    if (this.server?.listening) return;
+    if (this.serverStart) return this.serverStart;
 
-    this.server = createServer((req, res) => this.handleHttpRequest(req, res));
+    if (!this.server) {
+      this.server = createServer((req, res) => {
+        void this.handleHttpRequest(req, res).catch((err) => {
+          this.handleUnexpectedHttpError(res, err);
+        });
+      });
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      this.server!.listen(this.port, '127.0.0.1', () => {
-        this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${this.port}`);
+    const server = this.server;
+    this.serverStart = new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        server.off('error', onError);
+        this.serverStart = null;
+        this.server = null;
+        reject(err);
+      };
+
+      server.once('error', onError);
+      server.listen(this.port, '127.0.0.1', () => {
+        server.off('error', onError);
+        this.serverStart = null;
+        const address = server.address();
+        const boundPort = typeof address === 'object' && address ? address.port : this.port;
+        this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
         resolve();
       });
-      this.server!.on('error', reject);
     });
+
+    await this.serverStart;
   }
 
   async stop(): Promise<void> {
@@ -149,6 +186,10 @@ export class DkgChannelPlugin {
       clearTimeout(pending.timer);
       pending.reject(new Error('Channel shutting down'));
       this.pendingRequests.delete(id);
+    }
+
+    if (this.serverStart) {
+      await this.serverStart.catch(() => {});
     }
 
     if (this.server) {
@@ -166,13 +207,10 @@ export class DkgChannelPlugin {
   private loadSdk(): any {
     if (this.sdk) return this.sdk;
     try {
-      // In-process: the OpenClaw gateway already has this module loaded
-      this.sdk = require('openclaw/plugin-sdk');
+      this.sdk = moduleRequire('openclaw/plugin-sdk');
     } catch {
-      // Fallback: resolve via module.createRequire from the OpenClaw install
       try {
-        const { createRequire } = require('node:module');
-        const ocMain = require.resolve('openclaw');
+        const ocMain = moduleRequire.resolve('openclaw');
         const ocRequire = createRequire(ocMain);
         this.sdk = ocRequire('./plugin-sdk');
       } catch {
@@ -219,22 +257,24 @@ export class DkgChannelPlugin {
       api.logger.warn?.(`[dkg-channel] No runtime.channel (${!!runtime?.channel}) or cfg (${!!cfg}) — falling back`);
     }
 
-    // --- Fallback: pending request waiting for onOutbound callback ---
-    if (typeof (api as any).registerChannel === 'function') {
-      return new Promise<ChannelOutboundReply>((resolve, reject) => {
-        const TIMEOUT_MS = 120_000;
-        const timer = setTimeout(() => {
-          this.pendingRequests.delete(correlationId);
-          reject(new Error('Agent response timeout'));
-        }, TIMEOUT_MS);
-
-        this.pendingRequests.set(correlationId, { resolve, reject, timer });
+    if (typeof api.routeInboundMessage === 'function') {
+      api.logger.info?.(`[dkg-channel] Dispatching via api.routeInboundMessage for: ${correlationId}`);
+      const reply = await api.routeInboundMessage({
+        channelName: CHANNEL_NAME,
+        senderId: identity || 'owner',
+        senderIsOwner: true,
+        text,
+        correlationId,
       });
+      this.persistTurn(text, reply.text, correlationId).catch((err) => {
+        api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
+      });
+      return reply;
     }
 
     throw new Error(
       'No message routing mechanism available. ' +
-      'The OpenClaw gateway must support runtime.channel dispatch or registerChannel().',
+      'The OpenClaw gateway must expose runtime.channel dispatch or api.routeInboundMessage().',
     );
   }
 
@@ -342,12 +382,7 @@ export class DkgChannelPlugin {
         route: { agentId: route.agentId, sessionKey: route.sessionKey },
         storePath,
         ctxPayload,
-        core: {
-          channel: {
-            session: { recordInboundSession: runtime.channel.session.recordInboundSession },
-            reply: { dispatchReplyWithBufferedBlockDispatcher: runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher },
-          },
-        },
+        core: this.buildSdkCore(runtime, cfg),
         deliver: async (payload: any) => {
           const text = payload?.text;
           if (text) replyChunks.push(text);
@@ -391,45 +426,35 @@ export class DkgChannelPlugin {
 
       const replyChunks: string[] = [];
 
-      // Record inbound session
-      try {
-        runtime.channel.session.recordInboundSession({
-          storePath,
-          sessionKey: route.sessionKey,
-          channel: CHANNEL_NAME,
-          chatType: 'direct',
-          peer: { kind: 'direct', id: 'owner' },
+      void this.recordRuntimeInboundSession(runtime, storePath, route, ctxPayload)
+        .then(() => this.dispatchRuntimeReply(
+          runtime,
+          cfg,
+          ctxPayload,
+          {
+            deliver: async (payload: any) => {
+              const text = payload?.text;
+              if (text) replyChunks.push(text);
+            },
+            onError: (err: any) => {
+              log.warn?.(`[dkg-channel] Dispatch error: ${err}`);
+              clearTimeout(timer);
+              reject(err instanceof Error ? err : new Error(String(err)));
+            },
+          },
+          {},
+        ))
+        .then(() => {
+          clearTimeout(timer);
+          const replyText = replyChunks.join('\n') || '(no response)';
+          log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
+          resolve({ text: replyText, correlationId });
+        })
+        .catch((err: any) => {
+          clearTimeout(timer);
+          log.warn?.(`[dkg-channel] dispatchReplyWithBufferedBlockDispatcher failed: ${err.message}`);
+          reject(err);
         });
-      } catch (err: any) {
-        log.warn?.(`[dkg-channel] recordInboundSession failed: ${err.message}`);
-      }
-
-      // Dispatch via the buffered block dispatcher
-      runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher(
-        ctxPayload,
-        cfg,
-        {
-          deliver: async (payload: any) => {
-            const text = payload?.text;
-            if (text) replyChunks.push(text);
-          },
-          onError: (err: any) => {
-            log.warn?.(`[dkg-channel] Dispatch error: ${err}`);
-            clearTimeout(timer);
-            reject(err instanceof Error ? err : new Error(String(err)));
-          },
-        },
-        {},  // replyOptions
-      ).then(() => {
-        clearTimeout(timer);
-        const replyText = replyChunks.join('\n') || '(no response)';
-        log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-        resolve({ text: replyText, correlationId });
-      }).catch((err: any) => {
-        clearTimeout(timer);
-        log.warn?.(`[dkg-channel] dispatchReplyWithBufferedBlockDispatcher failed: ${err.message}`);
-        reject(err);
-      });
     });
   }
 
@@ -446,11 +471,18 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
-    if (!this.api || !this.runtime) throw new Error('Channel not registered');
+    if (!this.api) throw new Error('Channel not registered');
 
     const log = this.api.logger;
     const runtime = this.runtime;
     const cfg = this.cfg;
+
+    if (!runtime?.channel || !cfg) {
+      const reply = await this.processInbound(text, correlationId, identity);
+      yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
+      return;
+    }
+
     const sdk = this.loadSdk();
 
     // Resolve route + build context (same as processInbound)
@@ -507,34 +539,23 @@ export class DkgChannelPlugin {
           cfg, channel: CHANNEL_NAME,
           route: { agentId: route.agentId, sessionKey: route.sessionKey },
           storePath, ctxPayload,
-          core: {
-            channel: {
-              session: { recordInboundSession: runtime.channel.session.recordInboundSession },
-              reply: { dispatchReplyWithBufferedBlockDispatcher: runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher },
-            },
-          },
+          core: this.buildSdkCore(runtime, cfg),
           deliver,
           onRecordError: (err: any) => log.warn?.(`[dkg-channel] Session record error: ${err}`),
           onDispatchError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
         })
-      : () => {
-          try {
-            runtime.channel.session.recordInboundSession({
-              storePath, sessionKey: route.sessionKey, channel: CHANNEL_NAME,
-              chatType: 'direct', peer: { kind: 'direct', id: 'owner' },
-            });
-          } catch (err: any) {
-            log.warn?.(`[dkg-channel] recordInboundSession failed: ${err.message}`);
-          }
-          return runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher(
-            ctxPayload, cfg,
+      : () => this.recordRuntimeInboundSession(runtime, storePath, route, ctxPayload).then(() =>
+          this.dispatchRuntimeReply(
+            runtime,
+            cfg,
+            ctxPayload,
             {
               deliver,
               onError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
             },
             {},
-          );
-        };
+          ),
+        );
 
     dispatchFn()
       .then(() => push({ type: 'done' }))
@@ -588,6 +609,106 @@ export class DkgChannelPlugin {
   // Chat turn persistence  (DKG graph for Agent Hub visualization)
   // ---------------------------------------------------------------------------
 
+  private dispatchRuntimeReply(
+    runtime: any,
+    cfg: any,
+    ctxPayload: any,
+    dispatcherOptions: Record<string, unknown>,
+    replyOptions: Record<string, unknown>,
+  ): Promise<unknown> {
+    const replyRuntime = runtime?.channel?.reply;
+    const dispatch = replyRuntime?.dispatchReplyWithBufferedBlockDispatcher;
+    if (typeof dispatch !== 'function') {
+      return Promise.reject(new Error('runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher unavailable'));
+    }
+
+    // OpenClaw moved this dispatcher from positional args to a single params object.
+    // Support both to keep the adapter compatible with host runtime drift.
+    if (dispatch.length <= 1) {
+      return dispatch.call(replyRuntime, {
+        ctx: ctxPayload,
+        cfg,
+        dispatcherOptions,
+        replyOptions,
+      });
+    }
+
+    return dispatch.call(replyRuntime, ctxPayload, cfg, dispatcherOptions, replyOptions);
+  }
+
+  private buildSdkCore(runtime: any, cfg: any): {
+    channel: {
+      session: { recordInboundSession: (params: any) => Promise<unknown> | unknown };
+      reply: { dispatchReplyWithBufferedBlockDispatcher: (params: any) => Promise<unknown> };
+    };
+  } {
+    return {
+      channel: {
+        session: {
+          recordInboundSession: (params: any) => runtime.channel.session.recordInboundSession(params),
+        },
+        reply: {
+          dispatchReplyWithBufferedBlockDispatcher: (params: any) => this.dispatchRuntimeReply(
+            runtime,
+            params?.cfg ?? cfg,
+            params?.ctx ?? params?.ctxPayload,
+            params?.dispatcherOptions ?? {},
+            params?.replyOptions ?? {},
+          ),
+        },
+      },
+    };
+  }
+
+  private async recordRuntimeInboundSession(
+    runtime: any,
+    storePath: string,
+    route: any,
+    ctxPayload: any,
+  ): Promise<void> {
+    const log = this.api?.logger;
+    const sessionRuntime = runtime?.channel?.session;
+    const record = sessionRuntime?.recordInboundSession;
+    if (typeof record !== 'function') return;
+
+    try {
+      await Promise.resolve(record.call(sessionRuntime, {
+        storePath,
+        sessionKey: route.sessionKey,
+        ctx: ctxPayload,
+        onRecordError: (err: any) => {
+          log?.warn?.(`[dkg-channel] Session record error: ${err}`);
+        },
+        channel: CHANNEL_NAME,
+        chatType: 'direct',
+        peer: { kind: 'direct', id: ctxPayload?.SenderId ?? 'owner' },
+      }));
+    } catch (err: any) {
+      log?.warn?.(`[dkg-channel] recordInboundSession failed: ${err.message}`);
+    }
+  }
+
+  private handleUnexpectedHttpError(res: ServerResponse, err: unknown): void {
+    this.api?.logger.warn?.(`[dkg-channel] Unexpected bridge HTTP error: ${formatError(err)}`);
+    if (res.writableEnded) return;
+    try {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal bridge error' }));
+    } catch {
+      // Ignore response write failures after socket teardown.
+    }
+  }
+
+  private handleUnexpectedGatewayError(res: any, err: unknown): void {
+    this.api?.logger.warn?.(`[dkg-channel] Unexpected gateway route error: ${formatError(err)}`);
+    try {
+      res.writeHead?.(500, { 'Content-Type': 'application/json' });
+      res.end?.(JSON.stringify({ error: 'Internal bridge error' }));
+    } catch {
+      // Ignore response write failures after route teardown.
+    }
+  }
+
   /**
    * Persist a chat turn to the DKG agent-memory graph.
    * Fire-and-forget — errors are logged but don't affect the reply.
@@ -611,10 +732,9 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // CORS preflight
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, corsHeaders());
-      res.end();
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed' }));
       return;
     }
 
@@ -629,18 +749,20 @@ export class DkgChannelPlugin {
     }
 
     if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { ...corsHeaders(), 'Content-Type': 'application/json' });
+      if (!this.authorizeBridgeRequest(req, res)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
       return;
     }
 
-    res.writeHead(404, { ...corsHeaders(), 'Content-Type': 'application/json' });
+    res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   }
 
   private async handleInboundHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.authorizeBridgeRequest(req, res)) return;
     if (this.inFlight >= this.maxInFlight) {
-      res.writeHead(429, { ...corsHeaders(), 'Content-Type': 'application/json' });
+      res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too many concurrent requests', retryAfter: 5 }));
       return;
     }
@@ -654,18 +776,18 @@ export class DkgChannelPlugin {
         parsed = JSON.parse(body);
       } catch (err: any) {
         if (err.message === 'Request body too large') {
-          res.writeHead(413, { ...corsHeaders(), 'Content-Type': 'application/json' });
+          res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Request body too large' }));
           return;
         }
-        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON body' }));
         return;
       }
 
       const { text, correlationId, identity } = parsed;
       if (!text || !correlationId) {
-        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
@@ -673,11 +795,11 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
 
-        res.writeHead(200, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
       } catch (err: any) {
         const status = err.message === 'Agent response timeout' ? 504 : 500;
-        res.writeHead(status, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
     } finally {
@@ -689,8 +811,9 @@ export class DkgChannelPlugin {
 
   /** SSE streaming handler — yields events as the agent produces them. */
   private async handleInboundStreamHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.authorizeBridgeRequest(req, res)) return;
     if (this.inFlight >= this.maxInFlight) {
-      res.writeHead(429, { ...corsHeaders(), 'Content-Type': 'application/json' });
+      res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too many concurrent requests', retryAfter: 5 }));
       return;
     }
@@ -704,25 +827,24 @@ export class DkgChannelPlugin {
         parsed = JSON.parse(body);
       } catch (err: any) {
         if (err.message === 'Request body too large') {
-          res.writeHead(413, { ...corsHeaders(), 'Content-Type': 'application/json' });
+          res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Request body too large' }));
           return;
         }
-        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON body' }));
         return;
       }
 
       const { text, correlationId, identity } = parsed;
       if (!text || !correlationId) {
-        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
 
       // Write SSE headers
       res.writeHead(200, {
-        ...corsHeaders(),
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
@@ -772,12 +894,32 @@ export class DkgChannelPlugin {
     }
   }
 
+  private authorizeBridgeRequest(req: IncomingMessage, res: ServerResponse): boolean {
+    const expectedToken = this.client.getAuthToken();
+    if (!expectedToken) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bridge auth token unavailable' }));
+      return false;
+    }
+
+    const rawHeader = req.headers['x-dkg-bridge-token'];
+    const providedToken = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+    if (providedToken !== expectedToken) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return false;
+    }
+
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Public accessors (for wiring in DkgNodePlugin)
   // ---------------------------------------------------------------------------
 
   get bridgePort(): number {
-    return this.port;
+    const address = this.server?.address();
+    return typeof address === 'object' && address ? address.port : this.port;
   }
 
   get isUsingGatewayRoute(): boolean {
@@ -788,14 +930,6 @@ export class DkgChannelPlugin {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function corsHeaders(): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-  };
-}
 
 function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -816,4 +950,11 @@ function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
     req.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks).toString('utf-8')); } });
     req.on('error', (err) => { if (!settled) { settled = true; reject(err); } });
   });
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.stack ?? err.message;
+  }
+  return String(err);
 }

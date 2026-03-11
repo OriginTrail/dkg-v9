@@ -606,7 +606,13 @@ export async function streamOpenClawLocalChat(
 }
 
 export const fetchOpenClawLocalHealth = () =>
-  get<{ ok: boolean; bridge?: { ok: boolean; channel: string }; error?: string }>(
+  get<{
+    ok: boolean;
+    target?: 'bridge' | 'gateway';
+    bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
+    gateway?: { ok: boolean; channel?: string; error?: string };
+    error?: string;
+  }>(
     '/api/openclaw-channel/health',
   );
 
@@ -624,16 +630,18 @@ export async function fetchOpenClawLocalHistory(limit = 50): Promise<
            <http://schema.org/author> ?author ;
            <http://schema.org/dateCreated> ?ts .
     }
-    ORDER BY ?ts
+    ORDER BY DESC(?ts)
     LIMIT ${limit}`;
   const res = await executeQuery(sparql, 'agent-memory', true);
   const bindings: any[] = res?.result?.bindings ?? (res as any)?.results?.bindings ?? [];
-  return bindings.map((b: any) => ({
+  const history = bindings.map((b: any) => ({
     uri: bv(b.uri) ?? '',
     text: bv(b.text) ?? '',
     author: bv(b.author) ?? '',
     ts: bv(b.ts) ?? '',
   }));
+  history.reverse();
+  return history;
 }
 
 /** Extract plain string from a SPARQL binding value (standard JSON or N-Triples). */

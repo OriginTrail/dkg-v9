@@ -215,7 +215,7 @@ export class FinalizationHandler {
     paranetId: string,
     workspaceQuads: Quad[],
     ual: string,
-    rootEntities: string[],
+    _rootEntities: string[],
     publisherAddress: string,
     txHash: string,
     blockNumber: number,
@@ -235,6 +235,7 @@ export class FinalizationHandler {
     await this.store.insert(canonicalQuads);
 
     const partitioned = autoPartition(canonicalQuads);
+    const rootEntities = [...partitioned.keys()].sort();
     const kaMetadata: KAMetadata[] = [];
     const kaRoots: Uint8Array[] = [];
 

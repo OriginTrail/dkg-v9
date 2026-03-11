@@ -867,7 +867,19 @@ export class DKGAgent {
    * and the next cleanup cycle without requiring a restart.
    */
   setWorkspaceTtlMs(ttlMs: number): void {
+    const oldTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
     (this.config as any).workspaceTtlMs = ttlMs;
+
+    if (oldTtl <= 0 && ttlMs > 0 && !this.workspaceCleanupTimer) {
+      this.cleanupExpiredWorkspace().catch(() => {});
+      this.workspaceCleanupTimer = setInterval(() => {
+        this.cleanupExpiredWorkspace().catch(() => {});
+      }, WORKSPACE_CLEANUP_INTERVAL_MS);
+      if (this.workspaceCleanupTimer.unref) this.workspaceCleanupTimer.unref();
+    } else if (ttlMs <= 0 && this.workspaceCleanupTimer) {
+      clearInterval(this.workspaceCleanupTimer);
+      this.workspaceCleanupTimer = null;
+    }
   }
 
   /**

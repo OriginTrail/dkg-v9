@@ -42,10 +42,13 @@ export class WorkspaceHandler {
    * Validates, stores to workspace + workspace_meta, updates workspaceOwnedEntities.
    */
   async handle(data: Uint8Array, fromPeerId: string, onPhase?: PhaseCallback): Promise<void> {
-    const ctx = createOperationContext('workspace');
+    let ctx = createOperationContext('workspace');
     try {
       onPhase?.('decode', 'start');
       const request = decodeWorkspacePublishRequest(data);
+      if (request.operationId) {
+        ctx = createOperationContext('workspace', request.operationId);
+      }
       const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 

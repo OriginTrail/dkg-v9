@@ -1404,11 +1404,11 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
   if (req.method === 'POST' && path === '/api/publish') {
     const serverT0 = Date.now();
     const body = await readBody(req);
-    const { paranetId, quads, privateQuads } = JSON.parse(body);
+    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = JSON.parse(body);
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
     }
@@ -1416,9 +1416,11 @@ async function handleRequest(
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
+        accessPolicy,
+        allowedPeers,
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
-      });
+      } as any);
       const chain = result.onChainResult;
       if (chain) {
         tracker.setCost(ctx, {

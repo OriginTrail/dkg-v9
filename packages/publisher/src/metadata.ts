@@ -18,6 +18,7 @@ export interface KCMetadata {
   kaCount: number;
   publisherPeerId: string;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
   timestamp: Date;
 }
 
@@ -71,6 +72,14 @@ export function generateKCMetadata(
     ),
     mq(meta.ual, `${DKG}paranet`, `did:dkg:paranet:${meta.paranetId}`, metaGraph),
   );
+
+  if (meta.allowedPeers?.length) {
+    for (const peerId of meta.allowedPeers) {
+      quads.push(
+        mq(meta.ual, `${DKG}allowedPeer`, lit(peerId), metaGraph),
+      );
+    }
+  }
 
   // KA metadata
   for (const ka of kaEntries) {

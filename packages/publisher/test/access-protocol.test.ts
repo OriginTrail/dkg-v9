@@ -213,4 +213,28 @@ describe('Access Protocol', () => {
     expect(accessResult.granted).toBe(false);
     expect(accessResult.rejectionReason).toContain('owner identity missing');
   }, 20000);
+
+  it('rejects publish when allowList policy is set without allowed peers', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: bus,
+      keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    await expect(
+      publisher.publish({
+        paranetId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"TestBot"')],
+        privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
+        accessPolicy: 'allowList',
+      }),
+    ).rejects.toThrow('accessPolicy "allowList" requires non-empty "allowedPeers"');
+  });
 });

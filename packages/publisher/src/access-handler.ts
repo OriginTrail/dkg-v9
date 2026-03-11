@@ -91,7 +91,10 @@ export class AccessHandler {
           return this.deny('Access denied: owner-only policy');
         }
       } else if (effectivePolicy === 'allowList') {
-        if (meta.allowedPeers && !meta.allowedPeers.includes(fromPeerId)) {
+        if (!meta.allowedPeers || meta.allowedPeers.length === 0) {
+          return this.deny('Access denied: allow list missing or empty');
+        }
+        if (!meta.allowedPeers.includes(fromPeerId)) {
           this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
             kaUal: request.kaUal,
             requester: fromPeerId,
@@ -165,7 +168,7 @@ export class AccessHandler {
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const result = await this.store.query(
-      `SELECT ?rootEntity ?paranet ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
+      `SELECT ?rootEntity ?paranet ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
         GRAPH ?g {
           <${kaUal}> <${DKG_NS}rootEntity> ?rootEntity .
           <${kaUal}> <${DKG_NS}partOf> ?kc .
@@ -187,6 +190,7 @@ export class AccessHandler {
     const rootEntity = row['rootEntity'];
     const paranetUri = row['paranet'];
     const paranetId = paranetUri.replace('did:dkg:paranet:', '');
+    const kcUal = row['kc'];
 
     let privateMerkleRoot: Uint8Array | undefined;
     const rawRoot = row['privateMerkleRoot'];
@@ -218,6 +222,23 @@ export class AccessHandler {
         ? stripLiteral(row['attributedTo'])
         : undefined;
 
+    const allowedPeerRes = await this.store.query(
+      `SELECT ?allowedPeer WHERE {
+        GRAPH ?g {
+          <${kcUal}> <${DKG_NS}allowedPeer> ?allowedPeer .
+        }
+      }`,
+    );
+    const allowedPeers =
+      allowedPeerRes.type === 'bindings'
+        ? [...new Set(
+          allowedPeerRes.bindings
+            .map((b) => b['allowedPeer'])
+            .filter(Boolean)
+            .map((s) => stripLiteral(s)),
+        )]
+        : undefined;
+
     return {
       rootEntity,
       paranetId,
@@ -226,6 +247,7 @@ export class AccessHandler {
       accessPolicyExplicit,
       accessPolicy,
       publisherPeerId,
+      allowedPeers,
     };
   }
 

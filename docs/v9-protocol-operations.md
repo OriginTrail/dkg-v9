@@ -654,14 +654,15 @@ Private triple retrieval uses a separate protocol and policy path from remote qu
 - **Protocol:** `/dkg/access/1.0.0` — requester sends KA UAL + signature; provider
   returns private N-Quads if access is granted.
 - **Handler:** `AccessHandler` checks KA/KC metadata (`dkg:accessPolicy`,
-  `dkg:publisherPeerId`, optional allow list) before returning private triples.
+  `dkg:publisherPeerId`, `dkg:allowedPeer`) before returning private triples.
 - **Client:** `AccessClient` verifies returned triples against `privateMerkleRoot`
   when available.
 
 Effective policy rules:
 
 - `ownerOnly` -> only publisher peer may access.
-- `allowList` -> only explicitly allowed peers may access.
+- `allowList` -> only peers listed by KC metadata `dkg:allowedPeer` may access.
+- `allowList` with missing or empty `dkg:allowedPeer` entries -> access denied.
 - `public` -> any peer may request private triples for that KA.
 
 > **Security note:** `/dkg/query/2.0.0` and `/dkg/access/1.0.0` are independent.

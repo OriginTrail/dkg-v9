@@ -19,6 +19,8 @@ export interface PublishOptions {
   publisherPeerId?: string;
   /** KC-level private access policy metadata. */
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Allowed peer IDs when accessPolicy is allowList. */
+  allowedPeers?: string[];
   manifest?: KAManifestEntry[];
   /** Publishing node identity (peerId) for provenance metadata. */
   publisherPeerId?: string;

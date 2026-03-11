@@ -321,12 +321,21 @@ export class DKGPublisher implements Publisher {
       privateQuads = [],
       publisherPeerId = '',
       accessPolicy,
+      allowedPeers,
       operationCtx,
       entityProofs = false,
       onPhase,
     } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
+    const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
+
+    if (effectiveAccessPolicy === 'allowList' && normalizedAllowedPeers.length === 0) {
+      throw new Error('Publish rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
+    }
+    if (effectiveAccessPolicy !== 'allowList' && normalizedAllowedPeers.length > 0) {
+      throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
+    }
 
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:ensureParanet', 'start');
@@ -541,6 +550,7 @@ export class DKGPublisher implements Publisher {
             kaCount,
             publisherPeerId: publisherPeerId || 'unknown',
             accessPolicy: effectiveAccessPolicy,
+            allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
           },
           kaMetadata,
@@ -577,6 +587,7 @@ export class DKGPublisher implements Publisher {
           kaCount,
           publisherPeerId: publisherPeerId || 'unknown',
           accessPolicy: effectiveAccessPolicy,
+          allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),
         },
         kaMetadata,

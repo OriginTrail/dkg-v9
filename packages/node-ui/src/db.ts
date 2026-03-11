@@ -408,25 +408,28 @@ export class DashboardDB {
     };
   }
 
-  getErrorHotspots(periodMs = 7 * 86_400_000): { phase: string; error_count: number; last_error: string | null; last_occurred: number | null }[] {
+  getErrorHotspots(periodMs = 7 * 86_400_000): { phase: string; operation_name: string; error_count: number; last_error: string | null; last_occurred: number | null }[] {
     const cutoff = Date.now() - periodMs;
     return this.db.prepare(`
       SELECT
-        phase,
+        p.phase,
+        o.operation_name,
         COUNT(*) as error_count,
         (SELECT p2.details FROM operation_phases p2
-         WHERE p2.phase = operation_phases.phase
+         JOIN operations o2 ON o2.operation_id = p2.operation_id
+         WHERE p2.phase = p.phase AND o2.operation_name = o.operation_name
            AND p2.status = 'error' AND p2.started_at >= ?
          ORDER BY p2.started_at DESC LIMIT 1) as last_error,
-        MAX(started_at) as last_occurred
-      FROM operation_phases
-      WHERE status = 'error' AND started_at >= ?
-      GROUP BY phase
+        MAX(p.started_at) as last_occurred
+      FROM operation_phases p
+      JOIN operations o ON o.operation_id = p.operation_id
+      WHERE p.status = 'error' AND p.started_at >= ?
+      GROUP BY p.phase, o.operation_name
       ORDER BY error_count DESC
     `).all(cutoff, cutoff) as any[];
   }
 
-  getFailedOperations(opts: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}): {
+  getFailedOperations(opts: { phase?: string; operationName?: string; periodMs?: number; q?: string; limit?: number } = {}): {
     operations: Array<OperationRow & { phase: string; phase_error: string | null; phase_started_at: number; logs: LogRow[] }>;
   } {
     const cutoff = Date.now() - (opts.periodMs ?? 7 * 86_400_000);
@@ -438,6 +441,10 @@ export class DashboardDB {
     if (opts.phase) {
       where += ' AND p.phase = ?';
       params.push(opts.phase);
+    }
+    if (opts.operationName) {
+      where += ' AND o.operation_name = ?';
+      params.push(opts.operationName);
     }
     if (opts.q) {
       where += ' AND (p.details LIKE ? OR o.operation_id LIKE ? OR o.error_message LIKE ?)';

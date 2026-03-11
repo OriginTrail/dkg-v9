@@ -12,14 +12,27 @@ import {
 
 const PHASE_COLORS: Record<string, string> = {
   prepare: '#3b82f6',
+  'prepare:ensureParanet': '#60a5fa',
+  'prepare:partition': '#2563eb',
+  'prepare:manifest': '#93c5fd',
+  'prepare:validate': '#1d4ed8',
+  'prepare:merkle': '#7dd3fc',
   store: '#8b5cf6',
   chain: '#f59e0b',
+  'chain:sign': '#fbbf24',
+  'chain:submit': '#d97706',
+  'chain:metadata': '#f97316',
   broadcast: '#22c55e',
+  decode: '#14b8a6',
+  validate: '#2dd4bf',
+  'read-workspace': '#06b6d4',
   parse: '#3b82f6',
   execute: '#8b5cf6',
-  transfer: '#3b82f6',
+  transfer: '#60a5fa',
   verify: '#22c55e',
 };
+
+const PHASE_FALLBACK_COLOR = '#a78bfa';
 
 const STATUS_COLORS: Record<string, string> = {
   success: '#22c55e',
@@ -131,8 +144,8 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`tab-item ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>Operations</button>
-        <button className={`tab-item ${tab === 'general' ? 'active' : ''}`} onClick={() => setTab('general')}>General</button>
+        <button className={`tab-item ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
+        <button className={`tab-item ${tab === 'general' ? 'active' : ''}`} onClick={() => setTab('general')}>Performance</button>
         <button className={`tab-item ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
         <button className={`tab-item ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
       </div>
@@ -165,8 +178,9 @@ function HealthTab() {
   const { data } = useFetch(() => fetchErrorHotspots(periodMs), [periodMs], 15_000);
   const hotspots = data?.hotspots ?? [];
 
+  const expandedHotspot = expandedPhase ? hotspots.find((_: any) => `${_.operation_name}-${_.phase}` === expandedPhase) : null;
   const { data: failedData } = useFetch(
-    () => expandedPhase ? fetchFailedOperations({ phase: expandedPhase, periodMs, q: search || undefined }) : Promise.resolve(null),
+    () => expandedHotspot ? fetchFailedOperations({ phase: expandedHotspot.phase, operationName: expandedHotspot.operation_name, periodMs, q: search || undefined }) : Promise.resolve(null),
     [expandedPhase, periodMs, search],
     10_000,
   );
@@ -195,25 +209,30 @@ function HealthTab() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Phase</th><th>Errors</th><th>Last Error</th><th>Last Occurred</th></tr>
+              <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last Error</th><th>Last Occurred</th></tr>
             </thead>
             <tbody>
-              {hotspots.map((h: any) => (
-                <React.Fragment key={h.phase}>
+              {hotspots.map((h: any) => {
+                const rowKey = `${h.operation_name}-${h.phase}`;
+                return (
+                <React.Fragment key={rowKey}>
                   <tr
-                    onClick={() => { setExpandedPhase(p => p === h.phase ? null : h.phase); setExpandedOp(null); }}
-                    style={{ cursor: 'pointer', background: expandedPhase === h.phase ? 'rgba(239,68,68,.08)' : undefined }}
+                    onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
+                    style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'rgba(239,68,68,.08)' : undefined }}
                   >
-                    <td style={{ color: PHASE_COLORS[h.phase] ?? '#9ca3af', fontWeight: 600, padding: '10px 14px' }}>
-                      <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === h.phase ? '▼' : '▸'}</span>
+                    <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
+                      <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
+                      {h.operation_name}
+                    </td>
+                    <td style={{ color: PHASE_COLORS[h.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 600, padding: '10px 14px' }}>
                       {h.phase}
                     </td>
                     <td style={{ padding: '10px 14px' }}><span className="badge badge-error">{h.error_count}</span></td>
                     <td style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
                     <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
-                  {expandedPhase === h.phase && (
-                    <tr><td colSpan={4} style={{ padding: 0, background: 'rgba(0,0,0,.15)' }}>
+                  {expandedPhase === rowKey && (
+                    <tr><td colSpan={5} style={{ padding: 0, background: 'rgba(0,0,0,.15)' }}>
                       <FailedOperationsList
                         operations={failedOps}
                         expandedOp={expandedOp}
@@ -222,7 +241,8 @@ function HealthTab() {
                     </td></tr>
                   )}
                 </React.Fragment>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -584,12 +604,13 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
   const [hover, setHover] = useState<number | null>(null);
 
   if (!phases?.length || totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
+  const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
   return (
     <div style={{ position: 'relative', minWidth: 80, maxWidth: 180 }}>
       <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
         {phases.map((p: any, i: number) => {
-          const pct = Math.max(((p.duration_ms ?? 0) / totalMs) * 100, 3);
-          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? '#6b7280';
+          const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 2);
+          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           const isHovered = hover === i;
           return (
             <div
@@ -614,7 +635,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
           boxShadow: '0 4px 12px rgba(0,0,0,.4)',
           whiteSpace: 'nowrap', fontSize: 11, zIndex: 10, pointerEvents: 'none',
         }}>
-          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? '#9ca3af' }}>
+          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? PHASE_FALLBACK_COLOR }}>
             {phases[hover].phase}
           </span>
           <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
@@ -863,7 +884,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
           const width = Math.max(1.5, (phaseDuration / opDuration) * 100);
           const isError = p.status === 'error';
           const isInProgress = p.status === 'in_progress';
-          const color = isError ? '#ef4444' : isInProgress ? '#f59e0b' : PHASE_COLORS[p.phase] ?? '#6b7280';
+          const color = isError ? '#ef4444' : isInProgress ? '#f59e0b' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
 
           return (
             <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', height: 22, padding: '0 8px', position: 'relative' }}>
@@ -967,7 +988,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
             <div className="card-title" style={{ marginBottom: 10 }}>Phase Details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
-                const color = PHASE_COLORS[p.phase] ?? '#9ca3af';
+                const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 return (
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? '#ef4444' : color}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }}>{p.phase}</span>

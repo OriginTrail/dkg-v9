@@ -57,9 +57,12 @@ export class UpdateHandler {
   }
 
   async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
-    const ctx = createOperationContext('ka-update');
+    let ctx = createOperationContext('ka-update');
     try {
       const request = decodeKAUpdateRequest(data);
+      if (request.operationId) {
+        ctx = createOperationContext('ka-update', request.operationId);
+      }
       const {
         paranetId,
         batchId,

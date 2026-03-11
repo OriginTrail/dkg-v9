@@ -146,6 +146,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
     } : undefined,
+    workspaceTtlMs: config.workspaceTtlMs,
   });
 
   const networkId = await computeNetworkId();
@@ -477,6 +478,28 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       // Auth guard — rejects with 401 if token is invalid/missing
       if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
 
+      // Workspace TTL settings
+      if (req.method === 'GET' && reqUrl.pathname === '/api/settings/workspace-ttl') {
+        const ttlMs = config.workspaceTtlMs ?? 30 * 24 * 60 * 60 * 1000;
+        return jsonResponse(res, 200, { ttlMs, ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)) });
+      }
+      if (req.method === 'PUT' && reqUrl.pathname === '/api/settings/workspace-ttl') {
+        try {
+          const bodyStr = await readBody(req);
+          const { ttlDays } = JSON.parse(bodyStr ?? '{}') as { ttlDays?: number };
+          if (typeof ttlDays !== 'number' || !Number.isFinite(ttlDays) || ttlDays < 0) {
+            return jsonResponse(res, 400, { error: 'ttlDays must be a finite non-negative number' });
+          }
+          const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
+          config.workspaceTtlMs = ttlMs;
+          agent.setWorkspaceTtlMs(ttlMs);
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
+        } catch (err: any) {
+          return jsonResponse(res, 500, { error: err.message ?? 'Failed to update workspace TTL' });
+        }
+      }
+
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings);
@@ -568,6 +591,7 @@ async function handleRequest(
     const networkId = await computeNetworkId();
     const chainConf = config.chain ?? network?.chain;
     const blockExplorerUrl = config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
+    const identityId = agent.publisher.getIdentityId();
     return jsonResponse(res, 200, {
       name: config.name,
       peerId: agent.peerId,
@@ -581,6 +605,8 @@ async function handleRequest(
       relayConnected: circuitAddrs.length > 0,
       multiaddrs: agent.multiaddrs,
       blockExplorerUrl,
+      identityId: String(identityId),
+      hasIdentity: identityId > 0n,
     });
   }
 
@@ -854,18 +880,21 @@ async function handleRequest(
     }
   }
 
-  // POST /api/workspace/enshrine  { paranetId: "...", selection?: "all" | { rootEntities: [...] }, clearAfter?: bool }
+  // POST /api/workspace/enshrine  { paranetId, selection?, clearAfter?, contextGraphId? }
   if (req.method === 'POST' && path === '/api/workspace/enshrine') {
     const body = await readBody(req);
-    const { paranetId, selection, clearAfter } = JSON.parse(body);
+    const { paranetId, selection, clearAfter, contextGraphId } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
     const ctx = createOperationContext('enshrine');
-    tracker.start(ctx, { paranetId, details: { source: 'api' } });
+    tracker.start(ctx, { paranetId, details: { source: 'api', contextGraphId } });
     try {
       const result = await agent.enshrineFromWorkspace(
         paranetId,
         selection || 'all',
-        { clearWorkspaceAfter: clearAfter ?? true },
+        {
+          clearWorkspaceAfter: clearAfter ?? true,
+          ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),
+        },
       );
       const chain = result.onChainResult;
       if (chain) {
@@ -877,10 +906,49 @@ async function handleRequest(
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
+        ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),
       });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
+    }
+  }
+
+  // POST /api/context-graph/create  { participantIdentityIds: number[], requiredSignatures: number }
+  if (req.method === 'POST' && path === '/api/context-graph/create') {
+    const body = await readBody(req);
+    const { participantIdentityIds, requiredSignatures } = JSON.parse(body);
+    if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
+      return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
+    }
+    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 0) {
+      return jsonResponse(res, 400, { error: 'requiredSignatures must be a non-negative integer' });
+    }
+    if (requiredSignatures > participantIdentityIds.length) {
+      return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
+    }
+    for (let i = 0; i < participantIdentityIds.length; i++) {
+      const id = participantIdentityIds[i];
+      if (typeof id === 'number') {
+        if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
+        }
+      } else if (typeof id === 'string') {
+        if (!/^\d+$/.test(id) || id === '0') {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
+        }
+      } else {
+        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
+      }
+    }
+    try {
+      const result = await agent.createContextGraph({
+        participantIdentityIds: participantIdentityIds.map((id: number | string) => BigInt(id)),
+        requiredSignatures,
+      });
+      return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
     }
   }
 
@@ -1031,6 +1099,28 @@ async function handleRequest(
       return jsonResponse(res, 200, { ok: true, rpcUrl, latencyMs, blockNumber });
     } catch (err: any) {
       return jsonResponse(res, 200, { ok: false, rpcUrl, latencyMs: null, blockNumber: null, error: err.message });
+    }
+  }
+
+  // GET /api/identity — current on-chain identity status
+  if (req.method === 'GET' && path === '/api/identity') {
+    const identityId = agent.publisher.getIdentityId();
+    return jsonResponse(res, 200, {
+      identityId: String(identityId),
+      hasIdentity: identityId > 0n,
+    });
+  }
+
+  // POST /api/identity/ensure — (re)attempt on-chain identity creation
+  if (req.method === 'POST' && path === '/api/identity/ensure') {
+    try {
+      const identityId = await agent.ensureIdentity();
+      return jsonResponse(res, 200, {
+        identityId: String(identityId),
+        hasIdentity: identityId > 0n,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message, identityId: '0', hasIdentity: false });
     }
   }
 

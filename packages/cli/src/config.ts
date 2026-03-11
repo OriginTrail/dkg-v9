@@ -80,6 +80,8 @@ export interface DkgConfig {
    * on first start and stored in `<DKG_HOME>/auth.token`.
    */
   auth?: { enabled?: boolean; tokens?: string[] };
+  /** Workspace data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
+  workspaceTtlMs?: number;
 }
 
 const DEFAULT_CONFIG: DkgConfig = {

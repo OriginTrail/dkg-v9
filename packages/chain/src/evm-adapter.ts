@@ -16,6 +16,10 @@ import type {
   PublishParams,
   OnChainPublishResult,
   KAUpdateVerification,
+  CreateContextGraphParams,
+  CreateContextGraphResult,
+  AddBatchToContextGraphParams,
+  PublishToContextGraphParams,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -48,6 +52,8 @@ interface ContractCache {
   token?: Contract;
   parametersStorage?: Contract;
   askStorage?: Contract;
+  contextGraphs?: Contract;
+  contextGraphStorage?: Contract;
 }
 
 /**
@@ -137,6 +143,13 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.paranetV9Registry = await this.resolveContract('ParanetV9Registry');
     } catch {
       // ParanetV9Registry not registered in Hub — createParanet/listParanetsFromChain unavailable
+    }
+
+    try {
+      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
+      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
+    } catch {
+      // ContextGraphs not deployed — context graph operations unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -621,6 +634,29 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
 
+      if (eventType === 'ContextGraphExpanded') {
+        const cgStorage = this.contracts.contextGraphStorage;
+        if (cgStorage) {
+          const eventFilter = cgStorage.filters.ContextGraphExpanded();
+          const logs = await cgStorage.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+
+          for (const log of logs) {
+            const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed) {
+              yield {
+                type: 'ContextGraphExpanded',
+                blockNumber: log.blockNumber,
+                data: {
+                  contextGraphId: parsed.args.contextGraphId.toString(),
+                  batchId: parsed.args.batchId?.toString(),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
+          }
+        }
+      }
+
       // V8 backward compat
       if (eventType === 'KCCreated' || eventType === 'KnowledgeCollectionCreated') {
         const kcStorage = this.contracts.knowledgeCollectionStorage;
@@ -757,11 +793,172 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
+  // Context Graphs
+  // =====================================================================
+
+  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+    await this.init();
+    if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
+      throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
+    }
+
+    const identityIds = params.participantIdentityIds.map((id) => id);
+    const tx = await this.contracts.contextGraphs.createContextGraph(
+      identityIds,
+      params.requiredSignatures,
+      params.metadataBatchId ?? 0n,
+    );
+    const receipt = await tx.wait();
+
+    let contextGraphId = 0n;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = this.contracts.contextGraphStorage!.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (parsed?.name === 'ContextGraphCreated') {
+          contextGraphId = BigInt(parsed.args.contextGraphId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+      contextGraphId,
+    };
+  }
+
+  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.contextGraphs) {
+      throw new Error('ContextGraphs contract not deployed.');
+    }
+
+    const identityIds = params.signerSignatures.map((s) => s.identityId);
+    const rValues = params.signerSignatures.map((s) => ethers.hexlify(s.r));
+    const vsValues = params.signerSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const tx = await this.contracts.contextGraphs.addBatchToContextGraph(
+      params.contextGraphId,
+      params.batchId,
+      ethers.hexlify(params.merkleRoot),
+      identityIds,
+      rValues,
+      vsValues,
+    );
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
+    await this.init();
+    if (!this.contracts.knowledgeAssets) {
+      throw new Error('KnowledgeAssets contract not deployed.');
+    }
+    if (!this.contracts.knowledgeAssetsStorage) {
+      throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
+    }
+
+    const signer = await this.nextSigner();
+    const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);
+    const receiverRs = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
+    const receiverVSs = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
+    const participantIdentityIds = params.participantSignatures.map((s) => s.identityId);
+    const participantRs = params.participantSignatures.map((s) => ethers.hexlify(s.r));
+    const participantVSs = params.participantSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const ka = this.contracts.knowledgeAssets.connect(signer) as any;
+    const kaAddress = await this.contracts.knowledgeAssets.getAddress();
+
+    if (this.contracts.token && params.tokenAmount > 0n) {
+      const token = this.contracts.token.connect(signer) as Contract;
+      const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
+    const tx = await ka.publishToContextGraph(
+      params.kaCount,
+      params.publisherNodeIdentityId,
+      ethers.hexlify(params.merkleRoot),
+      params.publicByteSize,
+      params.epochs,
+      params.tokenAmount,
+      ethers.ZeroAddress,
+      ethers.hexlify(params.publisherSignature.r),
+      ethers.hexlify(params.publisherSignature.vs),
+      receiverIdentityIds,
+      receiverRs,
+      receiverVSs,
+      params.contextGraphId,
+      participantIdentityIds,
+      participantRs,
+      participantVSs,
+    );
+    const receipt = await tx.wait();
+
+    let batchId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = signer.address;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+          topics: [...log.topics],
+          data: log.data,
+        });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+        }
+      } catch { /* not this contract */ }
+    }
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+    };
+  }
+
+  // =====================================================================
   // Utilities
   // =====================================================================
 
   getSignerAddress(): string {
     return this.signer.address;
+  }
+
+  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    const sig = ethers.Signature.from(
+      await this.signer.signMessage(messageHash),
+    );
+    return {
+      r: ethers.getBytes(sig.r),
+      vs: ethers.getBytes(sig.yParityAndS),
+    };
   }
 
   async getBlockNumber(): Promise<number> {

@@ -133,6 +133,15 @@ export class PublishHandler {
     const pending = this.pendingPublishes.get(ual);
     if (!pending) return false;
 
+    // Dedup guard: if already confirmed (e.g. by FinalizationHandler), skip
+    if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+      this.log.info(opCtx, `Publish ${ual} already confirmed, skipping duplicate confirmation`);
+      clearTimeout(pending.timeout);
+      this.pendingPublishes.delete(ual);
+      this.persistJournal();
+      return true;
+    }
+
     if (onChainData) {
       if (onChainData.publisherAddress.toLowerCase() !== pending.expectedPublisherAddress.toLowerCase()) {
         this.log.warn(opCtx,

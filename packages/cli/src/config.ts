@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -120,6 +120,59 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 
 export function dkgDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+}
+
+/**
+ * Resolve the repo root from the compiled code location.
+ * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
+ */
+export function repoDir(): string {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  return resolve(thisDir, '..', '..', '..');
+}
+
+export function releasesDir(): string {
+  return join(dkgDir(), 'releases');
+}
+
+/** Read the active slot name from the `releases/active` file. Returns null if not yet migrated. */
+export async function activeSlot(): Promise<'a' | 'b' | null> {
+  try {
+    const raw = (await readFile(join(releasesDir(), 'active'), 'utf-8')).trim();
+    if (raw === 'a' || raw === 'b') return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function inactiveSlot(): Promise<'a' | 'b'> {
+  const active = await activeSlot();
+  return (active ?? 'a') === 'a' ? 'b' : 'a';
+}
+
+/**
+ * Atomically swap the `releases/current` symlink to point to `target` slot.
+ * Uses tmp-symlink + rename to avoid any window where the symlink is broken.
+ */
+export async function swapSlot(target: 'a' | 'b'): Promise<void> {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current');
+  const tmpLink = join(rDir, 'current.tmp');
+
+  // Check if already pointing to target
+  try {
+    const dest = await readlink(currentLink);
+    if (dest === target) {
+      await writeFile(join(rDir, 'active'), target);
+      return;
+    }
+  } catch { /* link doesn't exist yet */ }
+
+  try { await unlink(tmpLink); } catch { /* ok if missing */ }
+  await symlink(target, tmpLink);
+  await rename(tmpLink, currentLink);
+  await writeFile(join(rDir, 'active'), target);
 }
 
 export function configPath(): string {

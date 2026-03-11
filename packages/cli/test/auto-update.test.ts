@@ -7,20 +7,49 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, readFile: vi.fn(), writeFile: vi.fn() };
+  return {
+    ...actual,
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
+    symlink: vi.fn(),
+    rename: vi.fn(),
+    unlink: vi.fn(),
+    readlink: vi.fn(),
+  };
 });
 
-// Stub global fetch for GitHub API calls
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, existsSync: vi.fn(() => true) };
+});
+
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+let mockActiveSlot = 'a';
+vi.mock('../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config.js')>();
+  return {
+    ...actual,
+    dkgDir: () => '/tmp/dkg-test',
+    releasesDir: () => '/tmp/dkg-test/releases',
+    activeSlot: () => Promise.resolve(mockActiveSlot as 'a' | 'b'),
+    inactiveSlot: () => Promise.resolve(mockActiveSlot === 'a' ? 'b' : 'a' as 'a' | 'b'),
+    swapSlot: vi.fn(),
+  };
+});
+
 import { execSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import { checkForUpdate } from '../src/daemon.js';
+import { existsSync } from 'node:fs';
+import { checkForUpdate, performUpdate } from '../src/daemon.js';
+import { swapSlot } from '../src/config.js';
 
 const mockedExecSync = vi.mocked(execSync);
 const mockedReadFile = vi.mocked(readFile);
 const mockedWriteFile = vi.mocked(writeFile);
+const mockedExistsSync = vi.mocked(existsSync);
+const mockedSwapSlot = vi.mocked(swapSlot);
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -36,101 +65,164 @@ function makeFetchOk(sha: string) {
   });
 }
 
-describe('checkForUpdate', () => {
+describe('blue-green checkForUpdate', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockActiveSlot = 'a';
+    mockedExistsSync.mockReturnValue(true);
   });
 
-  it('skips update when not inside a git worktree', async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --is-inside-work-tree')) throw new Error('not a git repo');
-      return '';
-    });
-
+  it('skips when blue-green slots are not initialized', async () => {
+    mockedExistsSync.mockReturnValue(false);
     const log = vi.fn();
-    await checkForUpdate(AU, log);
-
-    expect(log).toHaveBeenCalledWith(
-      'Auto-update: skipping \u2014 not inside a git worktree',
-    );
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('slots not initialized'));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('skips update when worktree has tracked uncommitted changes', async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
-      if (cmd.startsWith('git status --porcelain')) return ' M dirty-file.ts\n';
-      return '';
-    });
+  it('skips when no new commit', async () => {
+    const sha = 'abc123';
+    mockedReadFile.mockResolvedValueOnce(sha as any);
+    makeFetchOk(sha);
 
     const log = vi.fn();
-    await checkForUpdate(AU, log);
-
-    expect(log).toHaveBeenCalledWith(
-      'Auto-update: skipping \u2014 worktree has tracked uncommitted changes',
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
-  it('skips update when ff-only merge fails (diverged history)', async () => {
-    const currentCommit = 'aaa111';
-    const latestCommit = 'bbb222';
-
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
-      if (cmd.startsWith('git status --porcelain')) return '';
-      if (cmd.startsWith('git fetch')) return '';
-      if (cmd.startsWith('git merge --ff-only')) throw new Error('Not possible to fast-forward');
-      return '';
-    });
-    mockedReadFile.mockResolvedValueOnce(currentCommit);
-    makeFetchOk(latestCommit);
+  it('builds in inactive slot on new commit', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb222';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockReturnValue('' as any);
 
     const log = vi.fn();
-    await checkForUpdate(AU, log);
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
 
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('new commit detected'),
-    );
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('fast-forward merge failed'),
-    );
-    const allCmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
-    expect(allCmds.some(cmd => cmd.includes('git reset --hard'))).toBe(false);
-    expect(mockedWriteFile).not.toHaveBeenCalled();
+    const allCmds = mockedExecSync.mock.calls.map(c => ({
+      cmd: String(c[0]),
+      cwd: (c[1] as any)?.cwd,
+    }));
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    expect(allCmds.some(c => c.cmd.includes('git fetch') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('git checkout --force') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+
+    const activeDir = '/tmp/dkg-test/releases/a';
+    expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
   });
 
-  it('rolls back and reinstalls dependencies on build failure after merge', async () => {
-    const currentCommit = 'aaa111';
-    const latestCommit = 'ccc333';
+  it('swaps symlink after successful build', async () => {
+    const current = 'aaa111';
+    const latest = 'ccc333';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockReturnValue('' as any);
 
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --is-inside-work-tree')) return 'true';
-      if (cmd.startsWith('git status --porcelain')) return '';
-      if (cmd.startsWith('git fetch')) return '';
-      if (cmd.startsWith('git merge --ff-only')) return '';
-      if (cmd.startsWith('pnpm install')) return '';
-      if (cmd === 'pnpm build') throw new Error('build exploded');
-      if (cmd.startsWith('git reset --hard')) return '';
-      return '';
-    });
-    mockedReadFile.mockResolvedValueOnce(currentCommit);
-    makeFetchOk(latestCommit);
+    await performUpdate(AU, vi.fn());
 
+    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
+    expect(mockedWriteFile).toHaveBeenCalledWith(
+      '/tmp/dkg-test/.current-commit',
+      latest,
+    );
+  });
+
+  it('calls SIGTERM after swap via checkForUpdate', async () => {
+    const current = 'aaa111';
+    const latest = 'ddd444';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockReturnValue('' as any);
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const log = vi.fn();
     await checkForUpdate(AU, log);
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    killSpy.mockRestore();
+  });
 
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('build failed after merge'),
-    );
-    const allCmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
-    expect(allCmds.some(cmd => cmd.includes(`git reset --hard ${currentCommit}`))).toBe(true);
-    expect(allCmds.some(cmd => cmd === 'pnpm install --frozen-lockfile')).toBe(true);
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('rolled back to previous commit'),
-    );
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('artifacts may be stale'),
-    );
+  it('build failure does not swap', async () => {
+    const current = 'aaa111';
+    const latest = 'eee555';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd) === 'pnpm build') throw new Error('build exploded');
+      return '' as any;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('build failed'));
+  });
+
+  it('build failure does not touch active slot', async () => {
+    const current = 'aaa111';
+    const latest = 'fff666';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd) === 'pnpm build') throw new Error('build exploded');
+      return '' as any;
+    });
+
+    await performUpdate(AU, vi.fn());
+
+    const allCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    const activeDir = '/tmp/dkg-test/releases/a';
+    expect(allCwds.every((cwd: string) => cwd !== activeDir)).toBe(true);
+  });
+
+  it('fetch failure does not attempt build', async () => {
+    const current = 'aaa111';
+    const latest = 'ggg777';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd).includes('git fetch')) throw new Error('network down');
+      return '' as any;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+
+    const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
+    expect(allCmds.some(c => c.includes('pnpm install'))).toBe(false);
+    expect(allCmds.some(c => c.includes('pnpm build'))).toBe(false);
+  });
+
+  it('slot alternation — consecutive updates build in alternating slots', async () => {
+    // First update: active=a, builds in b
+    mockActiveSlot = 'a';
+    mockedReadFile.mockResolvedValueOnce('commit1' as any);
+    makeFetchOk('commit2');
+    mockedExecSync.mockReturnValue('' as any);
+
+    await performUpdate(AU, vi.fn());
+    const firstBuildCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    expect(firstBuildCwds.some((cwd: string) => cwd.includes('/b'))).toBe(true);
+
+    vi.resetAllMocks();
+    mockedExistsSync.mockReturnValue(true);
+
+    // Second update: active=b, builds in a
+    mockActiveSlot = 'b';
+    mockedReadFile.mockResolvedValueOnce('commit2' as any);
+    makeFetchOk('commit3');
+    mockedExecSync.mockReturnValue('' as any);
+
+    await performUpdate(AU, vi.fn());
+    const secondBuildCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    expect(secondBuildCwds.some((cwd: string) => cwd.includes('/a'))).toBe(true);
   });
 });

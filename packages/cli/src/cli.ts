@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
@@ -11,10 +11,10 @@ import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig,
+  loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon } from './daemon.js';
+import { runDaemon, performUpdate } from './daemon.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
@@ -229,10 +229,15 @@ program
       return;
     }
 
-    // Spawn detached background process
+    // Spawn detached background process via releases/current symlink
+    const rDir = releasesDir();
+    const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+    const entryPoint = existsSync(rDir) && existsSync(currentLink)
+      ? currentLink
+      : fileURLToPath(import.meta.url);
     const child = spawn(
       process.execPath,
-      [...process.execArgv, fileURLToPath(import.meta.url), 'start', '--foreground'],
+      [...process.execArgv, entryPoint, 'start', '--foreground'],
       {
         detached: true,
         stdio: ['ignore', 'ignore', 'ignore'],
@@ -1129,5 +1134,74 @@ function stripQuotes(s: string): string {
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
+
+// ─── dkg update ──────────────────────────────────────────────────────
+
+program
+  .command('update')
+  .description('Check for and apply DKG node updates (blue-green swap)')
+  .option('--check', 'Only check for updates, do not apply')
+  .action(async (opts: ActionOpts) => {
+    const config = await loadConfig();
+    const net = await loadNetworkConfig();
+    const au = config.autoUpdate ?? net?.autoUpdate ?? {
+      enabled: true,
+      repo: 'OriginTrail/dkg-v9',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+    };
+
+    if (opts.check) {
+      console.log('Checking for updates...');
+      const updated = await performUpdate(au, (msg) => console.log(msg));
+      if (!updated) console.log('No updates available.');
+      return;
+    }
+
+    console.log('Checking for updates and applying...');
+    const updated = await performUpdate(au, (msg) => console.log(msg));
+    if (updated) {
+      const pid = await readPid();
+      if (pid && isProcessRunning(pid)) {
+        console.log('Restarting daemon...');
+        process.kill(pid, 'SIGTERM');
+      } else {
+        console.log('Update applied. Start the daemon with: dkg start');
+      }
+    } else {
+      console.log('No update needed — already on latest.');
+    }
+  });
+
+// ─── dkg rollback ────────────────────────────────────────────────────
+
+program
+  .command('rollback')
+  .description('Roll back to the previous release slot and restart')
+  .action(async () => {
+    const current = await activeSlot();
+    if (!current) {
+      console.error('Blue-green slots not initialized. Nothing to roll back.');
+      process.exit(1);
+    }
+
+    const target = current === 'a' ? 'b' : 'a';
+    const targetDir = join(releasesDir(), target);
+    if (!existsSync(targetDir)) {
+      console.error(`Slot ${target} does not exist. Cannot roll back.`);
+      process.exit(1);
+    }
+
+    await swapSlot(target);
+    console.log(`Rolled back: current → slot ${target}`);
+
+    const pid = await readPid();
+    if (pid && isProcessRunning(pid)) {
+      console.log('Restarting daemon...');
+      process.kill(pid, 'SIGTERM');
+    } else {
+      console.log('Daemon not running. Start with: dkg start');
+    }
+  });
 
 program.parse();

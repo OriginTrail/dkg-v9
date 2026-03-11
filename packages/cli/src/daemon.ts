@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
@@ -29,6 +30,11 @@ import {
   ensureDkgDir,
   type DkgConfig,
   type AutoUpdateConfig,
+  repoDir,
+  releasesDir,
+  activeSlot,
+  inactiveSlot,
+  swapSlot,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
@@ -417,7 +423,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     const nodeUiDir = dirname(fileURLToPath(nodeUiPkg));
     nodeUiStaticDir = join(nodeUiDir, '..', 'dist-ui');
   } catch {
-    nodeUiStaticDir = join(process.cwd(), 'packages', 'node-ui', 'dist-ui');
+    nodeUiStaticDir = join(repoDir(), 'packages', 'node-ui', 'dist-ui');
   }
 
   // --- Authentication ---
@@ -1107,122 +1113,105 @@ function normalizeRepo(repo: string): string {
   return t;
 }
 
+/**
+ * Core blue-green update logic. Builds the new version in the inactive slot,
+ * then atomically swaps the `releases/current` symlink.
+ * Returns true if an update was applied (caller should SIGTERM to restart).
+ */
+export async function performUpdate(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const rDir = releasesDir();
+  const activeDir = join(rDir, (await activeSlot()) ?? 'a');
+  const target = await inactiveSlot();
+  const targetDir = join(rDir, target);
+
+  // Bail out if the release slots don't exist yet (not migrated)
+  if (!existsSync(activeDir) || !existsSync(targetDir)) {
+    log('Auto-update: skipping — blue-green slots not initialized');
+    return false;
+  }
+
+  const commitFile = join(dkgDir(), '.current-commit');
+
+  let currentCommit = '';
+  try {
+    currentCommit = (await readFile(commitFile, 'utf-8')).trim();
+  } catch {
+    try {
+      currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
+      await writeFile(commitFile, currentCommit);
+    } catch {
+      return false;
+    }
+  }
+
+  const repo = normalizeRepo(au.repo);
+  const branch = au.branch.trim() || 'main';
+  const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+  const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
+  const token = process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    if (res.status === 404) {
+      log(
+        `Auto-update: GitHub returned 404 for ${repo} branch "${branch}". ` +
+          'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/branch in config.',
+      );
+    } else {
+      log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
+    }
+    return false;
+  }
+  const data = await res.json() as { sha: string };
+  const latestCommit = data.sha;
+
+  if (latestCommit === currentCommit) return false;
+
+  log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), building in slot ${target}...`);
+
+  try {
+    execSync(`git fetch origin ${branch}`, {
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe',
+    });
+    execSync(`git checkout --force origin/${branch}`, {
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe',
+    });
+  } catch (fetchErr: any) {
+    log(`Auto-update: git fetch/checkout failed in slot ${target} — ${fetchErr.message}`);
+    return false;
+  }
+
+  try {
+    execSync('pnpm install --frozen-lockfile', {
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000,
+    });
+    execSync('pnpm build', {
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000,
+    });
+  } catch (err: any) {
+    log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
+    return false;
+  }
+
+  await swapSlot(target);
+  await writeFile(commitFile, latestCommit);
+  log(`Auto-update: build succeeded in slot ${target}. Swapped symlink. Restarting...`);
+  return true;
+}
+
 export async function checkForUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<void> {
   try {
-    const cwd = process.cwd();
-
-    // Bail out if not inside a git worktree
-    try {
-      const inWorktree = execSync('git rev-parse --is-inside-work-tree', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
-      if (inWorktree !== 'true') {
-        log('Auto-update: skipping — not inside a git worktree');
-        return;
-      }
-    } catch {
-      log('Auto-update: skipping — not inside a git worktree');
-      return;
+    const updated = await performUpdate(au, log);
+    if (updated) {
+      process.kill(process.pid, 'SIGTERM');
     }
-
-    // Bail out if worktree has tracked uncommitted changes
-    const status = execSync('git status --porcelain --untracked-files=no', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
-    if (status) {
-      log('Auto-update: skipping — worktree has tracked uncommitted changes');
-      return;
-    }
-
-    const commitFile = join(dkgDir(), '.current-commit');
-
-    // Get current running commit
-    let currentCommit = '';
-    try {
-      currentCommit = (await readFile(commitFile, 'utf-8')).trim();
-    } catch {
-      // First run — record current commit
-      try {
-        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd }).trim();
-        await writeFile(commitFile, currentCommit);
-      } catch {
-        return;
-      }
-    }
-
-    const repo = normalizeRepo(au.repo);
-    const branch = au.branch.trim() || 'main';
-    const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
-    const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
-    const token = process.env.GITHUB_TOKEN;
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    const res = await fetch(url, { headers });
-    if (!res.ok) {
-      if (res.status === 404) {
-        log(
-          `Auto-update: GitHub returned 404 for ${repo} branch "${branch}". ` +
-            'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/branch in config.',
-        );
-      } else {
-        log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
-      }
-      return;
-    }
-    const data = await res.json() as { sha: string };
-    const latestCommit = data.sha;
-
-    if (latestCommit === currentCommit) return;
-
-    log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
-
-    try {
-      execSync(`git fetch origin ${branch}`, {
-        cwd, encoding: 'utf-8', stdio: 'pipe',
-      });
-    } catch (fetchErr: any) {
-      log(`Auto-update: fetch failed — ${fetchErr.message}`);
-      return;
-    }
-
-    try {
-      execSync(`git merge --ff-only origin/${branch}`, {
-        cwd, encoding: 'utf-8', stdio: 'pipe',
-      });
-    } catch (mergeErr: any) {
-      log(`Auto-update: skipping — fast-forward merge failed: ${mergeErr.message}`);
-      return;
-    }
-
-    try {
-      execSync('pnpm install --frozen-lockfile', {
-        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
-      });
-      execSync('pnpm build', {
-        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
-      });
-    } catch (err: any) {
-      log(`Auto-update: build failed after merge — ${err.message}`);
-      try {
-        execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
-        execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        try {
-          execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        } catch (buildErr: any) {
-          log(`Auto-update: rollback build failed — artifacts may be stale: ${buildErr.message}`);
-        }
-        log('Auto-update: rolled back to previous commit after build failure');
-      } catch (resetErr: any) {
-        log(`Auto-update: rollback failed — ${resetErr.message}`);
-      }
-      return;
-    }
-
-    // Record the new commit
-    await writeFile(commitFile, latestCommit);
-    log(`Auto-update: build succeeded. Restarting daemon...`);
-
-    // Signal the process to restart (pm2 or wrapper script will restart it)
-    process.kill(process.pid, 'SIGTERM');
   } catch (err: any) {
     log(`Auto-update: error — ${err.message}`);
   }

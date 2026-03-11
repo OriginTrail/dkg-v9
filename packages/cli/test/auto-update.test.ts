@@ -341,6 +341,18 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
   });
 
+  it('checkForNewCommit handles fetch/network errors without throwing', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    fetchMock.mockRejectedValueOnce(new Error('network timeout'));
+    const log = vi.fn();
+
+    const result = await checkForNewCommit(AU, log);
+
+    expect(result).toBeNull();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('failed to check for new commit'));
+  });
+
   it('supports explicit tag refs for version-targeted updates', async () => {
     mockedReadFile.mockResolvedValueOnce('aaa111' as any);
     makeFetchOk('tagsha123');

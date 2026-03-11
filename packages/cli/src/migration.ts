@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { releasesDir, repoDir, swapSlot } from './config.js';
 
 /**
@@ -27,10 +27,17 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
   const slotB = join(rDir, 'b');
   const slotEntry = (slotDir: string) => join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
   const slotReady = (slotDir: string) => existsSync(join(slotDir, '.git')) && existsSync(slotEntry(slotDir));
+  const git = (args: string[], cwd?: string): string =>
+    String(execFileSync('git', args, {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 120_000,
+      ...(cwd ? { cwd } : {}),
+    })).trim();
 
   if (!slotReady(slotA)) {
     await rm(slotA, { recursive: true, force: true });
-    execSync(`git clone --local "${repo}" "${slotA}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+    git(['clone', '--local', repo, slotA]);
     execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
     execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
     log(`  Slot a: cloned and built from ${repo}`);
@@ -39,8 +46,8 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
   if (!slotReady(slotB)) {
     try {
       await rm(slotB, { recursive: true, force: true });
-      const repoUrl = execSync('git remote get-url origin', { cwd: repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
-      execSync(`git clone --reference "${slotA}" --dissociate "${repoUrl}" "${slotB}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+      const repoUrl = git(['remote', 'get-url', 'origin'], repo);
+      git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB]);
       execSync('pnpm install --frozen-lockfile', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
       execSync('pnpm build', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
       log(`  Slot b: cloned and built`);
@@ -48,8 +55,8 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
       log(`  Slot b: clone/build failed (${err.message}). Will be prepared on first update.`);
       await rm(slotB, { recursive: true, force: true });
       try {
-        const repoUrl = execSync('git remote get-url origin', { cwd: repo, encoding: 'utf-8', stdio: 'pipe' }).trim();
-        execSync(`git clone "${repoUrl}" "${slotB}"`, { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+        const repoUrl = git(['remote', 'get-url', 'origin'], repo);
+        git(['clone', repoUrl, slotB]);
       } catch { await mkdir(slotB, { recursive: true }); }
     }
   }

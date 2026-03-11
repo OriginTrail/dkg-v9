@@ -247,12 +247,13 @@ program
       process.exit(1);
     }
 
+    // Keep blue-green slots initialized for both foreground and daemonized start.
+    await migrateToBlueGreen((msg) => console.log(msg));
+
     if (opts.foreground) {
       await runDaemon(true);
       return;
     }
-
-    await migrateToBlueGreen((msg) => console.log(msg));
 
     // Spawn detached background process via releases/current symlink
     const rDir = releasesDir();

@@ -8,15 +8,19 @@ vi.mock('node:child_process', async () => {
   const { mkdirSync } = await import('node:fs');
   return {
     execSync: vi.fn((cmd: string) => {
-      const cmdStr = String(cmd);
-      if (cmdStr.startsWith('git clone')) {
-        const parts = cmdStr.split('"');
-        const target = parts[parts.length - 2];
+      return 'https://github.com/test/repo.git';
+    }),
+    execFileSync: vi.fn((binary: string, args: string[]) => {
+      if (binary === 'git' && args[0] === 'clone') {
+        const target = args[args.length - 1];
         if (target && !target.startsWith('git') && !target.startsWith('http')) {
           try { mkdirSync(target, { recursive: true }); } catch {}
         }
       }
-      return 'https://github.com/test/repo.git';
+      if (binary === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
+        return 'https://github.com/test/repo.git';
+      }
+      return '';
     }),
   };
 });
@@ -101,18 +105,18 @@ describe('migrateToBlueGreen', () => {
   // -------------------------------------------------------------------
 
   it('migration uses git clone (not symlink) for slot A to prevent dev repo damage', async () => {
-    const { execSync } = await import('node:child_process');
-    const mockedExecSync = vi.mocked(execSync);
+    const { execFileSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
 
     const { migrateToBlueGreen } = await import('../src/migration.js');
     await migrateToBlueGreen(vi.fn());
 
-    const cloneCalls = mockedExecSync.mock.calls
-      .map(c => String(c[0]))
-      .filter(cmd => cmd.includes('git clone'));
+    const cloneCalls = mockedExecFileSync.mock.calls
+      .map(c => ({ binary: String(c[0]), args: c[1] as string[] }))
+      .filter(call => call.binary === 'git' && call.args[0] === 'clone');
 
     // Slot A should be cloned, not symlinked
-    expect(cloneCalls.some(cmd => cmd.includes('git clone --local'))).toBe(true);
+    expect(cloneCalls.some(call => call.args.includes('--local'))).toBe(true);
   });
 
   it('migration builds slot A after cloning (not just clone)', async () => {
@@ -128,18 +132,18 @@ describe('migrateToBlueGreen', () => {
   });
 
   it('migration slot B clone uses --dissociate to prevent repo corruption', async () => {
-    const { execSync } = await import('node:child_process');
-    const mockedExecSync = vi.mocked(execSync);
+    const { execFileSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
 
     const { migrateToBlueGreen } = await import('../src/migration.js');
     await migrateToBlueGreen(vi.fn());
 
-    const cloneCalls = mockedExecSync.mock.calls
-      .map(c => String(c[0]))
-      .filter(cmd => cmd.includes('git clone') && cmd.includes('--reference'));
+    const cloneCalls = mockedExecFileSync.mock.calls
+      .map(c => ({ binary: String(c[0]), args: c[1] as string[] }))
+      .filter(call => call.binary === 'git' && call.args[0] === 'clone' && call.args.includes('--reference'));
 
     if (cloneCalls.length > 0) {
-      expect(cloneCalls[0]).toContain('--dissociate');
+      expect(cloneCalls[0].args).toContain('--dissociate');
     }
   });
 
@@ -148,14 +152,18 @@ describe('migrateToBlueGreen', () => {
     const slotA = join(rDir, 'a');
     await mkdir(slotA, { recursive: true }); // create incomplete slot
 
-    const { execSync } = await import('node:child_process');
+    const { execFileSync, execSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
     const mockedExecSync = vi.mocked(execSync);
 
     const { migrateToBlueGreen } = await import('../src/migration.js');
     await migrateToBlueGreen(vi.fn());
 
+    const gitCalls = mockedExecFileSync.mock.calls
+      .map(c => ({ binary: String(c[0]), args: c[1] as string[] }))
+      .filter(call => call.binary === 'git' && call.args[0] === 'clone');
+    expect(gitCalls.some(call => call.args.includes('--local'))).toBe(true);
     const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
-    expect(allCmds.some(cmd => cmd.includes('git clone --local'))).toBe(true);
     expect(allCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
   });
 });

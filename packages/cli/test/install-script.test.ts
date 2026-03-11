@@ -73,4 +73,11 @@ describe('install.sh validation', () => {
     // Should check if .git directory exists before cloning
     expect(content).toContain('.git');
   });
+
+  it('script validates slot entrypoints before skipping initialization', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    expect(content).toContain('slot_ready');
+    expect(content).toContain('packages/cli/dist/cli.js');
+    expect(content).toContain('Detected incomplete slots');
+  });
 });

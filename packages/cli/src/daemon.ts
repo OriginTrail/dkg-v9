@@ -1935,14 +1935,19 @@ export async function checkForNewCommit(
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) {
-    log(`Auto-update: GitHub API returned ${res.status}`);
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      log(`Auto-update: GitHub API returned ${res.status}`);
+      return null;
+    }
+    const data = await res.json() as { sha: string };
+    if (data.sha === currentCommit) return null;
+    return data.sha;
+  } catch (err: any) {
+    log(`Auto-update: failed to check for new commit (${err?.message ?? String(err)})`);
     return null;
   }
-  const data = await res.json() as { sha: string };
-  if (data.sha === currentCommit) return null;
-  return data.sha;
 }
 
 let _updateInProgress = false;

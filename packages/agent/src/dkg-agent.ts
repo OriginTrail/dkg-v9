@@ -564,6 +564,7 @@ export class DKGAgent {
   async syncFromPeer(
     remotePeerId: string,
     paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncParanets ?? [])],
+    onPhase?: PhaseCallback,
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
@@ -578,6 +579,7 @@ export class DKGAgent {
         let offset = 0;
         this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
 
+        onPhase?.('fetch', 'start');
         // eslint-disable-next-line no-constant-condition
         while (true) {
           if (Date.now() > deadline) {
@@ -610,15 +612,19 @@ export class DKGAgent {
           this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
           if (dataCount < SYNC_PAGE_SIZE) break;
         }
+        onPhase?.('fetch', 'end');
 
         if (allQuads.length === 0) continue;
 
+        onPhase?.('verify', 'start');
         const dataQuads = allQuads.filter(q => q.graph === dataGraph);
         const metaQuads = allQuads.filter(q => q.graph === metaGraph);
 
         const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
         const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
+        onPhase?.('verify', 'end');
 
+        onPhase?.('store', 'start');
         if (verified.data.length > 0) {
           await this.store.insert(verified.data);
           totalSynced += verified.data.length;
@@ -627,6 +633,7 @@ export class DKGAgent {
           await this.store.insert(verified.meta);
           totalSynced += verified.meta.length;
         }
+        onPhase?.('store', 'end');
 
         if (verified.rejected > 0) {
           this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
@@ -1027,6 +1034,7 @@ export class DKGAgent {
     const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
+    onPhase?.('broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
         const dataGraph = `did:dkg:paranet:${paranetId}`;
@@ -1057,6 +1065,7 @@ export class DKGAgent {
         this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    onPhase?.('broadcast', 'end');
 
     return result;
   }
@@ -1090,11 +1099,12 @@ export class DKGAgent {
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { clearWorkspaceAfter?: boolean; operationCtx?: OperationContext },
+    options?: { clearWorkspaceAfter?: boolean; operationCtx?: OperationContext; onPhase?: PhaseCallback },
   ): Promise<PublishResult> {
     return this.publisher.enshrineFromWorkspace(paranetId, selection, {
       operationCtx: options?.operationCtx ?? createOperationContext('enshrine'),
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
+      onPhase: options?.onPhase,
     });
   }
 

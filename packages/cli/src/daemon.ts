@@ -14,6 +14,7 @@ import {
   handleNodeUIRequest,
   ChatAssistant,
   ChatMemoryManager,
+  LogPushWorker,
   type MetricsSource,
 } from '@dkg/node-ui';
 import {
@@ -27,6 +28,7 @@ import {
   removeApiPort,
   logPath,
   ensureDkgDir,
+  TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
 } from './config.js';
@@ -268,6 +270,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         message: entry.message,
       });
     } catch { /* DB write must never break the node */ }
+    logPusher?.push(entry);
   });
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
@@ -320,6 +323,35 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const metricsCollector = new MetricsCollector(dashDb, metricsSource, dkgDir());
   metricsCollector.start();
   log('Metrics collector started (2min interval)');
+
+  // --- Telemetry: syslog log streaming (opt-in) ---
+  const networkKey = network?.networkName?.toLowerCase().includes('testnet') ? 'testnet' : 'mainnet';
+  const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
+  let logPusher: LogPushWorker | null = null;
+
+  function startLogPusher(): void {
+    if (logPusher || !syslogEndpoint || !syslogEndpoint.port) return;
+    logPusher = new LogPushWorker({
+      host: syslogEndpoint.host,
+      port: syslogEndpoint.port,
+      peerId: agent.peerId,
+      network: networkKey,
+      nodeName: config.name,
+    });
+    logPusher.start();
+    log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
+  }
+
+  function stopLogPusher(): void {
+    if (!logPusher) return;
+    logPusher.stop();
+    logPusher = null;
+    log('Telemetry: log streaming disabled');
+  }
+
+  if (config.telemetry?.enabled) {
+    startLogPusher();
+  }
 
   const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
@@ -431,6 +463,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     },
   };
 
+  const telemetrySettings = {
+    getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
+    setTelemetryEnabled: async (enabled: boolean) => {
+      config.telemetry = { ...config.telemetry, enabled };
+      await saveConfig(config);
+      if (enabled) startLogPusher();
+      else stopLogPusher();
+    },
+  };
+
   // Resolve the static UI directory (built by @dkg/node-ui)
   let nodeUiStaticDir: string;
   try {
@@ -500,7 +542,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings);
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)

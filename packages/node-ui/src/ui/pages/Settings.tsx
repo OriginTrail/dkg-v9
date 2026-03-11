@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useFetch, formatBytes } from '../hooks.js';
-import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode, fetchMetrics, fetchRetentionSettings, updateRetentionSettings } from '../api.js';
+import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode, fetchMetrics, fetchRetentionSettings, updateRetentionSettings, fetchTelemetrySettings, updateTelemetrySettings } from '../api.js';
 import { ObservabilitySection } from './Operations.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -219,17 +219,23 @@ function LlmSection() {
 }
 
 function TelemetrySection() {
-  // const { data: status } = useFetch(fetchStatus, [], 30_000);  // needed for Prometheus endpoint info
   const { data: metrics } = useFetch(fetchMetrics, [], 30_000);
   const { data: retentionData } = useFetch(fetchRetentionSettings, [], 60_000);
+  const { data: telemetryData } = useFetch(fetchTelemetrySettings, [], 60_000);
 
   const [retentionDays, setRetentionDays] = useState(90);
   const [retentionSaved, setRetentionSaved] = useState(false);
   const [pendingRetention, setPendingRetention] = useState<number | null>(null);
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const [telemetrySaving, setTelemetrySaving] = useState(false);
 
   useEffect(() => {
     if (retentionData?.retentionDays) setRetentionDays(retentionData.retentionDays);
   }, [retentionData]);
+
+  useEffect(() => {
+    if (telemetryData != null) setTelemetryEnabled(telemetryData.enabled);
+  }, [telemetryData]);
 
   const confirmRetention = useCallback(async () => {
     if (pendingRetention == null) return;
@@ -257,8 +263,21 @@ function TelemetrySection() {
     }
   }, [retentionDays]);
 
+  const toggleTelemetry = useCallback(async () => {
+    const next = !telemetryEnabled;
+    setTelemetryEnabled(next);
+    setTelemetrySaving(true);
+    try {
+      await updateTelemetrySettings(next);
+    } catch (err) {
+      setTelemetryEnabled(!next);
+      console.error('Failed to update telemetry:', err);
+    } finally {
+      setTelemetrySaving(false);
+    }
+  }, [telemetryEnabled]);
+
   const storeBytes = (metrics as any)?.store_bytes ?? null;
-  // const metricsUrl = `http://localhost:${apiPort}/metrics`;
 
   return (
     <div className="settings-card">
@@ -267,14 +286,31 @@ function TelemetrySection() {
         Local metrics are stored in SQLite and displayed in the Observability page.
       </div>
 
-      {/* TODO: Prometheus endpoint info — implementation in progress, hidden until ready
-      <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(74,222,128,.04)', border: '1px solid rgba(74,222,128,.15)', marginBottom: 14 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--green)', marginBottom: 4 }}>PROMETHEUS ENDPOINT</div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-          Passively exposed at <code className="mono" style={{ fontSize: 10, background: 'rgba(255,255,255,.05)', padding: '1px 4px', borderRadius: 3 }}>{metricsUrl}</code> — scrape it from your own Prometheus/Grafana stack. Zero overhead if not scraped.
+      {/* Share telemetry toggle */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Share telemetry with network</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+            When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
+          </div>
         </div>
+        <button
+          onClick={toggleTelemetry}
+          disabled={telemetrySaving}
+          style={{
+            width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
+            background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
+            transition: 'background .2s', position: 'relative', marginLeft: 16,
+            cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
+          }}
+        >
+          <span style={{
+            position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
+            width: 16, height: 16, borderRadius: '50%', background: '#fff',
+            transition: 'left .2s', display: 'block',
+          }} />
+        </button>
       </div>
-      */}
 
       {/* Data retention */}
       <div style={{ marginBottom: 14 }}>
@@ -340,15 +376,6 @@ function TelemetrySection() {
           </div>
         )}
       </div>
-
-      {/* TODO: Stream Telemetry — implementation in progress, hidden until ready
-      <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(139,92,246,.04)', border: '1px solid rgba(139,92,246,.12)', marginBottom: 14, opacity: 0.7 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(139,92,246,.7)', marginBottom: 4 }}>STREAM TELEMETRY — COMING SOON</div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-          Opt-in streaming of metrics and logs to the OriginTrail central telemetry collector will enable network-wide operation correlation and diagnostics.
-        </div>
-      </div>
-      */}
     </div>
   );
 }

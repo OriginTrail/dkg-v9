@@ -74,6 +74,9 @@ export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseU
 export const fetchRetentionSettings = () => get<{ retentionDays: number }>('/api/settings/retention');
 export const updateRetentionSettings = (retentionDays: number) =>
   put<{ ok: boolean; retentionDays: number }>('/api/settings/retention', { retentionDays });
+export const fetchTelemetrySettings = () => get<{ enabled: boolean }>('/api/settings/telemetry');
+export const updateTelemetrySettings = (enabled: boolean) =>
+  put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
 

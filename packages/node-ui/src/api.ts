@@ -71,6 +71,11 @@ export interface LlmSettingsCallbacks {
   setLlm: (llm: { apiKey: string; model?: string; baseURL?: string } | null) => Promise<void>;
 }
 
+export interface TelemetrySettingsCallbacks {
+  getTelemetryEnabled: () => boolean;
+  setTelemetryEnabled: (enabled: boolean) => Promise<void>;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/logs, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
@@ -86,6 +91,7 @@ export async function handleNodeUIRequest(
   authToken?: string,
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
+  telemetrySettings?: TelemetrySettingsCallbacks,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -346,6 +352,24 @@ export async function handleNodeUIRequest(
     db.setRetentionDays(days as number);
     db.prune();
     return json(res, 200, { ok: true, retentionDays: db.getRetentionDays() });
+  }
+
+  // --- Telemetry settings ---
+
+  if (req.method === 'GET' && path === '/api/settings/telemetry') {
+    const enabled = telemetrySettings?.getTelemetryEnabled() ?? false;
+    return json(res, 200, { enabled });
+  }
+
+  if (req.method === 'PUT' && path === '/api/settings/telemetry') {
+    if (!telemetrySettings) return json(res, 501, { error: 'Telemetry not available' });
+    const body = await readBody(req);
+    const payload = JSON.parse(body ?? '{}') as { enabled?: boolean };
+    if (typeof payload.enabled !== 'boolean') {
+      return json(res, 400, { error: 'enabled must be a boolean' });
+    }
+    await telemetrySettings.setTelemetryEnabled(payload.enabled);
+    return json(res, 200, { ok: true, enabled: payload.enabled });
   }
 
   // --- LLM settings ---

@@ -864,6 +864,9 @@ export class EVMChainAdapter implements ChainAdapter {
     if (!this.contracts.knowledgeAssets) {
       throw new Error('KnowledgeAssets contract not deployed.');
     }
+    if (!this.contracts.knowledgeAssetsStorage) {
+      throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
+    }
 
     const signer = await this.nextSigner();
     const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);

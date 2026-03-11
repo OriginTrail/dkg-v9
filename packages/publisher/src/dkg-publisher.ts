@@ -168,6 +168,37 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    const paranetGraph = this.graphManager.dataGraphUri(paranetId);
+    const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: paranetGraph }));
+    const nquadsStr = gossipQuads
+      .map(
+        (q) =>
+          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
+      )
+      .join('\n');
+
+    const message = encodeWorkspacePublishRequest({
+      paranetId,
+      nquads: new TextEncoder().encode(nquadsStr),
+      manifest: manifestEntries.map((m) => ({
+        rootEntity: m.rootEntity,
+        privateMerkleRoot: m.privateMerkleRoot,
+        privateTripleCount: m.privateTripleCount,
+      })),
+      publisherPeerId: options.publisherPeerId,
+      workspaceOperationId,
+      timestampMs: Date.now(),
+      operationId: ctx.operationId,
+    });
+
+    const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
+    if (message.length > MAX_GOSSIP_MESSAGE_SIZE) {
+      throw new Error(
+        `Workspace message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
+        `Split large writes into multiple writeToWorkspace calls partitioned by root entity.`,
+      );
+    }
+
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
     await this.store.insert(normalized);
 
@@ -206,37 +237,6 @@ export class DKGPublisher implements Publisher {
       for (const entry of newOwnershipEntries) {
         liveOwned.set(entry.rootEntity, entry.creatorPeerId);
       }
-    }
-
-    const paranetGraph = this.graphManager.dataGraphUri(paranetId);
-    const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: paranetGraph }));
-    const nquadsStr = gossipQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
-
-    const message = encodeWorkspacePublishRequest({
-      paranetId,
-      nquads: new TextEncoder().encode(nquadsStr),
-      manifest: manifestEntries.map((m) => ({
-        rootEntity: m.rootEntity,
-        privateMerkleRoot: m.privateMerkleRoot,
-        privateTripleCount: m.privateTripleCount,
-      })),
-      publisherPeerId: options.publisherPeerId,
-      workspaceOperationId,
-      timestampMs: Date.now(),
-      operationId: ctx.operationId,
-    });
-
-    const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
-    if (message.length > MAX_GOSSIP_MESSAGE_SIZE) {
-      throw new Error(
-        `Workspace message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
-        `Split large writes into multiple writeToWorkspace calls partitioned by root entity.`,
-      );
     }
 
     this.log.info(ctx, `Workspace write complete: ${workspaceOperationId}`);
@@ -342,12 +342,15 @@ export class DKGPublisher implements Publisher {
           if (typeof this.chain.addBatchToContextGraph !== 'function') {
             throw new Error('addBatchToContextGraph not available on chain adapter');
           }
-          await this.chain.addBatchToContextGraph({
+          const txResult = await this.chain.addBatchToContextGraph({
             contextGraphId: BigInt(ctxGraphId),
             batchId: publishResult.onChainResult.batchId,
             merkleRoot: publishResult.merkleRoot,
             signerSignatures: sortedSigs,
           });
+          if (txResult && typeof txResult === 'object' && 'success' in txResult && !txResult.success) {
+            throw new Error(`addBatchToContextGraph returned success=false`);
+          }
           registered = true;
           this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} registered to context graph ${ctxGraphId}`);
         } catch (err) {
@@ -366,6 +369,10 @@ export class DKGPublisher implements Publisher {
                 }
                 if (targetMetaGraphUri && publishResult.ual) {
                   await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: publishResult.ual });
+                  for (const ka of publishResult.kaManifest ?? []) {
+                    const kaSubject = `${publishResult.ual}/${ka.tokenId ?? ka.rootEntity}`;
+                    await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: kaSubject });
+                  }
                 }
                 this.log.info(ctx, `Rolled back this publish's quads from ${targetGraphUri}`);
               } catch (cleanErr) {

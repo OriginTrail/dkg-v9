@@ -608,13 +608,21 @@ export class MockChainAdapter implements ChainAdapter {
     const result = await this.publishKnowledgeAssets(params);
 
     const cg = this.contextGraphs.get(params.contextGraphId);
-    if (cg && cg.active) {
-      cg.batches.push(result.batchId);
-      this.pushEvent('ContextGraphExpanded', {
-        contextGraphId: params.contextGraphId.toString(),
-        batchId: result.batchId.toString(),
-      });
+    if (!cg || !cg.active) {
+      throw new Error(`Context graph ${params.contextGraphId} not found or inactive`);
     }
+
+    if (params.participantSignatures.length < cg.requiredSignatures) {
+      throw new Error(
+        `Not enough participant signatures: need ${cg.requiredSignatures}, got ${params.participantSignatures.length}`,
+      );
+    }
+
+    cg.batches.push(result.batchId);
+    this.pushEvent('ContextGraphExpanded', {
+      contextGraphId: params.contextGraphId.toString(),
+      batchId: result.batchId.toString(),
+    });
 
     return result;
   }

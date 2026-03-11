@@ -38,9 +38,12 @@ export class GossipPublishHandler {
   }
 
   async handlePublishMessage(data: Uint8Array, paranetId: string): Promise<void> {
-    const ctx = createOperationContext('gossip');
+    let ctx = createOperationContext('gossip');
     try {
       const request = decodePublishRequest(data);
+      if (request.operationId) {
+        ctx = createOperationContext('gossip', request.operationId);
+      }
 
       if (!request.paranetId) {
         request.paranetId = paranetId;

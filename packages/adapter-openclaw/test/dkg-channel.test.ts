@@ -62,6 +62,29 @@ describe('DkgChannelPlugin', () => {
     expect(registerChannel.mock.calls[0][0].plugin.id).toBe(CHANNEL_NAME);
   });
 
+  it('should register a current-style channel config adapter for gateway health/runtime snapshots', async () => {
+    const registerChannel = vi.fn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = registerChannel.mock.calls[0][0].plugin;
+    expect(registeredPlugin.config.listAccountIds({})).toEqual(['default']);
+    expect(registeredPlugin.config.defaultAccountId({})).toBe('default');
+    expect(registeredPlugin.config.isEnabled({}, {})).toBe(true);
+    expect(registeredPlugin.config.resolveAccount({}, undefined)).toMatchObject({
+      accountId: 'default',
+      enabled: true,
+      name: 'DKG UI',
+    });
+    await expect(registeredPlugin.config.isConfigured({}, {})).resolves.toBe(true);
+    expect(registeredPlugin.config.describeAccount({ accountId: 'default', name: 'DKG UI' }, {})).toMatchObject({
+      accountId: 'default',
+      enabled: true,
+      configured: true,
+      linked: true,
+    });
+  });
+
   it('should call registerHttpRoute if available', () => {
     const registerHttpRoute = vi.fn();
     const api = makeApi({ registerHttpRoute });
@@ -374,7 +397,7 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
-  it('processInboundStream should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {
+  it('processInboundStream should force block streaming in the direct runtime fallback', async () => {
     let dispatched: any;
     const mockRuntime = {
       channel: {
@@ -391,7 +414,8 @@ describe('DkgChannelPlugin', () => {
           formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
           async dispatchReplyWithBufferedBlockDispatcher(params: any) {
             dispatched = params;
-            await params.dispatcherOptions.deliver({ text: 'Streamed reply' });
+            await params.dispatcherOptions.deliver({ text: 'Streamed ' });
+            await params.dispatcherOptions.deliver({ text: 'reply' });
           },
         },
       },
@@ -419,11 +443,59 @@ describe('DkgChannelPlugin', () => {
         deliver: expect.any(Function),
         onError: expect.any(Function),
       }),
-      replyOptions: {},
+      replyOptions: { disableBlockStreaming: false },
     });
     expect(events).toEqual([
-      { type: 'text_delta', delta: 'Streamed reply' },
+      { type: 'text_delta', delta: 'Streamed ' },
+      { type: 'text_delta', delta: 'reply' },
       { type: 'final', text: 'Streamed reply', correlationId: 'corr-stream-runtime' },
+    ]);
+  });
+
+  it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+    const mockSdk = {
+      dispatchInboundReplyWithBase: vi.fn().mockImplementation(async (params: any) => {
+        expect(params.replyOptions).toEqual({ disableBlockStreaming: false });
+        await params.deliver({ text: 'SDK ' });
+        await params.deliver({ text: 'reply' });
+      }),
+    };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    (plugin as any).sdk = mockSdk;
+    plugin.register(api);
+
+    const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
+    for await (const event of plugin.processInboundStream('Hello', 'corr-stream-sdk', 'owner')) {
+      events.push(event as any);
+    }
+
+    expect(mockSdk.dispatchInboundReplyWithBase).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      { type: 'text_delta', delta: 'SDK ' },
+      { type: 'text_delta', delta: 'reply' },
+      { type: 'final', text: 'SDK reply', correlationId: 'corr-stream-sdk' },
     ]);
   });
 

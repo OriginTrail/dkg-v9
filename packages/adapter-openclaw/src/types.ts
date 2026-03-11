@@ -111,6 +111,17 @@ export interface OpenClawChannelAdapter {
   meta?: { displayName?: string; [key: string]: unknown };
   /** Channel capabilities. */
   capabilities?: Record<string, unknown>;
+  /** Channel account/config adapter expected by current OpenClaw runtimes. */
+  config?: {
+    listAccountIds(cfg: any): string[];
+    resolveAccount(cfg: any, accountId?: string): Record<string, unknown>;
+    defaultAccountId?(cfg: any): string;
+    isEnabled?(account: Record<string, unknown>, cfg: any): boolean;
+    isConfigured?(account: Record<string, unknown>, cfg: any): boolean | Promise<boolean>;
+    describeAccount?(account: Record<string, unknown>, cfg: any): Record<string, unknown>;
+    disabledReason?(account: Record<string, unknown>, cfg: any): string;
+    unconfiguredReason?(account: Record<string, unknown>, cfg: any): string;
+  };
   /** Called when the gateway starts.  Set up transport here. */
   start?(): Promise<void>;
   /** Called when the gateway stops.  Tear down transport. */

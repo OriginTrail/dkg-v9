@@ -27,6 +27,7 @@ import type {
 import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
+const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const moduleRequire = createRequire(import.meta.url);
 
 interface PendingRequest {
@@ -96,15 +97,7 @@ export class DkgChannelPlugin {
     // --- Register as a first-class channel ---
     if (typeof api.registerChannel === 'function') {
       api.registerChannel({
-        plugin: {
-          id: CHANNEL_NAME,
-          name: CHANNEL_NAME,
-          meta: { displayName: 'DKG UI' },
-          capabilities: {},
-          start: () => this.start(),
-          stop: () => this.stop(),
-          onOutbound: (reply) => this.handleOutboundReply(reply),
-        },
+        plugin: this.buildRegisteredChannelPlugin(),
       });
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
@@ -218,6 +211,56 @@ export class DkgChannelPlugin {
       }
     }
     return this.sdk;
+  }
+
+  private buildRegisteredChannelPlugin() {
+    return {
+      id: CHANNEL_NAME,
+      name: CHANNEL_NAME,
+      meta: {
+        id: CHANNEL_NAME,
+        label: 'DKG UI',
+        selectionLabel: 'DKG UI',
+        blurb: 'Local DKG Agent Hub bridge',
+        displayName: 'DKG UI',
+      },
+      capabilities: {
+        chatTypes: ['direct'],
+      },
+      config: {
+        listAccountIds: () => this.config.enabled === false ? [] : [DEFAULT_CHANNEL_ACCOUNT_ID],
+        resolveAccount: (_cfg: any, accountId?: string) => this.resolveRegisteredAccount(accountId),
+        defaultAccountId: () => DEFAULT_CHANNEL_ACCOUNT_ID,
+        isEnabled: () => this.config.enabled !== false,
+        isConfigured: async () => true,
+        describeAccount: (account: Record<string, unknown>) => ({
+          accountId: account.accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID,
+          name: account.name ?? 'DKG UI',
+          enabled: account.enabled !== false,
+          configured: true,
+          linked: true,
+        }),
+        disabledReason: () => 'disabled',
+        unconfiguredReason: () => 'not configured',
+      },
+      start: () => this.start(),
+      stop: () => this.stop(),
+      onOutbound: (reply: ChannelOutboundReply) => this.handleOutboundReply(reply),
+    };
+  }
+
+  private resolveRegisteredAccount(accountId?: string): Record<string, unknown> {
+    return {
+      accountId: accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID,
+      enabled: this.config.enabled !== false,
+      name: 'DKG UI',
+    };
+  }
+
+  private buildStreamingReplyOptions(): Record<string, unknown> {
+    // OpenClaw block streaming is off by default unless the channel opts in.
+    // The DKG UI stream endpoint needs incremental block replies, not final-only output.
+    return { disableBlockStreaming: false };
   }
 
   // ---------------------------------------------------------------------------
@@ -524,11 +567,11 @@ export class DkgChannelPlugin {
     const TIMEOUT_MS = 120_000;
     const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
 
-    const replyChunks: string[] = [];
+    let replyText = '';
     const deliver = async (payload: any) => {
       const t = payload?.text;
       if (t) {
-        replyChunks.push(t);
+        replyText += t;
         push({ type: 'text_delta', delta: t });
       }
     };
@@ -541,6 +584,7 @@ export class DkgChannelPlugin {
           storePath, ctxPayload,
           core: this.buildSdkCore(runtime, cfg),
           deliver,
+          replyOptions: this.buildStreamingReplyOptions(),
           onRecordError: (err: any) => log.warn?.(`[dkg-channel] Session record error: ${err}`),
           onDispatchError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
         })
@@ -553,7 +597,7 @@ export class DkgChannelPlugin {
               deliver,
               onError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
             },
-            {},
+            this.buildStreamingReplyOptions(),
           ),
         );
 
@@ -580,7 +624,7 @@ export class DkgChannelPlugin {
       aborted = true; // Stop dangling deliver() callbacks from queuing
     }
 
-    const finalText = replyChunks.join('\n') || '(no response)';
+    const finalText = replyText || '(no response)';
     yield { type: 'final', text: finalText, correlationId };
 
     // Fire-and-forget: persist turn to DKG graph

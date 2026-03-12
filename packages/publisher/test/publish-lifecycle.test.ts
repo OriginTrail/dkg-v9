@@ -180,7 +180,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     );
   });
 
-  it('stores private merkle root in KA metadata (not as synthetic triple)', async () => {
+  it('anchors private merkle root as synthetic leaf in flat KC root', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -203,8 +203,9 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
 
-    const flatHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
-    const expectedRoot = new MerkleTree(flatHashes).root;
+    const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
+    const privateRoot = result.kaManifest[0].privateMerkleRoot!;
+    const expectedRoot = new MerkleTree([...publicHashes, privateRoot]).root;
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(expectedRoot).toString('hex'));
   });
@@ -331,9 +332,12 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
 
     const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
 
-    // Receiver only sees public quads — flat root must match
+    // Receiver sees public quads + private roots from manifest as synthetic leaves
     const receiverHashes = result.publicQuads!.map(computeTripleHash);
-    const receiverRoot = new MerkleTree(receiverHashes).root;
+    const privateRoots = result.kaManifest
+      .filter(m => m.privateMerkleRoot)
+      .map(m => m.privateMerkleRoot!);
+    const receiverRoot = new MerkleTree([...receiverHashes, ...privateRoots]).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);

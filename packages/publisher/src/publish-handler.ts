@@ -12,8 +12,7 @@ import {
 import type { ChainAdapter } from '@dkg/chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash } from './merkle.js';
-import { MerkleTree } from '@dkg/core';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
@@ -215,9 +214,11 @@ export class PublishHandler {
         return this.rejectAck(validation.errors.join('; '));
       }
 
-      // ── Merkle verification (flat mode: single tree over all triple hashes) ──
-      const allHashes = quads.map(computeTripleHash);
-      const computedMerkleRoot = new MerkleTree(allHashes).root;
+      // ── Merkle verification (flat mode: triple hashes + private root anchors) ──
+      const privateRoots = (request.kas ?? [])
+        .filter(ka => ka.privateMerkleRoot?.length)
+        .map(ka => new Uint8Array(ka.privateMerkleRoot));
+      const computedMerkleRoot = computeFlatKCRoot(quads, privateRoots);
 
       const partitioned = autoPartition(quads);
 

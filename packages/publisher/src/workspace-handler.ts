@@ -120,6 +120,19 @@ export class WorkspaceHandler {
         },
         workspaceMetaGraph,
       );
+
+      for (const m of manifestForValidation) {
+        if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
+          const hex = '0x' + Array.from(m.privateMerkleRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+          metaQuads.push({
+            subject: m.rootEntity,
+            predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+            object: `"${hex}"`,
+            graph: workspaceMetaGraph,
+          });
+        }
+      }
+
       await this.store.insert(metaQuads);
 
       if (!this.workspaceOwnedEntities.has(paranetId)) {

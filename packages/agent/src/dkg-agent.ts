@@ -7,7 +7,7 @@ import {
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, MerkleTree, withRetry,
+  Logger, createOperationContext, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
@@ -15,7 +15,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig,
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
-  computeTripleHash, autoPartition,
+  computeTripleHash, computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
@@ -2390,8 +2390,23 @@ function verifySyncedData(
         allQuadsForKC.push(...quads);
       }
 
-      const flatHashes = allQuadsForKC.map(computeTripleHash);
-      const flatRoot = new MerkleTree(flatHashes).root;
+      // Collect private merkle roots from KA metadata for this KC
+      const kcPrivateRoots: Uint8Array[] = [];
+      for (const [kaUri, kcUri] of kaToKc) {
+        if (kcUri !== kcUal) continue;
+        for (const mq of metaQuads) {
+          if (mq.subject === kaUri && mq.predicate === `${DKG_NS}privateMerkleRoot`) {
+            const hex = stripLiteral(mq.object).replace(/^0x/, '');
+            if (hex.length === 64) {
+              const bytes = new Uint8Array(32);
+              for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+              kcPrivateRoots.push(bytes);
+            }
+          }
+        }
+      }
+
+      const flatRoot = computeFlatKCRoot(allQuadsForKC, kcPrivateRoots);
       const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
       if (flatHex === claimedHex) {

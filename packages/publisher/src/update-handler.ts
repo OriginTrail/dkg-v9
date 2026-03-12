@@ -6,8 +6,7 @@ import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computeTripleHash } from './merkle.js';
-import { MerkleTree } from '@dkg/core';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -136,8 +135,7 @@ export class UpdateHandler {
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
 
-      const allHashes = quads.map(computeTripleHash);
-      const computedRoot = new MerkleTree(allHashes).root;
+      const computedRoot = computeFlatKCRoot(quads, []);
 
       const partitioned = autoPartition(quads);
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));

@@ -5,6 +5,7 @@ export {
   computeTripleHash,
   computePublicRoot,
   computePrivateRoot,
+  computeFlatKCRoot,
   computeKARoot,
   computeKCRoot,
 } from './merkle.js';

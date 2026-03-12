@@ -1,12 +1,12 @@
 import type { Quad, TripleStore } from '@dkg/storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@dkg/chain';
 import type { EventBus, OperationContext } from '@dkg/core';
-import { DKGEvent, Logger, createOperationContext, sha256, MerkleTree, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, type Ed25519Keypair } from '@dkg/core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHash, computePrivateRoot } from './merkle.js';
+import { computeTripleHash, computePrivateRoot, computeFlatKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
@@ -587,9 +587,11 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:validate', 'end');
 
     onPhase?.('prepare:merkle', 'start');
-    const allPublicHashes = allSkolemizedQuads.map(computeTripleHash);
-    const kcMerkleRoot = new MerkleTree(allPublicHashes).root;
-    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
+    const privateRoots = manifestEntries
+      .map(m => m.privateMerkleRoot)
+      .filter((r): r is Uint8Array => r != null);
+    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -854,8 +856,10 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:merkle', 'start');
     const allSkolemizedQuads = [...kaMap.values()].flat();
-    const allHashes = allSkolemizedQuads.map(computeTripleHash);
-    const kcMerkleRoot = new MerkleTree(allHashes).root;
+    const updatePrivateRoots = manifestEntries
+      .map(m => m.privateMerkleRoot)
+      .filter((r): r is Uint8Array => r != null);
+    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 

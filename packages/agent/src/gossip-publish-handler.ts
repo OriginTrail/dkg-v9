@@ -6,12 +6,11 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computeTripleHash, autoPartition,
+  computeTripleHash, computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   validatePublishRequest,
   type KAMetadata,
 } from '@dkg/publisher';
-import { MerkleTree } from '@dkg/core';
 import { ethers } from 'ethers';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -169,8 +168,10 @@ export class GossipPublishHandler {
       }
 
       if (request.ual) {
-        const allHashes = normalized.map(computeTripleHash);
-        const merkleRoot = new MerkleTree(allHashes).root;
+        const privateRoots = (request.kas ?? [])
+          .filter(ka => ka.privateMerkleRoot?.length)
+          .map(ka => new Uint8Array(ka.privateMerkleRoot));
+        const merkleRoot = computeFlatKCRoot(normalized, privateRoots);
 
         const partitioned = autoPartition(normalized);
         const kaMetadata: KAMetadata[] = [];

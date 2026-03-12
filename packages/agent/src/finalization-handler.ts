@@ -8,11 +8,11 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computeTripleHash, autoPartition,
+  computeFlatKCRoot, autoPartition,
   generateConfirmedFullMetadata, getTentativeStatusQuad,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@dkg/publisher';
-import { MerkleTree } from '@dkg/core';
+const DKG_NS = 'http://dkg.io/ontology/';
 import { ethers } from 'ethers';
 
 export class FinalizationHandler {
@@ -62,7 +62,8 @@ export class FinalizationHandler {
       const workspaceQuads = await this.getWorkspaceQuadsForRoots(paranetId, msg.rootEntities);
 
       if (workspaceQuads.length > 0) {
-        const merkleMatch = this.verifyMerkleMatch(workspaceQuads, paranetId, msg.kcMerkleRoot, ctxGraphId);
+        const privateRoots = await this.getPrivateRootsFromMeta(paranetId, msg.rootEntities);
+        const merkleMatch = this.verifyMerkleMatch(workspaceQuads, privateRoots, msg.kcMerkleRoot);
 
         if (merkleMatch) {
           const batchId = protoToBigInt(msg.batchId);
@@ -128,10 +129,31 @@ export class FinalizationHandler {
     return result.type === 'quads' ? result.quads : [];
   }
 
-  private verifyMerkleMatch(workspaceQuads: Quad[], _paranetId: string, expectedMerkleRoot: Uint8Array, _ctxGraphId?: string): boolean {
-    const allHashes = workspaceQuads.map(computeTripleHash);
-    const computedRoot = new MerkleTree(allHashes).root;
+  private verifyMerkleMatch(workspaceQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
+    const computedRoot = computeFlatKCRoot(workspaceQuads, privateRoots);
     return ethers.hexlify(computedRoot) === ethers.hexlify(expectedMerkleRoot);
+  }
+
+  private async getPrivateRootsFromMeta(paranetId: string, rootEntities: string[]): Promise<Uint8Array[]> {
+    const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+    const roots: Uint8Array[] = [];
+    for (const rootEntity of rootEntities) {
+      const sparql = `SELECT ?root WHERE {
+        GRAPH <${wsMetaGraph}> { ?ka <${DKG_NS}rootEntity> <${rootEntity}> . ?ka <${DKG_NS}privateMerkleRoot> ?root }
+      } LIMIT 1`;
+      try {
+        const result = await this.store.query(sparql);
+        if (result.type === 'bindings' && result.bindings.length > 0) {
+          const hex = (result.bindings[0]['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
+          if (hex.length === 64) {
+            const bytes = new Uint8Array(32);
+            for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+            roots.push(bytes);
+          }
+        }
+      } catch { /* metadata may not exist for all entities */ }
+    }
+    return roots;
   }
 
   private async verifyOnChain(
@@ -229,8 +251,8 @@ export class FinalizationHandler {
     const canonicalQuads = workspaceQuads.map(q => ({ ...q, graph: dataGraph }));
     await this.store.insert(canonicalQuads);
 
-    const allHashes = canonicalQuads.map(computeTripleHash);
-    const merkleRoot = new MerkleTree(allHashes).root;
+    const privateRoots = await this.getPrivateRootsFromMeta(paranetId, msgRootEntities);
+    const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);
     // Use the root entity order from the finalization message (matches publisher's

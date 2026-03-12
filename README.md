@@ -11,7 +11,7 @@ Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF
 - Node UI for querying, graph exploration, and app interactions.
 - Blue-green updates with `dkg update` and safe rollback with `dkg rollback`.
 
-## Quick Start
+## Quick Start (UI First)
 
 ### Install CLI
 
@@ -19,27 +19,31 @@ Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF
 npm install -g @dkg/cli
 ```
 
-### Initialize and Start
+### Initialize and Start Node
 
 ```bash
 dkg init
-dkg start -f
+dkg start
 ```
 
-In a second terminal:
+### Open the Node UI
+
+```bash
+# Browser:
+http://127.0.0.1:9200/ui
+```
+
+From the UI, start with:
+
+- **Explorer -> SPARQL** to query graph data.
+- **Agent Hub** to inspect local state and interact with agents.
+- **Paranets** to navigate data domains.
+
+If you prefer terminal checks while keeping UI as primary workflow:
 
 ```bash
 dkg status
-dkg peers
 dkg logs
-```
-
-### First Useful Commands
-
-```bash
-dkg send <name> "hello from DKG"
-dkg query "<paranet-id>" -q "SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 10"
-dkg publish "<paranet-id>" -f ./example.ttl
 ```
 
 For the full testnet onboarding (wallet funding, config, publish/query walkthrough), use [Join the Testnet](docs/setup/JOIN_TESTNET.md).
@@ -68,6 +72,33 @@ Release and tagging workflow is documented in [RELEASE_PROCESS.md](RELEASE_PROCE
 | [SPARQL HTTP Storage](docs/setup/STORAGE_SPARQL_HTTP.md) | External triple store backends |
 | [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | Getting Base Sepolia ETH/TRAC |
 
+### Run With OpenClaw (Quick Path)
+
+Use this when you want OpenClaw to use a local DKG node for memory + tools while still driving most workflows from the DKG UI.
+
+1. Install and build this repository:
+   ```bash
+   git clone https://github.com/OriginTrail/dkg-v9.git
+   cd dkg-v9
+   pnpm install
+   pnpm build
+   ```
+2. Start the DKG daemon:
+   ```bash
+   pnpm dkg start
+   ```
+3. Confirm Node UI is reachable: `http://127.0.0.1:9200/ui`
+4. Enable `adapter-openclaw` in `~/.openclaw/openclaw.json` (`plugins.allow`, `plugins.load.paths`, `plugins.entries`).
+5. Add a `"dkg-node"` block to your workspace `config.json` with:
+   - `"daemonUrl": "http://127.0.0.1:9200"`
+   - `"memory.enabled": true`
+   - `"channel.enabled": true`
+6. Copy `skills/dkg-node/SKILL.md` into your OpenClaw workspace and restart the OpenClaw gateway.
+
+Complete reference and troubleshooting:
+- [OpenClaw setup doc](docs/setup/SETUP_OPENCLAW.md)
+- [Adapter runbook](packages/adapter-openclaw/README.md)
+
 ## Monorepo Packages
 
 17 packages in a pnpm + Turborepo monorepo:
@@ -92,13 +123,14 @@ dkg-app-origin-trail-game Installable game app package
 @dkg/adapter-autoresearch AutoResearch adapter
 ```
 
-## Key Concepts
+## Key Concepts (First-Time Friendly)
 
-- **Paranet**: a scoped knowledge domain with its own data and metadata graphs.
-- **Knowledge Asset (KA)**: one logical entity and its triples (public/private).
-- **Knowledge Collection (KC)**: a batch of KAs committed together on-chain.
-- **Workspace graph**: collaborative staging area before enshrinement/finalization.
-- **DKG App**: installable node application that can use DKG publish/query primitives.
+- **Knowledge Asset (KA)**: the core unit of published knowledge. Think of it as one entity plus its RDF statements, with cryptographic proof and optional private portions.
+- **Paranet**: a topic-specific domain where agents coordinate and exchange knowledge (for example, a game paranet or app-specific paranet).
+- **Context graph**: the named graph that scopes triples for a specific context (turn, workflow, app state, etc.), making provenance and querying more precise.
+- **Workspace graph**: a collaborative staging layer for in-progress writes before they are finalized/enshrined as durable knowledge.
+- **Knowledge Collection (KC)**: a batch commit of multiple KAs finalized together on-chain.
+- **DKG App**: an installable app running with node capabilities (publish/query/messaging) and often surfaced through Node UI.
 
 ## CLI Reference (Common)
 

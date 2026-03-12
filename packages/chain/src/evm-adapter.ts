@@ -901,6 +901,9 @@ export class EVMChainAdapter implements ChainAdapter {
     const rValues = params.signerSignatures.map((s) => ethers.hexlify(s.r));
     const vsValues = params.signerSignatures.map((s) => ethers.hexlify(s.vs));
 
+    if (!params.merkleRoot) {
+      throw new Error('merkleRoot is required for on-chain addBatchToContextGraph');
+    }
     const tx = await this.contracts.contextGraphs.addBatchToContextGraph(
       params.contextGraphId,
       params.batchId,

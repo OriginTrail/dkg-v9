@@ -152,7 +152,7 @@ export interface CreateContextGraphResult extends TxResult {
 export interface AddBatchToContextGraphParams {
   contextGraphId: bigint;
   batchId: bigint;
-  merkleRoot: Uint8Array;
+  merkleRoot?: Uint8Array;
   signerSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
 }
 

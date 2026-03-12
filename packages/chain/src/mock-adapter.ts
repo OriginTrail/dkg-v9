@@ -606,14 +606,16 @@ export class MockChainAdapter implements ChainAdapter {
     if (!batch) {
       throw new Error(`Mock: batch ${params.batchId} does not exist`);
     }
-    const providedHex = typeof params.merkleRoot === 'string'
-      ? params.merkleRoot
-      : toHex(params.merkleRoot);
-    const storedHex = typeof batch.merkleRoot === 'string'
-      ? batch.merkleRoot
-      : toHex(batch.merkleRoot);
-    if (providedHex !== storedHex) {
-      throw new Error(`Mock: merkleRoot mismatch for batch ${params.batchId}`);
+    if (params.merkleRoot != null) {
+      const providedHex = typeof params.merkleRoot === 'string'
+        ? params.merkleRoot
+        : toHex(params.merkleRoot);
+      const storedHex = typeof batch.merkleRoot === 'string'
+        ? batch.merkleRoot
+        : toHex(batch.merkleRoot);
+      if (providedHex !== storedHex) {
+        throw new Error(`Mock: merkleRoot mismatch for batch ${params.batchId}`);
+      }
     }
 
     if (params.signerSignatures.length < cg.requiredSignatures) {

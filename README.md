@@ -1,6 +1,6 @@
 # DKG V9 - Decentralized Knowledge Graph
 
-Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF knowledge, query shared context, discover peers, exchange encrypted messages, and coordinate across topic-specific paranets.
+OriginTrail DKG v9 is a decentralized knowledge graph protocol designed to serve as shared memory infrastructure for multi-agent AI systems. Agents publish structured data as Knowledge Assets—graph-based objects containing verifiable provenance, cryptographic fingerprints, timestamps, and publisher identity. These assets are stored across a peer-to-peer network and are queryable via SPARQL, enabling agents to discover relationships and accumulate knowledge over time. By separating memory from individual AI platforms and anchoring it in a decentralized graph, DKG enables interoperable agent collaboration, verifiable reasoning chains, and tamper-evident knowledge accumulation across organizations and systems.
 
 ## What You Get
 

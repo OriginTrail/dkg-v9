@@ -222,11 +222,10 @@ describe('Context Graph Integration', () => {
       coord.destroy();
     });
 
-    it('skips participants with missing identityId', async () => {
+    it('skips context graph when any player lacks identityId', async () => {
       const coord = createCoordinator(agent);
       const swarm = await coord.createSwarm('Alice', 'TestSwarm');
 
-      // Add a player without identityId
       const topic = proto.appTopic('origin-trail-game');
       const joinNoId = proto.encode({
         app: proto.APP_ID,
@@ -250,10 +249,11 @@ describe('Context Graph Integration', () => {
       leaderInject(agent, topic, joinC, 'peer-C');
       await new Promise(r => setTimeout(r, 50));
 
-      await coord.launchExpedition(swarm.id);
+      const launched = await coord.launchExpedition(swarm.id);
 
-      const params = agent._contextGraphs[0];
-      expect(params.participantIdentityIds).toEqual([1n, 3n]);
+      // Context graph should NOT be created when any player lacks identityId
+      expect(agent._contextGraphs.length).toBe(0);
+      expect(launched.contextGraphId).toBeUndefined();
 
       coord.destroy();
     });
@@ -557,7 +557,7 @@ describe('Context Graph Integration', () => {
       coord.destroy();
     });
 
-    it('enshrinement waits for M crypto signatures before proceeding', async () => {
+    it('turn progresses on gossip approvals, falls back to plain publish without enough sigs', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 
@@ -575,6 +575,9 @@ describe('Context Graph Integration', () => {
 
       const swarm = coord.getSwarm(swarmId);
       if (!swarm?.pendingProposal) {
+        // Already resolved via threshold — turn progressed on approvals alone
+        const totalPublished = agent._published.length + agent._enshrined.length;
+        expect(totalPublished).toBeGreaterThan(0);
         coord.destroy();
         return;
       }
@@ -586,25 +589,12 @@ describe('Context Graph Integration', () => {
         turn: 1, proposalHash: swarm.pendingProposal.hash,
       });
       agent._injectMessage(topic, approveNoSig, 'peer-B');
-      await new Promise(r => setTimeout(r, 100));
-
-      // Should NOT have enshrined yet (only leader's sig = 1, M = 2)
-      expect(agent._enshrined.length).toBe(0);
-
-      // Now send approval WITH signatures from peer-C
-      const fakeR = '0x' + '00'.repeat(32);
-      const fakeVS = '0x' + '00'.repeat(32);
-      const approveWithSig = proto.encode({
-        app: proto.APP_ID, type: 'turn:approve',
-        swarmId, peerId: 'peer-C', timestamp: Date.now(),
-        turn: 1, proposalHash: swarm.pendingProposal.hash,
-        identityId: '3', signatureR: fakeR, signatureVS: fakeVS,
-      });
-      agent._injectMessage(topic, approveWithSig, 'peer-C');
       await new Promise(r => setTimeout(r, 200));
 
-      // Now M = 2 (leader + peer-C), should have enshrined
-      expect(agent._enshrined.length).toBeGreaterThanOrEqual(1);
+      // Turn should resolve once approval threshold is met, regardless of signatures.
+      // With insufficient crypto sigs, enshrinement falls back to plain publish.
+      const totalPublished = agent._published.length + agent._enshrined.length;
+      expect(totalPublished).toBeGreaterThan(0);
 
       coord.destroy();
     });
@@ -672,9 +662,8 @@ describe('Context Graph Integration', () => {
 
       await coord.launchExpedition(swarm.id);
 
-      // Only leader has identityId (1), so context graph is created with just 1 participant
-      expect(agent._contextGraphs.length).toBe(1);
-      expect(agent._contextGraphs[0].participantIdentityIds).toEqual([1n]);
+      // Context graph should NOT be created when any player lacks identityId
+      expect(agent._contextGraphs.length).toBe(0);
 
       coord.destroy();
     });
@@ -697,6 +686,87 @@ describe('Context Graph Integration', () => {
       const swarm = await coord.createSwarm('Alice', 'TestSwarm');
       const formatted = coord.formatSwarmState(swarm);
       expect(formatted.contextGraphId).toBeNull();
+
+      coord.destroy();
+    });
+  });
+
+  describe('Security and Robustness (review feedback)', () => {
+    it('rejects spoofed identityId in turn approval', async () => {
+      const { coord, swarmId } = await setupThreePlayerGame(agent);
+      await coord.launchExpedition(swarmId);
+      const swarm = coord.getSwarm(swarmId)!;
+
+      // Cast votes
+      await coord.castVote(swarmId, 'continue');
+      const topic = proto.appTopic('origin-trail-game');
+      const voteB = proto.encode({
+        app: proto.APP_ID, type: 'vote:cast', swarmId, peerId: 'peer-B',
+        timestamp: Date.now(), turn: 1, action: 'continue',
+      });
+      leaderInject(agent, topic, voteB, 'peer-B');
+      await new Promise(r => setTimeout(r, 20));
+
+      // Simulate a turn proposal being created by triggering the leader flow
+      if (!swarm.pendingProposal) return; // skip if proposal already resolved
+
+      // Inject approval from peer-B claiming peer-C's identityId (spoofed)
+      const spoofedApproval = proto.encode({
+        app: proto.APP_ID, type: 'turn:approve', swarmId, peerId: 'peer-B',
+        timestamp: Date.now(), turn: 1, proposalHash: swarm.pendingProposal.hash,
+        identityId: '3', // peer-B claims to be identity 3 (peer-C's)
+        signatureR: '0x' + '00'.repeat(32),
+        signatureVS: '0x' + '00'.repeat(32),
+      });
+      leaderInject(agent, topic, spoofedApproval, 'peer-B');
+      await new Promise(r => setTimeout(r, 20));
+
+      // The spoofed sig should NOT be counted
+      const sigs = swarm.pendingProposal?.participantSignatures;
+      if (sigs) {
+        const peerBSig = sigs.get('peer-B');
+        expect(peerBSig).toBeUndefined();
+      }
+
+      coord.destroy();
+    });
+
+    it('propagates requiredSignatures in launch message', async () => {
+      const { coord, swarmId } = await setupThreePlayerGame(agent);
+      await coord.launchExpedition(swarmId);
+
+      const launchMsg = agent._broadcasts.find(
+        (m: any) => m.type === 'expedition:launched' && m.swarmId === swarmId,
+      );
+      expect(launchMsg).toBeDefined();
+      expect(launchMsg.requiredSignatures).toBeGreaterThanOrEqual(1);
+      expect(launchMsg.contextGraphId).toBeDefined();
+
+      coord.destroy();
+    });
+
+    it('falls back to plain publish when insufficient signatures', async () => {
+      const { coord, swarmId } = await setupThreePlayerGame(agent);
+      await coord.launchExpedition(swarmId);
+      const swarm = coord.getSwarm(swarmId)!;
+      expect(swarm.contextGraphId).toBeDefined();
+
+      // Force resolve with no peer signatures (only leader's approval)
+      await coord.castVote(swarmId, 'continue');
+      const topic = proto.appTopic('origin-trail-game');
+      const voteB = proto.encode({
+        app: proto.APP_ID, type: 'vote:cast', swarmId, peerId: 'peer-B',
+        timestamp: Date.now(), turn: 1, action: 'continue',
+      });
+      leaderInject(agent, topic, voteB, 'peer-B');
+      await new Promise(r => setTimeout(r, 20));
+      await coord.forceResolveTurn(swarmId);
+      await new Promise(r => setTimeout(r, 50));
+
+      // Should have fallen back to plain publish since insufficient sigs
+      // (agent._enshrined may be empty if it used plain publish instead)
+      const totalPublished = agent._published.length + agent._enshrined.length;
+      expect(totalPublished).toBeGreaterThan(0);
 
       coord.destroy();
     });

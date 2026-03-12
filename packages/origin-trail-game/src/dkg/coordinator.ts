@@ -879,8 +879,20 @@ export class OriginTrailGameCoordinator {
       try {
         const collectedSigs = [...proposal.participantSignatures.values()];
         const turnQuads = proposal.turnQuads ?? [];
+
+        // If we don't have enough signatures for context-graph enshrinement,
+        // fall back to plain publish to avoid on-chain revert.
+        const reqSigs = swarm.requiredSignatures ?? 0;
+        let useContextGraph = !!swarm.contextGraphId;
+        if (useContextGraph && collectedSigs.length < reqSigs) {
+          this.log(`Turn ${proposal.turn}: only ${collectedSigs.length}/${reqSigs} signatures, falling back to plain publish`);
+          useContextGraph = false;
+        }
+
+        const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
         const publishResult = await this.enshrineToContextGraph(
-          swarm, turnQuads, `Turn ${proposal.turn}`, collectedSigs,
+          effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
+          useContextGraph ? collectedSigs : undefined,
         );
 
         const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
@@ -1344,10 +1356,13 @@ export class OriginTrailGameCoordinator {
     const peerSigs = new Map<string, ParticipantSignature>();
 
     // Sign the context graph participant digest if merkle root was provided
+    // and the proposed contextGraphId matches our swarm's established one.
     let myIdentityIdStr: string | undefined;
     let mySignatureR: string | undefined;
     let mySignatureVS: string | undefined;
-    if (msg.merkleRoot && msg.contextGraphId && this.agent.identityId > 0n) {
+    const contextGraphIdValid = msg.contextGraphId && swarm.contextGraphId
+      && String(msg.contextGraphId) === String(swarm.contextGraphId);
+    if (msg.merkleRoot && contextGraphIdValid && this.agent.identityId > 0n) {
       try {
         const merkleRootBytes = ethers.getBytes(msg.merkleRoot);
         const sig = await this.agent.signContextGraphDigest(

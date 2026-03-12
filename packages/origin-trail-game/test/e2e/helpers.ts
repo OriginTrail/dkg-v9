@@ -278,10 +278,31 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
       const profileAddr = contracts.contracts?.Profile?.evmAddress;
       if (profileAddr) {
         // updateAsk(uint72 identityId, uint96 ask) — 1 TRAC = 0x0de0b6b3a7640000
+        // Resolve each node's identity ID via IdentityStorage.getIdentityId(address)
+        // selector: 0xd7236ebf (getIdentityId(address))
         const askData = '0000000000000000000000000000000000000000000000000de0b6b3a7640000';
+        const identityStorageAddr = contracts.contracts?.IdentityStorage?.evmAddress;
         for (let i = 0; i < nodeCount; i++) {
           const hw = HARDHAT_WALLETS[i % HARDHAT_WALLETS.length];
-          const idHex = (i + 1).toString(16).padStart(64, '0');
+          let identityId = i + 1;
+          if (identityStorageAddr) {
+            try {
+              const callData = '0xd7236ebf' + hw.address.slice(2).padStart(64, '0');
+              const callBody = JSON.stringify({
+                jsonrpc: '2.0', id: 1, method: 'eth_call',
+                params: [{ to: identityStorageAddr, data: callData }, 'latest'],
+              });
+              const result = execSync(
+                `curl -s -X POST "${chain.rpcUrl}" -H "Content-Type: application/json" -d '${callBody}'`,
+                { timeout: 5_000 },
+              ).toString();
+              const parsed = JSON.parse(result);
+              if (parsed.result && parsed.result !== '0x' && parsed.result !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+                identityId = parseInt(parsed.result, 16);
+              }
+            } catch { /* fall back to sequential i+1 */ }
+          }
+          const idHex = identityId.toString(16).padStart(64, '0');
           const data = '0xc740e04c' + idHex + askData;
           const body = JSON.stringify({
             jsonrpc: '2.0', id: 1,

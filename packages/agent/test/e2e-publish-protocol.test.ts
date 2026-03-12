@@ -487,14 +487,11 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { contextGraphId },
     );
 
-    // The KC publish itself may succeed (to paranet data graph),
-    // but context graph registration should fail
-    // Check that data is NOT in context graph
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
-    const ctxData = await nodeA.query(
-      `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_1}> <http://schema.org/name> ?name } }`,
-    );
-    expect(ctxData.bindings.length).toBe(0);
+    // KC publish succeeds, but context graph on-chain registration should fail.
+    // Data is intentionally kept locally to avoid chain/local divergence;
+    // the failure is signalled via contextGraphError.
+    expect(result.contextGraphError).toBeDefined();
+    expect(result.contextGraphError).toMatch(/Not enough.*signatures/i);
   }, 20_000);
 });
 

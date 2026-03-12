@@ -65,7 +65,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   it('creates a context graph on the shared chain', async () => {
     const result = await nodeA.createContextGraph({
       participantIdentityIds: [1n, 2n],
-      requiredSignatures: 0,
+      requiredSignatures: 1,
     });
 
     contextGraphId = result.contextGraphId;

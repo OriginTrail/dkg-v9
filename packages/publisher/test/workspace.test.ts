@@ -255,7 +255,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
 
     await chain.createContextGraph!({
       participantIdentityIds: [1n],
-      requiredSignatures: 0,
+      requiredSignatures: 1,
     });
 
     const quads = [
@@ -292,7 +292,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     const ctxId = '1';
     await chain.createContextGraph!({
       participantIdentityIds: [1n],
-      requiredSignatures: 0,
+      requiredSignatures: 1,
     });
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Batch Test"')];

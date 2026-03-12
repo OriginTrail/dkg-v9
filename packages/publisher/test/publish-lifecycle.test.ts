@@ -324,6 +324,7 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
 
     const result = await publisher.publish({
       paranetId: PARANET,
+      publisherPeerId: 'test-peer',
       quads: publicTriples,
       privateQuads: privateTriples,
     });

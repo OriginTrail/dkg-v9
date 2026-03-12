@@ -42,6 +42,13 @@ export interface PublishOptions {
   allowedPeers?: string[];
   manifest?: KAManifestEntry[];
   operationCtx?: OperationContext;
+  /**
+   * When true, triples are grouped by root entity and each group gets its
+   * own `kaRoot`. The `kcMerkleRoot` is a Merkle tree over sorted `kaRoot`
+   * values, enabling selective disclosure (prove one entity without
+   * revealing others). Off by default — the flat hash is simpler and cheaper.
+   */
+  entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
   /** Override the data graph URI (used for context graph enshrinement). */

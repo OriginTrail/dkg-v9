@@ -464,7 +464,7 @@ describe('PublishToContextGraph chain adapter method', () => {
     // Create context graph first
     const { contextGraphId } = await chain.createContextGraph!({
       participantIdentityIds: [1n, 2n],
-      requiredSignatures: 0,
+      requiredSignatures: 1,
     });
 
     const result = await chain.publishToContextGraph!({
@@ -477,7 +477,7 @@ describe('PublishToContextGraph chain adapter method', () => {
       publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
       receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
       contextGraphId,
-      participantSignatures: [],
+      participantSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
     });
 
     expect(result.batchId).toBeGreaterThan(0n);
@@ -513,7 +513,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       publisherNodeIdentityId: 1n,
     });
     await chain.createContextGraph!({
-      participantIdentityIds: [1n, 5n, 3n],
+      participantIdentityIds: [1n, 3n, 5n],
       requiredSignatures: 1,
     });
   });

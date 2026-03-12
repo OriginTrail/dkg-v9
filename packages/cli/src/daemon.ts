@@ -1032,8 +1032,20 @@ async function handleRequest(
   }
 
   // GET /api/agents — enriched with live connection health
+  // Optional query params: ?framework=X &skill_type=X
   if (req.method === 'GET' && path === '/api/agents') {
-    const agents = await agent.findAgents();
+    const frameworkFilter = url.searchParams.get('framework') || undefined;
+    const skillTypeFilter = url.searchParams.get('skill_type') || undefined;
+    const agents = await agent.findAgents({
+      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
+    });
+    // If skill_type filter is requested, find agents offering that skill and intersect
+    let filteredAgents = agents;
+    if (skillTypeFilter) {
+      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
+      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
+      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
+    }
     const allConns = agent.node.libp2p.getConnections();
     const connByPeer = new Map<string, { transport: string; direction: string; sinceMs: number }>();
     for (const c of allConns) {
@@ -1048,7 +1060,7 @@ async function handleRequest(
     }
     const myPeerId = agent.peerId;
     const healthMap = agent.getPeerHealth();
-    const enriched = agents.map((a: any) => {
+    const enriched = filteredAgents.map((a: any) => {
       const isSelf = a.peerId === myPeerId;
       const conn = connByPeer.get(a.peerId);
       const health = healthMap.get(a.peerId);
@@ -1066,9 +1078,45 @@ async function handleRequest(
   }
 
   // GET /api/skills
+  // Optional query params: ?skillType=X
   if (req.method === 'GET' && path === '/api/skills') {
-    const skills = await agent.findSkills();
+    const skillTypeFilter = url.searchParams.get('skillType') || undefined;
+    const skills = await agent.findSkills(
+      skillTypeFilter ? { skillType: skillTypeFilter } : undefined,
+    );
     return jsonResponse(res, 200, { skills });
+  }
+
+  // POST /api/invoke-skill  { peerId: "...", skillUri: "...", input: "..." }
+  if (req.method === 'POST' && path === '/api/invoke-skill') {
+    const body = await readBody(req);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const rawPeerId = parsed.peerId ? String(parsed.peerId) : '';
+    const skillUri = parsed.skillUri ? String(parsed.skillUri) : '';
+    const input = parsed.input != null ? String(parsed.input) : '';
+    if (!rawPeerId || !skillUri) return jsonResponse(res, 400, { error: 'Missing "peerId" or "skillUri"' });
+
+    // Resolve name → peerId
+    const peerId = await resolveNameToPeerId(agent, rawPeerId);
+    if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+
+    try {
+      const inputData = new TextEncoder().encode(input);
+      const response = await agent.invokeSkill(peerId, skillUri, inputData);
+      return jsonResponse(res, 200, {
+        success: response.success,
+        output: response.outputData ? new TextDecoder().decode(response.outputData) : undefined,
+        error: response.error,
+        executionTimeMs: response.executionTimeMs,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 502, { error: err.message });
+    }
   }
 
   // POST /api/chat  { to: "name-or-peerId", text: "..." }

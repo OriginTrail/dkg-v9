@@ -2281,6 +2281,8 @@ async function _performUpdateInner(
     const fetchRef = maybeTag
       ? `${ref}:${ref}`
       : ref;
+    const fetchStartedAt = Date.now();
+    log(`Auto-update: fetching "${ref}" from ${fetchUrl} into slot ${target}...`);
     await execFileAsync('git', [...gitCommandArgs(fetchUrl, au), 'fetch', fetchUrl, fetchRef], {
       cwd: targetDir,
       encoding: 'utf-8',
@@ -2306,6 +2308,11 @@ async function _performUpdateInner(
     });
     const resolved = String(stdout).trim();
     if (/^[0-9a-f]{7,40}$/i.test(resolved)) checkedOutCommit = resolved;
+    const fetchElapsedMs = Date.now() - fetchStartedAt;
+    log(
+      `Auto-update: fetch complete in slot ${target}, checked out ${checkedOutCommit.slice(0, 8)} ` +
+      `(in ${fetchElapsedMs}ms).`,
+    );
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
     return 'failed';
@@ -2350,10 +2357,14 @@ async function _performUpdateInner(
     createdAt: new Date().toISOString(),
   });
   try {
+    const swapStartedAt = Date.now();
+    log(`Auto-update: swapping active slot to ${target}...`);
     await swapSlot(target);
     await writeFile(commitFile, checkedOutCommit);
     if (nextVersion) await writeFile(versionFile, nextVersion);
     await clearPendingUpdateState();
+    const swapElapsedMs = Date.now() - swapStartedAt;
+    log(`Auto-update: swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`);
   } catch (swapErr: any) {
     await clearPendingUpdateState();
     log(`Auto-update: symlink swap failed — ${swapErr.message}`);

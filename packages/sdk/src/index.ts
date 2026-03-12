@@ -1,6 +1,19 @@
 export { createDKG } from './client.js';
 export { DKGSDKError } from './errors.js';
 export type {
+  AgentChatInput,
+  AgentChatResult,
+  AgentInvokeSkillInput,
+  AgentInvokeSkillResult,
+  AgentListFilters,
+  AgentListResponse,
+  AgentMessage,
+  AgentMessagesOptions,
+  AgentMessagesResponse,
+  AgentSkill,
+  AgentSkillFilters,
+  AgentSkillsResponse,
+  AgentSummary,
   AccessPolicy,
   CatchupResult,
   CatchupStatusResponse,

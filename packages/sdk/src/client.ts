@@ -1,4 +1,5 @@
 import { HttpClient } from './http.js';
+import { AgentResource } from './resources/agent.js';
 import { NodeResource } from './resources/node.js';
 import { ParanetResource } from './resources/paranet.js';
 import { PublishResource } from './resources/publish.js';
@@ -13,5 +14,6 @@ export function createDKG(options: DKGClientOptions): DKGSDK {
     paranet: new ParanetResource(http),
     publish: new PublishResource(http),
     query: new QueryResource(http),
+    agent: new AgentResource(http),
   };
 }

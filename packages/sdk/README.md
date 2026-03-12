@@ -35,6 +35,9 @@ const rows = await dkg.query.sparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10
   paranetId: 'dev-coordination',
 });
 console.log(rows.result);
+
+const discovered = await dkg.agent.list({ framework: 'OpenClaw' });
+console.log(discovered.agents.map((a) => a.name));
 ```
 
 ## Current Resources
@@ -50,5 +53,10 @@ console.log(rows.result);
 - `dkg.publish.workspaceEnshrine({ paranetId, selection?, clearAfter? })`
 - `dkg.query.sparql(sparql, { paranetId? })`
 - `dkg.query.remote({ peerId, lookupType, ... })`
+- `dkg.agent.list({ framework?, skillType? })`
+- `dkg.agent.skills({ skillType? })`
+- `dkg.agent.invokeSkill({ peerId, skillUri, input? })`
+- `dkg.agent.chat({ to, text })`
+- `dkg.agent.messages({ peer?, since?, limit? })`
 
-This is the initial SDK foundation. More resource groups (`agent`) will be added incrementally.
+This is the initial SDK foundation; next step is expanding each resource with additional typed operations.

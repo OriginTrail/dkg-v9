@@ -43,6 +43,13 @@ export interface DKGSDK {
     sparql(sparql: string, options?: QueryOptions): Promise<QueryResult>;
     remote(input: QueryRemoteInput): Promise<QueryRemoteResult>;
   };
+  agent: {
+    list(filters?: AgentListFilters): Promise<AgentListResponse>;
+    skills(filters?: AgentSkillFilters): Promise<AgentSkillsResponse>;
+    invokeSkill(input: AgentInvokeSkillInput): Promise<AgentInvokeSkillResult>;
+    chat(input: AgentChatInput): Promise<AgentChatResult>;
+    messages(options?: AgentMessagesOptions): Promise<AgentMessagesResponse>;
+  };
 }
 
 export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
@@ -129,6 +136,95 @@ export interface QueryRemoteResult {
   resultCount: number;
   gasConsumed?: number;
   error?: string;
+}
+
+export interface AgentListFilters {
+  framework?: string;
+  skillType?: string;
+}
+
+export interface AgentSummary {
+  agentUri: string;
+  name: string;
+  peerId: string;
+  framework?: string;
+  nodeRole?: string;
+  connectionStatus?: 'self' | 'connected' | 'disconnected';
+  connectionTransport?: 'direct' | 'relayed' | null;
+  connectionDirection?: string | null;
+  connectedSinceMs?: number | null;
+  lastSeen?: number | null;
+  latencyMs?: number | null;
+}
+
+export interface AgentListResponse {
+  agents: AgentSummary[];
+}
+
+export interface AgentSkillFilters {
+  skillType?: string;
+}
+
+export interface AgentSkill {
+  agentUri: string;
+  peerId?: string;
+  agentName: string;
+  skillType: string;
+  skillUri?: string;
+  description?: string;
+  pricePerCall?: number;
+  currency?: string;
+}
+
+export interface AgentSkillsResponse {
+  skills: AgentSkill[];
+}
+
+export interface AgentInvokeSkillInput {
+  peerId: string;
+  skillUri: string;
+  input?: string;
+}
+
+export interface AgentInvokeSkillResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+  executionTimeMs?: number;
+}
+
+export interface AgentChatInput {
+  to: string;
+  text: string;
+}
+
+export interface AgentChatResult {
+  delivered: boolean;
+  error?: string;
+  phases?: {
+    resolve?: number;
+    send?: number;
+    serverTotal?: number;
+  };
+}
+
+export interface AgentMessage {
+  ts: number;
+  direction: 'in' | 'out';
+  peer: string;
+  peerName?: string;
+  text: string;
+  delivered?: boolean;
+}
+
+export interface AgentMessagesOptions {
+  peer?: string;
+  since?: number;
+  limit?: number;
+}
+
+export interface AgentMessagesResponse {
+  messages: AgentMessage[];
 }
 
 export interface ParanetSummary {

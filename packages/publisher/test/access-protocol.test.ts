@@ -11,7 +11,6 @@ import { MockChainAdapter } from '@dkg/chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
-import { computePrivateRoot } from '../src/merkle.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 
@@ -90,11 +89,11 @@ describe('Access Protocol', () => {
     return { result, bus, keypair };
   }
 
-  it('grants access and verifies merkle root of received private triples', async () => {
+  it('denies non-owner access to private triples', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
@@ -109,22 +108,12 @@ describe('Access Protocol', () => {
 
     const onChain = result.onChainResult!;
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    // accessClient is bound to nodeB (requester); nodeA.peerId is the remote provider target.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
-    expect(accessResult.granted).toBe(true);
-    expect(accessResult.quads.length).toBe(2);
-    expect(accessResult.verified).toBe(true);
-
-    const apiKeyTriple = accessResult.quads.find(
-      (q) => q.predicate === 'http://ex.org/apiKey',
-    );
-    expect(apiKeyTriple).toBeDefined();
-    expect(apiKeyTriple!.object).toContain('secret-key-123');
-
-    // Verify the returned merkle root matches what we compute locally
-    const localRoot = computePrivateRoot(accessResult.quads);
-    expect(localRoot).toBeDefined();
-    expect(accessResult.privateMerkleRoot).toBeDefined();
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.quads.length).toBe(0);
+    expect(accessResult.rejectionReason).toContain('owner-only');
   }, 20000);
 
   it('denies access when KA does not exist', async () => {

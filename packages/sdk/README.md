@@ -30,6 +30,11 @@ const published = await dkg.publish.quads({
   ],
 });
 console.log(published.kcId);
+
+const rows = await dkg.query.sparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10', {
+  paranetId: 'dev-coordination',
+});
+console.log(rows.result);
 ```
 
 ## Current Resources
@@ -43,5 +48,7 @@ console.log(published.kcId);
 - `dkg.publish.quads({ paranetId, quads, privateQuads?, accessPolicy?, allowedPeers? })`
 - `dkg.publish.workspaceWrite({ paranetId, quads })`
 - `dkg.publish.workspaceEnshrine({ paranetId, selection?, clearAfter? })`
+- `dkg.query.sparql(sparql, { paranetId? })`
+- `dkg.query.remote({ peerId, lookupType, ... })`
 
-This is the initial SDK foundation. More resource groups (`query`, `agent`) will be added incrementally.
+This is the initial SDK foundation. More resource groups (`agent`) will be added incrementally.

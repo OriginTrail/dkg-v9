@@ -39,6 +39,10 @@ export interface DKGSDK {
     workspaceWrite(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult>;
     workspaceEnshrine(input: WorkspaceEnshrineInput): Promise<WorkspaceEnshrineResult>;
   };
+  query: {
+    sparql(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+    remote(input: QueryRemoteInput): Promise<QueryRemoteResult>;
+  };
 }
 
 export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
@@ -93,6 +97,38 @@ export interface WorkspaceEnshrineResult {
   kas: KARef[];
   txHash?: string;
   blockNumber?: number;
+}
+
+export interface QueryOptions {
+  paranetId?: string;
+}
+
+export interface QueryResult {
+  result: unknown;
+}
+
+export interface QueryRemoteInput {
+  peerId: string;
+  lookupType: string;
+  paranetId?: string;
+  ual?: string;
+  entityUri?: string;
+  rdfType?: string;
+  sparql?: string;
+  limit?: number;
+  timeout?: number;
+}
+
+export interface QueryRemoteResult {
+  operationId: string;
+  status: string;
+  ntriples?: string;
+  bindings?: string;
+  entityUris?: string[];
+  truncated: boolean;
+  resultCount: number;
+  gasConsumed?: number;
+  error?: string;
 }
 
 export interface ParanetSummary {

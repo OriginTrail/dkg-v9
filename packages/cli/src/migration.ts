@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, symlink, rm } from 'node:fs/promises';
+import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig } from './config.js';
@@ -76,8 +76,13 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
   if (!slotReady(slotB)) {
     try {
       await rm(slotB, { recursive: true, force: true });
-      const repoUrl = hasLocalRepo ? git(['remote', 'get-url', 'origin'], repo) : sourceRepo;
-      git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB]);
+      if (hasLocalRepo) {
+        // Keep slot B source aligned with slot A/local repo state.
+        git(['clone', '--reference', slotA, '--dissociate', repo, slotB]);
+      } else {
+        const repoUrl = sourceRepo;
+        git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB]);
+      }
       if (!hasLocalRepo) {
         git(['checkout', sourceBranch], slotB);
       }
@@ -88,7 +93,7 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
       log(`  Slot b: clone/build failed (${err.message}). Will be prepared on first update.`);
       await rm(slotB, { recursive: true, force: true });
       try {
-        const repoUrl = hasLocalRepo ? git(['remote', 'get-url', 'origin'], repo) : sourceRepo;
+        const repoUrl = hasLocalRepo ? repo : sourceRepo;
         git(['clone', repoUrl, slotB]);
         if (!hasLocalRepo) {
           git(['checkout', sourceBranch], slotB);
@@ -98,8 +103,17 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
   }
 
   if (!hadCurrentLink) {
-    await swapSlot('a');
-    log('Migration complete: releases/current → a');
+    let initialSlot: 'a' | 'b' = 'a';
+    try {
+      const activeRaw = (await readFile(join(rDir, 'active'), 'utf-8')).trim();
+      if ((activeRaw === 'a' || activeRaw === 'b') && slotReady(join(rDir, activeRaw))) {
+        initialSlot = activeRaw;
+      }
+    } catch {
+      // No prior active metadata; default to a.
+    }
+    await swapSlot(initialSlot);
+    log(`Migration complete: releases/current → ${initialSlot}`);
     return;
   }
 

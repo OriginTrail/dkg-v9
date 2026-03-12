@@ -76,6 +76,20 @@ describe('migrateToBlueGreen', () => {
     expect(active).toBe('a');
   });
 
+  it('restores current symlink from existing active metadata when valid', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
+    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeFile(join(rDir, 'active'), 'b');
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const target = await readlink(join(rDir, 'current'));
+    expect(target).toBe('b');
+  });
+
   it('slot b directory is created even if clone/build fails', async () => {
     const { migrateToBlueGreen } = await import('../src/migration.js');
     const log = vi.fn();

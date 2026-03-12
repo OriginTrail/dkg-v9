@@ -2141,6 +2141,7 @@ async function _performUpdateInner(
   if (latestCommit === currentCommit) return 'up-to-date';
 
   log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
+  let checkedOutCommit = latestCommit;
 
   try {
     const maybeTag = parseTagName(ref);
@@ -2164,6 +2165,13 @@ async function _performUpdateInner(
       encoding: 'utf-8',
       timeout: 60_000,
     });
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+    const resolved = String(stdout).trim();
+    if (/^[0-9a-f]{7,40}$/i.test(resolved)) checkedOutCommit = resolved;
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
     return 'failed';
@@ -2202,14 +2210,14 @@ async function _performUpdateInner(
 
   await writePendingUpdateState({
     target,
-    commit: latestCommit,
+    commit: checkedOutCommit,
     version: nextVersion || undefined,
     ref,
     createdAt: new Date().toISOString(),
   });
   try {
     await swapSlot(target);
-    await writeFile(commitFile, latestCommit);
+    await writeFile(commitFile, checkedOutCommit);
     if (nextVersion) await writeFile(versionFile, nextVersion);
     await clearPendingUpdateState();
   } catch (swapErr: any) {

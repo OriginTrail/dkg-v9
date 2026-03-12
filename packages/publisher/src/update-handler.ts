@@ -11,6 +11,7 @@ import { toHex } from './metadata.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
+const SAFE_PARANET_ID = /^[\w.:-]+$/;
 
 interface AppliedUpdate {
   blockNumber: number;
@@ -226,11 +227,13 @@ export class UpdateHandler {
   }
 
   private async updateMetaMerkleRoot(paranetId: string, batchId: bigint, newMerkleRoot: Uint8Array): Promise<void> {
+    if (!SAFE_PARANET_ID.test(paranetId)) return;
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
     const metaGraph = this.graphManager.metaGraphUri(paranetId);
+    const batchNum = Number(batchId);
     const result = await this.store.query(
-      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchNum}"^^<${XSD}integer> } } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return;
     const ual = result.bindings[0]['ual'];

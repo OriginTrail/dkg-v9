@@ -939,8 +939,9 @@ export class DKGPublisher implements Publisher {
   private async resolveUalByBatchId(metaGraph: string, batchId: bigint): Promise<string | undefined> {
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const batchNum = Number(batchId);
     const result = await this.store.query(
-      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchNum}"^^<${XSD}integer> } } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return result.bindings[0]['ual'] ?? undefined;

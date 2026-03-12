@@ -98,6 +98,7 @@ program
   .command('init')
   .description('Interactive setup — set node name and relay')
   .action(async () => {
+    console.log('v9 auto-update test live');
     await ensureDkgDir();
     const existing = await loadConfig();
     const network = await loadNetworkConfig();

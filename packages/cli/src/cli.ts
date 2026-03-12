@@ -249,7 +249,7 @@ program
     }
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
-    await migrateToBlueGreen((msg) => console.log(msg));
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
 
     if (opts.foreground) {
       await runDaemon(true);
@@ -1261,6 +1261,10 @@ program
             await sleep(500);
             if (!isProcessRunning(pid)) break;
           }
+          if (isProcessRunning(pid)) {
+            console.error('Update applied but daemon is still running after SIGTERM. Stop it manually before restarting.');
+            process.exit(1);
+          }
           console.log('Update applied. Run "dkg start" to start with the new version.');
         } else {
           console.log('Update applied. Start the daemon with: dkg start');
@@ -1330,6 +1334,10 @@ program
       for (let i = 0; i < 20; i++) {
         await sleep(500);
         if (!isProcessRunning(pid)) break;
+      }
+      if (isProcessRunning(pid)) {
+        console.error('Rollback switched slots but daemon is still running after SIGTERM. Stop it manually.');
+        process.exit(1);
       }
       console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
     } else {

@@ -1939,7 +1939,10 @@ export async function checkForNewCommitWithStatus(
     const activeDir = join(releasesDir(), active ?? 'a');
     try {
       currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
-    } catch { return { status: 'error' }; }
+    } catch {
+      // First-run node (or missing slots/metadata): treat as unknown current commit and still allow check.
+      currentCommit = '';
+    }
   }
 
   const repo = normalizeRepo(au.repo);

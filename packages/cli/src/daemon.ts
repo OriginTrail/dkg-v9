@@ -1877,8 +1877,27 @@ function isValidRef(ref: string): boolean {
   return /^[\w./+\-]+$/.test(ref) && !ref.startsWith('-');
 }
 
+function isValidRepoSpec(repo: string): boolean {
+  const trimmed = repo.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('-')) return false;
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) return false;
+  if (/\s/.test(trimmed)) return false;
+
+  if (trimmed.startsWith('/') || /^[A-Za-z]:\\/.test(trimmed)) return true; // Absolute local path.
+  if (trimmed.startsWith('file://')) return true;
+  if (trimmed.startsWith('https://') || trimmed.startsWith('ssh://') || trimmed.startsWith('git@')) return true;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(trimmed)) return true; // owner/name or owner/name.git
+  if (/^[A-Za-z0-9._/\-]+$/.test(trimmed)) return true; // Relative local path.
+
+  return false;
+}
+
 function repoToFetchUrl(repo: string): string {
   const trimmed = repo.trim();
+  if (!isValidRepoSpec(trimmed)) {
+    throw new Error(`invalid autoUpdate.repo "${repo}"`);
+  }
   if (!trimmed) return trimmed;
   if (trimmed.startsWith('/') || trimmed.includes('://') || trimmed.startsWith('git@')) return trimmed;
   const normalized = normalizeRepo(trimmed);
@@ -2094,8 +2113,8 @@ async function _performUpdateInner(
   const target = await inactiveSlot();
   const targetDir = join(rDir, target);
 
-  // Bail out if the release slots don't exist or aren't git repos
-  if (!existsSync(activeDir) || !existsSync(join(targetDir, '.git'))) {
+  // Bail out if the active slot is missing; target slot can self-heal below.
+  if (!existsSync(activeDir)) {
     log('Auto-update: skipping — blue-green slots not initialized (run "dkg start" first)');
     return 'failed';
   }
@@ -2170,13 +2189,35 @@ async function _performUpdateInner(
 
   log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
   let checkedOutCommit = latestCommit;
+  let fetchUrl = '';
+
+  try {
+    fetchUrl = repoToFetchUrl(au.repo);
+  } catch (repoErr: any) {
+    log(`Auto-update: ${repoErr?.message ?? 'invalid autoUpdate.repo'}`);
+    return 'failed';
+  }
+
+  if (!existsSync(join(targetDir, '.git'))) {
+    try {
+      log(`Auto-update: slot ${target} missing git metadata; reinitializing slot repo.`);
+      await mkdir(targetDir, { recursive: true });
+      await execFileAsync('git', ['init'], {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+    } catch (initErr: any) {
+      log(`Auto-update: failed to initialize slot ${target} repo — ${initErr?.message ?? String(initErr)}`);
+      return 'failed';
+    }
+  }
 
   try {
     const maybeTag = parseTagName(ref);
     const fetchRef = maybeTag
       ? `${ref}:${ref}`
       : ref;
-    const fetchUrl = repoToFetchUrl(au.repo);
     await execFileAsync('git', ['fetch', fetchUrl, fetchRef], {
       cwd: targetDir,
       encoding: 'utf-8',

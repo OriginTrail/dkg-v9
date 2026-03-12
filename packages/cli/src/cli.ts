@@ -1305,6 +1305,20 @@ program
       process.exit(1);
     }
 
+    const pid = await readPid();
+    if (pid && isProcessRunning(pid)) {
+      console.log('Stopping daemon...');
+      process.kill(pid, 'SIGTERM');
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        if (!isProcessRunning(pid)) break;
+      }
+      if (isProcessRunning(pid)) {
+        console.error('Rollback aborted: daemon is still running after SIGTERM. Stop it manually and retry.');
+        process.exit(1);
+      }
+    }
+
     await swapSlot(target);
     const commitFile = join(dkgDir(), '.current-commit');
     const versionFile = join(dkgDir(), '.current-version');
@@ -1326,23 +1340,7 @@ program
       console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
     }
     console.log(`Rolled back: current → slot ${target}`);
-
-    const pid = await readPid();
-    if (pid && isProcessRunning(pid)) {
-      console.log('Stopping daemon...');
-      process.kill(pid, 'SIGTERM');
-      for (let i = 0; i < 20; i++) {
-        await sleep(500);
-        if (!isProcessRunning(pid)) break;
-      }
-      if (isProcessRunning(pid)) {
-        console.error('Rollback switched slots but daemon is still running after SIGTERM. Stop it manually.');
-        process.exit(1);
-      }
-      console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
-    } else {
-      console.log('Daemon not running. Start with: dkg start');
-    }
+    console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
   });
 
 program.parse();

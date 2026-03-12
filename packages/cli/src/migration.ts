@@ -109,7 +109,7 @@ export async function migrateToBlueGreen(
       execSync('pnpm build', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
       log(`  Slot b: cloned and built`);
     } catch (err: any) {
-      log(`  Slot b: clone/build failed (${err.message}). Will be prepared on first update.`);
+      log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
       await rm(slotB, { recursive: true, force: true });
       try {
         const repoUrl = hasLocalRepo ? repo : sourceRepo;
@@ -117,7 +117,11 @@ export async function migrateToBlueGreen(
         if (!hasLocalRepo) {
           git(['checkout', sourceBranch], slotB);
         }
-      } catch { await mkdir(slotB, { recursive: true }); }
+      } catch {
+        // Keep slot B absent if bootstrap fails; avoid leaving a broken empty directory.
+        await rm(slotB, { recursive: true, force: true }).catch(() => undefined);
+        log('  Slot b: fallback clone failed; slot left uninitialized for later self-heal.');
+      }
     }
   }
 

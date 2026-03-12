@@ -101,6 +101,26 @@ describe('blue-green checkForUpdate', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('reinitializes missing target slot git metadata before fetch', async () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.endsWith('/releases/a')) return true; // active slot path
+      if (path.endsWith('/releases/b/.git')) return false; // target slot missing git metadata
+      if (path.includes('cli.js')) return true;
+      return true;
+    });
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('bbb222');
+
+    const result = await performUpdate(AU, vi.fn());
+    expect(result).toBe(true);
+
+    const gitCmds = getExecFileCalls();
+    const targetDir = '/tmp/dkg-test/releases/b';
+    expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'fetch' && c.cwd === targetDir)).toBe(true);
+  });
+
   it('skips when no new commit', async () => {
     const sha = 'abc123';
     mockedReadFile.mockResolvedValueOnce(sha as any);
@@ -276,17 +296,22 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
   });
 
-  it('skips when target slot has no .git directory (empty dir from failed migration)', async () => {
+  it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
       const path = String(p);
-      if (path.includes('.git')) return false;
+      if (path.endsWith('/releases/a')) return true;
+      if (path.endsWith('/releases/b/.git')) return false;
+      if (path.includes('cli.js')) return true;
       return true;
     });
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('bbb222');
 
-    const log = vi.fn();
-    const result = await performUpdate(AU, log);
-    expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('slots not initialized'));
+    const result = await performUpdate(AU, vi.fn());
+    expect(result).toBe(true);
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const gitCmds = getExecFileCalls();
+    expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
   });
 
   it('commit file is written before swap (crash safety)', async () => {
@@ -352,6 +377,21 @@ describe('blue-green checkForUpdate', () => {
 
     expect(result).toBeNull();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
+  });
+
+  it('rejects unsafe repo specs that start with dash', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('bbb222');
+    const log = vi.fn();
+
+    const result = await performUpdate(
+      { ...AU, repo: '-c protocol.file.allow=always' },
+      log,
+    );
+
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid autoUpdate.repo'));
+    expect(mockedExecFile.mock.calls.some(c => String(c[0]) === 'git' && (c[1] as string[])[0] === 'fetch')).toBe(false);
   });
 
   it('rejects refs that start with dash to avoid git option injection', async () => {

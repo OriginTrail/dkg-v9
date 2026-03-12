@@ -98,6 +98,7 @@ export interface TurnProposal {
   actionSuccess?: boolean;
   turnQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
   merkleRoot?: Uint8Array;
+  proposalTimestamp: number;
   participantSignatures: Map<string, ParticipantSignature>;
 }
 
@@ -761,6 +762,7 @@ export class OriginTrailGameCoordinator {
       actionSuccess: result.success,
       turnQuads,
       merkleRoot,
+      proposalTimestamp,
       participantSignatures: leaderSigs,
     };
 
@@ -870,14 +872,14 @@ export class OriginTrailGameCoordinator {
         let turnQuads = proposal.turnQuads ?? [];
 
         if (turnQuads.length === 0) {
-          const approvers = [...proposal.approvals].map(peerId => ({
-            peerId,
-            timestamp: proposal.approvalTimestamps.get(peerId) ?? Date.now(),
+          const voteAttestors = proposal.votes.map(v => ({
+            peerId: v.peerId,
+            timestamp: proposal.proposalTimestamp,
           }));
           turnQuads = this.computeTurnQuads(
             swarm.id, proposal.turn, proposal.winningAction,
             proposal.newStateJson, proposal.votes.map(v => v.peerId),
-            approvers, proposal.resolution, proposal.hash,
+            voteAttestors, proposal.resolution, proposal.hash,
           );
           if (turnQuads.length > 0) {
             this.log(`Turn ${proposal.turn}: recomputed ${turnQuads.length} turn quads from proposal data`);
@@ -1451,6 +1453,7 @@ export class OriginTrailGameCoordinator {
       deaths,
       event: msg.event,
       turnQuads: localTurnQuads.length > 0 ? localTurnQuads : undefined,
+      proposalTimestamp: msg.timestamp,
       participantSignatures: peerSigs,
     };
 

@@ -303,9 +303,14 @@ export class FinalizationHandler {
       chainId: this.chain?.chainId ?? 'unknown',
     };
 
-    // Remove any existing tentative status for this UAL before inserting confirmed metadata
+    // Remove any existing tentative status for this UAL before inserting confirmed metadata.
+    // For context-graph KCs, tentative status lives in the context-graph meta graph.
+    const tentativeQuad = getTentativeStatusQuad(ual, paranetId);
+    if (ctxGraphId) {
+      tentativeQuad.graph = contextGraphMetaUri(paranetId, ctxGraphId);
+    }
     try {
-      await this.store.delete([getTentativeStatusQuad(ual, paranetId)]);
+      await this.store.delete([tentativeQuad]);
     } catch { /* tentative status may not exist */ }
 
     let metaQuads = generateConfirmedFullMetadata(kcMeta, kaMetadata, provenance);

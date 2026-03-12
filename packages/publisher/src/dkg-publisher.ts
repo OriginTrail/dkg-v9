@@ -367,31 +367,45 @@ export class DKGPublisher implements Publisher {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
 
             // KC is confirmed on-chain but NOT registered in the context graph.
-            // Move data from context-graph URI back to the default paranet data
-            // graph so local state matches what is actually on-chain.
+            // Move only THIS batch's data from context-graph URI back to the
+            // default paranet data graph. Scoped to the current publish's root
+            // entities to avoid disturbing other batches already in the context graph.
             try {
               const ctxDataGraph = contextGraphDataUri(paranetId, ctxGraphId);
               const ctxMetaGraph = contextGraphMetaUri(paranetId, ctxGraphId);
               const defaultDataGraph = this.graphManager.dataGraphUri(paranetId);
               const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
 
-              const ctxQuads = await this.store.query(
-                `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${ctxDataGraph}> { ?s ?p ?o } }`,
-              );
+              const batchRoots = publishResult.kaManifest.map(ka => ka.rootEntity);
+              const values = batchRoots.map(r => `<${r}>`).join(' ');
+              const scopedDataQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+                GRAPH <${ctxDataGraph}> {
+                  VALUES ?root { ${values} }
+                  ?s ?p ?o .
+                  FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+                }
+              }`;
+
+              const ctxQuads = await this.store.query(scopedDataQuery);
               if (ctxQuads.type === 'quads' && ctxQuads.quads.length > 0) {
                 await this.store.insert(ctxQuads.quads.map(q => ({ ...q, graph: defaultDataGraph })));
                 await this.store.delete(ctxQuads.quads.map(q => ({ ...q, graph: ctxDataGraph })));
               }
 
-              const ctxMeta = await this.store.query(
-                `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${ctxMetaGraph}> { ?s ?p ?o } }`,
-              );
+              const scopedMetaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+                GRAPH <${ctxMetaGraph}> {
+                  ?s ?p ?o .
+                  FILTER(STRSTARTS(STR(?s), "${publishResult.ual}"))
+                }
+              }`;
+
+              const ctxMeta = await this.store.query(scopedMetaQuery);
               if (ctxMeta.type === 'quads' && ctxMeta.quads.length > 0) {
                 await this.store.insert(ctxMeta.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
                 await this.store.delete(ctxMeta.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
               }
 
-              this.log.info(ctx, `Migrated data from context graph ${ctxGraphId} back to paranet data graph`);
+              this.log.info(ctx, `Migrated ${batchRoots.length} root entities from context graph ${ctxGraphId} back to paranet data graph`);
             } catch (migrateErr) {
               this.log.warn(ctx, `Failed to migrate context-graph data back to paranet graph: ${migrateErr instanceof Error ? migrateErr.message : String(migrateErr)}`);
             }

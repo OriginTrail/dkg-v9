@@ -38,6 +38,17 @@ console.log(rows.result);
 
 const discovered = await dkg.agent.list({ framework: 'OpenClaw' });
 console.log(discovered.agents.map((a) => a.name));
+
+const context = await dkg.context.create({
+  participantIdentityIds: [101, 202, 303],
+  requiredSignatures: 2,
+});
+
+const enshrined = await dkg.publish.workspaceEnshrine({
+  paranetId: 'dev-coordination',
+  contextGraphId: context.contextGraphId,
+});
+console.log(enshrined.contextGraphId);
 ```
 
 ## Current Resources
@@ -50,7 +61,8 @@ console.log(discovered.agents.map((a) => a.name));
 - `dkg.paranet.catchupStatus(paranetId)`
 - `dkg.publish.quads({ paranetId, quads, privateQuads?, accessPolicy?, allowedPeers? })`
 - `dkg.publish.workspaceWrite({ paranetId, quads })`
-- `dkg.publish.workspaceEnshrine({ paranetId, selection?, clearAfter? })`
+- `dkg.publish.workspaceEnshrine({ paranetId, selection?, clearAfter?, contextGraphId? })`
+- `dkg.context.create({ participantIdentityIds, requiredSignatures })`
 - `dkg.query.sparql(sparql, { paranetId? })`
 - `dkg.query.remote({ peerId, lookupType, ... })`
 - `dkg.agent.list({ framework?, skillType? })`

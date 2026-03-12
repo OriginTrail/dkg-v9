@@ -17,6 +17,8 @@ export type {
   AccessPolicy,
   CatchupResult,
   CatchupStatusResponse,
+  ContextCreateInput,
+  ContextCreateResult,
   KARef,
   CreateParanetInput,
   CreateParanetResponse,

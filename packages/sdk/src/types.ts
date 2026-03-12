@@ -39,6 +39,9 @@ export interface DKGSDK {
     workspaceWrite(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult>;
     workspaceEnshrine(input: WorkspaceEnshrineInput): Promise<WorkspaceEnshrineResult>;
   };
+  context: {
+    create(input: ContextCreateInput): Promise<ContextCreateResult>;
+  };
   query: {
     sparql(sparql: string, options?: QueryOptions): Promise<QueryResult>;
     remote(input: QueryRemoteInput): Promise<QueryRemoteResult>;
@@ -96,6 +99,7 @@ export interface WorkspaceEnshrineInput {
   paranetId: string;
   selection?: WorkspaceSelection;
   clearAfter?: boolean;
+  contextGraphId?: string | number | bigint;
 }
 
 export interface WorkspaceEnshrineResult {
@@ -104,6 +108,18 @@ export interface WorkspaceEnshrineResult {
   kas: KARef[];
   txHash?: string;
   blockNumber?: number;
+  contextGraphId?: string;
+  contextGraphError?: string;
+}
+
+export interface ContextCreateInput {
+  participantIdentityIds: Array<number | string | bigint>;
+  requiredSignatures: number;
+}
+
+export interface ContextCreateResult {
+  contextGraphId: string;
+  success: boolean;
 }
 
 export interface QueryOptions {

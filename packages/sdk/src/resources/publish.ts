@@ -24,6 +24,7 @@ export class PublishResource {
       paranetId: input.paranetId,
       selection: input.selection ?? 'all',
       clearAfter: input.clearAfter ?? true,
+      ...(input.contextGraphId != null ? { contextGraphId: String(input.contextGraphId) } : {}),
     });
   }
 }

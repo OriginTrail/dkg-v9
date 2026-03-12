@@ -1248,7 +1248,7 @@ export class DKGAgent {
       const topic = paranetFinalizationTopic(paranetId);
       try {
         await this.gossip.publish(topic, encodeFinalizationMessage(msg));
-        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}`);
+        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
@@ -2411,6 +2411,19 @@ function verifySyncedData(
 
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
+      } else if (kcPrivateRoots.length > 0) {
+        const legacyRoot = computeFlatKCRoot(allQuadsForKC, []);
+        const legacyHex = Array.from(legacyRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+        if (legacyHex === claimedHex) {
+          log.debug(ctx, `KC ${kcUal} verified via legacy flat root (without private root anchoring)`);
+          verifiedKcUals.add(kcUal);
+        } else if (acceptUnverified) {
+          log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        } else {
+          log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        }
       } else if (acceptUnverified) {
         log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;

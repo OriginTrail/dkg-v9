@@ -19,6 +19,7 @@ interface KAMeta {
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
   accessPolicy?: AccessPolicy;
+  hasInvalidExplicitPolicy?: boolean;
   publisherPeerId?: string;
   allowedPeers?: string[];
 }
@@ -63,6 +64,10 @@ export class AccessHandler {
       const meta = await this.lookupKAMeta(request.kaUal);
       if (!meta) {
         return this.deny('KA not found');
+      }
+
+      if (meta.hasInvalidExplicitPolicy) {
+        return this.deny('Access denied: invalid access policy metadata');
       }
 
       const hasPrivate =
@@ -208,9 +213,9 @@ export class AccessHandler {
       : 0;
 
     const rawPolicy = row['accessPolicy'];
-    const accessPolicy = rawPolicy
-      ? (stripLiteral(rawPolicy) as AccessPolicy)
-      : undefined;
+    const parsedPolicy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
+    const accessPolicy = isAccessPolicy(parsedPolicy) ? parsedPolicy : undefined;
+    const hasInvalidExplicitPolicy = !!parsedPolicy && !isAccessPolicy(parsedPolicy);
 
     const publisherPeerId = row['publisherPeerId']
       ? stripLiteral(row['publisherPeerId'])
@@ -242,6 +247,7 @@ export class AccessHandler {
       privateMerkleRoot,
       privateTripleCount,
       accessPolicy,
+      hasInvalidExplicitPolicy,
       publisherPeerId,
       allowedPeers,
     };
@@ -273,4 +279,8 @@ function stripLiteral(s: string): string {
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
   if (match) return match[1];
   return s;
+}
+
+function isAccessPolicy(value: string | undefined): value is AccessPolicy {
+  return value === 'public' || value === 'ownerOnly' || value === 'allowList';
 }

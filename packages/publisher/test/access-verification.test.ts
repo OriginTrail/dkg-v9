@@ -250,6 +250,24 @@ describe('I-005: Access handler signature verification', () => {
     expect(res.granted).toBe(true);
   });
 
+  it('rejects unknown explicit access policy values', async () => {
+    const store = await setupStoreWithPolicy('totallyUnknownPolicy');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'any-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'any-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('invalid access policy metadata');
+  });
+
   it('rejects allowList access when allowed peer list is missing', async () => {
     const store = await setupStoreWithPolicy('allowList', 'publisher-peer');
     const handler = new AccessHandler(store, new TypedEventBus());

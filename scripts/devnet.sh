@@ -534,18 +534,27 @@ cmd_start() {
       const signers = await provider.listAccounts();
       const n = Math.min(signers.length, $NUM_NODES);
 
-      // Wait up to 30s for at least the first node to have an identity
-      for (let attempt = 0; attempt < 15; attempt++) {
-        const id0 = await identity.getIdentityId(signers[0].address);
-        if (id0 > 0n) break;
+      // Wait up to 60s for ALL nodes to have identities, not just the first
+      const nodeIds = new Array(n).fill(0n);
+      for (let attempt = 0; attempt < 30; attempt++) {
+        let allReady = true;
+        for (let i = 0; i < n; i++) {
+          if (nodeIds[i] === 0n) {
+            nodeIds[i] = await identity.getIdentityId(signers[i].address);
+          }
+          if (nodeIds[i] === 0n) allReady = false;
+        }
+        if (allReady) break;
+        const ready = nodeIds.filter(id => id > 0n).length;
+        if (attempt % 5 === 4) console.log('Waiting for identities: ' + ready + '/' + n + ' ready...');
         await new Promise(r => setTimeout(r, 2000));
       }
 
       let staked = 0, asked = 0;
       for (let i = 0; i < n; i++) {
         const signer = signers[i];
-        const idId = await identity.getIdentityId(signer.address);
-        if (idId === 0n) { console.log('Node ' + (i+1) + ': no identity yet, skipping'); continue; }
+        const idId = nodeIds[i] || await identity.getIdentityId(signer.address);
+        if (idId === 0n) { console.log('Node ' + (i+1) + ': no identity after 60s, skipping'); continue; }
 
         const stakeAmount = ethers.parseEther('50000');
         const askAmount = ethers.parseEther('1');

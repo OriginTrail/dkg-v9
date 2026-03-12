@@ -289,17 +289,20 @@ export class FinalizationHandler {
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);
-    const localRoots = [...partitioned.keys()].sort();
-    const sortedMsgRoots = msgRootEntities.length > 0
-      ? [...msgRootEntities].sort()
-      : localRoots;
+    const localRootSet = new Set(partitioned.keys());
 
-    if (sortedMsgRoots.length !== localRoots.length ||
-        !sortedMsgRoots.every((r, i) => r === localRoots[i])) {
-      this.log.warn(ctx, `Finalization: root entity set mismatch — message has [${sortedMsgRoots.join(', ')}] but local data has [${localRoots.join(', ')}]`);
+    const rootEntities = msgRootEntities.length > 0
+      ? msgRootEntities
+      : [...partitioned.keys()];
+
+    if (msgRootEntities.length > 0) {
+      const msgSet = new Set(msgRootEntities);
+      const extraInMsg = msgRootEntities.filter(r => !localRootSet.has(r));
+      const missingInMsg = [...localRootSet].filter(r => !msgSet.has(r));
+      if (extraInMsg.length > 0 || missingInMsg.length > 0) {
+        this.log.warn(ctx, `Finalization: root entity set mismatch — extra in msg: [${extraInMsg.join(', ')}], missing: [${missingInMsg.join(', ')}]`);
+      }
     }
-
-    const rootEntities = localRoots;
     const kaMetadata: KAMetadata[] = [];
 
     for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {

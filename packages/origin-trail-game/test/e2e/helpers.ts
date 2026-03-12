@@ -154,7 +154,11 @@ export async function startHardhatChain(): Promise<HardhatChain> {
           data: '0xf7ae9b6e' + '0000000000000000000000000000000000000000000000000000000000000001', // setMinimumRequiredSignatures(1)
         }],
       });
-      execSync(`curl -s -X POST "${rpcUrl}" -H "Content-Type: application/json" -d '${body}'`, { timeout: 5_000 });
+      const resp = execSync(`curl -s -X POST "${rpcUrl}" -H "Content-Type: application/json" -d '${body}'`, { timeout: 5_000 }).toString();
+      try {
+        const parsed = JSON.parse(resp);
+        if (parsed.error) console.warn(`setMinimumRequiredSignatures failed: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+      } catch { /* non-JSON response */ }
     }
   } catch { /* best-effort */ }
 
@@ -297,7 +301,9 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
                 { timeout: 5_000 },
               ).toString();
               const parsed = JSON.parse(result);
-              if (parsed.result && parsed.result !== '0x' && parsed.result !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+              if (parsed.error) {
+                console.warn(`getIdentityId failed for node ${i}: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+              } else if (parsed.result && parsed.result !== '0x' && parsed.result !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
                 identityId = parseInt(parsed.result, 16);
               }
             } catch { /* fall back to sequential i+1 */ }
@@ -341,15 +347,14 @@ function startDaemon(node: TestNode): ChildProcess {
 }
 
 export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
-  for (const node of nodes) {
-    if (node.process && !node.process.killed) {
-      node.process.kill('SIGTERM');
-    }
+  const alive = nodes.filter(n => n.process && n.process.exitCode === null);
+  for (const node of alive) {
+    node.process!.kill('SIGTERM');
   }
   await sleep(2000);
-  for (const node of nodes) {
-    if (node.process && !node.process.killed) {
-      node.process.kill('SIGKILL');
+  for (const node of alive) {
+    if (node.process!.exitCode === null) {
+      node.process!.kill('SIGKILL');
     }
   }
 

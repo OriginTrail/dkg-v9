@@ -1226,7 +1226,7 @@ export class DKGAgent {
       contextGraphSignatures: options?.contextGraphSignatures,
     });
 
-    if (result.status === 'confirmed' && result.onChainResult && !result.contextGraphError) {
+    if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities = [...result.kaManifest.map(ka => ka.rootEntity)].sort();
 
       const msg: FinalizationMessageMsg = {
@@ -1242,18 +1242,16 @@ export class DKGAgent {
         rootEntities,
         timestampMs: Date.now(),
         operationId: ctx.operationId,
-        contextGraphId: ctxGraphIdStr,
+        contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
       };
 
       const topic = paranetFinalizationTopic(paranetId);
       try {
         await this.gossip.publish(topic, encodeFinalizationMessage(msg));
-        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}`);
+        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
-    } else if (result.contextGraphError) {
-      this.log.warn(ctx, `Skipping finalization broadcast: context graph registration failed (${result.contextGraphError})`);
     }
 
     return result;

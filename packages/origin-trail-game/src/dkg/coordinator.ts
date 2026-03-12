@@ -724,23 +724,11 @@ export class OriginTrailGameCoordinator {
     const deaths = detectDeaths(swarm.gameState, result.newState, event);
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
-    // Pre-compute turn quads and merkle root so peers can sign the digest
-    const attestations: rdf.ConsensusAttestation[] = swarm.votes.map(v => ({
-      peerId: v.peerId,
-      proposalHash: hash,
-      approved: true,
-      timestamp: v.timestamp,
-    }));
-    const turnQuads = [
-      ...rdf.turnResolvedQuads(
-        this.paranetId, swarm.id, swarm.currentTurn,
-        winningAction, newStateJson,
-        swarm.votes.map(v => v.peerId),
-      ),
-      ...rdf.consensusAttestationQuads(
-        this.paranetId, swarm.id, swarm.currentTurn, attestations, resolution, hash,
-      ),
-    ];
+    const proposalTimestamp = Date.now();
+    const turnQuads = this.computeTurnQuads(
+      swarm.id, swarm.currentTurn, winningAction, newStateJson,
+      votes, resolution, hash, proposalTimestamp,
+    );
     const tripleHashes = turnQuads.map(q => hashTriple(q.subject, q.predicate, q.object));
     const merkleRoot = new MerkleTree(tripleHashes).root;
 
@@ -780,7 +768,7 @@ export class OriginTrailGameCoordinator {
       type: 'turn:proposal',
       swarmId: swarm.id,
       peerId: this.myPeerId,
-      timestamp: Date.now(),
+      timestamp: proposalTimestamp,
       turn: swarm.currentTurn,
       proposalHash: hash,
       winningAction,
@@ -891,13 +879,28 @@ export class OriginTrailGameCoordinator {
           }
 
           const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
-          const publishResult = await this.enshrineToContextGraph(
-            effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
-            useContextGraph ? collectedSigs : undefined,
-          );
+          let publishResult: DKGPublishReturn | undefined;
+          try {
+            publishResult = await this.enshrineToContextGraph(
+              effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
+              useContextGraph ? collectedSigs : undefined,
+            );
+          } catch (ctxErr: any) {
+            if (useContextGraph) {
+              this.log(`Context-graph enshrinement failed for turn ${proposal.turn}: ${ctxErr.message}. Falling back to plain publish.`);
+              publishResult = await this.enshrineToContextGraph(
+                { ...swarm, contextGraphId: undefined }, turnQuads,
+                `Turn ${proposal.turn} (fallback)`,
+              );
+            } else {
+              throw ctxErr;
+            }
+          }
 
-          const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
-          await this.publishProvenanceChain(turnEntity, publishResult);
+          if (publishResult) {
+            const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
+            await this.publishProvenanceChain(turnEntity, publishResult);
+          }
         }
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
@@ -1057,6 +1060,31 @@ export class OriginTrailGameCoordinator {
 
     this.log(`Force-resolve: turn ${turnNumber} resolved immediately for ${swarm.id}`);
     return swarm;
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────
+
+  private computeTurnQuads(
+    swarmId: string, turn: number, winningAction: string,
+    newStateJson: string, votes: Array<{ peerId: string; action: string }>,
+    resolution: string, proposalHash: string, proposalTimestamp: number,
+  ): Array<{ subject: string; predicate: string; object: string; graph: string }> {
+    const attestations: rdf.ConsensusAttestation[] = votes.map(v => ({
+      peerId: v.peerId,
+      proposalHash,
+      approved: true,
+      timestamp: proposalTimestamp,
+    }));
+    return [
+      ...rdf.turnResolvedQuads(
+        this.paranetId, swarmId, turn,
+        winningAction, newStateJson,
+        votes.map(v => v.peerId),
+      ),
+      ...rdf.consensusAttestationQuads(
+        this.paranetId, swarmId, turn, attestations, resolution, proposalHash,
+      ),
+    ];
   }
 
   // ── Vote tallying ─────────────────────────────────────────────────
@@ -1357,16 +1385,30 @@ export class OriginTrailGameCoordinator {
     const receivedAt = Date.now();
     const peerSigs = new Map<string, ParticipantSignature>();
 
-    // Sign the context graph participant digest if merkle root was provided
-    // and the proposed contextGraphId matches our swarm's established one.
+    // Recompute turn quads and merkle root locally so we can verify the
+    // proposal's claimed root before signing. Uses the proposal timestamp
+    // for deterministic attestation quads.
+    const localTurnQuads = this.computeTurnQuads(
+      swarm.id, msg.turn, msg.winningAction, msg.newStateJson,
+      votes, resolution, msg.proposalHash, msg.timestamp,
+    );
+    let localMerkleRootHex: string | undefined;
+    if (localTurnQuads.length > 0) {
+      const hashes = localTurnQuads.map(q => hashTriple(q.subject, q.predicate, q.object));
+      const localRoot = new MerkleTree(hashes).root;
+      localMerkleRootHex = ethers.hexlify(localRoot);
+    }
+
     let myIdentityIdStr: string | undefined;
     let mySignatureR: string | undefined;
     let mySignatureVS: string | undefined;
     const contextGraphIdValid = msg.contextGraphId && swarm.contextGraphId
       && String(msg.contextGraphId) === String(swarm.contextGraphId);
-    if (msg.merkleRoot && contextGraphIdValid && this.agent.identityId > 0n) {
+    const merkleRootVerified = msg.merkleRoot && localMerkleRootHex
+      && msg.merkleRoot === localMerkleRootHex;
+    if (merkleRootVerified && contextGraphIdValid && this.agent.identityId > 0n) {
       try {
-        const merkleRootBytes = ethers.getBytes(msg.merkleRoot);
+        const merkleRootBytes = ethers.getBytes(msg.merkleRoot!);
         const sig = await this.agent.signContextGraphDigest(
           BigInt(msg.contextGraphId!), merkleRootBytes,
         );
@@ -1375,6 +1417,8 @@ export class OriginTrailGameCoordinator {
         mySignatureR = ethers.hexlify(sig.r);
         mySignatureVS = ethers.hexlify(sig.vs);
       } catch { /* chain adapter may not support signing */ }
+    } else if (msg.merkleRoot && !merkleRootVerified) {
+      this.log(`Merkle root mismatch for proposal on turn ${msg.turn} — refusing to sign`);
     }
 
     swarm.pendingProposal = {
@@ -1389,6 +1433,7 @@ export class OriginTrailGameCoordinator {
       resolution,
       deaths,
       event: msg.event,
+      turnQuads: localTurnQuads.length > 0 ? localTurnQuads : undefined,
       participantSignatures: peerSigs,
     };
 
@@ -1424,11 +1469,17 @@ export class OriginTrailGameCoordinator {
       const expectedId = senderPlayer?.identityId;
       if (expectedId && String(msg.identityId) === String(expectedId)) {
         try {
-          swarm.pendingProposal.participantSignatures.set(msg.peerId, {
-            identityId: BigInt(msg.identityId),
-            r: ethers.getBytes(msg.signatureR),
-            vs: ethers.getBytes(msg.signatureVS),
-          });
+          const rBytes = ethers.getBytes(msg.signatureR);
+          const vsBytes = ethers.getBytes(msg.signatureVS);
+          if (rBytes.length !== 32 || vsBytes.length !== 32) {
+            this.log(`Rejected signature from ${msg.peerId.slice(0, 8)}: r(${rBytes.length}) or vs(${vsBytes.length}) not 32 bytes`);
+          } else {
+            swarm.pendingProposal.participantSignatures.set(msg.peerId, {
+              identityId: BigInt(msg.identityId),
+              r: rBytes,
+              vs: vsBytes,
+            });
+          }
         } catch {
           this.log(`Malformed signature from ${msg.peerId.slice(0, 8)}, ignoring signature data`);
         }

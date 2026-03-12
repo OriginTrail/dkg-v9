@@ -93,18 +93,13 @@ export class DkgNodePlugin {
       this.writeCapture = new WriteCapture(this.client, effectiveConfig);
       this.writeCapture.register(api);
 
-      // Start file watcher on session_start.
-      // Stop is handled by DkgNodePlugin.stop() — no separate session_end hook
-      // needed to avoid double-stop.
-      api.registerHook('session_start', async () => {
-        this.writeCapture?.startFileWatcher(memoryDir);
-
-        // Fire-and-forget: backlog import on first-ever install (runs at most once)
-        if (!this.backlogImportDone) {
-          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
-            .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
-        }
-      }, { name: 'dkg-write-watcher-start' });
+      // Fire-and-forget: backlog import on first-ever install.
+      // Runs at gateway startup (not session_start) so it works regardless
+      // of which channel the user interacts through.
+      if (!this.backlogImportDone) {
+        this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
+          .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
+      }
 
       api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
     }

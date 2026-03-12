@@ -329,6 +329,13 @@ export class DKGPublisher implements Publisher {
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
+    const normalizedPublisherPeerId = publisherPeerId.trim();
+
+    if (effectiveAccessPolicy !== 'public' && normalizedPublisherPeerId.length === 0) {
+      throw new Error(
+        `Publish rejected: accessPolicy "${effectiveAccessPolicy}" requires a non-empty "publisherPeerId"`,
+      );
+    }
 
     if (effectiveAccessPolicy === 'allowList' && normalizedAllowedPeers.length === 0) {
       throw new Error('Publish rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
@@ -548,7 +555,7 @@ export class DKGPublisher implements Publisher {
             paranetId,
             merkleRoot: kcMerkleRoot,
             kaCount,
-            publisherPeerId: publisherPeerId || 'unknown',
+            publisherPeerId: normalizedPublisherPeerId || 'unknown',
             accessPolicy: effectiveAccessPolicy,
             allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
@@ -585,7 +592,7 @@ export class DKGPublisher implements Publisher {
           paranetId,
           merkleRoot: kcMerkleRoot,
           kaCount,
-          publisherPeerId: publisherPeerId || 'unknown',
+          publisherPeerId: normalizedPublisherPeerId || 'unknown',
           accessPolicy: effectiveAccessPolicy,
           allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),

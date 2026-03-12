@@ -194,15 +194,15 @@ describe('Access Protocol', () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     const onChain = result.onChainResult!;
     const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
     const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
-      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: '"unknown"', graph: metaGraph },
-      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: '"unknown"', graph: metaGraph },
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
+      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
 
     const accessHandler = new AccessHandler(storeA, bus);
@@ -224,7 +224,10 @@ describe('Access Protocol', () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA, { accessPolicy: 'ownerOnly' });
+    const { result, bus } = await publishWithPrivate(storeA, {
+      publisherPeerId: nodeA.peerId,
+      accessPolicy: 'ownerOnly',
+    });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
@@ -235,6 +238,13 @@ describe('Access Protocol', () => {
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
     const onChain = result.onChainResult!;
+    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    await storeA.delete([
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
+      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
+    ]);
+
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
@@ -261,6 +271,7 @@ describe('Access Protocol', () => {
         paranetId: PARANET,
         quads: [q(ENTITY, 'http://schema.org/name', '"TestBot"')],
         privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
+        publisherPeerId: '12D3KooWTestPublisher',
         accessPolicy: 'allowList',
       }),
     ).rejects.toThrow('accessPolicy "allowList" requires non-empty "allowedPeers"');

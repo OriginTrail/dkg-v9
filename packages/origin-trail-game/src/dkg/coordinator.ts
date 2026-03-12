@@ -744,16 +744,16 @@ export class OriginTrailGameCoordinator {
     const tripleHashes = turnQuads.map(q => hashTriple(q.subject, q.predicate, q.object));
     const merkleRoot = new MerkleTree(tripleHashes).root;
 
-    // Leader self-signs the context graph participant digest
+    // Always provide merkleRootHex so peers can produce signatures,
+    // even if leader self-signing fails (best-effort).
     const leaderSigs = new Map<string, ParticipantSignature>();
-    let merkleRootHex: string | undefined;
+    const merkleRootHex = swarm.contextGraphId ? ethers.hexlify(merkleRoot) : undefined;
     if (swarm.contextGraphId && this.agent.identityId > 0n) {
       try {
         const sig = await this.agent.signContextGraphDigest(
           BigInt(swarm.contextGraphId), merkleRoot,
         );
         leaderSigs.set(this.myPeerId, sig);
-        merkleRootHex = ethers.hexlify(merkleRoot);
       } catch { /* chain adapter may not support signing */ }
     }
 
@@ -880,23 +880,25 @@ export class OriginTrailGameCoordinator {
         const collectedSigs = [...proposal.participantSignatures.values()];
         const turnQuads = proposal.turnQuads ?? [];
 
-        // If we don't have enough signatures for context-graph enshrinement,
-        // fall back to plain publish to avoid on-chain revert.
-        const reqSigs = swarm.requiredSignatures ?? 0;
-        let useContextGraph = !!swarm.contextGraphId;
-        if (useContextGraph && collectedSigs.length < reqSigs) {
-          this.log(`Turn ${proposal.turn}: only ${collectedSigs.length}/${reqSigs} signatures, falling back to plain publish`);
-          useContextGraph = false;
+        if (turnQuads.length === 0) {
+          this.log(`Turn ${proposal.turn}: no quads to publish (proposal missing turnQuads), skipping enshrinement`);
+        } else {
+          const reqSigs = swarm.requiredSignatures ?? 0;
+          let useContextGraph = !!swarm.contextGraphId;
+          if (useContextGraph && collectedSigs.length < reqSigs) {
+            this.log(`Turn ${proposal.turn}: only ${collectedSigs.length}/${reqSigs} signatures, falling back to plain publish`);
+            useContextGraph = false;
+          }
+
+          const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
+          const publishResult = await this.enshrineToContextGraph(
+            effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
+            useContextGraph ? collectedSigs : undefined,
+          );
+
+          const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
+          await this.publishProvenanceChain(turnEntity, publishResult);
         }
-
-        const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
-        const publishResult = await this.enshrineToContextGraph(
-          effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
-          useContextGraph ? collectedSigs : undefined,
-        );
-
-        const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
-        await this.publishProvenanceChain(turnEntity, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -1421,11 +1423,15 @@ export class OriginTrailGameCoordinator {
       const senderPlayer = swarm.players.find(p => p.peerId === msg.peerId);
       const expectedId = senderPlayer?.identityId;
       if (expectedId && String(msg.identityId) === String(expectedId)) {
-        swarm.pendingProposal.participantSignatures.set(msg.peerId, {
-          identityId: BigInt(msg.identityId),
-          r: ethers.getBytes(msg.signatureR),
-          vs: ethers.getBytes(msg.signatureVS),
-        });
+        try {
+          swarm.pendingProposal.participantSignatures.set(msg.peerId, {
+            identityId: BigInt(msg.identityId),
+            r: ethers.getBytes(msg.signatureR),
+            vs: ethers.getBytes(msg.signatureVS),
+          });
+        } catch {
+          this.log(`Malformed signature from ${msg.peerId.slice(0, 8)}, ignoring signature data`);
+        }
       } else {
         this.log(`Rejected signature from ${msg.peerId.slice(0, 8)}: claimed identityId=${msg.identityId} does not match registered ${expectedId ?? 'none'}`);
       }

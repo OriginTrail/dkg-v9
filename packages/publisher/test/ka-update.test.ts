@@ -720,6 +720,30 @@ describe('UpdateHandler', () => {
     expect(original.status).toBe('confirmed');
     const originalRootHex = toHex(original.merkleRoot);
 
+    // Build a separate receiver store that only has the original publish data
+    const receiverStore = new OxigraphStore();
+    const allQuads = await store.query(
+      `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } }`,
+    );
+    if (allQuads.type === 'bindings') {
+      const quadsToInsert = allQuads.bindings.map((b: Record<string, string>) => ({
+        subject: b['s'], predicate: b['p'], object: b['o'], graph: b['g'],
+      }));
+      await receiverStore.insert(quadsToInsert);
+    }
+    const receiverHandler = new UpdateHandler(receiverStore, chain, new TypedEventBus());
+
+    // Verify the receiver store has the original merkle root before update
+    const preResult = await receiverStore.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(preResult.type).toBe('bindings');
+    if (preResult.type === 'bindings') {
+      expect(preResult.bindings.length).toBe(1);
+      expect(preResult.bindings[0]['root']).toContain(originalRootHex);
+    }
+
+    // Build update quads and gossip message (without running publisher.update on receiver)
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via gossip"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
@@ -737,9 +761,9 @@ describe('UpdateHandler', () => {
       blockNumber: updateResult.onChainResult!.blockNumber,
     });
 
-    await handler.handle(message, '12D3KooWPeerA');
+    await receiverHandler.handle(message, '12D3KooWPeerA');
 
-    const newRootResult = await store.query(
+    const newRootResult = await receiverStore.query(
       `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(newRootResult.type).toBe('bindings');

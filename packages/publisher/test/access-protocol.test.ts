@@ -51,7 +51,14 @@ describe('Access Protocol', () => {
     return { nodeA, nodeB };
   }
 
-  async function publishWithPrivate(store: OxigraphStore, options?: { publisherPeerId?: string }) {
+  async function publishWithPrivate(
+    store: OxigraphStore,
+    options?: {
+      publisherPeerId?: string;
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    },
+  ) {
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -76,6 +83,8 @@ describe('Access Protocol', () => {
         q(ENTITY, 'http://ex.org/credentials', '"password:hunter2"'),
       ],
       publisherPeerId: options?.publisherPeerId,
+      accessPolicy: options?.accessPolicy,
+      allowedPeers: options?.allowedPeers,
     });
 
     return { result, bus, keypair };
@@ -192,11 +201,41 @@ describe('Access Protocol', () => {
     expect(accessResult.quads.length).toBe(2);
   }, 20000);
 
-  it('denies private access when owner identity is missing', async () => {
+  it('denies private access when policy and owner metadata are missing', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA);
+
+    const onChain = result.onChainResult!;
+    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    await storeA.delete([
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: '"unknown"', graph: metaGraph },
+      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: '"unknown"', graph: metaGraph },
+    ]);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner identity missing');
+  }, 20000);
+
+  it('denies ownerOnly access when owner identity is missing', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA, { accessPolicy: 'ownerOnly' });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);

@@ -18,8 +18,7 @@ interface KAMeta {
   paranetId: string;
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
-  accessPolicyExplicit?: boolean;
-  accessPolicy: AccessPolicy;
+  accessPolicy?: AccessPolicy;
   publisherPeerId?: string;
   allowedPeers?: string[];
 }
@@ -74,8 +73,7 @@ export class AccessHandler {
         return this.deny('No private triples available for this KA');
       }
 
-      const effectivePolicy: AccessPolicy =
-        (!meta.accessPolicyExplicit && hasPrivate) ? 'ownerOnly' : meta.accessPolicy;
+      const effectivePolicy = this.resolveAccessPolicy(meta, hasPrivate);
 
       // Enforce access policy (cheap peerId checks first, before expensive crypto)
       if (effectivePolicy === 'ownerOnly') {
@@ -208,13 +206,11 @@ export class AccessHandler {
     const privateTripleCount = row['privateTripleCount']
       ? Number(stripLiteral(row['privateTripleCount']))
       : 0;
-    const hasPrivateMetadata = !!privateMerkleRoot || privateTripleCount > 0;
 
     const rawPolicy = row['accessPolicy'];
-    const accessPolicyExplicit = !!rawPolicy;
     const accessPolicy = rawPolicy
       ? (stripLiteral(rawPolicy) as AccessPolicy)
-      : (hasPrivateMetadata ? 'ownerOnly' : 'public');
+      : undefined;
 
     const publisherPeerId = row['publisherPeerId']
       ? stripLiteral(row['publisherPeerId'])
@@ -222,9 +218,10 @@ export class AccessHandler {
         ? stripLiteral(row['attributedTo'])
         : undefined;
 
+    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
     const allowedPeerRes = await this.store.query(
       `SELECT ?allowedPeer WHERE {
-        GRAPH ?g {
+        GRAPH <${metaGraph}> {
           <${kcUal}> <${DKG_NS}allowedPeer> ?allowedPeer .
         }
       }`,
@@ -244,11 +241,15 @@ export class AccessHandler {
       paranetId,
       privateMerkleRoot,
       privateTripleCount,
-      accessPolicyExplicit,
       accessPolicy,
       publisherPeerId,
       allowedPeers,
     };
+  }
+
+  private resolveAccessPolicy(meta: KAMeta, hasPrivate: boolean): AccessPolicy {
+    if (meta.accessPolicy) return meta.accessPolicy;
+    return hasPrivate ? 'ownerOnly' : 'public';
   }
 
   private deny(reason: string): Uint8Array {

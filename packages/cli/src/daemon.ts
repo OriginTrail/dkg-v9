@@ -2364,6 +2364,7 @@ async function _performUpdateInner(
       `${nextVersion ? ` (version ${nextVersion})` : ''}. Swapped symlink. Restarting...`,
   );
   log('v9 auto-update test live leeroy jenkins');
+  log('v9 auto-update test live foreground restart pending');
   return 'updated';
 }
 

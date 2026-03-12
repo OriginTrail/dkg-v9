@@ -6,6 +6,7 @@ import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
 import { SettingsPage, isDevModeEnabled } from './pages/Settings.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
+import { TestPage } from './pages/TestPage.js';
 import { fetchNotifications, markNotificationsRead, type Notification } from './api.js';
 
 const chevronIcon = (
@@ -22,6 +23,7 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   messages: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
   activity: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
   settings: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  flask: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2v7.31"/><path d="M14 9.3V2"/><path d="M8.5 2h7"/><path d="M14 9.3 19.6 19a2 2 0 0 1-1.74 3H6.14a2 2 0 0 1-1.74-3L10 9.3"/><path d="M7 16h10"/></svg>,
 };
 
 function useInstalledApps(): InstalledApp[] {
@@ -306,6 +308,9 @@ export function App() {
             {NAV_ICONS.terminal}<span>Agent Hub</span>
           </NavLink>
           <AppsNavSection installedApps={installedApps} />
+          <NavLink to="/test" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
+            {NAV_ICONS.flask}<span>Test Page</span>
+          </NavLink>
           <SettingsNavSection />
         </nav>
 
@@ -339,6 +344,7 @@ export function App() {
           <Route path="/messages" element={<Navigate to="/agent" replace />} />
           <Route path="/apps/*" element={<AppsPage apps={installedApps} />} />
           <Route path="/operations/*" element={<Navigate to="/settings?tab=observability" replace />} />
+          <Route path="/test" element={<TestPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
           {/* Backward-compatible redirects for legacy routes */}

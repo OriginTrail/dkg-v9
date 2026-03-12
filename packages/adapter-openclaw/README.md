@@ -100,11 +100,16 @@ What the running daemon provides:
 
 Read `~/.openclaw/openclaw.json` and discover `agents.defaults.workspace`.
 
-Merge the adapter load path and plugin entry:
+Merge three things into the existing `plugins` block:
+
+1. Add `"adapter-openclaw"` to `plugins.allow`
+2. Add the adapter path to `plugins.load.paths`
+3. Add the entry to `plugins.entries`
 
 ```json
 {
   "plugins": {
+    "allow": ["adapter-openclaw"],
     "load": {
       "paths": [
         "~/dkg-v9/packages/adapter-openclaw"
@@ -120,9 +125,10 @@ Merge the adapter load path and plugin entry:
 ```
 
 Rules:
-- The plugin entry key must be `adapter-openclaw`.
-- Do not put DKG config in `plugins.entries`.
-- Merge this into existing plugin config — do not replace the whole `plugins` block.
+- The plugin entry key must be `adapter-openclaw` (matches `openclaw.plugin.json` `id`).
+- `adapter-openclaw` must appear in `plugins.allow` or the gateway will not load it.
+- Do not put DKG config in `plugins.entries` — that goes in the workspace `config.json`.
+- Merge into existing plugin config — do not replace the whole `plugins` block.
 
 ### 5. Configure the adapter in the workspace
 
@@ -232,7 +238,7 @@ If another agent is performing the setup, these are the exact steps:
 5. Write `~/.dkg/config.json` programmatically using the agent name and network defaults.
 6. Run `pnpm dkg start` — wallets, auth token, and identity key are auto-generated on first start.
 7. Read `~/.dkg/wallets.json` and present full wallet info (addresses + private keys) to the user for backup and funding.
-8. Merge the adapter load path and `adapter-openclaw` entry into `~/.openclaw/openclaw.json`.
+8. Merge into `~/.openclaw/openclaw.json`: add `"adapter-openclaw"` to `plugins.allow`, add the adapter path to `plugins.load.paths`, and add `adapter-openclaw` to `plugins.entries`.
 9. Write the `"dkg-node"` block into `WORKSPACE_DIR/config.json` with `daemonUrl`, `memory.enabled`, and `channel.enabled`.
 10. Copy `skills/dkg-node/SKILL.md` into `WORKSPACE_DIR/skills/dkg-node/SKILL.md`.
 11. Restart the OpenClaw gateway.

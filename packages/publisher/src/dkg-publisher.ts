@@ -174,7 +174,7 @@ export class DKGPublisher implements Publisher {
   private async _writeToWorkspaceImpl(
     paranetId: string,
     quads: Quad[],
-    options: WriteToWorkspaceOptions,
+    options: WriteToWorkspaceOptions & { conditions?: CASCondition[] },
   ): Promise<WriteToWorkspaceResult> {
     const ctx = options.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
@@ -237,6 +237,13 @@ export class DKGPublisher implements Publisher {
       )
       .join('\n');
 
+    const casConditions = options.conditions?.map(c => ({
+      subject: c.subject,
+      predicate: c.predicate,
+      expectedValue: c.expectedValue ?? '',
+      expectAbsent: c.expectedValue === null,
+    }));
+
     const message = encodeWorkspacePublishRequest({
       paranetId,
       nquads: new TextEncoder().encode(nquadsStr),
@@ -249,6 +256,7 @@ export class DKGPublisher implements Publisher {
       workspaceOperationId,
       timestampMs: Date.now(),
       operationId: ctx.operationId,
+      casConditions,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -370,7 +378,10 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
-    return this._writeToWorkspaceImpl(paranetId, quads, options);
+    return this._writeToWorkspaceImpl(paranetId, quads, {
+      ...options,
+      conditions: options.conditions,
+    });
   }
 
   /**

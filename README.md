@@ -25,6 +25,7 @@ npm install -g @dkg/cli
 dkg init      # Interactive setup — pick a name, paste an EVM key
 dkg start -f  # Start your node (foreground)
 ```
+fsdgjsfdlk
 
 In another terminal:
 

@@ -344,6 +344,11 @@ export class DkgChannelPlugin {
         accountId: 'default',
         peer: { kind: 'direct', id: identity || 'owner' },
       });
+      // Give non-owner identities (e.g. game-autopilot) their own session
+      // so they don't pollute the user's chat context.
+      if (identity && identity !== 'owner') {
+        route.sessionKey = `agent:${route.agentId}:${identity}`;
+      }
       log.info?.(`[dkg-channel] Route resolved: agent=${route.agentId}, session=${route.sessionKey}`);
     } catch (err: any) {
       log.warn?.(`[dkg-channel] resolveAgentRoute failed: ${err.message}`);
@@ -533,6 +538,11 @@ export class DkgChannelPlugin {
       cfg, channel: CHANNEL_NAME, accountId: 'default',
       peer: { kind: 'direct', id: identity || 'owner' },
     });
+    // Give non-owner identities (e.g. game-autopilot) their own session
+    // so they don't pollute the user's chat context.
+    if (identity && identity !== 'owner') {
+      route.sessionKey = `agent:${route.agentId}:${identity}`;
+    }
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({

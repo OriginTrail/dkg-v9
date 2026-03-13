@@ -477,8 +477,21 @@ export function App() {
     }).catch(() => {});
   }, []);
 
+  const autoNavigatedRef = useRef(false);
+
   const refreshLobby = useCallback(async () => {
-    try { setLobby(await api.lobby()); } catch (e: any) { setError(e.message); }
+    try {
+      const data = await api.lobby();
+      setLobby(data);
+      if (data.mySwarms?.length === 1 && !autoNavigatedRef.current) {
+        try {
+          const fresh = await api.swarm(data.mySwarms[0].id);
+          autoNavigatedRef.current = true;
+          setSwarm(fresh);
+          setView('swarm');
+        } catch { /* swarm fetch failed, retry on next poll */ }
+      }
+    } catch (e: any) { setError(e.message); }
   }, []);
 
   const refreshSwarm = useCallback(async (swarmId: string) => {
@@ -521,6 +534,8 @@ export function App() {
             <span className="ot-player">Playing as: {playerName}</span>
           </div>
         </div>
+
+        {error && <div className="ot-error">{error}</div>}
 
         <div className="ot-section">
           <h2>Your Swarms</h2>
@@ -569,7 +584,6 @@ export function App() {
         </div>
 
         <button className="ot-secondary" onClick={refreshLobby}>Refresh</button>
-        {error && <div className="ot-error">{error}</div>}
       </div>
     );
   }

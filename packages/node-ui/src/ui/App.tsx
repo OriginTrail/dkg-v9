@@ -327,21 +327,25 @@ export function App() {
           </div>
           {currentVersion && (
             <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                <span className="mono" style={{ fontSize: 10, color: updateAvailable ? '#fbbf24' : liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)' }}>
-                  v{currentVersion}{commitShort ? ` (${commitShort})` : ''}
-                </span>
-                {liveStatus?.updateAvailable === false && (
-                  <span style={{ fontSize: 9, fontWeight: 600, color: 'var(--green)' }}>· latest</span>
-                )}
-                {updateAvailable && (
-                  <span title={`Latest: ${latestCommit || 'unknown'}${liveStatus?.autoUpdate ? ' — auto-update will apply it' : ' — update manually'}`} style={{
-                    fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3,
+              <div className="mono" style={{ fontSize: 10, color: liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)', marginBottom: 2 }}>
+                v{currentVersion}{liveStatus?.updateAvailable === false ? ' · latest' : ''}
+              </div>
+              {updateAvailable ? (
+                <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, marginBottom: 2 }}>
+                  <span style={{ color: 'var(--text-dim)' }}>{commitShort}</span>
+                  <span style={{ color: '#fbbf24' }}>→</span>
+                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{latestCommit || '?'}</span>
+                  <span title={liveStatus?.autoUpdate ? 'Auto-update will apply the new version' : 'Update manually'} style={{
+                    fontSize: 8, fontWeight: 600, padding: '1px 5px', borderRadius: 3, marginLeft: 2,
                     background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
                     animation: 'pulse-fade 2.5s ease-in-out infinite',
-                  }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}{latestCommit ? ` → ${latestCommit}` : ''}</span>
-                )}
-              </div>
+                  }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}</span>
+                </div>
+              ) : commitShort ? (
+                <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 2 }}>
+                  {commitShort}
+                </div>
+              ) : null}
               <div style={{ fontSize: 10, color: liveStatus?.autoUpdate ? 'var(--green)' : 'var(--text-dim)', opacity: 0.7 }}>
                 Auto-updater: {liveStatus?.autoUpdate ? 'enabled' : 'disabled'}
               </div>

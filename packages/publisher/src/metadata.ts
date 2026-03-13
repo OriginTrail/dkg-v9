@@ -1,4 +1,5 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad, TripleStore } from '@dkg/storage';
+import { GraphManager } from '@dkg/storage';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const DKG = 'http://dkg.io/ontology/';
@@ -88,7 +89,7 @@ export function generateKCMetadata(
       mq(kaUri, `${RDF}type`, `${DKG}KnowledgeAsset`, metaGraph),
       mq(kaUri, `${DKG}rootEntity`, ka.rootEntity, metaGraph),
       mq(kaUri, `${DKG}partOf`, ka.kcUal, metaGraph),
-      mq(kaUri, `${DKG}tokenId`, intLit(Number(ka.tokenId)), metaGraph),
+      mq(kaUri, `${DKG}tokenId`, intLit(ka.tokenId), metaGraph),
       mq(
         kaUri,
         `${DKG}publicTripleCount`,
@@ -177,7 +178,7 @@ export function generateConfirmedMetadata(
       metaGraph,
     ),
     mq(ual, `${DKG}publisherAddress`, lit(provenance.publisherAddress), metaGraph),
-    mq(ual, `${DKG}batchId`, intLit(Number(provenance.batchId)), metaGraph),
+    mq(ual, `${DKG}batchId`, intLit(provenance.batchId), metaGraph),
     mq(ual, `${DKG}chainId`, lit(provenance.chainId), metaGraph),
   ];
   return quads;
@@ -206,7 +207,7 @@ function lit(val: string): string {
   return `"${val}"`;
 }
 
-function intLit(val: number): string {
+function intLit(val: number | bigint): string {
   return `"${val}"^^<${XSD}integer>`;
 }
 
@@ -271,4 +272,48 @@ export function generateOwnershipQuads(
   return rootEntities.map((entry) =>
     mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), workspaceMetaGraph),
   );
+}
+
+const SAFE_PARANET_ID = /^[\w.:-]+$/;
+
+/**
+ * Resolve a KC's UAL from the _meta graph by its batchId.
+ * Uses String(batchId) to avoid Number precision loss for large bigints.
+ */
+export async function resolveUalByBatchId(
+  store: TripleStore,
+  metaGraph: string,
+  batchId: bigint,
+): Promise<string | undefined> {
+  const result = await store.query(
+    `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+  return result.bindings[0]['ual'] ?? undefined;
+}
+
+/**
+ * Update the merkle root for a KC in the _meta graph after a data update.
+ * Shared between DKGPublisher (local updates) and UpdateHandler (gossip).
+ * Validates paranetId against a strict charset to prevent SPARQL injection.
+ */
+export async function updateMetaMerkleRoot(
+  store: TripleStore,
+  graphManager: GraphManager,
+  paranetId: string,
+  batchId: bigint,
+  newMerkleRoot: Uint8Array,
+): Promise<void> {
+  if (!SAFE_PARANET_ID.test(paranetId)) return;
+  const metaGraph = graphManager.metaGraphUri(paranetId);
+  const ual = await resolveUalByBatchId(store, metaGraph, batchId);
+  if (!ual) return;
+
+  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+  await store.insert([{
+    subject: ual,
+    predicate: `${DKG}merkleRoot`,
+    object: `"${toHex(newMerkleRoot)}"`,
+    graph: metaGraph,
+  }]);
 }

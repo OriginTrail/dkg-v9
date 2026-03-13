@@ -4,7 +4,7 @@ import { GraphManager } from '@dkg/storage';
 import { MockChainAdapter } from '@dkg/chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@dkg/core';
 import { generateEd25519Keypair } from '@dkg/core';
-import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex } from '../src/index.js';
+import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -720,7 +720,6 @@ describe('UpdateHandler', () => {
     expect(original.status).toBe('confirmed');
     const originalRootHex = toHex(original.merkleRoot);
 
-    // Build a separate receiver store that only has the original publish data
     const receiverStore = new OxigraphStore();
     const allQuads = await store.query(
       `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } }`,
@@ -733,7 +732,6 @@ describe('UpdateHandler', () => {
     }
     const receiverHandler = new UpdateHandler(receiverStore, chain, new TypedEventBus());
 
-    // Verify the receiver store has the original merkle root before update
     const preResult = await receiverStore.query(
       `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
@@ -743,7 +741,6 @@ describe('UpdateHandler', () => {
       expect(preResult.bindings[0]['root']).toContain(originalRootHex);
     }
 
-    // Build update quads and gossip message (without running publisher.update on receiver)
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via gossip"')];
     const updateResult = await publisher.update(original.kcId, {
       paranetId: PARANET,
@@ -773,5 +770,50 @@ describe('UpdateHandler', () => {
       expect(newRootResult.bindings[0]['root']).toContain(newRootHex);
       expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
     }
+  });
+
+  it('updateMetaMerkleRoot rejects paranetId with SPARQL-injection characters', async () => {
+    const DKG = 'http://dkg.io/ontology/';
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"SafeData"')],
+    });
+    const originalRootHex = toHex(original.merkleRoot);
+
+    const maliciousIds = ['test> } DELETE WHERE { ?s ?p ?o', 'foo"bar', 'test<injection'];
+    const fakeRoot = new Uint8Array(32).fill(0xff);
+    const gm = new GraphManager(store);
+
+    for (const bad of maliciousIds) {
+      await updateMetaMerkleRoot(store, gm, bad, original.kcId, fakeRoot);
+    }
+
+    const rootAfter = await store.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(rootAfter.type).toBe('bindings');
+    if (rootAfter.type === 'bindings') {
+      expect(rootAfter.bindings.length).toBe(1);
+      expect(rootAfter.bindings[0]['root']).toContain(originalRootHex);
+    }
+  });
+
+  it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const gm = new GraphManager(store);
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"BigIntTest"')],
+    });
+
+    const ual = await resolveUalByBatchId(store, META_GRAPH, original.kcId);
+    expect(ual).toBeDefined();
+    expect(ual).toContain('did:dkg:');
+
+    const noMatch = await resolveUalByBatchId(store, META_GRAPH, 999999n);
+    expect(noMatch).toBeUndefined();
   });
 });

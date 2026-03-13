@@ -12,7 +12,7 @@
 1. [Node Boot Sequence](#1-node-boot-sequence)
 2. [Publish Operation](#2-publish-operation)
    - 2.1 [Standard Publish Flow](#21-standard-publish-flow)
-   - 2.2 [Workspace + Enshrine Flow (Deferred Publish)](#22-workspace--enshrine-flow-deferred-publish)
+   - 2.2 [Workspace + Enshrine Flow](#22-workspace--enshrine-flow)
    - 2.3 [Context Graph Publish Flow](#23-context-graph-publish-flow)
    - 2.4 [Publish Flow Comparison](#24-publish-flow-comparison)
    - 2.5 [Signature Types](#25-signature-types)
@@ -245,7 +245,7 @@ sequenceDiagram
 > way to know when all peers have finalized, and waiting would add unbounded
 > latency for no additional guarantee.
 
-### 2.2 Workspace + Enshrine Flow (Deferred Publish)
+### 2.2 Workspace + Enshrine Flow
 
 This is the same protocol as standard publish, but split into two user-controlled
 phases: **stage now, publish later.** The workspace is used for collaborative

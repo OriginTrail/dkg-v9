@@ -46,11 +46,12 @@ export class ProtocolRouter {
     this.node.libp2p.unhandle(protocolId);
   }
 
+  /** Default timeout for protocol requests. Sync over relay may need longer; callers can pass a higher value. */
   async send(
     peerIdStr: string,
     protocolId: string,
     data: Uint8Array,
-    timeoutMs = 10_000,
+    timeoutMs = 20_000,
   ): Promise<Uint8Array> {
     const libp2p = this.node.libp2p;
     const { peerIdFromString } = await import('@libp2p/peer-id');
@@ -86,7 +87,9 @@ export class ProtocolRouter {
           || msg.includes('stream returned in closed state')
           || msg.includes('econnreset') || msg.includes('etimedout')
           || msg.includes('econnrefused') || msg.includes('epipe')
-          || msg.includes('aborted') || msg.includes('no valid addresses');
+          || msg.includes('aborted') || msg.includes('no valid addresses')
+          || msg.includes('protocol selection failed')
+          || msg.includes('could not negotiate');
         if (!recoverable || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
         await new Promise(r => setTimeout(r, backoff));

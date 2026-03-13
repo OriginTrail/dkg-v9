@@ -484,7 +484,10 @@ export class OriginTrailGameCoordinator {
         // stale graph memberships resurrecting players who already left.
         // Gate on the local (post-rank-check) status so stale graph data
         // cannot mutate the player list of a traveling/finished swarm.
-        if (existingSwarm.status === 'recruiting' && players.length > 0) {
+        const canReconcileRoster =
+          existingSwarm.status === 'recruiting'
+          || (existingSwarm.status === 'traveling' && existingSwarm.currentTurn <= 1 && existingSwarm.turnHistory.length === 0);
+        if (canReconcileRoster && players.length > 0) {
           const existingByPeerId = new Map(existingSwarm.players.map((p) => [p.peerId, p]));
           for (const graphPlayer of players) {
             const local = existingByPeerId.get(graphPlayer.peerId);
@@ -510,11 +513,13 @@ export class OriginTrailGameCoordinator {
               changed = true;
             }
           }
-          const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
-          const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
-          if (needsReorder) {
-            existingSwarm.players = sortedPlayers;
-            changed = true;
+          if (existingSwarm.status === 'recruiting') {
+            const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
+            const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
+            if (needsReorder) {
+              existingSwarm.players = sortedPlayers;
+              changed = true;
+            }
           }
         }
 
@@ -1424,6 +1429,10 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
+    if (msg.partyOrder && !this.isValidPartyOrder(msg.partyOrder, swarm)) {
+      // If join gossip was delayed, allow launch payload to fill missing members.
+      this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
+    }
     if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
       swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
     } else {
@@ -1450,6 +1459,25 @@ export class OriginTrailGameCoordinator {
     if (partyOrder.length !== currentPeerIds.size) return false;
     if (new Set(partyOrder).size !== partyOrder.length) return false;
     return partyOrder.every(pid => currentPeerIds.has(pid));
+  }
+
+  private backfillPlayersFromPartyOrder(swarm: SwarmState, partyOrder: string[], joinedAt: number): void {
+    const existingPeerIds = new Set(swarm.players.map(p => p.peerId));
+    let added = 0;
+    for (const peerId of partyOrder) {
+      if (existingPeerIds.has(peerId)) continue;
+      swarm.players.push({
+        peerId,
+        displayName: peerId.slice(0, 8),
+        joinedAt,
+        isLeader: peerId === swarm.leaderPeerId,
+      });
+      existingPeerIds.add(peerId);
+      added++;
+    }
+    if (added > 0) {
+      this.log(`Backfilled ${added} missing swarm member(s) from launch partyOrder for ${swarm.id}`);
+    }
   }
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {

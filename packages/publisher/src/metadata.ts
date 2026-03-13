@@ -41,6 +41,14 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
+function assertSafeParanetIdForSparql(paranetId: string): void {
+  // Reject characters that can break GRAPH <...> IRI delimiters and enable injection.
+  // Keep "/" allowed because existing paranets may use path-like IDs.
+  if (/[<>"{}|^`\\\s]/.test(paranetId)) {
+    throw new Error(`Unsafe paranetId for SPARQL graph IRI: "${paranetId}"`);
+  }
+}
+
 /**
  * Generate RDF metadata triples for a Knowledge Collection.
  * These go into the paranet's meta graph.
@@ -274,8 +282,6 @@ export function generateOwnershipQuads(
   );
 }
 
-const SAFE_PARANET_ID = /^[\w.:-]+$/;
-
 /**
  * Resolve a KC's UAL from the _meta graph by its batchId.
  * Uses String(batchId) to avoid Number precision loss for large bigints.
@@ -295,7 +301,6 @@ export async function resolveUalByBatchId(
 /**
  * Update the merkle root for a KC in the _meta graph after a data update.
  * Shared between DKGPublisher (local updates) and UpdateHandler (gossip).
- * Validates paranetId against a strict charset to prevent SPARQL injection.
  */
 export async function updateMetaMerkleRoot(
   store: TripleStore,
@@ -304,7 +309,7 @@ export async function updateMetaMerkleRoot(
   batchId: bigint,
   newMerkleRoot: Uint8Array,
 ): Promise<void> {
-  if (!SAFE_PARANET_ID.test(paranetId)) return;
+  assertSafeParanetIdForSparql(paranetId);
   const metaGraph = graphManager.metaGraphUri(paranetId);
   const ual = await resolveUalByBatchId(store, metaGraph, batchId);
   if (!ual) return;

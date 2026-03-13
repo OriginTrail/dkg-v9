@@ -772,7 +772,7 @@ describe('UpdateHandler', () => {
     }
   });
 
-  it('updateMetaMerkleRoot rejects paranetId with SPARQL-injection characters', async () => {
+  it('updateMetaMerkleRoot fails loudly for unsafe paranetId values', async () => {
     const DKG = 'http://dkg.io/ontology/';
     const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
 
@@ -787,7 +787,9 @@ describe('UpdateHandler', () => {
     const gm = new GraphManager(store);
 
     for (const bad of maliciousIds) {
-      await updateMetaMerkleRoot(store, gm, bad, original.kcId, fakeRoot);
+      await expect(
+        updateMetaMerkleRoot(store, gm, bad, original.kcId, fakeRoot),
+      ).rejects.toThrow('Unsafe paranetId for SPARQL graph IRI');
     }
 
     const rootAfter = await store.query(

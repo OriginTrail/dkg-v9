@@ -1658,13 +1658,13 @@ describe('@unit Paranet', () => {
       // Initiate multiplier update
       const secondMultiplier = ethers.parseUnits('2', 12); // 2 NEURO per 1 TRAC
       const expectedDelay = 7 * 24 * 3600;
-      const tx = await incentivesPool
+      const updateTx = await incentivesPool
         .connect(registrarSigner)
         .initiateTokenEmissionMultiplierUpdate(secondMultiplier);
-      const receipt = await tx.wait();
-      const block = await hre.ethers.provider.getBlock(receipt!.blockNumber);
+      const updateReceipt = await updateTx.wait();
+      const block = await hre.ethers.provider.getBlock(updateReceipt!.blockNumber);
       const expectedEffectiveDate = block!.timestamp + expectedDelay;
-      await expect(tx)
+      await expect(updateTx)
         .to.emit(incentivesPool, 'TokenEmissionMultiplierUpdateInitiated')
         .withArgs(
           initialEmissionMultiplier,

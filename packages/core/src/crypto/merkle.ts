@@ -59,7 +59,7 @@ export class MerkleTree {
   }
 
   proof(leafIndex: number): Uint8Array[] {
-    if (leafIndex < 0 || leafIndex >= this.layers[0].length) {
+    if (leafIndex < 0 || leafIndex >= this._originalLeafCount) {
       throw new RangeError(`Leaf index ${leafIndex} out of range`);
     }
 

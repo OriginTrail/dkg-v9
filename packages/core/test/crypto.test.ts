@@ -64,6 +64,17 @@ describe('MerkleTree', () => {
     expect(tree.root).toHaveLength(32);
   });
 
+  it('proof() rejects index at padding boundary for odd-leaf trees', () => {
+    const leaves = ['a', 'b', 'c'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(3);
+    // Index 0-2 are valid, index 3 is the synthetic duplicate padding leaf
+    expect(() => tree.proof(2)).not.toThrow();
+    expect(() => tree.proof(3)).toThrow(RangeError);
+  });
+
   it('leafCount returns original count, not padded (odd leaves)', () => {
     const leaves = ['a', 'b', 'c', 'd', 'e'].map(s =>
       sha256(new TextEncoder().encode(s)),

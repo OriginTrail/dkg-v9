@@ -222,7 +222,7 @@ sequenceDiagram
         Peers->>Store: Delete quads from workspace graph
         Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
 
-        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent fallback)
+        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent, parallel)
         Peers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
         Peers->>Peers: Match event kcMerkleRoot against workspace data
         Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
@@ -241,7 +241,7 @@ sequenceDiagram
 > on-chain transaction confirms (Phase 6–7). It does NOT wait for peers to
 > finalize. This is intentional: the chain confirmation is the source of truth.
 > Peer finalization is an eventually-consistent replication step — peers will
-> catch up via gossip (fast) or chain polling (fallback). The publisher has no
+> catch up via either mechanism (gossip or chain polling). The publisher has no
 > way to know when all peers have finalized, and waiting would add unbounded
 > latency for no additional guarantee.
 
@@ -367,7 +367,7 @@ sequenceDiagram
         Peers->>Store: Delete quads from workspace graph
         Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
 
-        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent fallback)
+        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent, parallel)
         Peers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
         Peers->>Peers: Match event kcMerkleRoot against workspace data
         Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
@@ -405,8 +405,12 @@ signatures). If either set of signatures is insufficient, nothing is published.
 - Participants are registered on-chain at context graph creation with an M-of-N
   threshold. The protocol's `minimumRequiredSignatures` does NOT apply — each
   context graph defines its own requirements.
-- Data is gossip-replicated to ALL paranet peers (for availability), but only
-  lands in the context graph URI after the atomic chain tx succeeds.
+- Data is gossip-replicated to **paranet peers only** (for availability), but
+  only lands in the context graph URI after the atomic chain tx succeeds.
+- **Context graph participants are a governance role**, not a storage role. They
+  may or may not be paranet peers. Participants who are also paranet peers
+  receive data via gossip; participants who are not (e.g., edge nodes) only
+  participate in the signing step through the application coordination mechanism.
 - **Receiver signatures** (replication proof) and **participant signatures**
   (governance consent) are collected in parallel before the chain tx.
 
@@ -455,9 +459,8 @@ sequenceDiagram
     Agent->>GS: publish(paranetPublishTopic, PublishRequest)
     Note over GS: Message contains:<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
     GS-->>ParaPeers: PublishRequest (relayed through mesh)
-    GS-->>CGPeers: PublishRequest (participants are also paranet peers)
     ParaPeers->>ParaPeers: Validate + store in workspace graph
-    CGPeers->>CGPeers: Validate + store in workspace graph
+    Note over CGPeers: Participants are a governance role, not a storage role.<br/>They may or may not be paranet peers.<br/>If they are paranet peers, they receive data via gossip.<br/>If not, they only verify and sign via the app coordination<br/>mechanism in Phase 5b — they do NOT store the data.
 
     rect rgb(232, 245, 233)
         Note over Agent,ParaPeers: Phase 5a — Collect receiver attestations (from any paranet peer)
@@ -477,13 +480,17 @@ sequenceDiagram
     rect rgb(255, 243, 224)
         Note over App,CGPeers: Phase 5b — Collect participant signatures (governance)
 
+        Note over App: ⚠ OPEN QUESTION (OQ-21): Who collects participant signatures?<br/>Current diagram shows the App collecting and passing to Agent.<br/>Alternative: Agent collects internally via callback or protocol.<br/>See Open Questions section.
+
         Note over App: Application-defined coordination mechanism<br/>(e.g., game turn proposal/approval, voting protocol, manual review)
+        Note over CGPeers: Participants verify the proposed data via the app mechanism.<br/>If they are also paranet peers, they may verify against their workspace.<br/>If not, the app provides the data or a summary for review.
 
         CGPeers->>CGPeers: Verify data matches proposal
         CGPeers->>CGPeers: Sign keccak256(contextGraphId, kcMerkleRoot)
         CGPeers-->>App: Participant signature {identityId, r, vs}
 
         App->>App: Collect M-of-N participant signatures
+        App->>Agent: Pass participantSignatures[] to Agent
         Note over App: If < M participants sign → publish fails entirely<br/>(no orphaned data in paranet)
     end
 
@@ -498,6 +505,7 @@ sequenceDiagram
     end
 
     Note over Agent,Store: Phase 7 — Promote workspace → context graph (publisher side)
+    Note over Agent,Store: ⚠ OPEN QUESTION (OQ-22): Should data also live in the<br/>paranet data graph, or ONLY in the context graph URI?
 
     Agent->>Store: Copy quads: workspace → context graph data URI
     Agent->>Store: Delete quads from workspace graph
@@ -533,7 +541,7 @@ sequenceDiagram
         ParaPeers->>Store: Delete quads from workspace graph
         ParaPeers->>Store: insert(confirmed metadata + chain provenance → context graph meta)
 
-        Note over ParaPeers,Chain: Mechanism B — ChainEventPoller (independent fallback)
+        Note over ParaPeers,Chain: Mechanism B — ChainEventPoller (independent, parallel)
         ParaPeers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
         ParaPeers->>ParaPeers: Match event kcMerkleRoot against workspace data
         ParaPeers->>ParaPeers: Recompute kcMerkleRoot from workspace quads, verify match
@@ -550,8 +558,15 @@ sequenceDiagram
 
 #### How participant signature collection works
 
-The protocol provides the **signing primitive** but NOT the coordination mechanism.
-How participants learn about the proposal and decide to sign is application-specific:
+For **receiver signatures**, the protocol handles the full coordination:
+gossip disseminates data, peers verify and sign, peers dial back via
+`/dkg/attest/1.0.0`. No application involvement needed.
+
+For **participant signatures**, the coordination mechanism is an open design
+question (see OQ-21). Participants who are also paranet peers receive data
+via gossip and can sign through the protocol. Participants who are not
+paranet peers need an application-level mechanism to learn about the proposal.
+Examples of how applications might coordinate participant signing:
 
 | Application | Coordination mechanism | Timing |
 |-------------|----------------------|--------|
@@ -559,8 +574,8 @@ How participants learn about the proposal and decide to sign is application-spec
 | **Manual curation** | Dashboard shows pending proposals; curators sign via UI | Asynchronous, human-in-the-loop |
 | **Automated pipeline** | Service monitors workspace writes; auto-signs if validation passes | Event-driven, immediate |
 
-The protocol only requires: M-of-N valid signatures over `keccak256(contextGraphId, kcMerkleRoot)`,
-collected before the chain tx. How they're collected is up to the application.
+The protocol requires: M-of-N valid signatures over `keccak256(contextGraphId, kcMerkleRoot)`,
+collected before the chain tx.
 
 #### What if participant signatures are insufficient?
 
@@ -614,10 +629,17 @@ verified by different on-chain logic.
 
 ## 3. Chain Event Confirmation
 
-Receiver nodes use the ChainEventPoller as a **fallback confirmation mechanism**.
-The primary path is the publisher gossip in Phase 8/9 (Section 2.1), where the
-publisher broadcasts chain proof and peers verify on-chain + promote. The poller
-independently catches events missed due to gossip failures or node restarts.
+Receiver nodes use two **independent, parallel mechanisms** to confirm that a
+publish has landed on-chain and trigger workspace → data graph promotion:
+
+1. **Publisher gossip (Phase 8/9):** The publisher broadcasts chain proof via
+   GossipSub after the on-chain tx confirms. Peers verify on-chain and promote.
+2. **ChainEventPoller:** Each node independently polls the chain for
+   `KnowledgeBatchCreated` events and matches them against workspace data.
+
+Neither mechanism is primary or fallback — they run in parallel and whichever
+fires first wins. The second is a no-op (dedup by UAL). This gives the network
+two independent paths to finalization: one peer-to-peer, one chain-direct.
 
 Both paths dedup by **UAL** (not by kcMerkleRoot) — checking whether
 `<ual> dkg:status "confirmed"` already exists in the meta graph. This is
@@ -1223,6 +1245,8 @@ deferred until the update flow is redesigned.
 | OQ-18 | **`publisherPeerId` ↔ `publisherAddress` relationship not documented.** Gossip uses peerId (libp2p identity), chain uses address (Ethereum). How does one resolve to the other? Via the identity contract? This mapping is central to the protocol but never explained. | Throughout |
 | OQ-13 | **`/dkg/query/2.0.0` registered but queries are documented as "LOCAL ONLY."** Is remote query a planned future feature, or should the handler be removed from the boot sequence? | Section 1 vs Section 5 |
 | OQ-20 | **Workspace conflict resolution undefined.** Creator-only upsert handles single-owner entities, but what about two publishers writing overlapping (non-identical) entities? Is this prevented by validation rules, or is it a race condition? | Section 2.2, Section 12.2 W1 |
+| OQ-21 | **Who collects participant signatures — the App or the DKG Agent?** The current diagram shows the App/Game Coordinator collecting M-of-N participant signatures and passing them to the Agent. But this means the App must somehow halt/resume the publish flow mid-execution. Alternatives: **(a)** App provides participant signatures upfront in the `publish()` call (requires app to pre-coordinate before calling publish). **(b)** Agent exposes a callback/event that the app subscribes to (agent pauses, app collects, agent resumes). **(c)** Agent collects internally via a protocol (but how does it know the app-specific coordination mechanism?). Each has trade-offs for API design and flow control. | Section 2.3 Phase 5b |
+| OQ-22 | **Should context graph data also live in the paranet data graph?** Currently, data published to a context graph lands ONLY at `did:dkg:paranet:{id}/context/{ctxId}`, NOT in the paranet data graph. This means paranet-scoped queries won't find context graph data. Options: **(a)** Context graph only (current) — clean separation, but requires explicit context graph queries. **(b)** Both graphs — data is queryable from either scope, but creates duplication. **(c)** Paranet graph with a context graph link — data in paranet, metadata links it to the context graph. | Section 2.3 Phase 7 |
 
 ### Known Issues (not blocking, tracked for future work)
 

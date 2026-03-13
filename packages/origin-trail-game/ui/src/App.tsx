@@ -484,9 +484,11 @@ export function App() {
       setSwarm(data);
       setError('');
     } catch (e: any) {
-      if (e.message?.includes('not found') || e.message?.includes('404')) {
+      if (e.status === 404) {
         setSwarm(null);
         setView('lobby');
+      } else {
+        setError(e.message);
       }
     }
   }, []);
@@ -732,7 +734,7 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
   const doVote = async (action: string, params?: Record<string, any>) => {
     try { onVoted(await api.vote(swarm.id, action, params)); }
     catch (e: any) {
-      if (e.message?.includes('not traveling') || e.message?.includes('not found')) return;
+      if (e.status === 400 || e.status === 404) return;
       onError(e.message);
     }
   };
@@ -767,7 +769,7 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
         <button className="ot-secondary" onClick={async () => {
           try { onVoted(await api.forceResolve(swarm.id)); }
           catch (e: any) {
-            if (e.message?.includes('not traveling') || e.message?.includes('not found')) return;
+            if (e.status === 400 || e.status === 404) return;
             onError(e.message);
           }
         }}>Force Resolve Turn</button>

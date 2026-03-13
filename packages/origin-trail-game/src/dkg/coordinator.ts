@@ -222,6 +222,7 @@ export class OriginTrailGameCoordinator {
   private graphSyncInFlight = false;
   private graphSyncLastErrorLogAt = 0;
   private lastTurnResolvedAt = new Map<string, number>();
+  private proposalInFlight = new Set<string>();
   private static readonly MIN_TURN_INTERVAL_MS = 4_000;
   private graphSyncLastPlayerCount: number | null = null;
   private graphSyncLastSwarmCount: number | null = null;
@@ -667,6 +668,7 @@ export class OriginTrailGameCoordinator {
       this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
       this.workspaceOps.delete(swarmId);
+      this.lastTurnResolvedAt.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
@@ -867,14 +869,21 @@ export class OriginTrailGameCoordinator {
   // ── Turn resolution (GM only) ────────────────────────────────────
 
   private async debouncedProposeTurnResolution(swarm: SwarmState): Promise<void> {
-    const lastResolved = this.lastTurnResolvedAt.get(swarm.id) ?? 0;
-    const elapsed = Date.now() - lastResolved;
-    if (elapsed < OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS) {
-      const delay = OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS - elapsed;
-      await new Promise(resolve => setTimeout(resolve, delay));
-      if (swarm.status !== 'traveling' || !this.allAliveVoted(swarm)) return;
+    const key = `${swarm.id}:${swarm.currentTurn}`;
+    if (this.proposalInFlight.has(key) || swarm.pendingProposal?.turn === swarm.currentTurn) return;
+    this.proposalInFlight.add(key);
+    try {
+      const lastResolved = this.lastTurnResolvedAt.get(swarm.id) ?? 0;
+      const elapsed = Date.now() - lastResolved;
+      if (elapsed < OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS) {
+        const delay = OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS - elapsed;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        if (swarm.status !== 'traveling' || !this.allAliveVoted(swarm)) return;
+      }
+      await this.proposeTurnResolution(swarm);
+    } finally {
+      this.proposalInFlight.delete(key);
     }
-    await this.proposeTurnResolution(swarm);
   }
 
   private async proposeTurnResolution(swarm: SwarmState): Promise<void> {
@@ -1417,6 +1426,7 @@ export class OriginTrailGameCoordinator {
       });
       this.swarms.delete(msg.swarmId);
       this.workspaceOps.delete(msg.swarmId);
+      this.lastTurnResolvedAt.delete(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);

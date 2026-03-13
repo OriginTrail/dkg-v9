@@ -16,7 +16,11 @@ async function request(method: string, path: string, body?: unknown) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) {
+    const err = new Error(data.error || 'Request failed') as Error & { status: number };
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 

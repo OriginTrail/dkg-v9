@@ -27,6 +27,7 @@ dkg start -f  # Start your node (foreground)
 ```
 fsdgjsfdlk
 fdsfg
+gfdjslig
 
 In another terminal:
 

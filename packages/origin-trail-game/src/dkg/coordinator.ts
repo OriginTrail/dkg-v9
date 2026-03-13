@@ -869,8 +869,9 @@ export class OriginTrailGameCoordinator {
   // ── Turn resolution (GM only) ────────────────────────────────────
 
   private async debouncedProposeTurnResolution(swarm: SwarmState): Promise<void> {
-    const key = `${swarm.id}:${swarm.currentTurn}`;
-    if (this.proposalInFlight.has(key) || swarm.pendingProposal?.turn === swarm.currentTurn) return;
+    const scheduledTurn = swarm.currentTurn;
+    const key = `${swarm.id}:${scheduledTurn}`;
+    if (this.proposalInFlight.has(key) || swarm.pendingProposal?.turn === scheduledTurn) return;
     this.proposalInFlight.add(key);
     try {
       const lastResolved = this.lastTurnResolvedAt.get(swarm.id) ?? 0;
@@ -878,8 +879,8 @@ export class OriginTrailGameCoordinator {
       if (elapsed < OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS) {
         const delay = OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS - elapsed;
         await new Promise(resolve => setTimeout(resolve, delay));
-        if (swarm.status !== 'traveling' || !this.allAliveVoted(swarm)) return;
       }
+      if (swarm.currentTurn !== scheduledTurn || swarm.status !== 'traveling' || !this.allAliveVoted(swarm) || swarm.pendingProposal) return;
       await this.proposeTurnResolution(swarm);
     } finally {
       this.proposalInFlight.delete(key);

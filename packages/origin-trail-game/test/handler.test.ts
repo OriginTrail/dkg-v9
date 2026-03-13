@@ -355,6 +355,96 @@ describe('OriginTrail Game API handler', () => {
     expect(swarm!.gameState!.party).toHaveLength(3);
   });
 
+  it('onRemoteExpeditionLaunched backfills missing players from partyOrder', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+
+    const leaderPeerId = 'leader-backfill';
+    const followerAgent = makeMockAgent('follower-backfill');
+    followerAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-backfill' });
+
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch-backfill/app');
+    const handle = handlers![0];
+
+    // Follower only sees swarm:created; join gossip is intentionally missing.
+    handle('dkg/paranet/test-remote-launch-backfill/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-backfill',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Backfill Test', playerName: 'Leader', maxPlayers: 3,
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gs = engine.createGame(['Leader', 'P2', 'P3'], leaderPeerId);
+    const launchMsg = encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-backfill',
+      peerId: leaderPeerId, timestamp: Date.now(),
+      gameStateJson: JSON.stringify(gs),
+      partyOrder: [leaderPeerId, 'p2-missed-join', 'p3-missed-join'],
+    });
+
+    const beforeWrites = followerAgent._workspaceWrites.length;
+    handle('dkg/paranet/test-remote-launch-backfill/app', launchMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
+    const swarm = coordinator.getSwarm('swarm-backfill');
+    expect(swarm).not.toBeNull();
+    expect(swarm!.status).toBe('traveling');
+    expect(swarm!.players.map(p => p.peerId)).toEqual([leaderPeerId, 'p2-missed-join', 'p3-missed-join']);
+    expect(swarm!.players.map(p => p.peerId).sort()).toEqual([leaderPeerId, 'p2-missed-join', 'p3-missed-join'].sort());
+    expect(swarm!.playerIndexMap.get('p2-missed-join')).toBe(1);
+    expect(swarm!.playerIndexMap.get('p3-missed-join')).toBe(2);
+  });
+
+  it('onRemoteExpeditionLaunched ignores malformed partyOrder that would drop known members', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+
+    const leaderPeerId = 'leader-malformed';
+    const followerAgent = makeMockAgent('follower-malformed');
+    followerAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-malformed' });
+
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch-malformed/app');
+    const handle = handlers![0];
+
+    // Local node knows leader + p2 from gossip before launch.
+    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-malformed',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Malformed PartyOrder', playerName: 'Leader', maxPlayers: 3,
+    }), leaderPeerId);
+    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-malformed',
+      peerId: 'p2-known', timestamp: Date.now(), playerName: 'P2',
+    }), 'p2-known');
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gs = engine.createGame(['Leader', 'P2'], leaderPeerId);
+    const launchMsg = encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-malformed',
+      peerId: leaderPeerId, timestamp: Date.now(),
+      gameStateJson: JSON.stringify(gs),
+      // Malformed: drops known p2-known and introduces unrelated peer id.
+      partyOrder: [leaderPeerId, 'intruder-peer'],
+    });
+
+    handle('dkg/paranet/test-remote-launch-malformed/app', launchMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const swarm = coordinator.getSwarm('swarm-malformed');
+    expect(swarm).not.toBeNull();
+    expect(swarm!.status).toBe('traveling');
+    expect(swarm!.players.map(p => p.peerId)).toEqual([leaderPeerId, 'p2-known']);
+    expect(swarm!.players.some(p => p.peerId === 'intruder-peer')).toBe(false);
+    // Falls back to local order because partyOrder is rejected.
+    expect(swarm!.playerIndexMap.get(leaderPeerId)).toBe(0);
+    expect(swarm!.playerIndexMap.get('p2-known')).toBe(1);
+  });
+
   it('GET /players returns registered players from the graph', async () => {
     const playerAgent = makeMockAgent('player-peer');
     playerAgent.query = async () => ({
@@ -1644,10 +1734,20 @@ describe('Graph-based lobby sync', () => {
     expect(swarm).toBeTruthy();
     expect(swarm!.status).toBe('recruiting');
 
-    // Simulate expedition launch advancing the swarm to traveling
+    // Simulate a later traveling phase (past launch reconciliation window)
     swarm!.status = 'traveling';
     swarm!.gameState = { sessionId: 'test', status: 'active', party: [], month: 1, epochs: 0 } as any;
-    swarm!.currentTurn = 1;
+    swarm!.currentTurn = 2;
+    swarm!.turnHistory.push({
+      turn: 1,
+      winningAction: 'advance',
+      resultMessage: 'ok',
+      approvers: ['leader-peer', 'peer-b'],
+      votes: [{ peerId: 'leader-peer', action: 'advance' }, { peerId: 'peer-b', action: 'advance' }],
+      resolution: 'consensus',
+      deaths: [],
+      timestamp: now + 100,
+    });
     const rosterSnapshot = swarm!.players.map(p => p.peerId);
 
     // Graph sync runs again — graph still says 'recruiting' with a new stale member
@@ -1658,6 +1758,62 @@ describe('Graph-based lobby sync', () => {
     expect(swarm!.status).toBe('traveling');
     // Roster must NOT be mutated by stale graph data for a traveling swarm
     expect(swarm!.players.map(p => p.peerId)).toEqual(rosterSnapshot);
+    coordinator.destroy();
+  });
+
+  it('graph sync can add missing players during launch window for traveling swarm', async () => {
+    const syncAgent = makeMockAgent('leader-peer');
+    const now = Date.now();
+    let includeLatePlayer = false;
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-launch-window',
+            name: '"Launch Window Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+            maxPlayers: '"3"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        const bindings = [
+          { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+          { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"', joinedAt: `"${now + 10}"` },
+        ];
+        if (includeLatePlayer) {
+          bindings.push({ agent: 'https://origintrail-game.dkg.io/player/peer-c', displayName: '"C"', joinedAt: `"${now + 20}"` });
+        }
+        return { bindings };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    await (coordinator as any).loadLobbyFromGraph();
+    const swarm = coordinator.getSwarm('swarm-launch-window');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['leader-peer', 'peer-b']);
+
+    // Launch window: swarm started, but still turn 1 with no turn history.
+    swarm!.status = 'traveling';
+    swarm!.currentTurn = 1;
+    swarm!.gameState = { sessionId: 'launch-window', status: 'active', party: [], month: 1, epochs: 0 } as any;
+    swarm!.playerIndexMap = new Map([
+      ['leader-peer', 0],
+      ['peer-c', 1],
+      ['peer-b', 2],
+    ]);
+
+    includeLatePlayer = true;
+    await (coordinator as any).loadLobbyFromGraph();
+
+    expect(swarm!.status).toBe('traveling');
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['leader-peer', 'peer-c', 'peer-b']);
     coordinator.destroy();
   });
 

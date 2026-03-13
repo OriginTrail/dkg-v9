@@ -490,6 +490,14 @@ export function App() {
   }, [view, refreshLobby]);
 
   useEffect(() => {
+    if (view !== 'lobby') return;
+    const interval = setInterval(() => {
+      void refreshLobby();
+    }, 4_000);
+    return () => clearInterval(interval);
+  }, [view, refreshLobby]);
+
+  useEffect(() => {
     if (view !== 'swarm' || !swarm) return;
     const interval = setInterval(() => refreshSwarm(swarm.id), 3000);
     return () => clearInterval(interval);

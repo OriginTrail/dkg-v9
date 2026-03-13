@@ -484,12 +484,12 @@ export function App() {
       const data = await api.lobby();
       setLobby(data);
       if (data.mySwarms?.length === 1 && !autoNavigatedRef.current) {
-        autoNavigatedRef.current = true;
         try {
           const fresh = await api.swarm(data.mySwarms[0].id);
+          autoNavigatedRef.current = true;
           setSwarm(fresh);
           setView('swarm');
-        } catch { /* swarm fetch failed, stay on lobby */ }
+        } catch { /* swarm fetch failed, retry on next poll */ }
       }
     } catch (e: any) { setError(e.message); }
   }, []);

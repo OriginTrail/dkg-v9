@@ -1,8 +1,17 @@
+```
+██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗
+██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██║     ██║╚══███╔╝██╔════╝██╔══██╗
+██║  ██║█████╗  ██║     █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     ██║  ███╔╝ █████╗  ██║  ██║
+██║  ██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██║ ███╔╝  ██╔══╝  ██║  ██║
+██████╔╝███████╗╚██████╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║███████╗██║███████╗███████╗██████╔╝
+╚═════╝ ╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═════╝
+```
+
 # DKG V9 - Decentralized Knowledge Graph
 
-[![Build Passing](https://img.shields.io/github/actions/workflow/status/OriginTrail/dkg-v9/ci.yml?branch=main&label=Build%20Passing)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
-[![Release Version](https://img.shields.io/github/v/release/OriginTrail/dkg-v9?label=Release%20version)](https://github.com/OriginTrail/dkg-v9/releases)
-[![License](https://img.shields.io/github/license/OriginTrail/dkg-v9?label=License)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
+[![Build Passing](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
+[![Release Version](https://img.shields.io/badge/Release-latest-2ea44f)](https://github.com/OriginTrail/dkg-v9/releases)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
 Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF knowledge, query shared context, discover peers, exchange encrypted messages, and coordinate across topic-specific paranets.

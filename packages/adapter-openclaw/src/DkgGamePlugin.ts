@@ -658,7 +658,8 @@ export function parseActionResponse(text: string): { action: ActionType; params?
         const itemMatch = text.match(/(trainingTokens|apiCredits|computeUnits|modelWeights)/i);
         const qtyMatch = text.match(/quantity\s*[=:]?\s*(\d+)/i);
         if (itemMatch) {
-          const item = canonicalizeTradeItem(itemMatch[1]) ?? itemMatch[1];
+          const item = canonicalizeTradeItem(itemMatch[1]);
+          if (!item) continue; // unrecognized item — skip trade, try next action
           const quantity = qtyMatch ? Math.max(1, parseInt(qtyMatch[1], 10)) : 1;
           return { action: 'trade', params: { item, quantity } };
         }
@@ -692,6 +693,7 @@ export class DkgGamePlugin {
   private watchTimer: ReturnType<typeof setInterval> | null = null;
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private watchState: { swarmId: string; mode: 'wait-for-start' | 'wait-for-full' } | null = null;
+  private watchEpoch = 0;
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -760,12 +762,13 @@ export class DkgGamePlugin {
     if (this.gameService?.isRunning) return; // Already playing
     this.stopWatch(); // Single watcher policy
 
+    const epoch = ++this.watchEpoch;
     this.watchState = { swarmId, mode };
     const intervalMs = this.config.watchIntervalMs ?? 5_000;
     const timeoutMs = this.config.watchTimeoutMs ?? 600_000;
 
     this.watchTimer = setInterval(() => {
-      void this.watchTick().catch(err => {
+      void this.watchTick(epoch).catch(err => {
         this.api?.logger.warn?.(`[dkg-game] Watch tick error: ${err.message}`);
       });
     }, intervalMs);
@@ -792,8 +795,8 @@ export class DkgGamePlugin {
     }
   }
 
-  private async watchTick(): Promise<void> {
-    if (!this.watchState || !this.gameClient) return;
+  private async watchTick(epoch: number): Promise<void> {
+    if (epoch !== this.watchEpoch || !this.watchState || !this.gameClient) return;
     const { swarmId, mode } = this.watchState;
 
     let state: SwarmState;
@@ -836,8 +839,12 @@ export class DkgGamePlugin {
             await this.tryAutoEngage(swarmId);
             return;
           }
-        } catch { /* ignore recheck failure */ }
-        this.stopWatch();
+          if (recheck.status === 'finished') {
+            this.stopWatch();
+            return;
+          }
+          // Still recruiting — transient failure, keep watching
+        } catch { /* ignore recheck failure — keep watching */ }
       }
     }
   }

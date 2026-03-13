@@ -343,12 +343,14 @@ export class DkgChannelPlugin {
     // 1. Resolve agent route (agentId + sessionKey)
     let route: any;
     try {
-      route = runtime.channel.routing.resolveAgentRoute({
+      const resolved = runtime.channel.routing.resolveAgentRoute({
         cfg,
         channel: CHANNEL_NAME,
         accountId: 'default',
         peer: { kind: 'direct', id: identity || 'owner' },
       });
+      // Clone to avoid mutating the runtime's cached route object
+      route = { ...resolved };
       // Give non-owner identities (e.g. game-autopilot) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
@@ -539,10 +541,12 @@ export class DkgChannelPlugin {
     const sdk = this.loadSdk();
 
     // Resolve route + build context (same as processInbound)
-    const route = runtime.channel.routing.resolveAgentRoute({
+    const resolved = runtime.channel.routing.resolveAgentRoute({
       cfg, channel: CHANNEL_NAME, accountId: 'default',
       peer: { kind: 'direct', id: identity || 'owner' },
     });
+    // Clone to avoid mutating the runtime's cached route object
+    const route = { ...resolved };
     // Give non-owner identities (e.g. game-autopilot) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {

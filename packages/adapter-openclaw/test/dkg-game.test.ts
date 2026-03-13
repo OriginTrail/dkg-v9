@@ -603,6 +603,47 @@ describe('SwarmWatcher', () => {
     }
   });
 
+  it('watcher survives transient startExpedition failure', async () => {
+    const originalFetch = globalThis.fetch;
+    // Create succeeds, then startExpedition fails, then recheck shows still recruiting
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/create')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(fullSwarm) });
+      }
+      if (urlStr.includes('/start')) {
+        return Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('transient error') });
+      }
+      if (urlStr.includes('/swarm/')) {
+        callCount++;
+        // Recheck returns still recruiting (player may have left)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 100 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const createTool = api.tools.find(t => t.name === 'game_create')!;
+      await createTool.execute('test', { player_name: 'Bot', swarm_name: 'MySwarm' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Manually trigger a watchTick by accessing internals — the watcher should survive
+      // the failed startExpedition and keep watching
+      await (plugin as any).watchTick((plugin as any).watchEpoch);
+      expect(plugin.getWatchState().active).toBe(true); // Still watching!
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('game_status includes watcher state', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mockFetchForSwarm(recruitingSwarm);

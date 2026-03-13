@@ -25,7 +25,7 @@ import type {
 const require = createRequire(import.meta.url);
 
 function loadAbi(contractName: string): ethers.InterfaceAbi {
-  return require(`@dkg/evm-module/abi/${contractName}.json`);
+  return require(`@origintrail-official/dkg-evm-module/abi/${contractName}.json`);
 }
 
 const ERROR_ABI_CONTRACTS = [

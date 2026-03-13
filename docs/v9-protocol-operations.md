@@ -271,7 +271,9 @@ sequenceDiagram
     rect rgb(240, 240, 255)
         Note over Agent,Store: LOCAL: validate + store in workspace
         Agent->>Agent: autoPartition(quads) → group by rootEntity
+        Agent->>Agent: Build manifest + KA metadata
         Agent->>Agent: validatePublishRequest(quads, manifest, paranetId)
+        Note over Agent: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
         Agent->>Store: insert(quads → workspace graph)
         Agent->>Store: insert(workspace metadata → workspace_meta graph)
     end
@@ -287,51 +289,95 @@ sequenceDiagram
     App->>Agent: enshrineFromWorkspace(paranetId, selection)
 
     rect rgb(240, 240, 255)
-        Note over Agent,Store: LOCAL: read staged data from workspace
+        Note over Agent,Store: Phase 1–3 — Read staged data + compute Merkle root
+
         Agent->>Store: CONSTRUCT quads from workspace graph (by selection)
-        Agent->>Agent: Compute kcMerkleRoot + publicByteSize from workspace quads
+
+        opt privateQuads present in workspace
+            Agent->>Agent: computePrivateRoot(private quads)
+            Agent->>Agent: Add synthetic private commitment hash to leaf set
+        end
+        Agent->>Agent: Compute kcMerkleRoot (flat tree over all public triple hashes)
+        Agent->>Agent: Compute publicByteSize (canonical N-Triples encoding)
     end
 
-    Note over Agent,Peers: No pre-broadcast needed — peers already have workspace data
+    Note over Agent,Peers: Phase 4 — No data broadcast needed (peers already have workspace data)
 
     rect rgb(232, 245, 233)
-        Note over Agent,Peers: Collect receiver attestations (same peer-push mechanism)
-        Agent->>GS: publish(paranetPublishTopic, attestation request with publisherPeerId)
-        Peers->>Peers: Verify workspace data matches kcMerkleRoot
+        Note over Agent,Peers: Phase 5 — Peer-push attestation (Direct RPC)
+
+        Agent->>GS: publish(paranetPublishTopic, PublishRequest with publisherPeerId)
+        Note over GS: Message contains: kcMerkleRoot, publicByteSize,<br/>publisherPeerId (return address), operationId, deadline
+
+        Note over Peers: Each peer that received workspace data:
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads
+        Peers->>Peers: Verify kcMerkleRoot and publicByteSize match
         Peers->>Peers: Sign keccak256(kcMerkleRoot, publicByteSize)
-        Peers->>Agent: Dial back via /dkg/attest/1.0.0 with signature
-        Agent->>Agent: Collect until quorum or deadline
+        Peers->>Agent: Dial publisher's peerId via /dkg/attest/1.0.0
+        Note over Peers,Agent: Send: {operationId, identityId, signatureR, signatureVs}
+
+        Note over Agent: Publisher collects incoming attestations:
+        Agent->>Agent: Deduplicate by identityId
+        Agent->>Agent: Accumulate until quorum reached or deadline expires
+        Note over Agent: First N valid unique signatures win
     end
 
     rect rgb(232, 245, 233)
-        Note over Agent,Chain: Submit on-chain publish
+        Note over Agent,Chain: Phase 6 — Submit on-chain publish
+
         Agent->>Agent: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
         Agent->>Chain: publishKnowledgeAssets({kaCount, kcMerkleRoot, publicByteSize,<br/>tokenAmount, publisherSignature, receiverSignatures[]})
+        Note over Chain: Contract verifies publisher + receiver signatures
+        Note over Chain: Contract checks minimumRequiredSignatures threshold
         Chain-->>Agent: OnChainPublishResult {txHash, batchId, blockNumber, startKAId, endKAId}
         Note over Chain: Emits: UALRangeReserved, KnowledgeBatchCreated
     end
 
-    Note over Agent,Store: Promote workspace → data graph (publisher side)
+    Note over Agent,Store: Phase 7 — Promote workspace → data graph (publisher side)
+
     Agent->>Store: Copy quads: workspace graph → data graph
     Agent->>Store: Delete quads from workspace graph
+    Agent->>Agent: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
     Agent->>Store: insert(confirmed metadata + chain provenance → meta graph)
+    Agent->>Agent: Track ownedEntities + batch→paranet binding
 
-    Note over Agent,GS: Post-broadcast with chain proof
+    Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
+
     Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
     Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
-    Agent-->>App: PublishResult {status: confirmed}
+
+    Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
 
     rect rgb(240, 248, 255)
-        Note over Peers,Chain: Receiver-side finalization (same dual mechanism as 2.1 Phase 9)
+        Note over Peers,Chain: Phase 9 — Receiver-side finalization (two independent mechanisms)
 
-        Peers->>Store: Dedup gate: ASK { <ual> dkg:status "confirmed" }
-        Note over Peers: Mechanism A (fast): receive gossip → verify on-chain → promote
-        Note over Peers: Mechanism B (fallback): ChainEventPoller catches event → promote
-        Peers->>Chain: Verify KnowledgeBatchCreated at blockNumber
-        Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
+        Note over Peers: Dedup gate (both mechanisms)
+        Peers->>Store: ASK { <ual> dkg:status "confirmed" } in meta graph
+        alt Already confirmed
+            Peers->>Peers: Skip — already finalized (dedup by UAL)
+        end
+
+        Note over Peers,Chain: Mechanism A — Publisher gossip (fast path)
+        Peers->>Peers: Receive confirmed PublishRequest from Phase 8
+        Peers->>Chain: Verify KnowledgeBatchCreated event at specified blockNumber
+        Note over Peers,Chain: Must match ALL of: txHash, kcMerkleRoot,<br/>publisherAddress, startKAId..endKAId
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads
+        Peers->>Peers: Verify computed root matches on-chain event root
         Peers->>Store: Copy quads: workspace graph → data graph
         Peers->>Store: Delete quads from workspace graph
         Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
+
+        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent fallback)
+        Peers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
+        Peers->>Peers: Match event kcMerkleRoot against workspace data
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
+        alt Workspace data found and not yet promoted (UAL not confirmed)
+            Peers->>Store: Copy quads: workspace graph → data graph
+            Peers->>Store: Delete quads from workspace graph
+            Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
+        end
+
+        Note over Peers: Whichever mechanism fires first wins.<br/>The second is a no-op (dedup by UAL, not kcMerkleRoot).<br/>If neither fires within TTL, workspace data expires.
     end
 ```
 
@@ -379,15 +425,35 @@ sequenceDiagram
     App->>Agent: publish(paranetId, quads, {contextGraphId})
 
     rect rgb(240, 240, 255)
-        Note over Agent,Store: LOCAL: Prepare + validate + store in workspace
-        Agent->>Agent: autoPartition, validate, compute kcMerkleRoot + publicByteSize
+        Note over Agent,Store: Phases 1–3 are LOCAL to the publishing node
+
+        Note over Agent: Phase 1 — Prepare + validate
+
+        Agent->>Agent: ensureParanet(paranetId)
+        Agent->>Agent: autoPartition(quads) → group by rootEntity
+        Agent->>Agent: Build manifest + KA metadata
+        Agent->>Agent: validatePublishRequest(quads, manifest, paranetId)
+        Note over Agent: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
+
+        Note over Agent: Phase 2 — Compute Merkle roots
+
+        opt privateQuads present
+            Agent->>Agent: computePrivateRoot(private quads)
+            Agent->>Agent: Add synthetic private commitment hash to leaf set
+        end
+        Agent->>Agent: Compute kcMerkleRoot (flat tree over all public triple hashes)
+        Agent->>Agent: Compute publicByteSize (canonical N-Triples encoding)
+
+        Note over Agent,Store: Phase 3 — Store in workspace (local staging)
+
         Agent->>Store: insert(quads → workspace graph)
+        Agent->>Store: insert(workspace metadata → workspace_meta graph)
     end
 
     Note over Agent,ParaPeers: Phase 4 — Broadcast via GossipSub (to all paranet peers)
 
     Agent->>GS: publish(paranetPublishTopic, PublishRequest)
-    Note over GS: Contains: publisherPeerId, kcMerkleRoot,<br/>contextGraphId, deadline
+    Note over GS: Message contains:<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
     GS-->>ParaPeers: PublishRequest (relayed through mesh)
     GS-->>CGPeers: PublishRequest (participants are also paranet peers)
     ParaPeers->>ParaPeers: Validate + store in workspace graph
@@ -396,9 +462,16 @@ sequenceDiagram
     rect rgb(232, 245, 233)
         Note over Agent,ParaPeers: Phase 5a — Collect receiver attestations (from any paranet peer)
 
-        ParaPeers->>ParaPeers: Verify kcMerkleRoot, sign keccak256(kcMerkleRoot, publicByteSize)
-        ParaPeers->>Agent: Dial back via /dkg/attest/1.0.0
-        Agent->>Agent: Collect receiver sigs until quorum or deadline
+        Note over ParaPeers: Each peer that receives the gossip (any hop distance):
+        ParaPeers->>ParaPeers: Recompute kcMerkleRoot from stored quads
+        ParaPeers->>ParaPeers: Verify kcMerkleRoot and publicByteSize match
+        ParaPeers->>ParaPeers: Sign keccak256(kcMerkleRoot, publicByteSize)
+        ParaPeers->>Agent: Dial publisher's peerId via /dkg/attest/1.0.0
+        Note over ParaPeers,Agent: Send: {operationId, identityId, signatureR, signatureVs}
+
+        Note over Agent: Publisher collects incoming attestations:
+        Agent->>Agent: Deduplicate by identityId
+        Agent->>Agent: Accumulate until quorum reached or deadline expires
     end
 
     rect rgb(255, 243, 224)
@@ -417,9 +490,10 @@ sequenceDiagram
     rect rgb(232, 245, 233)
         Note over Agent,Chain: Phase 6 — Atomic on-chain publish
 
+        Agent->>Agent: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
         Agent->>Chain: publishToContextGraph({<br/>  kaCount, kcMerkleRoot, publicByteSize, tokenAmount,<br/>  publisherSignature,<br/>  receiverSignatures[],<br/>  contextGraphId, participantSignatures[]<br/>})
         Note over Chain: Contract verifies ALL signatures atomically:<br/>• Publisher commitment<br/>• Receiver attestations (≥ minimumRequired)<br/>• Participant governance (≥ context graph M-of-N)
-        Chain-->>Agent: {txHash, batchId, blockNumber, contextGraphExpanded}
+        Chain-->>Agent: {txHash, batchId, blockNumber, startKAId, endKAId, contextGraphExpanded}
         Note over Chain: Emits: KnowledgeBatchCreated + ContextGraphExpanded
     end
 
@@ -427,25 +501,50 @@ sequenceDiagram
 
     Agent->>Store: Copy quads: workspace → context graph data URI
     Agent->>Store: Delete quads from workspace graph
+    Agent->>Agent: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
     Agent->>Store: insert(confirmed metadata + chain provenance → context graph meta URI)
+    Agent->>Agent: Track ownedEntities + batch→paranet binding
     Note over Store: Data lives at did:dkg:paranet:{id}/context/{ctxId}<br/>NOT in the paranet data graph
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
+
     Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
-    Note over GS: Includes: txHash, blockNumber, startKAId, endKAId,<br/>publisherAddress, contextGraphId
-    Agent-->>App: PublishResult {status: confirmed, contextGraphId}
+    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress, contextGraphId
+
+    Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
 
     rect rgb(240, 248, 255)
-        Note over ParaPeers,Chain: Phase 9 — Receiver-side finalization (same dual mechanism as 2.1)
+        Note over ParaPeers,Chain: Phase 9 — Receiver-side finalization (two independent mechanisms)
 
-        ParaPeers->>Store: Dedup gate: ASK { <ual> dkg:status "confirmed" }
-        Note over ParaPeers: Mechanism A (fast): receive gossip → verify on-chain → promote
-        Note over ParaPeers: Mechanism B (fallback): ChainEventPoller catches event → promote
-        ParaPeers->>Chain: Verify KnowledgeBatchCreated + ContextGraphExpanded at blockNumber
-        ParaPeers->>ParaPeers: Recompute kcMerkleRoot from workspace quads, verify match
+        Note over ParaPeers: Dedup gate (both mechanisms)
+        ParaPeers->>Store: ASK { <ual> dkg:status "confirmed" } in context graph meta
+        alt Already confirmed
+            ParaPeers->>ParaPeers: Skip — already finalized (dedup by UAL)
+        end
+
+        Note over ParaPeers,Chain: Mechanism A — Publisher gossip (fast path)
+        ParaPeers->>ParaPeers: Receive confirmed PublishRequest from Phase 8
+        ParaPeers->>Chain: Verify KnowledgeBatchCreated event at specified blockNumber
+        Note over ParaPeers,Chain: Must match ALL of: txHash, kcMerkleRoot,<br/>publisherAddress, startKAId..endKAId
+        ParaPeers->>Chain: Verify ContextGraphExpanded event (contextGraphId, batchId)
+        ParaPeers->>ParaPeers: Recompute kcMerkleRoot from workspace quads
+        ParaPeers->>ParaPeers: Verify computed root matches on-chain event root
         ParaPeers->>Store: Copy quads: workspace → context graph data URI
         ParaPeers->>Store: Delete quads from workspace graph
         ParaPeers->>Store: insert(confirmed metadata + chain provenance → context graph meta)
+
+        Note over ParaPeers,Chain: Mechanism B — ChainEventPoller (independent fallback)
+        ParaPeers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
+        ParaPeers->>ParaPeers: Match event kcMerkleRoot against workspace data
+        ParaPeers->>ParaPeers: Recompute kcMerkleRoot from workspace quads, verify match
+        ParaPeers->>Chain: Verify ContextGraphExpanded event for this batchId
+        alt Workspace data found and not yet promoted (UAL not confirmed)
+            ParaPeers->>Store: Copy quads: workspace → context graph data URI
+            ParaPeers->>Store: Delete quads from workspace graph
+            ParaPeers->>Store: insert(confirmed metadata + chain provenance → context graph meta)
+        end
+
+        Note over ParaPeers: Whichever mechanism fires first wins.<br/>The second is a no-op (dedup by UAL, not kcMerkleRoot).<br/>If neither fires within TTL, workspace data expires.
     end
 ```
 

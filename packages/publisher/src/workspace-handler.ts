@@ -3,8 +3,9 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { decodeWorkspacePublishRequest, assertSafeIri } from '@origintrail-official/dkg-core';
 import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
+import { assertSafeRdfTerm } from './rdf-safe.js';
 import { validatePublishRequest } from './validation.js';
 import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -72,6 +73,17 @@ export class WorkspaceHandler {
     ctx: import('@origintrail-official/dkg-core').OperationContext,
   ): Promise<boolean> {
     for (const cond of conditions) {
+      try {
+        assertSafeIri(cond.subject);
+        assertSafeIri(cond.predicate);
+        if (!cond.expectAbsent && cond.expectedValue) {
+          assertSafeRdfTerm(cond.expectedValue);
+        }
+      } catch {
+        this.log.warn(ctx, `CAS rejected: invalid IRI/term in condition — possible injection attempt`);
+        return false;
+      }
+
       if (cond.expectAbsent) {
         const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
         const result = await this.store.query(ask);
@@ -128,7 +140,8 @@ export class WorkspaceHandler {
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
-      const subjects = [...new Set(quads.map(q => q.subject))];
+      const condSubjects = (casConditions ?? []).map(c => c.subject);
+      const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
       const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
 
       onPhase?.('store', 'start');

@@ -669,10 +669,11 @@ sequenceDiagram
             Poller->>Chain: listenForEvents({fromBlock: lastBlock+1,<br/>types: ["KnowledgeBatchCreated", "ContextGraphExpanded"]})
 
             loop For each KnowledgeBatchCreated event
-                Chain-->>Poller: {kcMerkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
-                Poller->>PH: confirmByKcMerkleRoot(kcMerkleRoot, chainData)
-                PH->>PH: Find workspace data with matching kcMerkleRoot
-                PH->>PH: Resolve UAL from workspace metadata
+                Chain-->>Poller: {merkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
+                Poller->>PH: confirmByChainEvent(merkleRoot, publisherAddress, startKAId, endKAId)
+                PH->>PH: Find workspace data matching ALL of: merkleRoot,<br/>publisherAddress, startKAId, endKAId
+                Note over PH: Matching by merkleRoot alone is not enough.<br/>Identical data published twice has the same root<br/>but different KA ranges. All discriminators required.
+                PH->>PH: Derive UAL from chain event (startKAId, publisherAddress)
                 PH->>PH: Check dedup: is UAL already confirmed?
                 alt Match found and not yet confirmed
                     PH->>Store: Copy quads: workspace graph → data graph
@@ -710,7 +711,7 @@ sequenceDiagram
 
 | Event | Source Contract | Fields | Purpose |
 |-------|---------------|--------|---------|
-| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, kcMerkleRoot, startKAId, endKAId, txHash | Confirm published data, trigger workspace → data graph promotion |
+| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, merkleRoot, startKAId, endKAId, txHash | Confirm published data, trigger workspace → data graph promotion |
 | `UALRangeReserved` | KnowledgeAssetsStorage | publisher, startId, endId | UAL allocation |
 | `ParanetCreated` | ParanetV9Registry | paranetId, creator, accessPolicy | Discover new paranets |
 | `KnowledgeBatchUpdated` | KnowledgeAssetsStorage | batchId, newMerkleRoot | Confirm data updates |
@@ -1231,17 +1232,6 @@ significantly increase utility for AI agents:
 
 Issues surfaced during document review. Resolved items are struck through;
 remaining items need design decisions before implementation.
-
-### Resolved
-
-| # | Resolution |
-|---|-----------|
-| ~~OQ-1~~ | `/dkg/attest/1.0.0` added to boot sequence (Section 1). |
-| ~~OQ-2~~ | Flat Merkle tree confirmed as the correct model. Section 10 rewritten. |
-| ~~OQ-3~~ | Sync verification updated to use flat tree (Section 6). Consistent with publish. |
-| ~~OQ-4~~ | Standardized on `kcMerkleRoot` terminology throughout the document. |
-| ~~OQ-8~~ | Private triples are never propagated. The publisher computes a `privateMerkleRoot` and shares it in the manifest. Peers include this as a synthetic leaf in the flat tree. Section 10 now documents this. |
-| ~~OQ-15~~ | P3 in Section 12.1 updated — `operationId` already exists, issue is missing dedup window. |
 
 ### Open — Update flow (deferred)
 

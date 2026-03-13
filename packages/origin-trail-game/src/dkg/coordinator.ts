@@ -471,7 +471,10 @@ export class OriginTrailGameCoordinator {
           existingSwarm.createdAt = createdAt;
           changed = true;
         }
-        if (existingSwarm.status !== status) {
+        const STATUS_RANK: Record<string, number> = { recruiting: 0, traveling: 1, finished: 2 };
+        const incomingRank = STATUS_RANK[status] ?? 0;
+        const currentRank = STATUS_RANK[existingSwarm.status] ?? 0;
+        if (incomingRank > currentRank) {
           existingSwarm.status = status;
           changed = true;
         }

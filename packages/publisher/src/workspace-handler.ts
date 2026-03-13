@@ -242,8 +242,8 @@ export class WorkspaceHandler {
         return true;
       });
 
+      onPhase?.('store', 'end');
       if (applied) {
-        onPhase?.('store', 'end');
         this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
       }
     } catch (err) {

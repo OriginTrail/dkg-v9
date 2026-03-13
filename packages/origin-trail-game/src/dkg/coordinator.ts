@@ -221,6 +221,9 @@ export class OriginTrailGameCoordinator {
   private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
   private graphSyncInFlight = false;
   private graphSyncLastErrorLogAt = 0;
+  private lastTurnResolvedAt = new Map<string, number>();
+  private proposalInFlight = new Set<string>();
+  private static readonly MIN_TURN_INTERVAL_MS = 4_000;
   private graphSyncLastPlayerCount: number | null = null;
   private graphSyncLastSwarmCount: number | null = null;
   // Local tombstones prevent stale graph memberships from re-adding leavers/disbanded swarms.
@@ -469,7 +472,10 @@ export class OriginTrailGameCoordinator {
           existingSwarm.createdAt = createdAt;
           changed = true;
         }
-        if (existingSwarm.status !== status) {
+        const STATUS_RANK: Record<string, number> = { recruiting: 0, traveling: 1, finished: 2 };
+        const incomingRank = STATUS_RANK[status] ?? 0;
+        const currentRank = STATUS_RANK[existingSwarm.status] ?? 0;
+        if (incomingRank > currentRank) {
           existingSwarm.status = status;
           changed = true;
         }
@@ -662,6 +668,7 @@ export class OriginTrailGameCoordinator {
       this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
       this.workspaceOps.delete(swarmId);
+      this.lastTurnResolvedAt.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
@@ -797,7 +804,7 @@ export class OriginTrailGameCoordinator {
     this.startVoteHeartbeat(swarmId);
 
     if (this.allAliveVoted(swarm) && swarm.leaderPeerId === this.myPeerId) {
-      await this.proposeTurnResolution(swarm);
+      await this.debouncedProposeTurnResolution(swarm);
     }
 
     return swarm;
@@ -860,6 +867,25 @@ export class OriginTrailGameCoordinator {
   }
 
   // ── Turn resolution (GM only) ────────────────────────────────────
+
+  private async debouncedProposeTurnResolution(swarm: SwarmState): Promise<void> {
+    const scheduledTurn = swarm.currentTurn;
+    const key = `${swarm.id}:${scheduledTurn}`;
+    if (this.proposalInFlight.has(key) || swarm.pendingProposal?.turn === scheduledTurn) return;
+    this.proposalInFlight.add(key);
+    try {
+      const lastResolved = this.lastTurnResolvedAt.get(swarm.id) ?? 0;
+      const elapsed = Date.now() - lastResolved;
+      if (elapsed < OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS) {
+        const delay = OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS - elapsed;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      if (swarm.currentTurn !== scheduledTurn || swarm.status !== 'traveling' || !this.allAliveVoted(swarm) || swarm.pendingProposal) return;
+      await this.proposeTurnResolution(swarm);
+    } finally {
+      this.proposalInFlight.delete(key);
+    }
+  }
 
   private async proposeTurnResolution(swarm: SwarmState): Promise<void> {
     if (!swarm.gameState) return;
@@ -1008,6 +1034,8 @@ export class OriginTrailGameCoordinator {
       event: proposal.event,
       timestamp: Date.now(),
     });
+
+    this.lastTurnResolvedAt.set(swarm.id, Date.now());
 
     if (newState.status !== 'active') {
       swarm.status = 'finished';
@@ -1399,6 +1427,7 @@ export class OriginTrailGameCoordinator {
       });
       this.swarms.delete(msg.swarmId);
       this.workspaceOps.delete(msg.swarmId);
+      this.lastTurnResolvedAt.delete(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
@@ -1470,7 +1499,7 @@ export class OriginTrailGameCoordinator {
     this.log(`Remote vote: ${msg.action} from ${msg.peerId.slice(0, 8)} on turn ${msg.turn}`);
 
     if (this.allAliveVoted(swarm) && swarm.leaderPeerId === this.myPeerId) {
-      this.proposeTurnResolution(swarm).catch(err => this.log(`Propose error: ${err.message}`));
+      this.debouncedProposeTurnResolution(swarm).catch(err => this.log(`Propose error: ${err.message}`));
     }
   }
 

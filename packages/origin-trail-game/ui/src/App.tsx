@@ -312,9 +312,6 @@ function ContextGraphPanel({ swarm }: { swarm: any }) {
             [`${OT}GameEvent`]: '#d29922',
           },
         },
-        physics: { enabled: true, solver: 'forceAtlas2', gravity: -25, springLength: 90 },
-        node: { label: true, size: 5 },
-        edge: { label: false },
         hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
         focus: { maxNodes: 500, hops: 999 },
       }}
@@ -482,7 +479,18 @@ export function App() {
   }, []);
 
   const refreshSwarm = useCallback(async (swarmId: string) => {
-    try { setSwarm(await api.swarm(swarmId)); } catch (e: any) { setError(e.message); }
+    try {
+      const data = await api.swarm(swarmId);
+      setSwarm(data);
+      setError('');
+    } catch (e: any) {
+      if (e.status === 404) {
+        setSwarm(null);
+        setView('lobby');
+      } else {
+        setError(e.message);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -725,7 +733,10 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
 
   const doVote = async (action: string, params?: Record<string, any>) => {
     try { onVoted(await api.vote(swarm.id, action, params)); }
-    catch (e: any) { onError(e.message); }
+    catch (e: any) {
+      if (e.status === 400 || e.status === 404) return;
+      onError(e.message);
+    }
   };
 
   return (
@@ -757,7 +768,10 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
       {swarm.leaderId === peerId && (
         <button className="ot-secondary" onClick={async () => {
           try { onVoted(await api.forceResolve(swarm.id)); }
-          catch (e: any) { onError(e.message); }
+          catch (e: any) {
+            if (e.status === 400 || e.status === 404) return;
+            onError(e.message);
+          }
         }}>Force Resolve Turn</button>
       )}
     </div>

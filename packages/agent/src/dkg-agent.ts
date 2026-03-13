@@ -14,9 +14,9 @@ import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConf
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal,
+  PublishJournal, StaleWriteError,
   computeTripleHash, computeFlatKCRoot, autoPartition,
-  type PublishResult, type PhaseCallback, type KAMetadata,
+  type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -1204,6 +1204,35 @@ export class DKGAgent {
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+    });
+    if (!opts?.localOnly) {
+      const topic = paranetWorkspaceTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+    return { workspaceOperationId };
+  }
+
+  /**
+   * Compare-and-swap workspace write. Verifies each condition against the
+   * current workspace graph before applying the write atomically.
+   * Throws StaleWriteError if any condition fails.
+   */
+  async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    conditions: CASCondition[],
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+  ): Promise<{ workspaceOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
+    const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      conditions,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(paranetId);

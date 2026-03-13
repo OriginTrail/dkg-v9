@@ -49,6 +49,34 @@ export interface WriteToWorkspaceResult {
   message: Uint8Array;
 }
 
+export interface CASCondition {
+  subject: string;
+  predicate: string;
+  /**
+   * Expected current object value as a SPARQL term (e.g. `"recruiting"`,
+   * `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`, `<http://example.org/>`).
+   * `null` means the triple must not exist.
+   */
+  expectedValue: string | null;
+}
+
+export class StaleWriteError extends Error {
+  readonly condition: CASCondition;
+  readonly actualValue: string | null;
+  constructor(condition: CASCondition, actualValue: string | null) {
+    const exp = condition.expectedValue === null ? '<absent>' : `"${condition.expectedValue}"`;
+    const act = actualValue === null ? '<absent>' : `"${actualValue}"`;
+    super(`CAS failed: <${condition.subject}> <${condition.predicate}> expected ${exp}, found ${act}`);
+    this.name = 'StaleWriteError';
+    this.condition = condition;
+    this.actualValue = actualValue;
+  }
+}
+
+export interface WriteConditionalToWorkspaceOptions extends WriteToWorkspaceOptions {
+  conditions: CASCondition[];
+}
+
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
@@ -240,6 +268,50 @@ export class DKGPublisher implements Publisher {
 
     this.log.info(ctx, `Workspace write complete: ${workspaceOperationId}`);
     return { workspaceOperationId, message };
+  }
+
+  /**
+   * Compare-and-swap workspace write. Checks each condition against the
+   * current workspace graph state before applying the write.
+   * Throws StaleWriteError if any condition fails.
+   */
+  async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteConditionalToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    const ctx = options.operationCtx ?? createOperationContext('workspace');
+
+    await this.graphManager.ensureParanet(paranetId);
+    const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
+
+    for (const cond of options.conditions) {
+      assertSafeIri(cond.subject);
+      assertSafeIri(cond.predicate);
+
+      if (cond.expectedValue === null) {
+        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
+        const result = await this.store.query(ask);
+        if (result.type === 'boolean' && result.value) {
+          const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
+          const cur = await this.store.query(sel);
+          const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
+          throw new StaleWriteError(cond, actual);
+        }
+      } else {
+        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+        const result = await this.store.query(ask);
+        if (result.type !== 'boolean' || !result.value) {
+          const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
+          const cur = await this.store.query(sel);
+          const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
+          throw new StaleWriteError(cond, actual);
+        }
+      }
+    }
+
+    this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
+    return this.writeToWorkspace(paranetId, quads, options);
   }
 
   /**

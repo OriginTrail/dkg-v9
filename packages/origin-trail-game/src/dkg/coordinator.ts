@@ -36,6 +36,11 @@ interface DKGAgent {
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
   writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
+  writeConditionalToWorkspace?(
+    paranetId: string,
+    quads: any[],
+    conditions: Array<{ subject: string; predicate: string; expectedValue: string | null }>,
+  ): Promise<{ workspaceOperationId: string }>;
   publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
   enshrineFromWorkspace(
     paranetId: string,
@@ -712,10 +717,20 @@ export class OriginTrailGameCoordinator {
     const now = Date.now();
 
     try {
-      await this.agent.writeToWorkspace(
-        this.paranetId,
-        rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
-      );
+      const launchQuads = rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now);
+      if (this.agent.writeConditionalToWorkspace) {
+        await this.agent.writeConditionalToWorkspace(
+          this.paranetId,
+          launchQuads,
+          [{
+            subject: rdf.swarmUri(swarmId),
+            predicate: rdf.SWARM_STATUS_PREDICATE,
+            expectedValue: '"recruiting"',
+          }],
+        );
+      } else {
+        await this.agent.writeToWorkspace(this.paranetId, launchQuads);
+      }
     } catch (err) {
       this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
     }

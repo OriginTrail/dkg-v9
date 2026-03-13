@@ -58,9 +58,11 @@ export function monotonicTransition(
  * @param agent         The DKG agent instance
  * @param paranetId     Target paranet
  * @param subject       The entity whose version is tracked
- * @param currentVersion Expected current version (0 = first write, null = must not exist)
+ * @param currentVersion Expected current version, or `null` if the version triple
+ *                       must not yet exist (first write). Passing `0` expects a
+ *                       stored `"0"^^xsd:integer` — it does NOT mean "first write".
  * @param quads         Application quads to write
- * @param opts          Optional: localOnly, operationCtx
+ * @param opts          Optional: `{ localOnly?: boolean }`
  * @returns The new version number and workspace operation ID
  */
 export async function versionedWrite(

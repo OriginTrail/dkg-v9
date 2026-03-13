@@ -77,6 +77,14 @@ export interface WriteConditionalToWorkspaceOptions extends WriteToWorkspaceOpti
   conditions: CASCondition[];
 }
 
+const SAFE_RDF_LITERAL = /^"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?$/;
+const SAFE_RDF_IRI = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
+
+function assertSafeRdfTerm(value: string): void {
+  if (SAFE_RDF_LITERAL.test(value)) return;
+  if (SAFE_RDF_IRI.test(value)) return;
+  throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
+}
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
@@ -96,6 +104,7 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
+  private readonly casLocks = new Map<string, Promise<void>>();
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -272,10 +281,48 @@ export class DKGPublisher implements Publisher {
 
   /**
    * Compare-and-swap workspace write. Checks each condition against the
-   * current workspace graph state before applying the write.
+   * current workspace graph state before applying the write atomically.
+   * Serializes concurrent CAS writes to the same subject+predicate via
+   * an in-process lock so check-then-write cannot interleave.
    * Throws StaleWriteError if any condition fails.
    */
   async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteConditionalToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    for (const cond of options.conditions) {
+      assertSafeIri(cond.subject);
+      assertSafeIri(cond.predicate);
+      if (cond.expectedValue !== null) {
+        assertSafeRdfTerm(cond.expectedValue);
+      }
+    }
+
+    const lockKeys = options.conditions.map(c => `${c.subject}\0${c.predicate}`);
+    const uniqueKeys = [...new Set(lockKeys)];
+
+    const predecessor = Promise.all(uniqueKeys.map(k => this.casLocks.get(k) ?? Promise.resolve()));
+
+    let resolve!: () => void;
+    const gate = new Promise<void>(r => { resolve = r; });
+    for (const k of uniqueKeys) {
+      this.casLocks.set(k, gate);
+    }
+
+    await predecessor;
+
+    try {
+      return await this._executeConditionalWrite(paranetId, quads, options);
+    } finally {
+      resolve();
+      for (const k of uniqueKeys) {
+        if (this.casLocks.get(k) === gate) this.casLocks.delete(k);
+      }
+    }
+  }
+
+  private async _executeConditionalWrite(
     paranetId: string,
     quads: Quad[],
     options: WriteConditionalToWorkspaceOptions,
@@ -286,9 +333,6 @@ export class DKGPublisher implements Publisher {
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
 
     for (const cond of options.conditions) {
-      assertSafeIri(cond.subject);
-      assertSafeIri(cond.predicate);
-
       if (cond.expectedValue === null) {
         const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
         const result = await this.store.query(ask);

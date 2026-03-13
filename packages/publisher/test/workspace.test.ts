@@ -729,4 +729,69 @@ describe('Workspace: writeConditionalToWorkspace (CAS)', () => {
     await expect(publisher.writeConditionalToWorkspace(PARANET, updated, opts))
       .rejects.toThrow(StaleWriteError);
   });
+
+  it('rejects unsafe RDF terms in expectedValue (SPARQL injection)', async () => {
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting" } } . DROP ALL #',
+      }],
+    };
+    await expect(publisher.writeConditionalToWorkspace(PARANET, [], opts))
+      .rejects.toThrow('Unsafe RDF term');
+  });
+
+  it('accepts valid RDF literal and IRI terms', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/status', '"recruiting"'),
+    ], { publisherPeerId: 'peer1' });
+
+    const literalOpts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+      }],
+    };
+    await expect(publisher.writeConditionalToWorkspace(PARANET, [], literalOpts))
+      .resolves.toBeDefined();
+  });
+
+  it('serializes concurrent CAS writes to the same subject+predicate', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], { publisherPeerId: 'peer1' });
+
+    const write1 = publisher.writeConditionalToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/counter',
+        expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      }],
+    });
+
+    const write2 = publisher.writeConditionalToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/counter',
+        expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      }],
+    });
+
+    const results = await Promise.allSettled([write1, write2]);
+    const successes = results.filter(r => r.status === 'fulfilled');
+    const failures = results.filter(r => r.status === 'rejected');
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    expect((failures[0] as PromiseRejectedResult).reason).toBeInstanceOf(StaleWriteError);
+  });
 });

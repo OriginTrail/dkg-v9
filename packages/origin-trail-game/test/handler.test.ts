@@ -352,6 +352,36 @@ describe('OriginTrail Game API handler', () => {
     expect(casWrite.conditions[0].expectedValue).toBe('"recruiting"');
   });
 
+  it('launchExpedition aborts when CAS write throws StaleWriteError', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const testAgent = makeMockAgent('cas-abort-peer');
+    testAgent.query = async () => ({ bindings: [] });
+
+    const staleErr = new Error('CAS failed: status expected "recruiting", found "traveling"');
+    staleErr.name = 'StaleWriteError';
+    testAgent.writeConditionalToWorkspace = async () => { throw staleErr; };
+
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-abort' });
+    const swarm = await coordinator.createSwarm('Leader', 'Abort Test');
+    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-cas-abort/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['abort-p2', 'P2'], ['abort-p3', 'P3']]) {
+      handle('dkg/paranet/test-cas-abort/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      if (swarm.players.length >= 3) break;
+    }
+    expect(swarm.players.length).toBe(3);
+
+    await expect(coordinator.launchExpedition(swarm.id)).rejects.toThrow('CAS failed');
+    expect(swarm.status).toBe('recruiting');
+  });
+
   it('onRemoteExpeditionLaunched updates in-memory state without workspace write (C3)', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');

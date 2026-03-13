@@ -251,11 +251,13 @@ describe('GameService with mock consultAgent', () => {
 
   it('cannot start autopilot twice', async () => {
     const service = plugin.getService();
-    // Mock the getSwarm call to prevent actual HTTP
+    // Mock fetch: getSwarm returns a traveling swarm, getLocations returns []
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ locations: [] }),
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'traveling', gameState: null }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
     }) as any;
 
     try {
@@ -273,9 +275,11 @@ describe('GameService with mock consultAgent', () => {
   it('stop clears running state', async () => {
     const service = plugin.getService();
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ locations: [] }),
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'traveling', gameState: null }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
     }) as any;
 
     try {
@@ -342,7 +346,7 @@ describe('parseActionResponse', () => {
   it('extracts trade from natural language with item', () => {
     const result = parseActionResponse('We should trade for trainingTokens at this hub');
     expect(result.action).toBe('trade');
-    expect(result.params).toEqual({ item: 'trainingTokens' });
+    expect(result.params).toEqual({ item: 'trainingTokens', quantity: 1 });
   });
 
   it('falls back to advance(1) on gibberish', () => {

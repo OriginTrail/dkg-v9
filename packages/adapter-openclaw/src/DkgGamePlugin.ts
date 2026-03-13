@@ -231,6 +231,19 @@ class GameService {
       );
     }
 
+    // Preflight: verify swarm exists and is in a playable state
+    let swarm: SwarmState;
+    try {
+      swarm = await this.gameClient.getSwarm(swarmId);
+    } catch (err: any) {
+      throw new Error(`Cannot start autopilot: failed to fetch swarm ${swarmId} — ${err.message}`);
+    }
+    if (swarm.status !== 'traveling') {
+      throw new Error(
+        `Cannot start autopilot: swarm ${swarmId} is "${swarm.status}" (must be "traveling")`,
+      );
+    }
+
     this.swarmId = swarmId;
     this.strategyHint = strategyHint ?? '';
     this.lastSeenTurn = -1;
@@ -588,12 +601,43 @@ interface TurnHistoryEntry {
  *   advance with intensity 2
  *   I'll use syncMemory to heal
  */
+/** Canonical trade item names — map case-insensitive input to exact API values. */
+const TRADE_ITEMS: Record<string, string> = {
+  trainingtokens: 'trainingTokens',
+  apicredits: 'apiCredits',
+  computeunits: 'computeUnits',
+  modelweights: 'modelWeights',
+};
+
+function canonicalizeTradeItem(raw: string): string | undefined {
+  return TRADE_ITEMS[raw.toLowerCase()];
+}
+
+/** Validate and coerce params for a given action type. */
+function coerceParams(action: ActionType, params: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!params || typeof params !== 'object') return undefined;
+  if (action === 'advance') {
+    const raw = Number(params.intensity);
+    const intensity = Number.isFinite(raw) ? Math.min(3, Math.max(1, Math.round(raw))) : 1;
+    return { intensity };
+  }
+  if (action === 'trade') {
+    const item = typeof params.item === 'string' ? canonicalizeTradeItem(params.item) : undefined;
+    const qty = Number(params.quantity);
+    const quantity = Number.isFinite(qty) && qty > 0 ? Math.round(qty) : 1;
+    if (!item) return undefined; // can't trade without a valid item
+    return { item, quantity };
+  }
+  return params;
+}
+
 export function parseActionResponse(text: string): { action: ActionType; params?: Record<string, unknown> } {
   // Try structured format first: ACTION: <type> PARAMS: <json>
   const structuredMatch = text.match(/ACTION:\s*(\w+)/i);
   if (structuredMatch) {
     const action = normalizeAction(structuredMatch[1]);
-    const params = extractJsonAfterParams(text);
+    const rawParams = extractJsonAfterParams(text);
+    const params = coerceParams(action, rawParams);
     return { action, params: params ?? undefined };
   }
 
@@ -603,7 +647,7 @@ export function parseActionResponse(text: string): { action: ActionType; params?
     if (lowerText.includes(act.toLowerCase())) {
       // Try to extract intensity for advance
       if (act === 'advance') {
-        const intensityMatch = text.match(/intensity\s*[=:]?\s*(\d)/i);
+        const intensityMatch = text.match(/intensity\s*[=:]?\s*(\d+)/i);
         if (intensityMatch) {
           const intensity = Math.min(3, Math.max(1, parseInt(intensityMatch[1], 10)));
           return { action: 'advance', params: { intensity } };
@@ -614,13 +658,9 @@ export function parseActionResponse(text: string): { action: ActionType; params?
         const itemMatch = text.match(/(trainingTokens|apiCredits|computeUnits|modelWeights)/i);
         const qtyMatch = text.match(/quantity\s*[=:]?\s*(\d+)/i);
         if (itemMatch) {
-          return {
-            action: 'trade',
-            params: {
-              item: itemMatch[1],
-              ...(qtyMatch ? { quantity: parseInt(qtyMatch[1], 10) } : {}),
-            },
-          };
+          const item = canonicalizeTradeItem(itemMatch[1]) ?? itemMatch[1];
+          const quantity = qtyMatch ? Math.max(1, parseInt(qtyMatch[1], 10)) : 1;
+          return { action: 'trade', params: { item, quantity } };
         }
       }
       return { action: act };
@@ -741,7 +781,11 @@ export class DkgGamePlugin {
         },
         execute: async (_id, params) => {
           try {
-            const maxPlayers = params.max_players ? parseInt(String(params.max_players), 10) : undefined;
+            let maxPlayers: number | undefined;
+            if (params.max_players != null) {
+              const parsed = parseInt(String(params.max_players), 10);
+              maxPlayers = Number.isFinite(parsed) ? Math.min(8, Math.max(1, parsed)) : undefined;
+            }
             const result = await this.gameClient!.createSwarm(
               String(params.player_name),
               String(params.swarm_name),
@@ -809,12 +853,26 @@ export class DkgGamePlugin {
         },
         execute: async (_id, params) => {
           try {
-            const voteParams = params.params ? tryParseJson(String(params.params)) : undefined;
-            const result = await this.gameClient!.castVote(
-              String(params.swarm_id),
-              String(params.action),
-              voteParams ?? undefined,
-            );
+            const swarmId = String(params.swarm_id);
+            const action = String(params.action) as ActionType;
+
+            // Reject manual votes while autopilot is active for the same swarm
+            if (this.gameService!.isRunning && this.gameService!.activeSwarmId === swarmId) {
+              return this.json({
+                error: `Autopilot is running for swarm ${swarmId}. Stop it first with game_autopilot_stop.`,
+              });
+            }
+
+            // Validate and coerce params per action type
+            const rawParams = params.params ? tryParseJson(String(params.params)) : undefined;
+            const voteParams = coerceParams(action, rawParams);
+            if (action === 'trade' && !voteParams) {
+              return this.json({
+                error: 'Trade requires valid params: {"item": "trainingTokens|apiCredits|computeUnits|modelWeights", "quantity": <number>}',
+              });
+            }
+
+            const result = await this.gameClient!.castVote(swarmId, action, voteParams ?? undefined);
             return this.json(formatSwarmSummary(result));
           } catch (err: any) { return this.gameError(err); }
         },
@@ -974,7 +1032,12 @@ function bv(v: unknown): string | undefined {
 
 function tryParseJson(text: string | undefined | null): Record<string, unknown> | null {
   if (!text) return null;
-  try { return JSON.parse(text); } catch { return null; }
+  try {
+    const parsed = JSON.parse(text);
+    // Only accept plain objects — reject arrays, strings, numbers, etc.
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    return null;
+  } catch { return null; }
 }
 
 /** Extract JSON object after "PARAMS:" — handles nested braces by trying progressively shorter substrings. */

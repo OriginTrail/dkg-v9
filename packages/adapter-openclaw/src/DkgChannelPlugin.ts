@@ -28,6 +28,11 @@ import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+
+/** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
+function sanitizeIdentity(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
 const moduleRequire = createRequire(import.meta.url);
 
 interface PendingRequest {
@@ -347,7 +352,7 @@ export class DkgChannelPlugin {
       // Give non-owner identities (e.g. game-autopilot) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
-        route.sessionKey = `agent:${route.agentId}:${identity}`;
+        route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
       }
       log.info?.(`[dkg-channel] Route resolved: agent=${route.agentId}, session=${route.sessionKey}`);
     } catch (err: any) {
@@ -541,7 +546,7 @@ export class DkgChannelPlugin {
     // Give non-owner identities (e.g. game-autopilot) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
-      route.sessionKey = `agent:${route.agentId}:${identity}`;
+      route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
     }
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
@@ -782,7 +787,7 @@ export class DkgChannelPlugin {
     // Non-owner identities (e.g. game-autopilot) get their own session
     // so they don't pollute the user's DKG UI chat history.
     const sessionId = identity && identity !== 'owner'
-      ? `openclaw:${CHANNEL_NAME}:${identity}`
+      ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
     await this.client.storeChatTurn(
       sessionId,

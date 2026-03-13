@@ -64,6 +64,22 @@ describe('MerkleTree', () => {
     expect(tree.root).toHaveLength(32);
   });
 
+  it('leafCount returns original count, not padded (odd leaves)', () => {
+    const leaves = ['a', 'b', 'c', 'd', 'e'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(5);
+  });
+
+  it('leafCount returns original count for even leaves', () => {
+    const leaves = ['a', 'b', 'c', 'd'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(4);
+  });
+
   it('is order-independent (sorted internally)', () => {
     const a = sha256(new TextEncoder().encode('a'));
     const b = sha256(new TextEncoder().encode('b'));

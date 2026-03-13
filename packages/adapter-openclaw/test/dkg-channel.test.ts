@@ -312,6 +312,57 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('persistTurn should use separate sessionId for non-owner identities', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockImplementation(() => ({ agentId: 'agent-1', sessionKey: 'session-1' })),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI] msg'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    // game-autopilot identity → separate session
+    await plugin.processInbound('decide', 'corr-game', 'game-autopilot');
+    await new Promise(r => setTimeout(r, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui:game-autopilot',
+      'decide',
+      'reply',
+      { turnId: 'corr-game' },
+    );
+
+    storeSpy.mockClear();
+
+    // owner identity → default session
+    await plugin.processInbound('hello', 'corr-owner', 'owner');
+    await new Promise(r => setTimeout(r, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'hello',
+      'reply',
+      { turnId: 'corr-owner' },
+    );
+  });
+
   it('processInbound should use SDK core wrappers that preserve runtime method context', async () => {
     const sessionCalls: any[] = [];
     const dispatchCalls: any[] = [];

@@ -288,7 +288,7 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId).catch((err) => {
+        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
           api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
         });
         return reply;
@@ -309,7 +309,7 @@ export class DkgChannelPlugin {
         text,
         correlationId,
       });
-      this.persistTurn(text, reply.text, correlationId).catch((err) => {
+      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
         api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
       });
       return reply;
@@ -637,7 +637,7 @@ export class DkgChannelPlugin {
 
       // Persist turn even if the consumer cancelled early — use accumulated text
       const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId).catch(err => {
+      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
         log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
       });
     }
@@ -777,9 +777,15 @@ export class DkgChannelPlugin {
     userMessage: string,
     assistantReply: string,
     correlationId: string,
+    identity: string,
   ): Promise<void> {
+    // Non-owner identities (e.g. game-autopilot) get their own session
+    // so they don't pollute the user's DKG UI chat history.
+    const sessionId = identity && identity !== 'owner'
+      ? `openclaw:${CHANNEL_NAME}:${identity}`
+      : `openclaw:${CHANNEL_NAME}`;
     await this.client.storeChatTurn(
-      `openclaw:${CHANNEL_NAME}`,
+      sessionId,
       userMessage,
       assistantReply,
       { turnId: correlationId },

@@ -513,6 +513,34 @@ class GameService {
       lines.push('');
     }
 
+    // Strategic considerations — light nudges based on current game state
+    const considerations: string[] = [];
+    const minHp = gs.party.filter(m => m.alive).reduce((min, m) => Math.min(min, m.health), 100);
+    if (minHp < 40) {
+      considerations.push(`A party member is at ${minHp} HP — syncMemory heals +10 HP to all.`);
+    }
+    if (gs.trainingTokens < 150 && gs.apiCredits > 0) {
+      considerations.push(`Tokens low (${gs.trainingTokens}). upgradeSkills costs 1 API credit but can yield up to 100 tokens.`);
+    }
+    if (currentLoc?.type === 'hub' && gs.trac > 50) {
+      considerations.push(`You're at a hub with ${gs.trac} TRAC. Consider trading for scarce resources.`);
+    }
+    if (currentLoc?.type === 'bottleneck' && currentLoc.epoch === gs.epochs) {
+      const diff = ((currentLoc.difficulty ?? 0.5) * 100).toFixed(0);
+      considerations.push(`Bottleneck ahead: ${diff}% success if forced, or pay ${currentLoc.tollPrice} TRAC for safe passage.`);
+    }
+    if (turnHistory.length >= 3) {
+      const lastActions = turnHistory.slice(-3).map(e => e.action);
+      if (lastActions.every(a => a === lastActions[0])) {
+        considerations.push(`You've chosen "${lastActions[0]}" for 3+ turns in a row. Consider varying your strategy.`);
+      }
+    }
+    if (considerations.length > 0) {
+      lines.push('--- Strategic Considerations ---');
+      for (const c of considerations) lines.push(c);
+      lines.push('');
+    }
+
     // Strategy hint
     if (this.strategyHint) {
       lines.push(`--- Strategy Hint from User ---`);

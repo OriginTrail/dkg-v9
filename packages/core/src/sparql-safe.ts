@@ -78,7 +78,8 @@ export function sparqlString(value: string): string {
  * Handles `bigint` natively via `.toString()` to avoid precision loss
  * for values beyond `Number.MAX_SAFE_INTEGER`.
  */
-const SAFE_RDF_LITERAL = /^"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?$/;
+// SPARQL STRING_LITERAL2: forbid raw CR/LF, only allow valid SPARQL escapes
+const SAFE_RDF_LITERAL = /^"(?:[^"\\\r\n]|\\[tbnrf"'\\]|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8})*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?$/;
 const SAFE_RDF_IRI_TERM = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
 
 /**

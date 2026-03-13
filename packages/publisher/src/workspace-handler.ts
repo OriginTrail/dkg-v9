@@ -87,20 +87,25 @@ export class WorkspaceHandler {
         return false;
       }
 
-      if (cond.expectAbsent) {
-        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
-        const result = await this.store.query(ask);
-        if (result.type !== 'boolean' || result.value) {
-          this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected absent`);
-          return false;
+      try {
+        if (cond.expectAbsent) {
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
+          const result = await this.store.query(ask);
+          if (result.type !== 'boolean' || result.value) {
+            this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected absent`);
+            return false;
+          }
+        } else {
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+          const result = await this.store.query(ask);
+          if (result.type !== 'boolean' || !result.value) {
+            this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected ${cond.expectedValue}`);
+            return false;
+          }
         }
-      } else {
-        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
-        const result = await this.store.query(ask);
-        if (result.type !== 'boolean' || !result.value) {
-          this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected ${cond.expectedValue}`);
-          return false;
-        }
+      } catch (err) {
+        this.log.warn(ctx, `CAS rejected: query failed — ${err instanceof Error ? err.message : String(err)}`);
+        return false;
       }
     }
     this.log.info(ctx, `Remote CAS conditions passed (${conditions.length})`);

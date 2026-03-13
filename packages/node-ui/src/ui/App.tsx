@@ -327,8 +327,8 @@ export function App() {
           </div>
           {currentVersion && (
             <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
-              <div className="mono" style={{ fontSize: 10, color: liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)', marginBottom: 2 }}>
-                v{currentVersion}{liveStatus?.updateAvailable === false ? ' · latest' : ''}
+              <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 2 }}>
+                v{currentVersion}
               </div>
               {updateAvailable ? (
                 <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, marginBottom: 2 }}>
@@ -342,8 +342,10 @@ export function App() {
                   }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}</span>
                 </div>
               ) : commitShort ? (
-                <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 2 }}>
-                  {commitShort}
+                <div className="mono" style={{ fontSize: 10, marginBottom: 2 }}>
+                  <span style={{ color: liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)' }}>
+                    {commitShort}{liveStatus?.updateAvailable === false ? ' · latest' : ''}
+                  </span>
                 </div>
               ) : null}
               <div style={{ fontSize: 10, color: liveStatus?.autoUpdate ? 'var(--green)' : 'var(--text-dim)', opacity: 0.7 }}>

@@ -350,12 +350,17 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Auto-update
+  // Version check + auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   let pendingForegroundRestart = false;
-  if (config.autoUpdate?.enabled) {
-    const au = config.autoUpdate;
-    log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
+  const au = config.autoUpdate;
+  if (au?.repo && au?.branch) {
+    const checkIntervalMs = (au.checkIntervalMinutes || 30) * 60_000;
+    if (au.enabled) {
+      log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
+    } else {
+      log(`Auto-update disabled — version check only: ${au.repo}@${au.branch}`);
+    }
 
     const runCheck = async () => {
       const commitStatus = await checkForNewCommitWithStatus(au, log);
@@ -364,7 +369,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
         lastUpdateCheck.checkedAt = Date.now();
         if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
       }
-      if (commitStatus.status === 'available') {
+      if (au.enabled && commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
           if (foreground) {
@@ -380,7 +385,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     };
 
     setTimeout(runCheck, 15_000);
-    updateInterval = setInterval(runCheck, au.checkIntervalMinutes * 60_000);
+    updateInterval = setInterval(runCheck, checkIntervalMs);
   }
 
   // --- Dashboard DB + Metrics ---
@@ -756,6 +761,8 @@ export async function runDaemon(foreground: boolean): Promise<void> {
         tracker,
         memoryManager,
         bridgeAuthToken,
+        nodeVersion,
+        nodeCommit,
         catchupTracker,
       );
     } catch (err: any) {
@@ -1048,6 +1055,8 @@ async function handleRequest(
   tracker: OperationTracker,
   memoryManager: ChatMemoryManager,
   bridgeAuthToken: string | undefined,
+  nodeVersion: string,
+  nodeCommit: string,
   catchupTracker: CatchupTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);

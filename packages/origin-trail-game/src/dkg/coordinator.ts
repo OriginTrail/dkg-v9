@@ -520,6 +520,9 @@ export class OriginTrailGameCoordinator {
               existingSwarm.players = sortedPlayers;
               changed = true;
             }
+          } else if (existingSwarm.status === 'traveling') {
+            const reordered = this.reorderPlayersByPartyIndexMap(existingSwarm);
+            if (reordered) changed = true;
           }
         }
 
@@ -1435,6 +1438,7 @@ export class OriginTrailGameCoordinator {
     }
     if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
       swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+      this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
     } else {
       if (msg.partyOrder) this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
       swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
@@ -1478,6 +1482,40 @@ export class OriginTrailGameCoordinator {
     if (added > 0) {
       this.log(`Backfilled ${added} missing swarm member(s) from launch partyOrder for ${swarm.id}`);
     }
+    this.reorderPlayersToPartyOrder(swarm, partyOrder);
+  }
+
+  private reorderPlayersToPartyOrder(swarm: SwarmState, partyOrder: string[]): void {
+    const playersByPeerId = new Map(swarm.players.map(p => [p.peerId, p]));
+    const ordered: SwarmMember[] = [];
+    for (const peerId of partyOrder) {
+      const player = playersByPeerId.get(peerId);
+      if (player) ordered.push(player);
+    }
+    if (ordered.length === swarm.players.length && ordered.every((p, i) => p.peerId === swarm.players[i]?.peerId)) {
+      return;
+    }
+    if (ordered.length > 0) {
+      const remaining = swarm.players.filter(p => !partyOrder.includes(p.peerId)).sort(compareSwarmMembers);
+      swarm.players = [...ordered, ...remaining];
+    }
+  }
+
+  private reorderPlayersByPartyIndexMap(swarm: SwarmState): boolean {
+    if (!swarm.playerIndexMap || swarm.playerIndexMap.size === 0) return false;
+    const sorted = [...swarm.players].sort((a, b) => {
+      const ai = swarm.playerIndexMap.get(a.peerId);
+      const bi = swarm.playerIndexMap.get(b.peerId);
+      if (ai != null && bi != null) return ai - bi;
+      if (ai != null) return -1;
+      if (bi != null) return 1;
+      return compareSwarmMembers(a, b);
+    });
+    const changed = sorted.some((p, i) => p.peerId !== swarm.players[i]?.peerId);
+    if (changed) {
+      swarm.players = sorted;
+    }
+    return changed;
   }
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {

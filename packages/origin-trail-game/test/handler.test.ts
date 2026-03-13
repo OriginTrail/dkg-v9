@@ -392,6 +392,7 @@ describe('OriginTrail Game API handler', () => {
     const swarm = coordinator.getSwarm('swarm-backfill');
     expect(swarm).not.toBeNull();
     expect(swarm!.status).toBe('traveling');
+    expect(swarm!.players.map(p => p.peerId)).toEqual([leaderPeerId, 'p2-missed-join', 'p3-missed-join']);
     expect(swarm!.players.map(p => p.peerId).sort()).toEqual([leaderPeerId, 'p2-missed-join', 'p3-missed-join'].sort());
     expect(swarm!.playerIndexMap.get('p2-missed-join')).toBe(1);
     expect(swarm!.playerIndexMap.get('p3-missed-join')).toBe(2);
@@ -1755,12 +1756,17 @@ describe('Graph-based lobby sync', () => {
     swarm!.status = 'traveling';
     swarm!.currentTurn = 1;
     swarm!.gameState = { sessionId: 'launch-window', status: 'active', party: [], month: 1, epochs: 0 } as any;
+    swarm!.playerIndexMap = new Map([
+      ['leader-peer', 0],
+      ['peer-c', 1],
+      ['peer-b', 2],
+    ]);
 
     includeLatePlayer = true;
     await (coordinator as any).loadLobbyFromGraph();
 
     expect(swarm!.status).toBe('traveling');
-    expect(swarm!.players.map(p => p.peerId).sort()).toEqual(['leader-peer', 'peer-b', 'peer-c'].sort());
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['leader-peer', 'peer-c', 'peer-b']);
     coordinator.destroy();
   });
 

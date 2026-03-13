@@ -190,7 +190,9 @@ function fundWallet(rpcUrl: string, address: string): void {
 }
 
 export async function startTestCluster(nodeCount: number, options?: ClusterOptions): Promise<TestNode[]> {
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  if (existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, maxRetries: 3, retryDelay: 200 });
+  }
   mkdirSync(TEST_DIR, { recursive: true });
 
   const authToken = 'test-token-for-e2e';

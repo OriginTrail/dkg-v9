@@ -26,6 +26,7 @@ dkg init      # Interactive setup — pick a name, paste an EVM key
 dkg start -f  # Start your node (foreground)
 ```
 fsdgjsfdlk
+fdsfg
 
 In another terminal:
 

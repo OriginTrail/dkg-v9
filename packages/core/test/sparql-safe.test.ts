@@ -151,6 +151,19 @@ describe('sparqlInt', () => {
     expect(sparqlInt(42n)).toBe('42');
   });
 
+  it('preserves precision for large bigint values beyond Number.MAX_SAFE_INTEGER', () => {
+    const large = 9007199254740993n; // Number.MAX_SAFE_INTEGER + 2
+    expect(sparqlInt(large)).toBe('9007199254740993');
+    const veryLarge = 123456789012345678901234567890n;
+    expect(sparqlInt(veryLarge)).toBe('123456789012345678901234567890');
+  });
+
+  it('enforces bounds on bigint values', () => {
+    expect(() => sparqlInt(-1n, { min: 0 })).toThrow('below minimum');
+    expect(() => sparqlInt(1001n, { max: 1000 })).toThrow('above maximum');
+    expect(sparqlInt(500n, { min: 0, max: 1000 })).toBe('500');
+  });
+
   it('rejects NaN', () => {
     expect(() => sparqlInt(NaN)).toThrow('Invalid SPARQL integer');
   });

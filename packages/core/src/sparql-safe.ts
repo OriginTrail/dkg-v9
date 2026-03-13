@@ -74,20 +74,31 @@ export function sparqlString(value: string): string {
 /**
  * Validates and returns a safe integer string for SPARQL LIMIT / OFFSET
  * and similar numeric contexts. Rejects NaN, Infinity, and non-integer values.
+ *
+ * Handles `bigint` natively via `.toString()` to avoid precision loss
+ * for values beyond `Number.MAX_SAFE_INTEGER`.
  */
 export function sparqlInt(
   value: number | bigint,
   opts?: { min?: number; max?: number },
 ): string {
-  const n = typeof value === 'bigint' ? Number(value) : value;
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+  if (typeof value === 'bigint') {
+    if (opts?.min !== undefined && value < BigInt(opts.min)) {
+      throw new Error(`SPARQL integer ${value} below minimum ${opts.min}`);
+    }
+    if (opts?.max !== undefined && value > BigInt(opts.max)) {
+      throw new Error(`SPARQL integer ${value} above maximum ${opts.max}`);
+    }
+    return value.toString();
+  }
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
     throw new Error(`Invalid SPARQL integer: ${value}`);
   }
-  if (opts?.min !== undefined && n < opts.min) {
-    throw new Error(`SPARQL integer ${n} below minimum ${opts.min}`);
+  if (opts?.min !== undefined && value < opts.min) {
+    throw new Error(`SPARQL integer ${value} below minimum ${opts.min}`);
   }
-  if (opts?.max !== undefined && n > opts.max) {
-    throw new Error(`SPARQL integer ${n} above maximum ${opts.max}`);
+  if (opts?.max !== undefined && value > opts.max) {
+    throw new Error(`SPARQL integer ${value} above maximum ${opts.max}`);
   }
-  return String(n);
+  return String(value);
 }

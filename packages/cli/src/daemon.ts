@@ -1090,7 +1090,7 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
-      hasOpenClawChannel: !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
+      hasOpenClawChannel: config.openclawAdapter === true,
       autoUpdate: config.autoUpdate?.enabled ?? false,
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
@@ -2014,6 +2014,17 @@ async function handleRequest(
       { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
     ];
     return jsonResponse(res, 200, { adapters, skills, paranets });
+  }
+
+  // POST /api/register-adapter — adapter self-registers so UI can detect it
+  if (req.method === 'POST' && path === '/api/register-adapter') {
+    const body = await readBody(req);
+    const { id } = JSON.parse(body);
+    if (id === 'openclaw' && !config.openclawAdapter) {
+      config.openclawAdapter = true;
+      await saveConfig(config);
+    }
+    return jsonResponse(res, 200, { ok: true });
   }
 
   // GET /api/paranet/exists?id=<paranetId>

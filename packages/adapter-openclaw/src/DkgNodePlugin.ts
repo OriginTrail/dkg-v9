@@ -53,6 +53,10 @@ export class DkgNodePlugin {
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
+    // Self-register with daemon so the UI knows the OpenClaw adapter is in use.
+    // Fire-and-forget — non-fatal if daemon is temporarily unreachable.
+    this.client.registerAdapter('openclaw').catch(() => {});
+
     for (const tool of this.tools()) {
       api.registerTool(tool);
     }

@@ -153,12 +153,14 @@ export class LogPushWorker {
 
     for (const entry of batch) {
       const pri = FACILITY_LOCAL0 * 8 + (SYSLOG_SEVERITY[entry.level] ?? 6);
+      let verStat: string;
+      try { verStat = this.versionStatus(); } catch { verStat = 'unknown'; }
       const extra = [
         this.version ? `ver="${sdEscape(this.version)}"` : '',
         this.commit ? `commit="${sdEscape(this.commit)}"` : '',
         this.role ? `role="${sdEscape(this.role)}"` : '',
         `autoUpd="${this.autoUpdate}"`,
-        `verStat="${sdEscape(this.versionStatus())}"`,
+        `verStat="${sdEscape(verStat)}"`,
       ].filter(Boolean).join(' ');
       const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}" ${extra}]`;
       const msg = entry.message.replace(/[\r\n]+/g, ' ').slice(0, 8192);

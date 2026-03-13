@@ -158,6 +158,12 @@ class GameClient {
     return this.post(`${GAME_API}/force-resolve`, { swarmId });
   }
 
+  async leaveSwarm(swarmId?: string): Promise<SwarmState | { disbanded: true }> {
+    const body: Record<string, unknown> = {};
+    if (swarmId) body.swarmId = swarmId;
+    return this.post(`${GAME_API}/leave`, body);
+  }
+
   // HTTP primitives (same pattern as DkgDaemonClient)
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
@@ -716,7 +722,7 @@ export class DkgGamePlugin {
       api.registerTool(tool);
     }
 
-    api.logger.info?.('[dkg-game] Game plugin registered — 10 tools available');
+    api.logger.info?.('[dkg-game] Game plugin registered — 11 tools available');
   }
 
   async stop(): Promise<void> {
@@ -906,6 +912,51 @@ export class DkgGamePlugin {
               if (this.watchState) {
                 summary.watcher = 'Watching for game start — autopilot will auto-engage when the expedition begins.';
               }
+            }
+            return this.json(summary);
+          } catch (err: any) { return this.gameError(err); }
+        },
+      },
+      {
+        name: 'game_leave',
+        description:
+          'Leave an OriginTrail Game swarm. If swarm_id is omitted and you have exactly one active swarm, ' +
+          'it auto-resolves. Stops autopilot and watcher if running for this swarm. ' +
+          'If the leader leaves a recruiting swarm, the swarm is disbanded.',
+        parameters: {
+          type: 'object',
+          properties: {
+            swarm_id: { type: 'string', description: 'Swarm ID to leave (optional — auto-resolves if you have exactly one active swarm)' },
+          },
+          required: [],
+        },
+        execute: async (_id, params) => {
+          try {
+            const swarmId = params.swarm_id ? String(params.swarm_id) : undefined;
+
+            // Stop autopilot if running for this swarm (or any swarm if no ID given)
+            if (this.gameService!.isRunning && (!swarmId || this.gameService!.activeSwarmId === swarmId)) {
+              await this.gameService!.stop();
+            }
+
+            // Stop watcher if active for this swarm (or any swarm if no ID given)
+            if (this.watchState && (!swarmId || this.watchState.swarmId === swarmId)) {
+              this.stopWatch();
+            }
+
+            const result = await this.gameClient!.leaveSwarm(swarmId);
+
+            if ('disbanded' in result && result.disbanded) {
+              return this.json({
+                status: 'disbanded',
+                message: 'You were the leader of a recruiting swarm. The swarm has been disbanded.',
+              });
+            }
+
+            const summary: Record<string, unknown> = formatSwarmSummary(result as SwarmState);
+            summary.left = true;
+            if ((result as SwarmState).status === 'finished') {
+              summary.message = 'You left during the journey. The swarm has ended.';
             }
             return this.json(summary);
           } catch (err: any) { return this.gameError(err); }

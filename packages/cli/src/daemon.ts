@@ -1012,6 +1012,7 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      hasOpenClawChannel: !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
     });
   }
 

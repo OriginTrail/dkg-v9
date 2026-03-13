@@ -53,9 +53,22 @@ function getNodeVersion(): string {
     return pkg.version ?? '0.0.0';
   } catch { return '0.0.0'; }
 }
+
+function getCurrentCommitShort(): string {
+  try {
+    const commitFile = join(dkgDir(), '.current-commit');
+    return readFileSync(commitFile, 'utf-8').trim().slice(0, 8);
+  } catch {
+    try {
+      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    } catch { return ''; }
+  }
+}
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
+
+const lastUpdateCheck = { upToDate: true, checkedAt: 0 };
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -173,7 +186,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   origStdoutWrite(banner + '\n');
   appendFile(logFile, banner + '\n').catch(() => {});
 
-  log(`Starting DKG ${role} node "${config.name}"...`);
+  const nodeVersion = getNodeVersion();
+  const nodeCommit = getCurrentCommitShort();
+  const versionTag = nodeCommit ? `v${nodeVersion}, ${nodeCommit}` : `v${nodeVersion}`;
+  log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
   const syncParanets = [...new Set([
@@ -327,16 +343,22 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   if (config.autoUpdate?.enabled) {
     const au = config.autoUpdate;
     log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
-    updateInterval = setInterval(
-      async () => {
+
+    const runCheck = async () => {
+      const commitStatus = await checkForNewCommitWithStatus(au, log);
+      lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
+      lastUpdateCheck.checkedAt = Date.now();
+      if (commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
           log('Auto-update: update activated; restarting daemon process.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
         }
-      },
-      au.checkIntervalMinutes * 60_000,
-    );
+      }
+    };
+
+    setTimeout(runCheck, 15_000);
+    updateInterval = setInterval(runCheck, au.checkIntervalMinutes * 60_000);
   }
 
   // --- Dashboard DB + Metrics ---
@@ -425,6 +447,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       peerId: agent.peerId,
       network: networkKey,
       nodeName: config.name,
+      version: getNodeVersion(),
+      commit: getCurrentCommitShort(),
+      role: config.nodeRole ?? 'edge',
+      autoUpdate: config.autoUpdate?.enabled ?? false,
     });
     logPusher.start();
     log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
@@ -999,6 +1025,8 @@ async function handleRequest(
     const identityId = agent.publisher.getIdentityId();
     return jsonResponse(res, 200, {
       name: config.name,
+      version: getNodeVersion(),
+      commit: getCurrentCommitShort() || null,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
@@ -1012,6 +1040,8 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      autoUpdate: config.autoUpdate?.enabled ?? false,
+      updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
     });
   }
 

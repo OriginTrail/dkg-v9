@@ -136,6 +136,7 @@ function useLiveStatus() {
   return status;
 }
 
+
 const NOTIF_ICONS: Record<string, string> = {
   chat_message: '\u{1F4AC}',
   peer_connected: '\u{1F7E2}',
@@ -269,13 +270,50 @@ function NotificationBell() {
 export function App() {
   const installedApps = useInstalledApps();
   const liveStatus = useLiveStatus();
+  const currentVersion = liveStatus?.version;
+  const commitShort = liveStatus?.commit;
+  const updateAvailable = liveStatus?.updateAvailable === true;
 
   return (
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 500 }}>DKG v9 Node</div>
+          <style>{`@keyframes pulse-fade{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="logo-version" style={updateAvailable ? { color: '#fbbf24' } : liveStatus?.updateAvailable === false ? { color: 'var(--green)' } : {}}>
+              {currentVersion ? `v${currentVersion}` : 'DKG v9 Node'}
+              {commitShort ? ` (${commitShort})` : ''}
+            </span>
+            {liveStatus?.updateAvailable === false && (
+              <span title="Running the latest version" style={{
+                fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
+                background: 'rgba(74,222,128,.08)', color: 'var(--green)', cursor: 'default',
+                letterSpacing: '0.03em',
+              }}>latest</span>
+            )}
+            {updateAvailable && (
+              <span title={liveStatus?.autoUpdate ? 'Auto-update will apply the new version on the next check' : 'A newer version is available — update manually'} style={{
+                fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
+                background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
+                letterSpacing: '0.03em',
+                animation: 'pulse-fade 2.5s ease-in-out infinite',
+              }}>{liveStatus?.autoUpdate ? 'updating...' : 'update available'}</span>
+            )}
+          </div>
+          {currentVersion && (
+            <div style={{ marginTop: 1 }}>
+              {liveStatus?.autoUpdate ? (
+                <span title="Node will automatically update on the next version check" style={{
+                  fontSize: 10, color: 'var(--green)', opacity: 0.8, cursor: 'default',
+                }}>Auto-updater: enabled</span>
+              ) : (
+                <span title="Enable auto-update in config.json to stay current automatically" style={{
+                  fontSize: 10, color: 'var(--text-dim)', cursor: 'default',
+                }}>Auto-updater: disabled</span>
+              )}
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6 }}>
             <span style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '0.02em' }}>powered by</span>
             <svg width="60" height="13" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ opacity: 0.55 }}>

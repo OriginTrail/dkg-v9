@@ -1023,7 +1023,7 @@ export class DkgGamePlugin {
 
             // Validate and coerce params per action type
             const rawParams = params.params ? tryParseJson(String(params.params)) : undefined;
-            const voteParams = coerceParams(action, rawParams);
+            const voteParams = coerceParams(action, rawParams ?? undefined);
             if (action === 'trade' && !voteParams) {
               return this.json({
                 error: 'Trade requires valid params: {"item": "trainingTokens|apiCredits|computeUnits|modelWeights", "quantity": <number>}',

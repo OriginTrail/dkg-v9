@@ -204,25 +204,35 @@ sequenceDiagram
     Agent-->>App: PublishResult
 
     rect rgb(240, 248, 255)
-        Note over Peers,Store: Phase 9 — Receiver-side finalization (two independent mechanisms)
+        Note over Peers,Chain: Phase 9 — Receiver-side finalization (two independent mechanisms)
 
-        Note over Peers: Mechanism A — Publisher gossip (fast path)
+        Note over Peers: Dedup gate (both mechanisms)
+        Peers->>Store: ASK { <ual> dkg:status "confirmed" } in meta graph
+        alt Already confirmed
+            Peers->>Peers: Skip — already finalized (dedup by UAL)
+        end
+
+        Note over Peers,Chain: Mechanism A — Publisher gossip (fast path)
         Peers->>Peers: Receive confirmed PublishRequest from Phase 8
-        Peers->>Peers: Verify txHash on-chain (optional, configurable trust)
+        Peers->>Chain: Verify KnowledgeBatchCreated event at specified blockNumber
+        Note over Peers,Chain: Must match ALL of: txHash, kcMerkleRoot,<br/>publisherAddress, startKAId..endKAId
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads
+        Peers->>Peers: Verify computed root matches on-chain event root
         Peers->>Store: Copy quads: workspace graph → data graph
         Peers->>Store: Delete quads from workspace graph
         Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
 
-        Note over Peers: Mechanism B — ChainEventPoller (independent fallback)
+        Note over Peers,Chain: Mechanism B — ChainEventPoller (independent fallback)
         Peers->>Chain: Poll for KnowledgeBatchCreated events (every 12s)
         Peers->>Peers: Match event kcMerkleRoot against workspace data
-        alt Workspace data found and not yet promoted
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
+        alt Workspace data found and not yet promoted (UAL not confirmed)
             Peers->>Store: Copy quads: workspace graph → data graph
             Peers->>Store: Delete quads from workspace graph
             Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
         end
 
-        Note over Peers: Whichever mechanism fires first wins.<br/>The second is a no-op (dedup by kcMerkleRoot).<br/>If neither fires within TTL, workspace data expires.
+        Note over Peers: Whichever mechanism fires first wins.<br/>The second is a no-op (dedup by UAL, not kcMerkleRoot).<br/>If neither fires within TTL, workspace data expires.
     end
 ```
 
@@ -295,17 +305,34 @@ sequenceDiagram
 
     rect rgb(232, 245, 233)
         Note over Agent,Chain: Submit on-chain publish
-        Agent->>Chain: publishKnowledgeAssets({..., receiverSignatures[]})
-        Chain-->>Agent: OnChainPublishResult {txHash, batchId, ...}
+        Agent->>Agent: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
+        Agent->>Chain: publishKnowledgeAssets({kaCount, kcMerkleRoot, publicByteSize,<br/>tokenAmount, publisherSignature, receiverSignatures[]})
+        Chain-->>Agent: OnChainPublishResult {txHash, batchId, blockNumber, startKAId, endKAId}
+        Note over Chain: Emits: UALRangeReserved, KnowledgeBatchCreated
     end
 
-    Note over Agent,Store: Promote workspace → data graph
+    Note over Agent,Store: Promote workspace → data graph (publisher side)
     Agent->>Store: Copy quads: workspace graph → data graph
     Agent->>Store: Delete quads from workspace graph
-    Agent->>Store: insert(confirmed metadata → meta graph)
+    Agent->>Store: insert(confirmed metadata + chain provenance → meta graph)
 
-    Agent->>GS: Broadcast finalization with chain proof
+    Note over Agent,GS: Post-broadcast with chain proof
+    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
+    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
     Agent-->>App: PublishResult {status: confirmed}
+
+    rect rgb(240, 248, 255)
+        Note over Peers,Chain: Receiver-side finalization (same dual mechanism as 2.1 Phase 9)
+
+        Peers->>Store: Dedup gate: ASK { <ual> dkg:status "confirmed" }
+        Note over Peers: Mechanism A (fast): receive gossip → verify on-chain → promote
+        Note over Peers: Mechanism B (fallback): ChainEventPoller catches event → promote
+        Peers->>Chain: Verify KnowledgeBatchCreated at blockNumber
+        Peers->>Peers: Recompute kcMerkleRoot from workspace quads, verify match
+        Peers->>Store: Copy quads: workspace graph → data graph
+        Peers->>Store: Delete quads from workspace graph
+        Peers->>Store: insert(confirmed metadata + chain provenance → meta graph)
+    end
 ```
 
 **Key differences from standard publish:**
@@ -396,15 +423,30 @@ sequenceDiagram
         Note over Chain: Emits: KnowledgeBatchCreated + ContextGraphExpanded
     end
 
-    Note over Agent,Store: Phase 7 — Promote workspace → context graph
+    Note over Agent,Store: Phase 7 — Promote workspace → context graph (publisher side)
 
     Agent->>Store: Copy quads: workspace → context graph data URI
     Agent->>Store: Delete quads from workspace graph
-    Agent->>Store: insert(confirmed metadata → context graph meta URI)
+    Agent->>Store: insert(confirmed metadata + chain provenance → context graph meta URI)
     Note over Store: Data lives at did:dkg:paranet:{id}/context/{ctxId}<br/>NOT in the paranet data graph
 
-    Agent->>GS: Broadcast chain proof (for peer promotion)
+    Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
+    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
+    Note over GS: Includes: txHash, blockNumber, startKAId, endKAId,<br/>publisherAddress, contextGraphId
     Agent-->>App: PublishResult {status: confirmed, contextGraphId}
+
+    rect rgb(240, 248, 255)
+        Note over ParaPeers,Chain: Phase 9 — Receiver-side finalization (same dual mechanism as 2.1)
+
+        ParaPeers->>Store: Dedup gate: ASK { <ual> dkg:status "confirmed" }
+        Note over ParaPeers: Mechanism A (fast): receive gossip → verify on-chain → promote
+        Note over ParaPeers: Mechanism B (fallback): ChainEventPoller catches event → promote
+        ParaPeers->>Chain: Verify KnowledgeBatchCreated + ContextGraphExpanded at blockNumber
+        ParaPeers->>ParaPeers: Recompute kcMerkleRoot from workspace quads, verify match
+        ParaPeers->>Store: Copy quads: workspace → context graph data URI
+        ParaPeers->>Store: Delete quads from workspace graph
+        ParaPeers->>Store: insert(confirmed metadata + chain provenance → context graph meta)
+    end
 ```
 
 #### How participant signature collection works
@@ -474,9 +516,15 @@ verified by different on-chain logic.
 ## 3. Chain Event Confirmation
 
 Receiver nodes use the ChainEventPoller as a **fallback confirmation mechanism**.
-The primary path is the post-broadcast in Phase 8 (section 2.1), where the
-publisher gossips chain proof and peers promote workspace → data graph. The
-poller catches any events missed due to gossip failures or node restarts.
+The primary path is the publisher gossip in Phase 8/9 (Section 2.1), where the
+publisher broadcasts chain proof and peers verify on-chain + promote. The poller
+independently catches events missed due to gossip failures or node restarts.
+
+Both paths dedup by **UAL** (not by kcMerkleRoot) — checking whether
+`<ual> dkg:status "confirmed"` already exists in the meta graph. This is
+critical because two different publishes can have the same kcMerkleRoot
+(identical data) but different UALs; deduping by root would incorrectly
+skip the second publish.
 
 ```mermaid
 sequenceDiagram
@@ -494,12 +542,14 @@ sequenceDiagram
                 Chain-->>Poller: {kcMerkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
                 Poller->>PH: confirmByKcMerkleRoot(kcMerkleRoot, chainData)
                 PH->>PH: Find workspace data with matching kcMerkleRoot
-                alt Match found
+                PH->>PH: Resolve UAL from workspace metadata
+                PH->>PH: Check dedup: is UAL already confirmed?
+                alt Match found and not yet confirmed
                     PH->>Store: Copy quads: workspace graph → data graph
                     PH->>Store: Delete quads from workspace graph
                     PH->>Store: Insert confirmed metadata + chain provenance
                     PH-->>Poller: promoted = true
-                else No match
+                else No match or already confirmed
                     PH-->>Poller: promoted = false
                 end
             end

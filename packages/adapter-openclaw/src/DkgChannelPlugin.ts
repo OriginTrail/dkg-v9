@@ -208,6 +208,7 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   private loadSdk(): any {
+    if (this.sdk) { this.sdkLoaded = true; return this.sdk; }
     if (this.sdkLoaded) return this.sdk;
     this.sdkLoaded = true;
     const log = this.api?.logger;

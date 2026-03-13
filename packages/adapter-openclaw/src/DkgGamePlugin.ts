@@ -932,7 +932,8 @@ export class DkgGamePlugin {
         },
         execute: async (_id, params) => {
           try {
-            const swarmId = params.swarm_id ? String(params.swarm_id) : undefined;
+            const raw = params.swarm_id != null ? String(params.swarm_id).trim() : '';
+            const swarmId = raw.length > 0 ? raw : undefined;
 
             // Call API first — only clean up autopilot/watcher after a successful leave
             const result = await this.gameClient!.leaveSwarm(swarmId);
@@ -960,7 +961,7 @@ export class DkgGamePlugin {
             const summary: Record<string, unknown> = formatSwarmSummary(result as SwarmState);
             summary.left = true;
             if ((result as SwarmState).status === 'finished') {
-              summary.message = 'You left during the journey. The swarm has ended.';
+              summary.message = 'Leaving ended the expedition for this swarm.';
             }
             return this.json(summary);
           } catch (err: any) { return this.gameError(err); }

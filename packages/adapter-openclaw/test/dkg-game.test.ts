@@ -769,7 +769,7 @@ describe('game_leave tool', () => {
       const result = await leaveTool.execute('test', { swarm_id: 'sw-1' });
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.left).toBe(true);
-      expect(parsed.message).toContain('journey');
+      expect(parsed.message).toContain('ended the expedition');
 
       await plugin.stop();
     } finally {

@@ -44,6 +44,8 @@ export interface LogPushWorkerOptions {
   role?: string;
   /** Whether auto-update is enabled */
   autoUpdate?: boolean;
+  /** Dynamic getter returning version status: latest | updating | behind | disabled | unknown */
+  versionStatus?: () => string;
 }
 
 interface LogEntry {
@@ -75,6 +77,7 @@ export class LogPushWorker {
   private readonly commit: string;
   private readonly role: string;
   private readonly autoUpdate: string;
+  private readonly versionStatus: () => string;
 
   constructor(opts: LogPushWorkerOptions) {
     this.host = opts.host;
@@ -86,6 +89,7 @@ export class LogPushWorker {
     this.commit = opts.commit ?? '';
     this.role = opts.role ?? '';
     this.autoUpdate = opts.autoUpdate ? 'on' : 'off';
+    this.versionStatus = opts.versionStatus ?? (() => 'unknown');
   }
 
   push(entry: LogEntry): void {
@@ -154,6 +158,7 @@ export class LogPushWorker {
         this.commit ? `commit="${sdEscape(this.commit)}"` : '',
         this.role ? `role="${sdEscape(this.role)}"` : '',
         `autoUpd="${this.autoUpdate}"`,
+        `verStat="${sdEscape(this.versionStatus())}"`,
       ].filter(Boolean).join(' ');
       const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}" ${extra}]`;
       const msg = entry.message.replace(/[\r\n]+/g, ' ').slice(0, 8192);

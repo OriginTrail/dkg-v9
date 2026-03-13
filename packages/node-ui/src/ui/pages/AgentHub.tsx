@@ -1052,7 +1052,7 @@ function OpenClawChatView() {
               transition: 'all .15s ease',
             }}
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
               <line x1="8.5" y1="7.5" x2="10.5" y2="16"/><line x1="15.5" y1="7.5" x2="13.5" y2="16"/>
             </svg>
@@ -1290,7 +1290,7 @@ export function AgentHubPage() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    if (nodeStatus?.hasOpenClawChannel) setMode('openclaw');
+    if (nodeStatus?.hasOpenClawChannel) setMode(prev => prev === 'agent' ? 'openclaw' : prev);
   }, [nodeStatus]);
   const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
   const [input, setInput] = useState('');

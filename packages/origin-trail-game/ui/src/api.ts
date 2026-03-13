@@ -34,7 +34,8 @@ async function request(method: string, path: string, body?: unknown) {
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await res.json();
+  let data: any;
+  try { data = await res.json(); } catch { data = {}; }
   if (!res.ok) {
     const msg = data.error || (res.status === 401 ? 'Connection to node lost — try refreshing the page' : 'Request failed');
     throw new Error(msg);

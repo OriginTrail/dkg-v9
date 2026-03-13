@@ -202,6 +202,10 @@ function nextNotifId(): string {
   return `notif-${Date.now()}-${++notifSeq}`;
 }
 
+function compareSwarmMembers(a: SwarmMember, b: SwarmMember): number {
+  return a.joinedAt - b.joinedAt || a.peerId.localeCompare(b.peerId);
+}
+
 export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
@@ -221,7 +225,7 @@ export class OriginTrailGameCoordinator {
   private graphSyncLastSwarmCount: number | null = null;
   // Local tombstones prevent stale graph memberships from re-adding leavers/disbanded swarms.
   private readonly swarmTombstones = new Set<string>();
-  private readonly swarmMemberTombstones = new Map<string, Set<string>>();
+  private readonly swarmMemberTombstones = new Map<string, Map<string, number>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -398,31 +402,53 @@ export class OriginTrailGameCoordinator {
         : MAX_PLAYERS;
 
       const membersResult = await this.agent.query(
-        `SELECT ?agent ?displayName WHERE {
+        `SELECT ?agent ?displayName ?joinedAt WHERE {
           ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
                       <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
                       <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
                       <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
-        } ORDER BY ?agent ?displayName`,
+          OPTIONAL { ?membership <${rdf.SPARQL_PREFIXES.OT}joinedAt> ?joinedAt }
+        } ORDER BY ?joinedAt ?agent ?displayName`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
 
       const existingSwarm = this.swarms.get(swarmId);
       const existingPlayersByPeerId = new Map((existingSwarm?.players ?? []).map((p) => [p.peerId, p]));
       const tombstonedMembers = this.swarmMemberTombstones.get(swarmId);
-      const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
+      const graphPlayers = (membersResult.bindings ?? []).map((m: any) => {
         const pUri = m['agent'] ?? '';
         const pid = pUri.replace(/.*player\//, '');
         const existingPlayer = existingPlayersByPeerId.get(pid);
+        const graphJoinedAtRaw = stripQuotes(m['joinedAt'] ?? '0');
+        const graphJoinedAt = Number(graphJoinedAtRaw);
+        const joinedAt = Number.isFinite(graphJoinedAt) && graphJoinedAt > 0
+          ? graphJoinedAt
+          : (existingPlayer?.joinedAt ?? createdAt);
         return {
           peerId: pid,
           displayName: stripQuotes(m['displayName'] ?? ''),
-          joinedAt: existingPlayer?.joinedAt ?? createdAt,
+          joinedAt,
           isLeader: pid === orchestratorId,
           identityId: existingPlayer?.identityId,
         };
-      }).filter((p: SwarmMember) => !tombstonedMembers?.has(p.peerId))
-        .sort((a: SwarmMember, b: SwarmMember) => a.peerId.localeCompare(b.peerId));
+      });
+      const playersByPeerId = new Map<string, SwarmMember>();
+      for (const graphPlayer of graphPlayers) {
+        const existingGraphPlayer = playersByPeerId.get(graphPlayer.peerId);
+        if (!existingGraphPlayer || compareSwarmMembers(graphPlayer, existingGraphPlayer) < 0) {
+          playersByPeerId.set(graphPlayer.peerId, graphPlayer);
+        }
+      }
+      const players: SwarmMember[] = [...playersByPeerId.values()].filter((p: SwarmMember) => {
+        const tombstonedAt = tombstonedMembers?.get(p.peerId);
+        if (tombstonedAt == null) return true;
+        if (p.joinedAt > tombstonedAt) {
+          this.clearMemberTombstone(swarmId, p.peerId);
+          return true;
+        }
+        return false;
+      })
+        .sort(compareSwarmMembers);
 
       if (existingSwarm) {
         let changed = false;
@@ -456,6 +482,7 @@ export class OriginTrailGameCoordinator {
             const local = existingByPeerId.get(graphPlayer.peerId);
             if (!local) {
               existingSwarm.players.push(graphPlayer);
+              existingByPeerId.set(graphPlayer.peerId, graphPlayer);
               changed = true;
               continue;
             }
@@ -475,7 +502,7 @@ export class OriginTrailGameCoordinator {
               changed = true;
             }
           }
-          const sortedPlayers = [...existingSwarm.players].sort((a, b) => a.peerId.localeCompare(b.peerId));
+          const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
           const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
           if (needsReorder) {
             existingSwarm.players = sortedPlayers;
@@ -569,7 +596,7 @@ export class OriginTrailGameCoordinator {
 
     const quads = [
       ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
-      ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName),
+      ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now),
     ];
     const wsResult = await this.agent.writeToWorkspace(this.paranetId, quads);
     this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, quads);
@@ -608,7 +635,7 @@ export class OriginTrailGameCoordinator {
     });
     this.clearMemberTombstone(swarmId, this.myPeerId);
 
-    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
+    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now);
     const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
     this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, joinQuads);
 
@@ -648,7 +675,7 @@ export class OriginTrailGameCoordinator {
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
-    this.markMemberTombstone(swarmId, this.myPeerId);
+    this.markMemberTombstone(swarmId, this.myPeerId, Date.now());
     const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
     await this.broadcast(msg);
     return swarm;
@@ -1375,7 +1402,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
-    this.markMemberTombstone(msg.swarmId, msg.peerId);
+    this.markMemberTombstone(msg.swarmId, msg.peerId, msg.timestamp);
     this.pushNotification({
       type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
       playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1925,18 +1952,18 @@ export class OriginTrailGameCoordinator {
     this.swarmMemberTombstones.delete(swarmId);
   }
 
-  private markMemberTombstone(swarmId: string, peerId: string): void {
+  private markMemberTombstone(swarmId: string, peerId: string, timestamp: number): void {
     if (!this.swarmMemberTombstones.has(swarmId)) {
-      this.swarmMemberTombstones.set(swarmId, new Set());
+      this.swarmMemberTombstones.set(swarmId, new Map());
     }
-    this.swarmMemberTombstones.get(swarmId)!.add(peerId);
+    this.swarmMemberTombstones.get(swarmId)!.set(peerId, timestamp);
   }
 
   private clearMemberTombstone(swarmId: string, peerId: string): void {
-    const set = this.swarmMemberTombstones.get(swarmId);
-    if (!set) return;
-    set.delete(peerId);
-    if (set.size === 0) this.swarmMemberTombstones.delete(swarmId);
+    const tombstones = this.swarmMemberTombstones.get(swarmId);
+    if (!tombstones) return;
+    tombstones.delete(peerId);
+    if (tombstones.size === 0) this.swarmMemberTombstones.delete(swarmId);
   }
 
   // ── Network topology snapshots ──────────────────────────────────

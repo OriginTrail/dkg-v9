@@ -1477,7 +1477,56 @@ describe('Graph-based lobby sync', () => {
     coordinator.destroy();
   });
 
-  it('graph sync applies deterministic player ordering for restored swarms', async () => {
+  it('graph sync restores a rejoined member when graph evidence is newer than the leave tombstone', async () => {
+    const syncAgent = makeMockAgent('sync-peer');
+    const now = Date.now();
+    let membershipJoinedAt = now;
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-rejoin',
+            name: '"Graph Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+            maxPlayers: '"3"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/rejoin-peer', displayName: '"Rejoiner"', joinedAt: `"${membershipJoinedAt}"` },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    await (coordinator as any).loadLobbyFromGraph();
+
+    (coordinator as any).onRemotePlayerLeft({
+      app: 'origin-trail-game',
+      type: 'swarm:left',
+      swarmId: 'swarm-rejoin',
+      peerId: 'rejoin-peer',
+      timestamp: now + 10,
+    });
+
+    membershipJoinedAt = now + 20;
+    await (coordinator as any).loadLobbyFromGraph();
+
+    const swarm = coordinator.getSwarm('swarm-rejoin');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.players.some(p => p.peerId === 'rejoin-peer')).toBe(true);
+    coordinator.destroy();
+  });
+
+  it('graph sync applies deterministic join ordering for restored swarms', async () => {
     const syncAgent = makeMockAgent('sync-peer');
     const now = Date.now();
     syncAgent.query = async (sparql: string) => {
@@ -1497,9 +1546,9 @@ describe('Graph-based lobby sync', () => {
         // Intentionally unsorted response order.
         return {
           bindings: [
-            { agent: 'https://origintrail-game.dkg.io/player/peer-c', displayName: '"C"' },
-            { agent: 'https://origintrail-game.dkg.io/player/peer-a', displayName: '"A"' },
-            { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"' },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-c', displayName: '"C"', joinedAt: `"${now + 20}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-a', displayName: '"A"', joinedAt: `"${now + 30}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"', joinedAt: `"${now + 10}"` },
           ],
         };
       }
@@ -1512,7 +1561,46 @@ describe('Graph-based lobby sync', () => {
 
     const swarm = coordinator.getSwarm('swarm-order');
     expect(swarm).toBeTruthy();
-    expect(swarm!.players.map(p => p.peerId)).toEqual(['peer-a', 'peer-b', 'peer-c']);
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['peer-b', 'peer-c', 'peer-a']);
+    coordinator.destroy();
+  });
+
+  it('graph sync does not duplicate players when graph returns duplicate membership rows', async () => {
+    const syncAgent = makeMockAgent('sync-peer');
+    const now = Date.now();
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-dup',
+            name: '"Dup Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+            maxPlayers: '"4"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/dup-peer', displayName: '"Dup"', joinedAt: `"${now + 10}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/dup-peer', displayName: '"Dup"', joinedAt: `"${now + 10}"` },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    await (coordinator as any).loadLobbyFromGraph();
+    await (coordinator as any).loadLobbyFromGraph();
+
+    const swarm = coordinator.getSwarm('swarm-dup');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['leader-peer', 'dup-peer']);
     coordinator.destroy();
   });
 });

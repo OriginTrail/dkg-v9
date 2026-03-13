@@ -64,7 +64,7 @@ function getCurrentCommitShort(): string {
       const slotDir = existsSync(join(rDir, 'current'))
         ? join(rDir, 'current')
         : dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
+      return execSync('git rev-parse --short=8 HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
     } catch { return ''; }
   }
 }
@@ -73,6 +73,7 @@ import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from
 export const DAEMON_EXIT_CODE_RESTART = 75;
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '' };
+let isUpdating = false;
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
@@ -370,7 +371,9 @@ export async function runDaemon(foreground: boolean): Promise<void> {
         if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
       }
       if (au.enabled && commitStatus.status === 'available') {
+        isUpdating = true;
         const updated = await checkForUpdate(au, log);
+        isUpdating = false;
         if (updated) {
           if (foreground) {
             log('Auto-update: update activated; restarting foreground daemon in-place.');
@@ -468,6 +471,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     if (!syslogEndpoint || !syslogEndpoint.port) {
       return { ok: false, error: `Telemetry streaming is not available for ${networkKey} (no syslog endpoint configured)` };
     }
+    const autoUpdateEnabled = config.autoUpdate?.enabled ?? false;
     logPusher = new LogPushWorker({
       host: syslogEndpoint.host,
       port: syslogEndpoint.port,
@@ -477,7 +481,13 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       version: nodeVersion,
       commit: nodeCommit,
       role: config.nodeRole ?? 'edge',
-      autoUpdate: config.autoUpdate?.enabled ?? false,
+      autoUpdate: autoUpdateEnabled,
+      versionStatus: () => {
+        if (!autoUpdateEnabled) return 'disabled';
+        if (isUpdating) return 'updating';
+        if (lastUpdateCheck.checkedAt === 0) return 'unknown';
+        return lastUpdateCheck.upToDate ? 'latest' : 'behind';
+      },
     });
     logPusher.start();
     log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);

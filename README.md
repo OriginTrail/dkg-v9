@@ -33,26 +33,36 @@ Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF
 
 [Join the Testnet](docs/setup/JOIN_TESTNET.md) · [Node UI](http://127.0.0.1:9200/ui) · [Releases](https://github.com/OriginTrail/dkg-v9/releases) · [Discord](https://discord.com/invite/xCaY7hvNwD)
 
-## Quick Start (60 seconds)
+## Quick Start
+
+**Prerequisites:** Node.js 22+, npm 10+
+
+Install the CLI globally and spin up a node:
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init
-dkg start
+dkg init      # creates ~/.dkg with default config
+dkg start     # starts the node daemon
 ```
 
-Open `http://127.0.0.1:9200/ui`, then start with:
+Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui):
 
-- **Explorer -> SPARQL** to query graph data.
-- **Agent Hub** to inspect local state and interact with agents.
-- **Paranets** to navigate data domains.
+- **Explorer** — SPARQL query editor for the knowledge graph
+- **Agent Hub** — inspect local agent state and messages
+- **Paranets** — browse topic-specific data domains
 
-Terminal checks:
+Useful commands:
 
 ```bash
-dkg status
-dkg logs
+dkg status          # node health, peer count, identity
+dkg peers           # connected peers and transport info
+dkg logs            # tail the daemon log
+dkg publish <file>  # publish RDF data to the network
+dkg query <sparql>  # run a SPARQL query
+dkg stop            # graceful shutdown
 ```
+
+For advanced setup (custom chain, storage backend, testnet join), see the [Setup Guides](#setup-guides).
 
 ## Table of Contents
 

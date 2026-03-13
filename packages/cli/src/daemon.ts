@@ -199,7 +199,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   appendFile(logFile, banner + '\n').catch(() => {});
 
   const nodeVersion = getNodeVersion();
-  const nodeCommit = getCurrentCommitShort();
+  const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
   const versionTag = nodeCommit ? `v${nodeVersion}, ${nodeCommit}` : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
@@ -469,8 +469,8 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       peerId: agent.peerId,
       network: networkKey,
       nodeName: config.name,
-      version: getNodeVersion(),
-      commit: getCurrentCommitShort(),
+      version: nodeVersion,
+      commit: nodeCommit,
       role: config.nodeRole ?? 'edge',
       autoUpdate: config.autoUpdate?.enabled ?? false,
     });
@@ -1066,8 +1066,8 @@ async function handleRequest(
     const identityId = agent.publisher.getIdentityId();
     return jsonResponse(res, 200, {
       name: config.name,
-      version: getNodeVersion(),
-      commit: getCurrentCommitShort() || null,
+      version: nodeVersion,
+      commit: nodeCommit || null,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),

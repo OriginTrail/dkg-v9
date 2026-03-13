@@ -50,7 +50,7 @@ export interface TurnResult {
 export interface SwarmLobby {
   openSwarms: Swarm[];
   mySwarms: Swarm[];
-  recruitingSwarms: Swarm[];
+  recruitingSwarms?: Swarm[];
 }
 
 const swarms = new Map<string, Swarm>();

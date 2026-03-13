@@ -330,103 +330,99 @@ export class OriginTrailGameCoordinator {
     this.graphSyncInitialTimer.unref?.();
   }
 
-  async loadLobbyFromGraph(): Promise<void> {
-    try {
-      const playersResult = await this.agent.query(
-        `SELECT ?player ?name ?peerId ?registeredAt WHERE {
-          ?player a <${rdf.SPARQL_PREFIXES.OT}Player> ;
-                  <${rdf.SPARQL_PREFIXES.SCHEMA}name> ?name ;
-                  <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
-          OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
-        }`,
-        { paranetId: this.paranetId },
-      );
+  private async loadLobbyFromGraph(): Promise<void> {
+    const playersResult = await this.agent.query(
+      `SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <${rdf.SPARQL_PREFIXES.OT}Player> ;
+                <${rdf.SPARQL_PREFIXES.SCHEMA}name> ?name ;
+                <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
+        OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
+      }`,
+      { paranetId: this.paranetId },
+    );
 
-      const playerCount = playersResult.bindings?.length ?? 0;
-      this.log(`Graph sync: found ${playerCount} registered players`);
+    const playerCount = playersResult.bindings?.length ?? 0;
+    this.log(`Graph sync: found ${playerCount} registered players`);
 
-      const swarmsResult = await this.agent.query(
-        `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
-          ?swarm a <${rdf.SPARQL_PREFIXES.OT}AgentSwarm> ;
-                 <${rdf.SPARQL_PREFIXES.OT}name> ?name ;
-                 <${rdf.SPARQL_PREFIXES.OT}status> ?status .
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}orchestrator> ?orchestrator }
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
+    const swarmsResult = await this.agent.query(
+      `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+        ?swarm a <${rdf.SPARQL_PREFIXES.OT}AgentSwarm> ;
+               <${rdf.SPARQL_PREFIXES.OT}name> ?name ;
+               <${rdf.SPARQL_PREFIXES.OT}status> ?status .
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}orchestrator> ?orchestrator }
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
+      }`,
+      { paranetId: this.paranetId, includeWorkspace: true },
+    );
+
+    const newSwarms = swarmsResult.bindings?.length ?? 0;
+    this.log(`Graph sync: found ${newSwarms} swarms in graph`);
+
+    for (const row of swarmsResult.bindings ?? []) {
+      const swarmUri = row['swarm'] ?? '';
+      const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
+      if (!swarmIdMatch) continue;
+      const swarmId = swarmIdMatch[1];
+
+      if (this.swarms.has(swarmId)) continue;
+
+      const statusRaw = stripQuotes(row['status'] ?? '');
+      if (statusRaw !== 'recruiting') continue;
+
+      const orchestratorUri = row['orchestrator'] ?? '';
+      const orchestratorId = orchestratorUri.replace(/.*player\//, '');
+      const swarmName = stripQuotes(row['name'] ?? '');
+      const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
+
+      if (createdAt > 0 && Date.now() - createdAt > STALE_SWARM_TTL_MS) {
+        this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
+        continue;
+      }
+      const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
+      const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
+        ? graphMaxPlayers
+        : MAX_PLAYERS;
+
+      const membersResult = await this.agent.query(
+        `SELECT ?agent ?displayName WHERE {
+          ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
+                      <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
+                      <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
+                      <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
         }`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
 
-      const newSwarms = swarmsResult.bindings?.length ?? 0;
-      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
-
-      for (const row of swarmsResult.bindings ?? []) {
-        const swarmUri = row['swarm'] ?? '';
-        const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
-        if (!swarmIdMatch) continue;
-        const swarmId = swarmIdMatch[1];
-
-        if (this.swarms.has(swarmId)) continue;
-
-        const statusRaw = stripQuotes(row['status'] ?? '');
-        if (statusRaw !== 'recruiting') continue;
-
-        const orchestratorUri = row['orchestrator'] ?? '';
-        const orchestratorId = orchestratorUri.replace(/.*player\//, '');
-        const swarmName = stripQuotes(row['name'] ?? '');
-        const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
-
-        if (createdAt > 0 && Date.now() - createdAt > STALE_SWARM_TTL_MS) {
-          this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
-          continue;
-        }
-        const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
-        const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
-          ? graphMaxPlayers
-          : MAX_PLAYERS;
-
-        const membersResult = await this.agent.query(
-          `SELECT ?agent ?displayName WHERE {
-            ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
-                        <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
-                        <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
-                        <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
-          }`,
-          { paranetId: this.paranetId, includeWorkspace: true },
-        );
-
-        const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
-          const pUri = m['agent'] ?? '';
-          const pid = pUri.replace(/.*player\//, '');
-          return {
-            peerId: pid,
-            displayName: stripQuotes(m['displayName'] ?? ''),
-            joinedAt: createdAt,
-            isLeader: pid === orchestratorId,
-          };
-        });
-
-        const swarm: SwarmState = {
-          id: swarmId,
-          name: swarmName,
-          leaderPeerId: orchestratorId,
-          maxPlayers: restoredMaxPlayers,
-          players,
-          status: 'recruiting',
-          gameState: null,
-          currentTurn: 0,
-          votes: [],
-          turnDeadline: null,
-          pendingProposal: null,
-          turnHistory: [],
-          createdAt,
-          playerIndexMap: new Map(),
+      const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
+        const pUri = m['agent'] ?? '';
+        const pid = pUri.replace(/.*player\//, '');
+        return {
+          peerId: pid,
+          displayName: stripQuotes(m['displayName'] ?? ''),
+          joinedAt: createdAt,
+          isLeader: pid === orchestratorId,
         };
-        this.swarms.set(swarmId, swarm);
-        this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
-      }
-    } catch (err: any) {
-      throw err;
+      });
+
+      const swarm: SwarmState = {
+        id: swarmId,
+        name: swarmName,
+        leaderPeerId: orchestratorId,
+        maxPlayers: restoredMaxPlayers,
+        players,
+        status: 'recruiting',
+        gameState: null,
+        currentTurn: 0,
+        votes: [],
+        turnDeadline: null,
+        pendingProposal: null,
+        turnHistory: [],
+        createdAt,
+        playerIndexMap: new Map(),
+      };
+      this.swarms.set(swarmId, swarm);
+      this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
     }
   }
 

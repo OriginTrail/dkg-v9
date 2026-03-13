@@ -12,6 +12,14 @@ const DKG = 'http://dkg.io/ontology/';
 export const DKG_STATE_VERSION = `${DKG}stateVersion`;
 export const DKG_STATE_UPDATED_AT = `${DKG}stateUpdatedAt`;
 
+function escapeRdfLiteral(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
 /**
  * Validates and builds a CAS condition for a forward-only stage transition.
  * Returns the condition and the quad that sets the new value.
@@ -44,9 +52,9 @@ export function monotonicTransition(
     condition: {
       subject,
       predicate,
-      expectedValue: from === null ? null : `"${from}"`,
+      expectedValue: from === null ? null : `"${escapeRdfLiteral(from)}"`,
     },
-    quad: { subject, predicate, object: `"${to}"` },
+    quad: { subject, predicate, object: `"${escapeRdfLiteral(to)}"` },
   };
 }
 

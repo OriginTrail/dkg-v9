@@ -63,8 +63,25 @@ export const SWARM_STATUS_PREDICATE = otUri('status');
 
 export const SWARM_STAGES = ['recruiting', 'traveling', 'finished'] as const;
 
-export function swarmStatusUpdateQuad(paranetId: string, swarmId: string, newStatus: typeof SWARM_STAGES[number]): Quad {
-  return quad(swarmUri(swarmId), SWARM_STATUS_PREDICATE, literal(newStatus), workspaceGraph(paranetId));
+export function swarmSnapshotQuads(
+  paranetId: string,
+  swarmId: string,
+  swarmName: string,
+  leaderPeerId: string,
+  createdAt: number,
+  maxPlayers: number,
+  status: typeof SWARM_STAGES[number],
+): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const s = swarmUri(swarmId);
+  return [
+    quad(s, `${RDF}type`, otUri('AgentSwarm'), g),
+    quad(s, otUri('name'), literal(swarmName), g),
+    quad(s, otUri('orchestrator'), playerUri(leaderPeerId), g),
+    quad(s, otUri('createdAt'), literal(createdAt), g),
+    quad(s, otUri('status'), literal(status), g),
+    quad(s, otUri('maxPlayers'), literal(maxPlayers), g),
+  ];
 }
 
 export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName: string, leaderPeerId: string, createdAt: number, maxPlayers: number): Quad[] {

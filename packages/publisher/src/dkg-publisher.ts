@@ -104,7 +104,7 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
-  private readonly casLocks = new Map<string, Promise<void>>();
+  private readonly writeLocks = new Map<string, Promise<void>>();
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -134,11 +134,41 @@ export class DKGPublisher implements Publisher {
     this.knownBatchParanets = config.knownBatchParanets ?? new Map();
   }
 
+  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    const uniqueKeys = [...new Set(keys)].sort();
+    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
+    let resolve!: () => void;
+    const gate = new Promise<void>(r => { resolve = r; });
+    for (const k of uniqueKeys) {
+      this.writeLocks.set(k, gate);
+    }
+    await predecessor;
+    try {
+      return await fn();
+    } finally {
+      resolve();
+      for (const k of uniqueKeys) {
+        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
+      }
+    }
+  }
+
   /**
    * Write quads to the paranet's workspace graph (no chain, no TRAC).
    * Validates, stores locally in workspace + workspace_meta, returns encoded message for the agent to broadcast on the workspace topic.
+   * Acquires per-entity write locks to serialize against concurrent CAS writes.
    */
   async writeToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    const subjects = [...new Set(quads.map(q => q.subject))];
+    const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
+    return this.withWriteLocks(lockKeys, () => this._writeToWorkspaceImpl(paranetId, quads, options));
+  }
+
+  private async _writeToWorkspaceImpl(
     paranetId: string,
     quads: Quad[],
     options: WriteToWorkspaceOptions,
@@ -282,8 +312,9 @@ export class DKGPublisher implements Publisher {
   /**
    * Compare-and-swap workspace write. Checks each condition against the
    * current workspace graph state before applying the write atomically.
-   * Serializes concurrent CAS writes to the same subject+predicate via
-   * an in-process lock so check-then-write cannot interleave.
+   * Serializes against both CAS and plain writes via per-entity write
+   * locks so check-then-write cannot interleave with any concurrent
+   * store mutations on the same subjects.
    * Throws StaleWriteError if any condition fails.
    */
   async writeConditionalToWorkspace(
@@ -299,27 +330,11 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    const lockKeys = options.conditions.map(c => `${paranetId}\0${c.subject}\0${c.predicate}`);
-    const uniqueKeys = [...new Set(lockKeys)];
+    const conditionSubjects = options.conditions.map(c => c.subject);
+    const quadSubjects = [...new Set(quads.map(q => q.subject))];
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${paranetId}\0${s}`);
 
-    const predecessor = Promise.all(uniqueKeys.map(k => this.casLocks.get(k) ?? Promise.resolve()));
-
-    let resolve!: () => void;
-    const gate = new Promise<void>(r => { resolve = r; });
-    for (const k of uniqueKeys) {
-      this.casLocks.set(k, gate);
-    }
-
-    await predecessor;
-
-    try {
-      return await this._executeConditionalWrite(paranetId, quads, options);
-    } finally {
-      resolve();
-      for (const k of uniqueKeys) {
-        if (this.casLocks.get(k) === gate) this.casLocks.delete(k);
-      }
-    }
+    return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(paranetId, quads, options));
   }
 
   private async _executeConditionalWrite(
@@ -355,7 +370,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
-    return this.writeToWorkspace(paranetId, quads, options);
+    return this._writeToWorkspaceImpl(paranetId, quads, options);
   }
 
   /**

@@ -351,10 +351,13 @@ describe('OriginTrail Game API handler', () => {
     expect(casWrite.conditions[0].predicate).toContain('status');
     expect(casWrite.conditions[0].expectedValue).toBe('"recruiting"');
 
-    const statusQuad = casWrite.quads.find(
-      (q: any) => q.predicate.includes('status') && q.subject.includes('swarm/') && q.object.includes('traveling'),
-    );
+    const swarmQuads = casWrite.quads.filter((q: any) => q.subject.includes('swarm/swarm-'));
+    const statusQuad = swarmQuads.find((q: any) => q.predicate.includes('status') && q.object.includes('traveling'));
     expect(statusQuad).toBeDefined();
+    const nameQuad = swarmQuads.find((q: any) => q.predicate.includes('name'));
+    expect(nameQuad).toBeDefined();
+    const orchestratorQuad = swarmQuads.find((q: any) => q.predicate.includes('orchestrator'));
+    expect(orchestratorQuad).toBeDefined();
   });
 
   it('launchExpedition aborts when CAS write throws StaleWriteError', async () => {

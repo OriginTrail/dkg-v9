@@ -717,11 +717,14 @@ export class OriginTrailGameCoordinator {
     const now = Date.now();
 
     const launchQuads = rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now);
-    const statusUpdateQuad = rdf.swarmStatusUpdateQuad(this.paranetId, swarmId, 'traveling');
+    const swarmUpdateQuads = rdf.swarmSnapshotQuads(
+      this.paranetId, swarmId, swarm.name, swarm.leaderPeerId,
+      swarm.createdAt, swarm.maxPlayers, 'traveling',
+    );
     if (this.agent.writeConditionalToWorkspace) {
       await this.agent.writeConditionalToWorkspace(
         this.paranetId,
-        [...launchQuads, statusUpdateQuad],
+        [...launchQuads, ...swarmUpdateQuads],
         [{
           subject: rdf.swarmUri(swarmId),
           predicate: rdf.SWARM_STATUS_PREDICATE,
@@ -729,7 +732,7 @@ export class OriginTrailGameCoordinator {
         }],
       );
     } else {
-      await this.agent.writeToWorkspace(this.paranetId, [...launchQuads, statusUpdateQuad]);
+      await this.agent.writeToWorkspace(this.paranetId, [...launchQuads, ...swarmUpdateQuads]);
     }
 
     // Create on-chain context graph with all participant identity IDs.

@@ -5,6 +5,30 @@ import type { DKGNode } from './node.js';
 /** Default max bytes readAll will buffer before aborting (10 MB). */
 export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
 
+/** Default timeout for send() (ms). Sync over relay may need longer; callers can pass a higher value. */
+export const DEFAULT_SEND_TIMEOUT_MS = 20_000;
+
+/**
+ * Returns true if the error is recoverable (retry with backoff).
+ * Exported for tests.
+ */
+export function isRecoverableSendError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return (
+    msg.includes('closed') ||
+    msg.includes('reset') ||
+    msg.includes('stream returned in closed state') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('epipe') ||
+    msg.includes('aborted') ||
+    msg.includes('no valid addresses') ||
+    msg.includes('protocol selection failed') ||
+    msg.includes('could not negotiate')
+  );
+}
+
 export class ProtocolRouter {
   private readonly node: DKGNode;
   private handlers = new Map<string, DKGStreamHandler>();
@@ -50,7 +74,7 @@ export class ProtocolRouter {
     peerIdStr: string,
     protocolId: string,
     data: Uint8Array,
-    timeoutMs = 10_000,
+    timeoutMs = DEFAULT_SEND_TIMEOUT_MS,
   ): Promise<Uint8Array> {
     const libp2p = this.node.libp2p;
     const { peerIdFromString } = await import('@libp2p/peer-id');
@@ -81,13 +105,7 @@ export class ProtocolRouter {
         return await readAll(stream, this.maxReadBytes);
       } catch (err: unknown) {
         lastErr = err;
-        const msg = err instanceof Error ? err.message.toLowerCase() : '';
-        const recoverable = msg.includes('closed') || msg.includes('reset')
-          || msg.includes('stream returned in closed state')
-          || msg.includes('econnreset') || msg.includes('etimedout')
-          || msg.includes('econnrefused') || msg.includes('epipe')
-          || msg.includes('aborted') || msg.includes('no valid addresses');
-        if (!recoverable || attempt >= 2) throw err;
+        if (!isRecoverableSendError(err) || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
         await new Promise(r => setTimeout(r, backoff));
       }

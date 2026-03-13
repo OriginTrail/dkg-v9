@@ -335,6 +335,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "paranets": ["devnet-test", "origin-trail-game"],
+  "auth": { "enabled": false },
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",

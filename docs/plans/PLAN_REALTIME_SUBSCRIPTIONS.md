@@ -171,11 +171,15 @@ Accept: text/event-stream
 ```
 
 > **Auth note:** Browser `EventSource` cannot set custom headers, so SSE
-> endpoints must accept auth via a `token` query parameter (signed JWT or
-> short-lived HMAC token) in addition to the `Authorization` header. The
-> query-param token should be single-use or time-bounded (≤5 min) to
-> limit replay risk. Cookie-based auth is also acceptable when the client
-> and API share the same origin.
+> endpoints must accept auth via a `ticket` query parameter in addition
+> to the `Authorization` header. The ticket should be an **opaque,
+> single-use SSE ticket** (not a reusable JWT, which would leak
+> credentials into URL logs/history). The server issues tickets via
+> `POST /api/events/ticket` (authenticated, returns `{ ticket, expiresIn }`).
+> Tickets are valid for a single SSE connection and expire after ≤60s
+> if unused. Server-side logs must redact the `ticket` query parameter.
+> Cookie-based auth is also acceptable when the client and API share
+> the same origin.
 
 **Response:**
 
@@ -240,9 +244,16 @@ class SubscriptionManager {
   private subscriptions = new Set<Subscription>();
 
   constructor(private eventBus: TypedEventBus) {
-    // Listen to all DKGEvents and fan out to matching subscribers
+    // Listen to all DKGEvents (core) and fan out to matching subscribers
     for (const eventType of Object.values(DKGEvent)) {
       eventBus.on(eventType, (data) => this.broadcast(eventType, data));
+    }
+  }
+
+  /** Register an app-scoped event source (e.g., game:* events from gossip). */
+  registerAppEvents(appBus: TypedEventBus, eventTypes: string[]): void {
+    for (const eventType of eventTypes) {
+      appBus.on(eventType, (data) => this.broadcast(eventType, data));
     }
   }
 
@@ -262,7 +273,7 @@ class SubscriptionManager {
 
 **Keepalive:** Send `: keepalive\n\n` every 15s to prevent proxies from closing idle connections.
 
-**Backpressure:** If a client's TCP buffer is full (`res.writableNeedsDrain`), skip events for that client and send a `missed_events` notification when it drains.
+**Backpressure:** If a client's TCP buffer is full (`res.writableNeedsDrain`), skip events for that client and send a `system:missed_events` notification when it drains. Clients should treat this as a signal to re-fetch state (e.g., refresh lobby/swarm from the REST API).
 
 **Max connections:** Limit to 50 concurrent SSE connections per node. Return 503 if exceeded.
 
@@ -292,7 +303,9 @@ Replace the `setInterval(refreshLobby, 4000)` and `setInterval(refreshSwarm, 300
 ```typescript
 useEffect(() => {
   const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
-  const es = new EventSource(`${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game`);
+  // Obtain a short-lived, opaque SSE ticket (see auth note in §2.1)
+  const { ticket } = await api.getSseTicket();
+  const es = new EventSource(`${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`);
 
   es.addEventListener('game:turn_resolved', (e) => {
     const data = JSON.parse(e.data);
@@ -378,8 +391,8 @@ This phase is optional and can be implemented later once SSE proves the event mo
 | `kc:confirmed` | `{ual, batchId, txHash, blockNumber}` | Chain confirmation received |
 | `workspace:write` | `{operationId, quadCount, fromPeerId, rootEntities}` | Workspace data stored (local or remote) |
 | `workspace:enshrine` | `{ual, contextGraphId, quadCount, txHash}` | Data enshrined to context graph |
-| `context_graph:created` | `{contextGraphId, m, n, participants}` | New context graph registered |
-| `context_graph:signed` | `{contextGraphId, signerPeerId, signatureCount, threshold}` | Signature received |
+| `context-graph:created` | `{contextGraphId, m, n, participants}` | New context graph registered |
+| `context-graph:signed` | `{contextGraphId, signerPeerId, signatureCount, threshold}` | Signature received |
 | `peer:connected` | `{peerId, name, transport}` | New peer connected |
 | `peer:disconnected` | `{peerId, name}` | Peer disconnected |
 | `message:received` | `{fromPeerId, fromName, preview}` | Encrypted message received |
@@ -395,6 +408,12 @@ This phase is optional and can be implemented later once SSE proves the event mo
 | `game:expedition_started` | `{swarmId, playerCount}` |
 | `game:turn_resolved` | `{swarmId, turn, outcome, survivorCount}` |
 | `game:swarm_completed` | `{swarmId, finalScore, outcome}` |
+
+### System events (always delivered, not filterable)
+
+| Event type | Payload | Trigger |
+|------------|---------|---------|
+| `system:missed_events` | `{missedCount, oldestSeq, newestSeq}` | Client TCP buffer was full; events were skipped. Client should re-fetch state. |
 
 ---
 

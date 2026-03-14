@@ -2526,8 +2526,15 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
       try {
         const { readFileSync, unlinkSync } = await import('node:fs');
         const raw = String(readFileSync(lockPath, 'utf-8')).trim();
-        const pidStr = raw.split(':')[0] ?? raw;
+        const parts = raw.split(':');
+        const pidStr = parts[0] ?? raw;
         const lockPid = parseInt(pidStr, 10);
+        const lockTime = parseInt(parts[1] ?? '0', 10);
+        const STALE_MS = 15 * 60 * 1000; // 15 minutes
+        if (lockTime && Date.now() - lockTime > STALE_MS) {
+          try { unlinkSync(lockPath); } catch {}
+          return acquireUpdateLock(log);
+        }
         if (lockPid === process.pid) {
           _lockToken = raw;
           return true;

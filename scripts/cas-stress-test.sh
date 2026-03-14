@@ -25,7 +25,7 @@ fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo "  ✗ $1"; }
 api() {
   local node="$1" method="$2" path="$3"
   shift 3
-  curl -s -X "$method" \
+  curl -sf -X "$method" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     "$node$path" "$@" 2>/dev/null
@@ -44,11 +44,19 @@ echo ""
 # ── Phase 1: Register players on all 3 nodes ───────────────────────
 echo "Phase 1: Register players across all 3 nodes"
 
-api "$NODE1" POST "$APP/profile" -d '{"displayName":"Alice"}' > /dev/null
-api "$NODE2" POST "$APP/profile" -d '{"displayName":"Bob"}' > /dev/null
-api "$NODE3" POST "$APP/profile" -d '{"displayName":"Carol"}' > /dev/null
+REG_OK=0
+for pair in "$NODE1:Alice" "$NODE2:Bob" "$NODE3:Carol"; do
+  node="${pair%%:*}"; player="${pair##*:}"
+  if api "$node" POST "$APP/profile" -d "{\"displayName\":\"$player\"}" > /dev/null; then
+    REG_OK=$((REG_OK+1))
+  else
+    fail "Failed to register $player on $node"
+  fi
+done
 sleep 2
-ok "Registered Alice (node1), Bob (node2), Carol (node3)"
+if [[ "$REG_OK" -eq 3 ]]; then
+  ok "Registered Alice (node1), Bob (node2), Carol (node3)"
+fi
 
 # ── Phase 2: Create swarm on node1 ─────────────────────────────────
 echo ""

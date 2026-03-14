@@ -178,6 +178,11 @@ export class WorkspaceHandler {
         if (casConditions && casConditions.length > 0) {
           const passed = await this.enforceCASConditions(casConditions, workspaceGraph, ctx);
           if (!passed) {
+            // Intentional: we reject writes whose CAS pre-conditions don't hold
+            // locally. This can cause temporary divergence if gossip delivers
+            // writes out-of-order, but the originator's workspace-sync protocol
+            // replays missed writes on reconnect, converging replicas eventually.
+            // Accepting stale-CAS writes would silently corrupt local state.
             this.log.info(ctx, `Skipping workspace write ${workspaceOperationId} — remote CAS conditions not met`);
             return false;
           }

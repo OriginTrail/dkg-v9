@@ -79,7 +79,12 @@ export function sparqlString(value: string): string {
  * for values beyond `Number.MAX_SAFE_INTEGER`.
  */
 // SPARQL STRING_LITERAL2: forbid raw CR/LF, only allow valid SPARQL escapes
-const SAFE_RDF_LITERAL = /^"(?:[^"\\\r\n]|\\[tbnrf"'\\]|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8})*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?$/;
+// BCP47 lang tags: primary subtag alpha-only, subsequent subtags alphanumeric (e.g. de-CH-1996)
+const SAFE_IRI_CHARS = '[^<>"{}|\\\\^`\\x00-\\x20>]';
+const SAFE_RDF_LITERAL = new RegExp(
+  `^"(?:[^"\\\\\\r\\n]|\\\\[tbnrf"'\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\U[0-9a-fA-F]{8})*"` +
+  `(?:@[A-Za-z]+(?:-[A-Za-z0-9]+)*|\\^\\^<${SAFE_IRI_CHARS}+>)?$`,
+);
 const SAFE_RDF_IRI_TERM = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
 
 /**

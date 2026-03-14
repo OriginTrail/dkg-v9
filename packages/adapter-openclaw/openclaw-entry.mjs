@@ -2,12 +2,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DkgNodePlugin } from './dist/index.js';
 
-let registered = false;
+/** Module-level singleton — prevents duplicate registration during gateway multi-phase init. */
+let instance = null;
 
 export default function (api) {
   const log = api.logger ?? console;
 
-  if (registered) {
+  if (instance) {
     log.info?.('[dkg-entry] Skipping duplicate plugin load (gateway multi-phase init)');
     return;
   }
@@ -62,6 +63,11 @@ export default function (api) {
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
-  registered = true;
+  instance = dkg;
+
+  // Reset singleton on gateway shutdown so in-process restart re-registers fresh.
+  // Safe no-op if the event doesn't exist in this gateway version.
+  api.on('shutdown', () => { instance = null; });
+
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

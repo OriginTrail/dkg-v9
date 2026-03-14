@@ -63,7 +63,7 @@ describe('Workspace: writeToWorkspace', () => {
     expect(workspaceResult.type).toBe('bindings');
     if (workspaceResult.type === 'bindings') {
       expect(workspaceResult.bindings.length).toBe(1);
-      expect(workspaceResult.bindings[0]['o']).toContain('Test');
+      expect(workspaceResult.bindings[0]['o']).toBe('"Test"');
     }
 
     const metaResult = await store.query(
@@ -88,7 +88,7 @@ describe('Workspace: writeToWorkspace', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Updated by same creator');
+      expect(result.bindings[0]['o']).toBe('"Updated by same creator"');
     }
   });
 
@@ -130,7 +130,7 @@ describe('Workspace: writeToWorkspace', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Replaced');
+      expect(nameResult.bindings[0]['o']).toBe('"Replaced"');
     }
 
     const descResult = await store.query(
@@ -182,7 +182,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     expect(dataResult.type).toBe('bindings');
     if (dataResult.type === 'bindings') {
       expect(dataResult.bindings.length).toBe(1);
-      expect(dataResult.bindings[0]['o']).toContain('Enshrine Me');
+      expect(dataResult.bindings[0]['o']).toBe('"Enshrine Me"');
     }
   });
 
@@ -278,7 +278,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     expect(dataResult.type).toBe('bindings');
     if (dataResult.type === 'bindings') {
       expect(dataResult.bindings.length).toBe(1);
-      expect(dataResult.bindings[0]['o']).toContain('Context Enshrine');
+      expect(dataResult.bindings[0]['o']).toBe('"Context Enshrine"');
     }
 
     const metaResult = await store.query(
@@ -345,7 +345,7 @@ describe('Workspace: ownership persistence and reconstruction', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['creator']).toContain('12D3KooWCreator');
+      expect(result.bindings[0]['creator']).toBe('"12D3KooWCreator"');
     }
   });
 
@@ -450,7 +450,7 @@ describe('WorkspaceHandler', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Handler Test');
+      expect(result.bindings[0]['o']).toBe('"Handler Test"');
     }
     expect(workspaceOwned.get(PARANET)?.has(ENTITY)).toBe(true);
   });
@@ -515,7 +515,7 @@ describe('WorkspaceHandler', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Updated');
+      expect(result.bindings[0]['o']).toBe('"Updated"');
     }
   });
 
@@ -541,7 +541,7 @@ describe('WorkspaceHandler', () => {
     expect(afterFirst.type).toBe('bindings');
     if (afterFirst.type === 'bindings') {
       expect(afterFirst.bindings.length).toBe(1);
-      expect(afterFirst.bindings[0]['creator']).toContain(peerId);
+      expect(afterFirst.bindings[0]['creator']).toBe(`"${peerId}"`);
     }
 
     const msg2 = encodeWorkspacePublishRequest({
@@ -560,7 +560,301 @@ describe('WorkspaceHandler', () => {
     expect(afterSecond.type).toBe('bindings');
     if (afterSecond.type === 'bindings') {
       expect(afterSecond.bindings.length).toBe(1);
-      expect(afterSecond.bindings[0]['creator']).toContain(peerId);
+      expect(afterSecond.bindings[0]['creator']).toBe(`"${peerId}"`);
+    }
+  });
+});
+
+describe('WorkspaceHandler: CAS gossip enforcement', () => {
+  let store: OxigraphStore;
+  let handler: WorkspaceHandler;
+  let workspaceOwned: Map<string, Map<string, string>>;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    workspaceOwned = new Map();
+    handler = new WorkspaceHandler(store, new TypedEventBus(), {
+      workspaceOwnedEntities: workspaceOwned,
+    });
+  });
+
+  it('rejects CAS conditions with SPARQL injection in subject', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const safeEntity = 'urn:test:safe-entity';
+    const nquads = `<${safeEntity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-inject-1',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: 'urn:x> } } . DROP ALL #<urn:y',
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${safeEntity}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('rejects CAS conditions with SPARQL injection in expectedValue', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const safeEntity = 'urn:test:safe-entity2';
+
+    // First write so the entity exists
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${safeEntity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const nquads = `<${safeEntity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-inject-2',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: safeEntity,
+        predicate: 'http://schema.org/name',
+        expectedValue: '"Setup" } } . DROP ALL #',
+        expectAbsent: false,
+      }],
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${safeEntity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"Setup"');
+    }
+  });
+
+  it('accepts valid CAS conditions and enforces them', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:cas-valid';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-cas-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-cas-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"traveling"');
+    }
+  });
+
+  it('rejects write when CAS condition value mismatches', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:cas-mismatch';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-mismatch-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "arrived" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-mismatch-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"traveling"');
+    }
+  });
+
+  it('expectAbsent: allows write when triple does not exist', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-pass';
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-pass',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(true);
+  });
+
+  it('expectAbsent: rejects write when triple already exists', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-fail';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-reject',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"recruiting"');
+    }
+  });
+
+  it('rejects non-absent CAS condition with empty expectedValue (protobuf default)', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:empty-expected';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://schema.org/name',
+        expectedValue: '',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"Setup"');
     }
   });
 });
@@ -606,7 +900,7 @@ describe('Workspace: writeConditionalToWorkspace (CAS)', () => {
     );
     expect(check.type).toBe('bindings');
     if (check.type === 'bindings') {
-      expect(check.bindings[0].o).toContain('traveling');
+      expect(check.bindings[0].o).toBe('"traveling"');
     }
   });
 
@@ -793,5 +1087,224 @@ describe('Workspace: writeConditionalToWorkspace (CAS)', () => {
     expect(successes).toHaveLength(1);
     expect(failures).toHaveLength(1);
     expect((failures[0] as PromiseRejectedResult).reason).toBeInstanceOf(StaleWriteError);
+  });
+});
+
+describe('WorkspaceHandler: CAS edge cases', () => {
+  let store: OxigraphStore;
+  let handler: WorkspaceHandler;
+  let workspaceOwned: Map<string, Map<string, string>>;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    workspaceOwned = new Map();
+    handler = new WorkspaceHandler(store, new TypedEventBus(), {
+      workspaceOwnedEntities: workspaceOwned,
+    });
+  });
+
+  it('rejects CAS conditions with SPARQL injection in predicate', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:inject-pred';
+    const nquads = `<${entity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-inject-pred',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status> } } . DROP ALL #<http://x',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${entity}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('cross-subject CAS: condition on subject A, write targets subject B — lock covers both', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const subjectA = 'urn:test:lock-a';
+    const subjectB = 'urn:test:lock-b';
+
+    const setupA = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "active" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-lock-setup-a',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupA, peerId);
+
+    const writeB = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Created conditionally" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-lock-write-b',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: subjectA,
+        predicate: 'http://example.org/status',
+        expectedValue: '"active"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(writeB, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${subjectB}> <http://example.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(true);
+  });
+
+  it('cross-subject CAS: rejects when condition on subject A fails', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const subjectA = 'urn:test:lock-a2';
+    const subjectB = 'urn:test:lock-b2';
+
+    const setupA = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "inactive" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-lock-setup-a2',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupA, peerId);
+
+    const writeB = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Should not appear" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-lock-write-b2',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: subjectA,
+        predicate: 'http://example.org/status',
+        expectedValue: '"active"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(writeB, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${subjectB}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('multiple gossip CAS conditions: rejects if any single condition fails', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:multi-cond';
+
+    const setup = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(
+        `<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .\n` +
+        `<${entity}> <http://example.org/turn> "5"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
+      ),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-multi-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setup, peerId);
+
+    const update = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-multi-update',
+      timestampMs: Date.now(),
+      casConditions: [
+        { subject: entity, predicate: 'http://example.org/status', expectedValue: '"recruiting"', expectAbsent: false },
+        { subject: entity, predicate: 'http://example.org/turn', expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', expectAbsent: false },
+      ],
+    });
+    await handler.handle(update, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"recruiting"');
+    }
+  });
+
+  it('gossip CAS with typed literal (xsd:integer) succeeds when match', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:typed-lit';
+
+    const setup = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(
+        `<${entity}> <http://example.org/turn> "1"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
+      ),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-typed-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setup, peerId);
+
+    const update = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(
+        `<${entity}> <http://example.org/turn> "2"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
+      ),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-typed-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/turn',
+        expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(update, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/turn> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    }
   });
 });

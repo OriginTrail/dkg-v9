@@ -157,7 +157,7 @@ describe('Two-Agent E2E', () => {
       'test-paranet',
     );
     expect(qr.bindings.length).toBe(1);
-    expect(qr.bindings[0]['name']).toContain('TestEntity');
+    expect(qr.bindings[0]['name']).toBe('"TestEntity"');
   }, 10000);
 });
 

@@ -114,6 +114,6 @@ describe('Workspace E2E (2 nodes)', () => {
       PARANET,
     );
     expect(dataGraphResult.bindings.length).toBe(1);
-    expect(dataGraphResult.bindings[0]['name']).toContain('Workspace Draft');
+    expect(dataGraphResult.bindings[0]['name']).toBe('"Workspace Draft"');
   }, 10000);
 });

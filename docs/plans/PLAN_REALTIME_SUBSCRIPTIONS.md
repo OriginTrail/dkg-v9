@@ -264,10 +264,14 @@ class SubscriptionManager {
     const raw = data as Record<string, unknown>;
     const type = (raw.type as string) ?? eventType;
     const paranetId = raw.paranetId as string | undefined;
+    const seq = this.nextSeq++;
+    const payload = { ...raw, type };
+    this.ringBuffer.push({ seq, payload });
+    const isSystem = type.startsWith('system:');
     for (const sub of this.subscriptions) {
-      if (sub.filter.types && !sub.filter.types.has(type)) continue;
-      if (sub.filter.paranets && (!paranetId || !sub.filter.paranets.has(paranetId))) continue;
-      sendSse(sub.res, { ...raw, type }, this.nextSeq++);
+      if (!isSystem && sub.filter.types && !sub.filter.types.has(type)) continue;
+      if (!isSystem && sub.filter.paranets && (!paranetId || !sub.filter.paranets.has(paranetId))) continue;
+      sendSse(sub.res, payload, seq);
     }
   }
 }
@@ -306,23 +310,24 @@ Replace the `setInterval(refreshLobby, 4000)` and `setInterval(refreshSwarm, 300
 useEffect(() => {
   let es: EventSource | null = null;
   let cancelled = false;
+  let lastSeq: string | null = null;
 
   async function connect() {
     const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
     const { ticket } = await api.getSseTicket();
     if (cancelled) return;
-    const url = `${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`;
+    let url = `${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`;
+    if (lastSeq) url += `&since=${lastSeq}`;
     es = new EventSource(url);
 
-    es.addEventListener('game:turn_resolved', (e) => {
+    function onEvent(e: MessageEvent) {
+      if (e.lastEventId) lastSeq = e.lastEventId;
       const data = JSON.parse(e.data);
-      if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-    });
-    es.addEventListener('game:swarm_created', () => refreshLobby());
-    es.addEventListener('game:player_joined', (e) => {
-      const data = JSON.parse(e.data);
-      if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-    });
+      if (data.type === 'game:turn_resolved' && data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+      if (data.type === 'game:swarm_created') refreshLobby();
+      if (data.type === 'game:player_joined' && data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+    }
+    es.onmessage = onEvent;
 
     // Reconnect with a fresh ticket on connection loss.
     // Disable native EventSource reconnect since the ticket is single-use.

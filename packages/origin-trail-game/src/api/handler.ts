@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { OriginTrailGameCoordinator } from '../dkg/coordinator.js';
 import { MIN_PLAYERS, signatureThreshold } from '../engine/wagon-train.js';
+import { MAX_EPOCHS } from '../engine/game-engine.js';
 import { LOCATIONS } from '../world/world-data.js';
 
 const PREFIX = '/api/apps/origin-trail-game';
@@ -88,7 +89,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
         const rawLimit = Number(url.searchParams.get('limit') ?? '50');
         const limit = Number.isFinite(rawLimit) && rawLimit > 0
-          ? Math.min(Math.floor(rawLimit), 200)
+          ? Math.max(1, Math.min(Math.floor(rawLimit), 200))
           : 50;
         return json(res, 200, { messages: coordinator.getChatMessages(limit) });
       }
@@ -98,6 +99,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
           id: 'origin-trail-game',
           label: 'OriginTrail Game',
           minPlayers: MIN_PLAYERS,
+          maxEpochs: MAX_EPOCHS,
           version: '0.2.0',
           dkgEnabled: !!coordinator,
           peerId: coordinator?.myPeerId ?? null,

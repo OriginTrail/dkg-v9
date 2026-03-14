@@ -41,10 +41,8 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
           if [[ "$VERSION" == *-* ]]; then
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
-            echo "NPM_TAG=next" >> $GITHUB_OUTPUT
           else
             echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-            echo "NPM_TAG=latest" >> $GITHUB_OUTPUT
           fi
 
       - name: pnpm setup
@@ -80,7 +78,7 @@ jobs:
           fi
 
       - name: Publish to npm
-        run: pnpm -r publish --no-git-checks --tag ${{ steps.prerelease.outputs.NPM_TAG }}
+        run: pnpm -r publish --no-git-checks --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

@@ -102,7 +102,7 @@ export interface TurnProposal {
   event?: { type: string; description: string };
   actionSuccess?: boolean;
   turnQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-  merkleRoot?: Uint8Array;
+  merkleRoot?: Uint8Array | string;
   proposalTimestamp: number;
   participantSignatures: Map<string, ParticipantSignature>;
 }
@@ -121,6 +121,7 @@ export interface SwarmState {
   pendingProposal: TurnProposal | null;
   turnHistory: ResolvedTurn[];
   createdAt: number;
+  finishedAt?: number;
   playerIndexMap: Map<string, number>;
   contextGraphId?: string;
   requiredSignatures?: number;
@@ -216,8 +217,8 @@ export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
   private readonly topic: string;
-  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
-  private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
+  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 2_000;
+  private static readonly GRAPH_SYNC_INTERVAL_MS = 10_000;
   private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
@@ -690,6 +691,7 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.status === 'traveling') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
       if (swarm.gameState) swarm.gameState.status = 'lost';
       this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
@@ -856,6 +858,10 @@ export class OriginTrailGameCoordinator {
     const turn = this.swarms.get(swarmId)?.currentTurn;
 
     const timer = setInterval(async () => {
+      try {
+        if (!this.agent.peerId) return;
+      } catch { return; }
+
       const swarm = this.swarms.get(swarmId);
       if (!swarm || swarm.currentTurn !== turn || this.allAliveVoted(swarm)) {
         this.stopVoteHeartbeat(swarmId);
@@ -1042,6 +1048,7 @@ export class OriginTrailGameCoordinator {
 
     if (newState.status !== 'active') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
     } else {
       swarm.currentTurn++;
       swarm.votes = [];
@@ -1182,6 +1189,7 @@ export class OriginTrailGameCoordinator {
 
     if (result.newState.status !== 'active') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
     } else {
       swarm.currentTurn++;
       swarm.votes = [];
@@ -1611,6 +1619,47 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    if (swarm.pendingProposal?.hash === msg.proposalHash) {
+      const pp = swarm.pendingProposal;
+      const ppRootHex = pp.merkleRoot
+        ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot))
+        : null;
+      if (
+        msg.winningAction !== pp.winningAction ||
+        msg.resolution !== pp.resolution ||
+        (ppRootHex != null && msg.merkleRoot != null && msg.merkleRoot !== ppRootHex)
+      ) {
+        this.log(`Duplicate proposal hash but mismatched fields for ${msg.swarmId} turn ${msg.turn} — rejecting`);
+        return;
+      }
+      let mySig = pp.participantSignatures.get(this.myPeerId);
+      if (!mySig && swarm.contextGraphId != null && pp.merkleRoot && this.agent.identityId > 0n) {
+        try {
+          const merkleRootBytes = typeof pp.merkleRoot === 'string'
+            ? ethers.getBytes(pp.merkleRoot)
+            : pp.merkleRoot!;
+          const sig = await this.agent.signContextGraphDigest(
+            BigInt(swarm.contextGraphId), merkleRootBytes,
+          );
+          pp.participantSignatures.set(this.myPeerId, sig);
+          mySig = sig;
+        } catch { /* signing retry failed, send approval without signature */ }
+      }
+      await this.broadcast({
+        app: proto.APP_ID,
+        type: 'turn:approve',
+        swarmId: swarm.id,
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        turn: msg.turn,
+        proposalHash: msg.proposalHash,
+        identityId: mySig ? String(mySig.identityId) : undefined,
+        signatureR: mySig ? ethers.hexlify(mySig.r) : undefined,
+        signatureVS: mySig ? ethers.hexlify(mySig.vs) : undefined,
+      } as proto.TurnApproveMsg);
+      return;
+    }
+
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];
@@ -1644,6 +1693,7 @@ export class OriginTrailGameCoordinator {
 
       if (newState.status !== 'active') {
         swarm.status = 'finished';
+        swarm.finishedAt = Date.now();
       } else {
         swarm.currentTurn++;
         swarm.votes = [];
@@ -1724,6 +1774,7 @@ export class OriginTrailGameCoordinator {
       deaths,
       event: msg.event,
       turnQuads: localTurnQuads.length > 0 ? localTurnQuads : undefined,
+      merkleRoot: localMerkleRootHex,
       proposalTimestamp: msg.timestamp,
       participantSignatures: peerSigs,
     };
@@ -1812,6 +1863,7 @@ export class OriginTrailGameCoordinator {
 
       if (newState.status !== 'active') {
         swarm.status = 'finished';
+        swarm.finishedAt = Date.now();
       } else {
         swarm.currentTurn++;
         swarm.votes = [];
@@ -1839,8 +1891,9 @@ export class OriginTrailGameCoordinator {
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         if (swarm.status === 'finished') {
-          const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
-          const relevantTs = lastTurn?.timestamp ?? swarm.createdAt;
+          const relevantTs = swarm.finishedAt
+            ?? swarm.turnHistory[swarm.turnHistory.length - 1]?.timestamp
+            ?? now;
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
@@ -2060,15 +2113,40 @@ export class OriginTrailGameCoordinator {
 
   // ── Utilities ─────────────────────────────────────────────────────
 
+  private static readonly CRITICAL_MSG_TYPES = new Set([
+    'swarm:created', 'swarm:joined', 'expedition:launched',
+    'turn:proposal', 'turn:approve', 'turn:resolved',
+  ]);
+
   private async broadcast(msg: proto.OTMessage): Promise<void> {
-    try {
-      const publishPromise = this.agent.gossip.publish(this.topic, proto.encode(msg));
-      const timeout = new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('publish timeout')), 5_000),
-      );
-      await Promise.race([publishPromise, timeout]);
-    } catch (err: any) {
-      this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+    const data = proto.encode(msg);
+    const isCritical = OriginTrailGameCoordinator.CRITICAL_MSG_TYPES.has(msg.type);
+    const maxAttempts = isCritical ? 3 : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      try {
+        const publishPromise = this.agent.gossip.publish(this.topic, data)
+          .then(() => { settled = true; });
+        const timeout = new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('publish timeout')), 5_000);
+        });
+        await Promise.race([publishPromise, timeout]);
+        return;
+      } catch (err: any) {
+        if (settled) return;
+        if (attempt < maxAttempts) {
+          const delay = 500 * Math.pow(2, attempt - 1);
+          this.log(`Broadcast ${msg.type} attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          if (settled) return;
+        } else {
+          this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
   }
 
@@ -2178,21 +2256,22 @@ export class OriginTrailGameCoordinator {
               ?e a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?s .
-            } GROUP BY ?player
+            } GROUP BY ?player ORDER BY DESC(?maxScore) LIMIT 100
           }
           ?entry a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}finishedAt> ?ft ;
                  <${rdf.OT}displayName> ?displayName ;
                  <${rdf.OT}outcome> ?outcome ;
                  <${rdf.OT}epochs> ?epochs ;
                  <${rdf.OT}survivors> ?survivors ;
                  <${rdf.OT}partySize> ?partySize ;
-                 <${rdf.OT}swarm> ?swarm ;
-                 <${rdf.OT}finishedAt> ?finishedAt .
+                 <${rdf.OT}swarm> ?swarm .
           BIND(?maxScore AS ?score)
+          BIND(?ft AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score)`,
+        } ORDER BY DESC(?score) DESC(?finishedAt)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2254,10 +2333,6 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
       timestamp: Date.now(),
     };
-    this.chatMessages.push(chatMsg);
-    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
-      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
-    }
 
     const gossipMsg: proto.ChatMsg = {
       app: proto.APP_ID,
@@ -2270,11 +2345,16 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
     };
     await this.broadcast(gossipMsg);
+
+    this.chatMessages.push(chatMsg);
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
+    }
     return chatMsg;
   }
 
   getChatMessages(limit = 50): Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
-    return this.chatMessages.slice(-limit);
+    return [...this.chatMessages].sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   private onRemoteChatMessage(msg: proto.ChatMsg): void {

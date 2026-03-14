@@ -84,6 +84,12 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         return json(res, 200, coordinator.getNotifications());
       }
 
+      if (req.method === 'GET' && subpath === '/chat') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const limit = Number(url.searchParams.get('limit') ?? '50');
+        return json(res, 200, { messages: coordinator.getChatMessages(limit) });
+      }
+
       if (req.method === 'GET' && subpath === '/info') {
         return json(res, 200, {
           id: 'origin-trail-game',
@@ -111,6 +117,14 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
 
       const body = JSON.parse(await readBody(req));
+
+      if (subpath === '/chat') {
+        const { message, displayName } = body;
+        if (!message || typeof message !== 'string') return json(res, 400, { error: 'Missing or invalid message' });
+        const name = typeof displayName === 'string' && displayName ? displayName : coordinator.myPeerId.slice(0, 8);
+        const chatMsg = await coordinator.sendChatMessage(name, message);
+        return json(res, 200, chatMsg);
+      }
 
       if (subpath === '/create') {
         const { playerName, swarmName, maxPlayers } = body;

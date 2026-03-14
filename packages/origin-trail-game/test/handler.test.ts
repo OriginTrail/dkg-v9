@@ -2901,8 +2901,8 @@ describe('Leaderboard', () => {
     const leaderboardAgent = makeMockAgent('lb-peer');
     leaderboardAgent.query = async () => ({
       bindings: [
-        { displayName: '"Alice"', score: '"3500"', outcome: '"won"', epochs: '"2000"', survivors: '"3"', partySize: '"4"', swarmId: '"swarm-1"', finishedAt: '"1700000000000"' },
-        { displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
+        { player: '"peer-alice"', displayName: '"Alice"', score: '"3500"', outcome: '"won"', epochs: '"2000"', survivors: '"3"', partySize: '"4"', swarmId: '"swarm-1"', finishedAt: '"1700000000000"' },
+        { player: '"peer-bob"', displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
       ],
     });
     const lbHandler = createHandler(leaderboardAgent, { paranets: ['test'] });
@@ -3335,5 +3335,100 @@ describe('Notifications', () => {
 
     const { notifications } = coordinator.getNotifications();
     expect(notifications.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('MAX_EPOCHS constant', () => {
+  it('MAX_EPOCHS is 1000 and exported', async () => {
+    const { MAX_EPOCHS } = await import('../src/engine/game-engine.js');
+    expect(MAX_EPOCHS).toBe(1000);
+  });
+});
+
+describe('getLobby stale finished swarms', () => {
+  it('getLobby filters stale finished swarms older than 1 hour', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('lobby-stale');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'stale-test' });
+
+    const freshSwarm = await coordinator.createSwarm('Alice', 'FreshSwarm', 3);
+    const staleSwarm = await coordinator.createSwarm('Alice', 'StaleSwarm', 3);
+
+    freshSwarm.status = 'finished';
+    freshSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 30 * 60 * 1000 }];
+
+    staleSwarm.status = 'finished';
+    staleSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 2 * 60 * 60 * 1000 }];
+
+    const lobby = coordinator.getLobby();
+    const mySwarmIds = lobby.mySwarms.map(s => s.id);
+    expect(mySwarmIds).toContain(freshSwarm.id);
+    expect(mySwarmIds).not.toContain(staleSwarm.id);
+  });
+});
+
+describe('Leaderboard deduplication', () => {
+  it('getLeaderboard deduplicates by player keeping best score', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('dedup-peer');
+    agent.query = async () => ({
+      bindings: [
+        { player: 'peer-a', displayName: 'Alice', score: '500', outcome: 'won', epochs: '1000', survivors: '3', partySize: '3', swarmId: 'swarm-1', finishedAt: '100' },
+        { player: 'peer-a', displayName: 'Alice', score: '800', outcome: 'won', epochs: '1000', survivors: '5', partySize: '5', swarmId: 'swarm-2', finishedAt: '200' },
+        { player: 'peer-b', displayName: 'Bob', score: '600', outcome: 'won', epochs: '1000', survivors: '4', partySize: '4', swarmId: 'swarm-3', finishedAt: '300' },
+      ],
+    });
+
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'dedup-test' });
+    const entries = await coordinator.getLeaderboard();
+
+    expect(entries.length).toBe(2);
+    expect(entries[0].player).toBe('peer-a');
+    expect(entries[0].score).toBe(800);
+    expect(entries[1].player).toBe('peer-b');
+    expect(entries[1].score).toBe(600);
+  });
+});
+
+describe('Lobby chat', () => {
+  it('chat message round-trip via coordinator', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-test' });
+
+    const sent = await coordinator.sendChatMessage('Alice', 'Hello world');
+    expect(sent.peerId).toBe('chat-peer');
+    expect(sent.displayName).toBe('Alice');
+    expect(sent.message).toBe('Hello world');
+    expect(sent.id).toBeTruthy();
+
+    const messages = coordinator.getChatMessages();
+    expect(messages.length).toBe(1);
+    expect(messages[0].message).toBe('Hello world');
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-test/app')![0];
+    handle('dkg/paranet/chat-test/app', encode({
+      app: 'origin-trail-game',
+      type: 'chat:message',
+      swarmId: 'lobby',
+      peerId: 'remote-peer',
+      timestamp: Date.now(),
+      id: 'remote-chat-1',
+      displayName: 'Bob',
+      message: 'Hi Alice',
+    } as any), 'remote-peer');
+    await new Promise(r => setTimeout(r, 50));
+
+    const allMessages = coordinator.getChatMessages();
+    expect(allMessages.length).toBe(2);
+    expect(allMessages[1].displayName).toBe('Bob');
+
+    const limited = coordinator.getChatMessages(1);
+    expect(limited.length).toBe(1);
+    expect(limited[0].displayName).toBe('Bob');
   });
 });

@@ -3,6 +3,8 @@ import type { GameState, PartyMember, Action, ActionResult, GameEvent } from '..
 import { getPartySize } from '../game/types.js';
 import { getCurrentLocation, getNextLocation, isAtLocationType } from '../world/world-data.js';
 
+export const MAX_EPOCHS = 1000;
+
 const RANDOM_EVENTS = [
   { id: 'hallucination_cascade', weight: 0.08, type: 'ai_failure' as const, description: 'is experiencing a hallucination cascade', damage: 30 },
   { id: 'model_collapse', weight: 0.05, type: 'ai_failure' as const, description: 'is suffering model collapse', damage: 50 },
@@ -255,7 +257,7 @@ export class GameEngine {
       }
       if (!newState.party.some(m => m.alive)) { newState.status = 'lost'; return newState; }
     }
-    if (newState.epochs >= 1000) { newState.status = 'won'; return newState; }
+    if (newState.epochs >= MAX_EPOCHS) { newState.status = 'won'; return newState; }
     return newState;
   }
 

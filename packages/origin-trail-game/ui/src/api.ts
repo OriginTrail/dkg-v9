@@ -61,6 +61,8 @@ export const api = {
     request('POST', '/vote', { swarmId, voteAction, params }),
   forceResolve: (swarmId: string) =>
     request('POST', '/force-resolve', { swarmId }),
+  chat: (limit?: number) => request('GET', `/chat${limit ? `?limit=${limit}` : ''}`),
+  sendChat: (message: string) => request('POST', '/chat', { message }),
   notifications: () => request('GET', '/notifications'),
   markNotificationsRead: (ids?: string[]) =>
     request('POST', '/notifications/read', ids ? { ids } : {}),

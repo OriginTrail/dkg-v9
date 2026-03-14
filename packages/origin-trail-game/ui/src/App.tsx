@@ -539,14 +539,20 @@ export function App() {
 
         <div className="ot-section">
           <h2>Your Swarms</h2>
-          {lobby?.mySwarms?.length ? lobby.mySwarms.map((w: any) => (
-            <div key={w.id} className="ot-card ot-clickable" onClick={async () => {
-              try { const fresh = await api.swarm(w.id); setSwarm(fresh); setView('swarm'); }
-              catch (e: any) { setError(e.message); }
-            }}>
-              <strong>{w.name}</strong> — {w.players?.length ?? 0} players — {w.status}
-            </div>
-          )) : (
+          {(() => {
+            const activeSwarms = (lobby?.mySwarms ?? []).filter((w: any) => {
+              if (w.status !== 'finished') return true;
+              const lastActivity = w.lastTurn?.timestamp ?? w.createdAt ?? 0;
+              return Date.now() - lastActivity < 3600000;
+            });
+            return activeSwarms.length ? activeSwarms.map((w: any) => (
+              <div key={w.id} className="ot-card ot-clickable" onClick={async () => {
+                try { const fresh = await api.swarm(w.id); setSwarm(fresh); setView('swarm'); }
+                catch (e: any) { setError(e.message); }
+              }}>
+                <strong>{w.name}</strong> — {w.players?.length ?? 0} players — {w.status}
+              </div>
+            )) : (
             <div className="ot-empty-state">
               <div className="ot-empty-state-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -554,7 +560,8 @@ export function App() {
               <div className="ot-empty-state-title">No swarms yet</div>
               <div className="ot-empty-state-desc">Create a new swarm below to start your journey across the AI Frontier, or join an open one.</div>
             </div>
-          )}
+          );
+          })()}
         </div>
 
         <div className="ot-section">
@@ -582,6 +589,8 @@ export function App() {
           <h2>Launch Swarm</h2>
           <CreateSwarmForm playerName={playerName} onCreated={(w) => { setSwarm(w); setView('swarm'); }} onError={setError} />
         </div>
+
+        <LobbyChat playerName={playerName} />
 
         <button className="ot-secondary" onClick={refreshLobby}>Refresh</button>
       </div>
@@ -711,19 +720,28 @@ export function App() {
   return null;
 }
 
+function Tooltip({ text }: { text: string }) {
+  return (
+    <span className="ot-tooltip-wrap">
+      <span className="ot-tooltip-icon">?</span>
+      <span className="ot-tooltip-text">{text}</span>
+    </span>
+  );
+}
+
 function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: string }) {
   return (
     <div className="ot-game-state">
       <div className="ot-stats">
-        <div><label>Epochs</label><span>{state.epochs} / 2000</span></div>
-        <div><label>Tokens</label><span>{state.trainingTokens}</span></div>
-        <div><label>API Credits</label><span>{state.apiCredits}</span></div>
-        <div><label>GPUs</label><span>{state.computeUnits}</span></div>
-        <div><label>TRAC</label><span>{state.trac}</span></div>
-        <div><label>Date</label><span>Epoch {state.epochs}</span></div>
+        <div><label>Epochs <Tooltip text="Training epochs completed. Reach 1000 to achieve AGI." /></label><span>{state.epochs} / 1000</span></div>
+        <div><label>Tokens <Tooltip text="Training tokens fuel your AI models. Running out damages your party." /></label><span>{state.trainingTokens}</span></div>
+        <div><label>API Credits <Tooltip text="Used for advanced operations and skill upgrades." /></label><span>{state.apiCredits}</span></div>
+        <div><label>GPUs <Tooltip text="Compute units power your training runs. More GPUs = faster progress." /></label><span>{state.computeUnits}</span></div>
+        <div><label>TRAC <Tooltip text="OriginTrail tokens used for publishing knowledge to the DKG." /></label><span>{state.trac}</span></div>
+        <div><label>Date <Tooltip text="Current position on the AI Frontier timeline." /></label><span>Epoch {state.epochs}</span></div>
       </div>
       <div className="ot-trail-bar">
-        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / 2000) * 100)}%` }} />
+        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / 1000) * 100)}%` }} />
       </div>
       <div className="ot-party">
         <h4>Swarm Members</h4>
@@ -793,7 +811,14 @@ function Leaderboard() {
 
   useEffect(() => {
     api.leaderboard()
-      .then((data: any) => setEntries(data?.entries ?? []))
+      .then((data: any) => {
+        const seen = new Map<string, any>();
+        for (const e of data?.entries ?? []) {
+          const existing = seen.get(e.displayName);
+          if (!existing || e.score > existing.score) seen.set(e.displayName, e);
+        }
+        setEntries([...seen.values()].sort((a, b) => b.score - a.score));
+      })
       .catch((err: any) => setError(err?.message ?? 'Failed to load leaderboard'))
       .finally(() => setLoading(false));
   }, []);
@@ -842,12 +867,74 @@ function Leaderboard() {
               <span className={`ot-lb-outcome ${entry.outcome === 'won' ? 'ot-lb-won' : 'ot-lb-lost'}`}>
                 {entry.outcome === 'won' ? 'AGI ✓' : 'Failed'}
               </span>
-              <span className="ot-lb-epochs">{entry.epochs}/2000</span>
+              <span className="ot-lb-epochs">{entry.epochs}/1000</span>
               <span className="ot-lb-survivors">{entry.survivors}/{entry.partySize}</span>
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function LobbyChat({ playerName }: { playerName: string }) {
+  const [messages, setMessages] = useState<any[]>([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const load = () => {
+      api.chat(50).then((data: any) => setMessages(data?.messages ?? [])).catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages.length]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text) return;
+    setSending(true);
+    try {
+      await api.sendChat(text);
+      setInput('');
+      const data = await api.chat(50);
+      setMessages(data?.messages ?? []);
+    } catch { /* ignore */ }
+    finally { setSending(false); }
+  };
+
+  return (
+    <div className="ot-lobby-chat">
+      <h3>Lobby Chat</h3>
+      <div className="ot-lobby-chat-messages" ref={scrollRef}>
+        {messages.length === 0 ? (
+          <span className="ot-muted" style={{ alignSelf: 'center', marginTop: 'auto', marginBottom: 'auto' }}>No messages yet</span>
+        ) : messages.map((m: any, i: number) => (
+          <div key={i} className="ot-chat-msg">
+            <span className="ot-chat-msg-name">{m.displayName}</span>
+            {m.message}
+            <span className="ot-chat-msg-time">{m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : ''}</span>
+          </div>
+        ))}
+      </div>
+      <div className="ot-chat-input-row">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !sending) send(); }}
+          placeholder="Say something..."
+          maxLength={200}
+        />
+        <button onClick={send} disabled={sending || !input.trim()}>Send</button>
+      </div>
     </div>
   );
 }

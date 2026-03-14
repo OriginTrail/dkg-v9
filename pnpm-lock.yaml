@@ -204,6 +204,9 @@ importers:
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
+      '@origintrail-official/dkg-app-origin-trail-game':
+        specifier: workspace:*
+        version: link:../origin-trail-game
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core

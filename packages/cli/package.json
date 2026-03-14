@@ -7,10 +7,10 @@
     "dkg": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p network && cp ../../network/testnet.json network/",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist network tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@origintrail-official/dkg-agent": "workspace:*",
@@ -30,6 +30,7 @@
   },
   "files": [
     "dist",
+    "network",
     "README.md",
     "LICENSE"
   ],

@@ -512,20 +512,21 @@ describe('clickable notifications', () => {
     expect(agentHub).toMatch(/urlTab === ['"]peers['"].*['"]peers['"].*['"]agent['"]/);
   });
 
-  it('AgentHub clears URL params with proper dependencies', () => {
-    expect(agentHub).toContain('setSearchParams({}, { replace: true })');
-    expect(agentHub).toMatch(/\[urlTab, urlPeer, setSearchParams\]/);
+  it('AgentHub clears only tab/peer URL params with proper dependencies', () => {
+    expect(agentHub).toContain("next.delete('tab')");
+    expect(agentHub).toContain("next.delete('peer')");
+    expect(agentHub).toContain('setSearchParams(next, { replace: true })');
   });
 
-  it('PeerChatView accepts initialPeerId prop', () => {
-    expect(agentHub).toMatch(/function PeerChatView\(\s*\{\s*initialPeerId\s*\}/);
+  it('PeerChatView accepts initialPeerId and onPeerSelected props', () => {
+    expect(agentHub).toMatch(/function PeerChatView\(\s*\{\s*initialPeerId\s*,\s*onPeerSelected/);
     expect(agentHub).toContain('initialPeerId?: string');
+    expect(agentHub).toContain('onPeerSelected?: () => void');
   });
 
-  it('PeerChatView auto-selects initial peer from prop and retries on change', () => {
-    expect(agentHub).toContain('initialPeerApplied');
+  it('PeerChatView auto-selects initial peer from prop', () => {
     expect(agentHub).toContain('peers.find(p => p.peerId === initialPeerId)');
-    expect(agentHub).toContain('initialPeerApplied.current === initialPeerId');
+    expect(agentHub).toContain('onPeerSelected?.()');
   });
 
   it('AgentHub captures deep-link peer in stable state before clearing URL', () => {

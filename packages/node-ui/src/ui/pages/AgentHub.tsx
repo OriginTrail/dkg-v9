@@ -453,8 +453,6 @@ function PeerChatView({ initialPeerId, onPeerSelected }: { initialPeerId?: strin
   const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const initialPeerApplied = useRef<string | null>(null);
-
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [peerMessages]);
@@ -498,10 +496,8 @@ function PeerChatView({ initialPeerId, onPeerSelected }: { initialPeerId?: strin
 
   useEffect(() => {
     if (!initialPeerId || peers.length === 0) return;
-    if (initialPeerApplied.current === initialPeerId) return;
     const match = peers.find(p => p.peerId === initialPeerId);
     if (match) {
-      initialPeerApplied.current = initialPeerId;
       selectPeer(match);
       onPeerSelected?.();
     }

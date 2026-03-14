@@ -148,7 +148,7 @@ describe('DKGPublisher', () => {
     );
     if (result.type === 'bindings') {
       expect(result.bindings).toHaveLength(1);
-      expect(result.bindings[0]['name']).toContain('NewName');
+      expect(result.bindings[0]['name']).toBe('"NewName"');
     }
   });
 

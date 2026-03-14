@@ -93,7 +93,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       await sleep(500);
     }
     expect(bWorkspace.bindings.length).toBe(1);
-    expect(String(bWorkspace.bindings[0]['name'])).toContain('Context Graph Entity');
+    expect(bWorkspace.bindings[0]['name']).toBe('"Context Graph Entity"');
   }, 25_000);
 
   it('A enshrines to context graph; A has data in context graph URI', async () => {
@@ -112,7 +112,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
     );
     expect(aData.bindings.length).toBe(1);
-    expect(String(aData.bindings[0]['name'])).toContain('Context Graph Entity');
+    expect(aData.bindings[0]['name']).toBe('"Context Graph Entity"');
 
     // NOT in paranet data graph
     const aParanetData = await nodeA.query(
@@ -136,7 +136,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     }
 
     expect(bData.bindings.length).toBe(1);
-    expect(String(bData.bindings[0]['name'])).toContain('Context Graph Entity');
+    expect(bData.bindings[0]['name']).toBe('"Context Graph Entity"');
   }, 30_000);
 
   it('B has confirmed metadata in context graph meta', async () => {
@@ -147,7 +147,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     );
 
     const statuses = metaResult.bindings.map((b: any) => String(b['status']));
-    expect(statuses.some(s => s.includes('confirmed'))).toBe(true);
+    expect(statuses.some(s => s === '"confirmed"')).toBe(true);
   }, 10_000);
 
   it('B paranet data graph does NOT contain context graph data', async () => {

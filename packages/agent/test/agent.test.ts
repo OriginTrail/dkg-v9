@@ -266,8 +266,8 @@ describe('ProfileManager', () => {
     if (result.type === 'bindings') {
       const nameTriples = result.bindings.filter(b => b['p']?.includes('schema.org/name'));
       expect(nameTriples.length).toBeGreaterThan(0);
-      expect(nameTriples.some(b => b['o']?.includes('NewName'))).toBe(true);
-      expect(nameTriples.every(b => !b['o']?.includes('OldName'))).toBe(true);
+      expect(nameTriples.some(b => b['o'] === '"NewName"')).toBe(true);
+      expect(nameTriples.every(b => b['o'] !== '"OldName"')).toBe(true);
     }
   });
 });

@@ -38,7 +38,7 @@ describe('DKGQueryEngine', () => {
       { paranetId: PARANET },
     );
     expect(result.bindings).toHaveLength(1);
-    expect(result.bindings[0]['name']).toContain('ImageBot');
+    expect(result.bindings[0]['name']).toBe('"ImageBot"');
   });
 
   it('returns all triples for entity', async () => {
@@ -108,7 +108,7 @@ describe('DKGQueryEngine', () => {
       { paranetId: PARANET, graphSuffix: '_workspace' },
     );
     expect(result.bindings.length).toBe(1);
-    expect(result.bindings[0]['name']).toContain('Workspace Only');
+    expect(result.bindings[0]['name']).toBe('"Workspace Only"');
   });
 
   it('queries union of data and workspace when includeWorkspace is true', async () => {

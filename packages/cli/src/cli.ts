@@ -1471,8 +1471,8 @@ program
       console.error(`Slot ${target} does not exist. Cannot roll back.`);
       process.exit(1);
     }
-    const targetEntry = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
-    if (!existsSync(targetEntry)) {
+    const targetEntry = slotEntryPoint(targetDir);
+    if (!targetEntry) {
       console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
       process.exit(1);
     }
@@ -1505,13 +1505,22 @@ program
         stdio: 'pipe',
       }).trim();
       await writeFile(commitFile, commit);
-    } catch (err: any) {
-      console.warn(`Warning: failed to update rollback commit metadata: ${err?.message ?? String(err)}`);
+    } catch {
+      // NPM slots have no .git — commit metadata stays unchanged.
     }
     try {
-      const pkgRaw = readFileSync(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
-      const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
-      if (version) await writeFile(versionFile, version);
+      // Try git layout first, then NPM layout for version metadata.
+      const candidates = [
+        join(targetDir, 'packages', 'cli', 'package.json'),
+        join(targetDir, 'node_modules', '@origintrail-official', 'dkg', 'package.json'),
+      ];
+      for (const pkgPath of candidates) {
+        try {
+          const pkgRaw = readFileSync(pkgPath, 'utf-8');
+          const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+          if (version) { await writeFile(versionFile, version); break; }
+        } catch { /* try next */ }
+      }
     } catch (err: any) {
       console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
     }

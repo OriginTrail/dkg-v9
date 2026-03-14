@@ -2511,7 +2511,8 @@ async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
   try {
     const raw = await readFile(pendingFile, 'utf-8');
     const parsed = JSON.parse(raw) as PendingUpdateState;
-    if ((parsed.target !== 'a' && parsed.target !== 'b') || !parsed.commit || !parsed.ref) return null;
+    if ((parsed.target !== 'a' && parsed.target !== 'b') || !parsed.ref) return null;
+    if (!parsed.commit && !parsed.version) return null;
     return parsed;
   } catch {
     return null;
@@ -2877,10 +2878,10 @@ async function _performUpdateInner(
   if (pending) {
     const active = await activeSlot();
     if (active === pending.target) {
-      await writeFile(commitFile, pending.commit);
+      if (pending.commit) await writeFile(commitFile, pending.commit);
       if (pending.version) await writeFile(versionFile, pending.version);
       await clearPendingUpdateState();
-      currentCommit = pending.commit;
+      currentCommit = pending.commit || currentCommit;
       log(`Auto-update: recovered pending update state for slot ${pending.target}.`);
     } else {
       await clearPendingUpdateState();

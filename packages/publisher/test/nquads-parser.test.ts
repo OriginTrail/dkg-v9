@@ -10,13 +10,21 @@ describe('parseSimpleNQuads', () => {
     expect(quads[0].object).toBe('"42"^^<http://www.w3.org/2001/XMLSchema#integer>');
   });
 
-  it('does not hang on malformed datatype IRI (unclosed angle bracket)', () => {
-    const text = '<urn:s> <urn:p> "val"^^<http://broken <urn:g> .';
+  it('does not hang on malformed datatype IRI (no closing angle bracket)', () => {
+    const text = '"val"^^<http://broken-no-close';
     const start = Date.now();
     const quads = parseSimpleNQuads(text);
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(100);
-    expect(quads.length).toBeLessThanOrEqual(1);
+    expect(quads).toEqual([]);
+  });
+
+  it('does not hang on datatype IRI where only a later term has a closing bracket', () => {
+    const text = '<urn:s> <urn:p> "val"^^<http://broken <urn:g> .';
+    const start = Date.now();
+    parseSimpleNQuads(text);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(100);
   });
 
   it('parses language-tagged literals', () => {

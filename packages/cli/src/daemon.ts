@@ -272,7 +272,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     log(`Network config: ${network.networkName} (genesis v${network.genesisVersion})`);
   }
 
-  let chatDb: typeof import('./daemon.js') extends any ? any : never = null;
+  let chatDb: DashboardDB | null = null;
   agent.onChat((text, senderPeerId, _convId) => {
     if (chatDb) {
       try { chatDb.insertChatMessage({ ts: Date.now(), direction: 'in', peer: senderPeerId, text }); } catch { /* never crash */ }
@@ -780,7 +780,11 @@ export async function runDaemon(foreground: boolean): Promise<void> {
         catchupTracker,
       );
     } catch (err: any) {
-      jsonResponse(res, 500, { error: err.message });
+      if (err instanceof PayloadTooLargeError) {
+        jsonResponse(res, 413, { error: err.message });
+      } else {
+        jsonResponse(res, 500, { error: err.message });
+      }
     }
   });
 
@@ -2249,20 +2253,29 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
+class PayloadTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Request body too large (>${maxBytes} bytes)`);
+    this.name = 'PayloadTooLargeError';
+  }
+}
+
 function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let rejected = false;
     req.on('data', (c: Buffer) => {
+      if (rejected) return;
       total += c.length;
       if (total > maxBytes) {
-        req.destroy();
-        reject(new Error(`Request body too large (>${maxBytes} bytes)`));
+        rejected = true;
+        reject(new PayloadTooLargeError(maxBytes));
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
     req.on('error', reject);
   });
 }

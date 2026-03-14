@@ -8,3 +8,5 @@ export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandle
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export { DKGAgent, type DKGAgentConfig, type ParanetSub, type PeerHealth } from './dkg-agent.js';
+export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
+export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';

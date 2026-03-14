@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 function makeMockAgent(peerId = 'test-peer-1') {
   const published: any[] = [];
   const workspaceWrites: any[] = [];
+  const conditionalWrites: any[] = [];
   const enshrined: any[] = [];
   const contextGraphs: any[] = [];
   const subscriptions = new Set<string>();
@@ -26,6 +27,11 @@ function makeMockAgent(peerId = 'test-peer-1') {
     writeToWorkspace: async (_paranetId: string, quads: any[]) => {
       workspaceWrites.push(quads);
       return { workspaceOperationId: 'test-op' };
+    },
+    writeConditionalToWorkspace: async (_paranetId: string, quads: any[], conditions: any[]) => {
+      workspaceWrites.push(quads);
+      conditionalWrites.push({ quads, conditions });
+      return { workspaceOperationId: 'test-op-cas' };
     },
     publish: async (_paranetId: string, quads: any[]): Promise<any> => {
       published.push(quads);
@@ -48,6 +54,7 @@ function makeMockAgent(peerId = 'test-peer-1') {
     query: async () => ({ bindings: [] }),
     _published: published,
     _workspaceWrites: workspaceWrites,
+    _conditionalWrites: conditionalWrites,
     _enshrined: enshrined,
     _contextGraphs: contextGraphs,
     _subscriptions: subscriptions,
@@ -309,6 +316,78 @@ describe('OriginTrail Game API handler', () => {
       batch.some((q: any) => q.predicate.includes('gameState')),
     );
     expect(launchQuads).toBeDefined();
+  });
+
+  it('launchExpedition uses writeConditionalToWorkspace with CAS condition', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const testAgent = makeMockAgent('cas-launch-peer');
+    testAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-launch' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'CAS Launch Test');
+    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-cas-launch/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['cas-p2', 'P2'], ['cas-p3', 'P3']]) {
+      handle('dkg/paranet/test-cas-launch/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      if (swarm.players.length >= 3) break;
+    }
+    expect(swarm.players.length).toBe(3);
+
+    const beforeCas = testAgent._conditionalWrites.length;
+    await coordinator.launchExpedition(swarm.id);
+
+    const casWritesAfter = testAgent._conditionalWrites.slice(beforeCas);
+    expect(casWritesAfter.length).toBeGreaterThanOrEqual(1);
+    const casWrite = casWritesAfter[0];
+    expect(casWrite.conditions).toHaveLength(1);
+    expect(casWrite.conditions[0].predicate).toContain('status');
+    expect(casWrite.conditions[0].expectedValue).toBe('"recruiting"');
+
+    const swarmQuads = casWrite.quads.filter((q: any) => q.subject.includes('swarm/swarm-'));
+    const statusQuad = swarmQuads.find((q: any) => q.predicate.includes('status') && q.object.includes('traveling'));
+    expect(statusQuad).toBeDefined();
+    const nameQuad = swarmQuads.find((q: any) => q.predicate.includes('name'));
+    expect(nameQuad).toBeDefined();
+    const orchestratorQuad = swarmQuads.find((q: any) => q.predicate.includes('orchestrator'));
+    expect(orchestratorQuad).toBeDefined();
+  });
+
+  it('launchExpedition aborts when CAS write throws StaleWriteError', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const testAgent = makeMockAgent('cas-abort-peer');
+    testAgent.query = async () => ({ bindings: [] });
+
+    const staleErr = new Error('CAS failed: status expected "recruiting", found "traveling"');
+    staleErr.name = 'StaleWriteError';
+    testAgent.writeConditionalToWorkspace = async () => { throw staleErr; };
+
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-abort' });
+    const swarm = await coordinator.createSwarm('Leader', 'Abort Test');
+    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-cas-abort/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['abort-p2', 'P2'], ['abort-p3', 'P3']]) {
+      handle('dkg/paranet/test-cas-abort/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      if (swarm.players.length >= 3) break;
+    }
+    expect(swarm.players.length).toBe(3);
+
+    await expect(coordinator.launchExpedition(swarm.id)).rejects.toThrow('CAS failed');
+    expect(swarm.status).toBe('recruiting');
   });
 
   it('onRemoteExpeditionLaunched updates in-memory state without workspace write (C3)', async () => {
@@ -2822,8 +2901,8 @@ describe('Leaderboard', () => {
     const leaderboardAgent = makeMockAgent('lb-peer');
     leaderboardAgent.query = async () => ({
       bindings: [
-        { displayName: '"Alice"', score: '"3500"', outcome: '"won"', epochs: '"2000"', survivors: '"3"', partySize: '"4"', swarmId: '"swarm-1"', finishedAt: '"1700000000000"' },
-        { displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
+        { player: '"peer-alice"', displayName: '"Alice"', score: '"3500"', outcome: '"won"', epochs: '"2000"', survivors: '"3"', partySize: '"4"', swarmId: '"swarm-1"', finishedAt: '"1700000000000"' },
+        { player: '"peer-bob"', displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
       ],
     });
     const lbHandler = createHandler(leaderboardAgent, { paranets: ['test'] });
@@ -3256,5 +3335,196 @@ describe('Notifications', () => {
 
     const { notifications } = coordinator.getNotifications();
     expect(notifications.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('MAX_EPOCHS constant', () => {
+  it('MAX_EPOCHS is 1000 and exported', async () => {
+    const { MAX_EPOCHS } = await import('../src/engine/game-engine.js');
+    expect(MAX_EPOCHS).toBe(1000);
+  });
+});
+
+describe('getLobby stale finished swarms', () => {
+  it('getLobby filters stale finished swarms older than 1 hour', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('lobby-stale');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'stale-test' });
+
+    const freshSwarm = await coordinator.createSwarm('Alice', 'FreshSwarm', 3);
+    const staleSwarm = await coordinator.createSwarm('Alice', 'StaleSwarm', 3);
+
+    freshSwarm.status = 'finished';
+    freshSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 30 * 60 * 1000 }];
+
+    staleSwarm.status = 'finished';
+    staleSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 2 * 60 * 60 * 1000 }];
+
+    const lobby = coordinator.getLobby();
+    const mySwarmIds = lobby.mySwarms.map(s => s.id);
+    expect(mySwarmIds).toContain(freshSwarm.id);
+    expect(mySwarmIds).not.toContain(staleSwarm.id);
+  });
+});
+
+describe('Leaderboard deduplication', () => {
+  it('getLeaderboard deduplicates by player keeping best score', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('dedup-peer');
+    agent.query = async () => ({
+      bindings: [
+        { player: 'peer-a', displayName: 'Alice', score: '500', outcome: 'won', epochs: '1000', survivors: '3', partySize: '3', swarmId: 'swarm-1', finishedAt: '100' },
+        { player: 'peer-a', displayName: 'Alice', score: '800', outcome: 'won', epochs: '1000', survivors: '5', partySize: '5', swarmId: 'swarm-2', finishedAt: '200' },
+        { player: 'peer-b', displayName: 'Bob', score: '600', outcome: 'won', epochs: '1000', survivors: '4', partySize: '4', swarmId: 'swarm-3', finishedAt: '300' },
+      ],
+    });
+
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'dedup-test' });
+    const entries = await coordinator.getLeaderboard();
+
+    expect(entries.length).toBe(2);
+    expect(entries[0].player).toBe('peer-a');
+    expect(entries[0].score).toBe(800);
+    expect(entries[1].player).toBe('peer-b');
+    expect(entries[1].score).toBe(600);
+  });
+});
+
+describe('/chat API handler validation', () => {
+  it('POST /chat rejects empty message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: '   ', displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(400);
+    expect(JSON.parse(mock.body).error).toContain('empty');
+  });
+
+  it('POST /chat rejects oversized message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const longMessage = 'x'.repeat(201);
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: longMessage, displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(400);
+    expect(JSON.parse(mock.body).error).toContain('200');
+  });
+
+  it('POST /chat accepts valid 200-char message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const message = 'a'.repeat(200);
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message, displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(200);
+    const body = JSON.parse(mock.body);
+    expect(body.message).toBe(message);
+    expect(body.displayName).toBe('Alice');
+  });
+
+  it('GET /chat clamps invalid limit', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+
+    for (const invalidLimit of ['-5', '0', 'NaN', '999']) {
+      const req = createMockReq('GET', `/api/apps/origin-trail-game/chat?limit=${invalidLimit}`);
+      const mock = createMockRes();
+      await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+      expect(mock.status).toBe(200);
+    }
+  });
+});
+
+describe('Lobby chat', () => {
+  it('chat message round-trip via coordinator', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-test' });
+
+    const sent = await coordinator.sendChatMessage('Alice', 'Hello world');
+    expect(sent.peerId).toBe('chat-peer');
+    expect(sent.displayName).toBe('Alice');
+    expect(sent.message).toBe('Hello world');
+    expect(sent.id).toBeTruthy();
+
+    const messages = coordinator.getChatMessages();
+    expect(messages.length).toBe(1);
+    expect(messages[0].message).toBe('Hello world');
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-test/app')![0];
+    handle('dkg/paranet/chat-test/app', encode({
+      app: 'origin-trail-game',
+      type: 'chat:message',
+      swarmId: 'lobby',
+      peerId: 'remote-peer',
+      timestamp: Date.now(),
+      id: 'remote-chat-1',
+      displayName: 'Bob',
+      message: 'Hi Alice',
+    } as any), 'remote-peer');
+    await new Promise(r => setTimeout(r, 50));
+
+    const allMessages = coordinator.getChatMessages();
+    expect(allMessages.length).toBe(2);
+    expect(allMessages[1].displayName).toBe('Bob');
+
+    const limited = coordinator.getChatMessages(1);
+    expect(limited.length).toBe(1);
+    expect(limited[0].displayName).toBe('Bob');
+  });
+
+  it('drops remote chat messages with invalid or empty fields', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-val-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-val-test' });
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-val-test/app')![0];
+
+    handle('dkg/paranet/chat-val-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'bad-peer', timestamp: Date.now(),
+      id: '', displayName: 'X', message: 'no id',
+    } as any), 'bad-peer');
+
+    handle('dkg/paranet/chat-val-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'bad-peer', timestamp: Date.now(),
+      id: 'msg-2', displayName: 'X', message: '   ',
+    } as any), 'bad-peer');
+
+    await new Promise(r => setTimeout(r, 50));
+    expect(coordinator.getChatMessages().length).toBe(0);
+  });
+
+  it('truncates oversized remote chat messages', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-trunc-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-trunc-test' });
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-trunc-test/app')![0];
+    const longMsg = 'a'.repeat(500);
+    const longName = 'b'.repeat(100);
+    handle('dkg/paranet/chat-trunc-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'trunc-peer', timestamp: Date.now(),
+      id: 'trunc-1', displayName: longName, message: longMsg,
+    } as any), 'trunc-peer');
+
+    await new Promise(r => setTimeout(r, 50));
+    const msgs = coordinator.getChatMessages();
+    expect(msgs.length).toBe(1);
+    expect(msgs[0].message.length).toBe(200);
+    expect(msgs[0].displayName.length).toBe(50);
   });
 });

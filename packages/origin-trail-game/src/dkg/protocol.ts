@@ -26,7 +26,8 @@ export type MessageType =
   | 'vote:cast'
   | 'turn:proposal'
   | 'turn:approve'
-  | 'turn:resolved';
+  | 'turn:resolved'
+  | 'chat:message';
 
 export interface BaseMessage {
   app: typeof APP_ID;
@@ -99,6 +100,13 @@ export interface TurnResolvedMsg extends BaseMessage {
   proposalHash: string;
 }
 
+export interface ChatMsg extends BaseMessage {
+  type: 'chat:message';
+  id: string;
+  displayName: string;
+  message: string;
+}
+
 export type OTMessage =
   | SwarmCreatedMsg
   | SwarmJoinedMsg
@@ -107,7 +115,8 @@ export type OTMessage =
   | VoteCastMsg
   | TurnProposalMsg
   | TurnApproveMsg
-  | TurnResolvedMsg;
+  | TurnResolvedMsg
+  | ChatMsg;
 
 export function encode(msg: OTMessage): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(msg));

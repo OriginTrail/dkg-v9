@@ -13,9 +13,12 @@ export { validatePublishRequest, type ValidationResult, type ValidationOptions }
 export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance } from './metadata.js';
 export {
   DKGPublisher,
+  StaleWriteError,
   type DKGPublisherConfig,
   type WriteToWorkspaceOptions,
   type WriteToWorkspaceResult,
+  type WriteConditionalToWorkspaceOptions,
+  type CASCondition,
 } from './dkg-publisher.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';

@@ -14,9 +14,9 @@ import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConf
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal,
+  PublishJournal, StaleWriteError,
   computeTripleHash, computeFlatKCRoot, autoPartition,
-  type PublishResult, type PhaseCallback, type KAMetadata,
+  type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -134,6 +134,8 @@ export class DKGAgent {
   private readonly chain: ChainAdapter;
   /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  /** Shared write locks so gossip writes serialize against local CAS writes. */
+  private readonly writeLocks: Map<string, Promise<void>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
@@ -159,6 +161,7 @@ export class DKGAgent {
     eventBus: TypedEventBus,
     chain: ChainAdapter,
     workspaceOwnedEntities: Map<string, Map<string, string>>,
+    writeLocks: Map<string, Promise<void>>,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -167,6 +170,7 @@ export class DKGAgent {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
+    this.writeLocks = writeLocks;
     this.eventBus = eventBus;
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
@@ -240,6 +244,7 @@ export class DKGAgent {
 
     const node = new DKGNode(nodeConfig);
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
+    const writeLocks = new Map<string, Promise<void>>();
     const publisher = new DKGPublisher({
       store,
       chain,
@@ -247,6 +252,7 @@ export class DKGAgent {
       keypair,
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
+      writeLocks,
     });
 
     try {
@@ -264,7 +270,7 @@ export class DKGAgent {
 
     return new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities,
+      workspaceOwnedEntities, writeLocks,
     );
   }
 
@@ -1217,6 +1223,35 @@ export class DKGAgent {
   }
 
   /**
+   * Compare-and-swap workspace write. Verifies each condition against the
+   * current workspace graph before applying the write atomically.
+   * Throws StaleWriteError if any condition fails.
+   */
+  async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    conditions: CASCondition[],
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+  ): Promise<{ workspaceOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
+    const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      conditions,
+    });
+    if (!opts?.localOnly) {
+      const topic = paranetWorkspaceTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+    return { workspaceOperationId };
+  }
+
+  /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
@@ -1531,6 +1566,7 @@ export class DKGAgent {
     if (!this.workspaceHandler) {
       this.workspaceHandler = new WorkspaceHandler(this.store, this.eventBus, {
         workspaceOwnedEntities: this.workspaceOwnedEntities,
+        writeLocks: this.writeLocks,
       });
     }
     return this.workspaceHandler;

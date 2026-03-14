@@ -7,7 +7,9 @@ import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   WorkspaceHandler,
+  StaleWriteError,
   type WriteToWorkspaceOptions,
+  type WriteConditionalToWorkspaceOptions,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 
@@ -560,5 +562,530 @@ describe('WorkspaceHandler', () => {
       expect(afterSecond.bindings.length).toBe(1);
       expect(afterSecond.bindings[0]['creator']).toContain(peerId);
     }
+  });
+});
+
+describe('WorkspaceHandler: CAS gossip enforcement', () => {
+  let store: OxigraphStore;
+  let handler: WorkspaceHandler;
+  let workspaceOwned: Map<string, Map<string, string>>;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    workspaceOwned = new Map();
+    handler = new WorkspaceHandler(store, new TypedEventBus(), {
+      workspaceOwnedEntities: workspaceOwned,
+    });
+  });
+
+  it('rejects CAS conditions with SPARQL injection in subject', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const safeEntity = 'urn:test:safe-entity';
+    const nquads = `<${safeEntity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-inject-1',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: 'urn:x> } } . DROP ALL #<urn:y',
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${safeEntity}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('rejects CAS conditions with SPARQL injection in expectedValue', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const safeEntity = 'urn:test:safe-entity2';
+
+    // First write so the entity exists
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${safeEntity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const nquads = `<${safeEntity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-inject-2',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: safeEntity,
+        predicate: 'http://schema.org/name',
+        expectedValue: '"Setup" } } . DROP ALL #',
+        expectAbsent: false,
+      }],
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${safeEntity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Setup');
+    }
+  });
+
+  it('accepts valid CAS conditions and enforces them', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:cas-valid';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-cas-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-cas-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('traveling');
+    }
+  });
+
+  it('rejects write when CAS condition value mismatches', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:cas-mismatch';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-mismatch-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "arrived" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-mismatch-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('traveling');
+    }
+  });
+
+  it('expectAbsent: allows write when triple does not exist', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-pass';
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-pass',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(true);
+  });
+
+  it('expectAbsent: rejects write when triple already exists', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-fail';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-reject',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('recruiting');
+    }
+  });
+
+  it('rejects non-absent CAS condition with empty expectedValue (protobuf default)', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:empty-expected';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://schema.org/name',
+        expectedValue: '',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Setup');
+    }
+  });
+});
+
+describe('Workspace: writeConditionalToWorkspace (CAS)', () => {
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+  const wallet = ethers.Wallet.createRandom();
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  it('succeeds when condition matches current value', async () => {
+    const initial = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+      }],
+    };
+
+    const result = await publisher.writeConditionalToWorkspace(PARANET, updated, opts);
+    expect(result.workspaceOperationId).toBeTruthy();
+
+    const check = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://example.org/status> ?o } }`,
+    );
+    expect(check.type).toBe('bindings');
+    if (check.type === 'bindings') {
+      expect(check.bindings[0].o).toContain('traveling');
+    }
+  });
+
+  it('throws StaleWriteError when condition does not match', async () => {
+    const initial = [q(ENTITY, 'http://example.org/status', '"traveling"')];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+      }],
+    };
+
+    await expect(publisher.writeConditionalToWorkspace(PARANET, updated, opts))
+      .rejects.toThrow(StaleWriteError);
+  });
+
+  it('throws StaleWriteError when expecting absent but triple exists', async () => {
+    const initial = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const newQuads = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: null,
+      }],
+    };
+
+    await expect(publisher.writeConditionalToWorkspace(PARANET, newQuads, opts))
+      .rejects.toThrow(StaleWriteError);
+  });
+
+  it('succeeds when expecting absent and triple does not exist', async () => {
+    const quads = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: null,
+      }],
+    };
+
+    const result = await publisher.writeConditionalToWorkspace(PARANET, quads, opts);
+    expect(result.workspaceOperationId).toBeTruthy();
+  });
+
+  it('StaleWriteError includes condition and actual value', async () => {
+    const initial = [q(ENTITY, 'http://example.org/status', '"traveling"')];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+      }],
+    };
+
+    try {
+      await publisher.writeConditionalToWorkspace(PARANET, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(StaleWriteError);
+      const e = err as InstanceType<typeof StaleWriteError>;
+      expect(e.condition.subject).toBe(ENTITY);
+      expect(e.condition.predicate).toBe('http://example.org/status');
+      expect(e.condition.expectedValue).toBe('"recruiting"');
+      expect(e.actualValue).not.toBeNull();
+    }
+  });
+
+  it('supports multiple conditions (all must pass)', async () => {
+    const initial = [
+      q(ENTITY, 'http://example.org/status', '"recruiting"'),
+      q(ENTITY, 'http://example.org/turn', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const updated = [
+      q(ENTITY, 'http://example.org/status', '"traveling"'),
+      q(ENTITY, 'http://example.org/turn', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [
+        { subject: ENTITY, predicate: 'http://example.org/status', expectedValue: '"recruiting"' },
+        { subject: ENTITY, predicate: 'http://example.org/turn', expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      ],
+    };
+
+    const result = await publisher.writeConditionalToWorkspace(PARANET, updated, opts);
+    expect(result.workspaceOperationId).toBeTruthy();
+  });
+
+  it('fails if any one of multiple conditions mismatches', async () => {
+    const initial = [
+      q(ENTITY, 'http://example.org/status', '"recruiting"'),
+      q(ENTITY, 'http://example.org/turn', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ];
+    await publisher.writeToWorkspace(PARANET, initial, { publisherPeerId: 'peer1' });
+
+    const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [
+        { subject: ENTITY, predicate: 'http://example.org/status', expectedValue: '"recruiting"' },
+        { subject: ENTITY, predicate: 'http://example.org/turn', expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      ],
+    };
+
+    await expect(publisher.writeConditionalToWorkspace(PARANET, updated, opts))
+      .rejects.toThrow(StaleWriteError);
+  });
+
+  it('rejects unsafe RDF terms in expectedValue (SPARQL injection)', async () => {
+    const opts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting" } } . DROP ALL #',
+      }],
+    };
+    await expect(publisher.writeConditionalToWorkspace(PARANET, [], opts))
+      .rejects.toThrow('Unsafe RDF term');
+  });
+
+  it('accepts valid RDF literal and IRI terms', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/status', '"recruiting"'),
+    ], { publisherPeerId: 'peer1' });
+
+    const literalOpts: WriteConditionalToWorkspaceOptions = {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/status',
+        expectedValue: '"recruiting"',
+      }],
+    };
+    await expect(publisher.writeConditionalToWorkspace(PARANET, [], literalOpts))
+      .resolves.toBeDefined();
+  });
+
+  it('serializes concurrent CAS writes to the same subject+predicate', async () => {
+    await publisher.writeToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], { publisherPeerId: 'peer1' });
+
+    const write1 = publisher.writeConditionalToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/counter',
+        expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      }],
+    });
+
+    const write2 = publisher.writeConditionalToWorkspace(PARANET, [
+      q(ENTITY, 'http://example.org/counter', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate: 'http://example.org/counter',
+        expectedValue: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      }],
+    });
+
+    const results = await Promise.allSettled([write1, write2]);
+    const successes = results.filter(r => r.status === 'fulfilled');
+    const failures = results.filter(r => r.status === 'rejected');
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    expect((failures[0] as PromiseRejectedResult).reason).toBeInstanceOf(StaleWriteError);
   });
 });

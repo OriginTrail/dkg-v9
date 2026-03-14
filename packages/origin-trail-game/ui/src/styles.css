@@ -861,6 +861,113 @@ ul li { padding: 0.2rem 0; }
   max-width: 320px;
 }
 
+.ot-tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  cursor: help;
+}
+.ot-tooltip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.ot-tooltip-text {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.ot-tooltip-wrap:hover .ot-tooltip-text {
+  visibility: visible;
+  opacity: 1;
+}
+
+.ot-lobby-chat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  max-height: 360px;
+}
+.ot-lobby-chat h3 {
+  margin-bottom: 0.5rem;
+}
+.ot-lobby-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 120px;
+  max-height: 240px;
+  margin-bottom: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0.5rem;
+  background: var(--bg);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.ot-chat-msg {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+.ot-chat-msg-name {
+  font-weight: 600;
+  color: var(--green);
+  margin-right: 6px;
+}
+.ot-chat-msg-time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+.ot-chat-input-row {
+  display: flex;
+  gap: 6px;
+}
+.ot-chat-input-row input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.9rem;
+  margin-bottom: 0;
+}
+.ot-chat-input-row input:focus {
+  outline: none;
+  border-color: var(--green);
+}
+.ot-chat-input-row button {
+  flex-shrink: 0;
+}
+
 .ot-notif-error {
   padding: 6px 12px;
   font-size: 0.8rem;

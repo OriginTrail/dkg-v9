@@ -11,7 +11,7 @@ import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
+  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
 } from './config.js';
@@ -28,6 +28,15 @@ import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
+
+const STARTUP_BANNER = `
+\x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
+██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝\x1b[0m
+`;
 
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
@@ -367,8 +376,17 @@ program
       const newPid = await readPid();
       if (newPid && isProcessRunning(newPid)) {
         const config = await loadConfig();
-        console.log(`DKG node "${config.name}" started (PID ${newPid}).`);
-        console.log(`Logs: ${logPath()}`);
+        const port = await readApiPort().catch(() => 9200);
+        console.log(STARTUP_BANNER);
+        console.log(`  Node:       ${config.name} (PID ${newPid})`);
+        console.log(`  Node UI:    \x1b[4m\x1b[36mhttp://127.0.0.1:${port}/ui\x1b[0m`);
+        console.log(`  GitHub:     \x1b[4m\x1b[36mhttps://github.com/OriginTrail/dkg-v9\x1b[0m`);
+        console.log(`  Discord:    \x1b[4m\x1b[36mhttps://discord.com/invite/xCaY7hvNwD\x1b[0m`);
+        console.log(`  Logs:       ${logPath()}`);
+        console.log('');
+        console.log('  \x1b[33mThis is an experimental testnet node. Things will break.');
+        console.log('  Not intended for production use.\x1b[0m');
+        console.log('');
         return;
       }
     }

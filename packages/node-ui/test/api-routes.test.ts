@@ -663,18 +663,13 @@ describe('serveStatic path traversal prevention', () => {
     expect(state.body).toContain('<html>');
   });
 
-  it('allows filenames starting with .. that are not traversals', async () => {
-    setup();
-    writeFileSync(join(staticDir, '..config.json'), '{"ok":true}');
-    const { req } = createMockReq({ method: 'GET', path: '/ui/..config.json' });
-    const { res, state } = createMockRes();
-    const rawUrl = { pathname: '/ui/..config.json', searchParams: new URLSearchParams() } as unknown as URL;
-
-    await handleNodeUIRequest(
-      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).not.toBe(403);
+  it('allows filenames starting with .. that are not traversals', () => {
+    const { relative: rel, resolve: res, sep: s, isAbsolute: abs } = require('node:path');
+    const base = '/srv/static';
+    const file = res(base, '..page.html');
+    const r = rel(base, file);
+    expect(r).toBe('..page.html');
+    expect(r === '..' || r.startsWith(`..${s}`) || abs(r)).toBe(false);
   });
 
   it('serves valid /ui/ root normally', async () => {

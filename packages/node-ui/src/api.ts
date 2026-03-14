@@ -1,7 +1,7 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, realpath } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
 import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
@@ -807,13 +807,28 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
 
-  const resolved = resolve(filePath);
-  const resolvedBase = resolve(staticDir);
-  const rel = relative(resolvedBase, resolved);
-  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || resolve(resolvedBase, rel) !== resolved) {
+  const lexicalResolved = resolve(filePath);
+  const lexicalBase = resolve(staticDir);
+  const lexicalRel = relative(lexicalBase, lexicalResolved);
+  if (lexicalRel === '..' || lexicalRel.startsWith(`..${sep}`) || isAbsolute(lexicalRel) || resolve(lexicalBase, lexicalRel) !== lexicalResolved) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Forbidden' }));
     return true;
+  }
+
+  if (existsSync(filePath)) {
+    try {
+      const realFile = await realpath(filePath);
+      const realBase = await realpath(staticDir);
+      const realRel = relative(realBase, realFile);
+      if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
+    } catch {
+      // realpath fails if file doesn't exist — handled below by SPA fallback
+    }
   }
 
   // SPA fallback: if not a file with extension, serve index.html

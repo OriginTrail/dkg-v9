@@ -77,7 +77,7 @@ graph TB
 
 ### Why not just text embeddings?
 
-Text embeddings (e.g., sentence-transformers) capture semantic meaning of literal values — "Company X acquired Company Y" is similar to "Corporation A purchased Corporation B." This is valuable but ignores the graph structure: the fact that Company X and Company Y are connected by `schema:acquiredBy`, that Company Y has `schema:location` pointing to Berlin, and that three other agents have corroborated this fact.
+Text embeddings (e.g., sentence-transformers) capture semantic meaning of literal values — "Company X acquired Company Y" is similar to "Corporation A purchased Corporation B." This is valuable but ignores the graph structure: the fact that Company X and Company Y are connected by `schema:acquired`, that Company Y has `schema:location` pointing to Berlin, and that three other agents have corroborated this fact.
 
 Knowledge graph embeddings encode the **structural position** of entities in the graph. Two entities with similar neighborhoods (similar predicates, similar objects) get similar vectors — even if their textual descriptions are completely different.
 
@@ -130,7 +130,7 @@ When TransE learns embeddings for the DKG, it processes every triple `(subject, 
 
 - Entities that participate in similar relations cluster together
 - The relation vector captures the "meaning" of that relationship type
-- **Link prediction** becomes possible: given `(Company X, acquiredBy, ?)`, find entities whose embedding is close to `embed(Company X) + embed(acquiredBy)`
+- **Link prediction** becomes possible: given `(Company X, acquired, ?)`, find entities whose embedding is close to `embed(Company X) + embed(acquired)`
 
 ### Concrete example with DKG data
 
@@ -348,7 +348,7 @@ sequenceDiagram
 
 **Training trigger:**
 - Periodic (e.g., every 6 hours or after N new KAs published)
-- On-demand via API (`POST /api/embeddings/retrain`) — **requires local-admin auth**. Rate limited: max 1 concurrent training job, 30-minute cooldown between requests. Returns 429 if a job is already running or cooldown has not elapsed. Jobs are queued (max depth 1) to prevent DoS.
+- On-demand via API (`POST /api/embeddings/retrain`) — **requires local-admin auth**. Rate limited: max 1 concurrent training job, 30-minute cooldown between completions. If a job is already running, the request is **rejected** with `429 Too Many Requests` (not queued). If the cooldown has not elapsed, likewise `429`. This avoids unbounded queueing and makes behavior deterministic: the caller retries later or waits for completion.
 - Incremental update for new entities (approximate — add new vectors using learned relation vectors without full retrain)
 
 ### 2.2 PyKEEN integration
@@ -396,7 +396,7 @@ dkg embeddings import --paranet testing --input /tmp/embeddings/
 ```json
 {
   "head": "urn:corp:companyX",
-  "relation": "http://schema.org/acquiredBy",
+  "relation": "http://schema.org/acquired",
   "tail": null,
   "paranetId": "testing",
   "limit": 5
@@ -600,7 +600,7 @@ stateDiagram-v2
 
 ## Acceptance Criteria
 
-- [ ] `POST /api/search` returns semantically relevant results for natural language queries
+- [ ] `POST /api/search` returns relevant results for natural language queries. Measurable: on a curated eval dataset of 50+ query/expected-result pairs, achieve **Recall@10 ≥ 0.7** and **nDCG@10 ≥ 0.5** (thresholds tightened post-Phase 3 when graph embeddings are available)
 - [ ] Text embeddings are computed on KA publish (latency < 50ms per KA)
 - [ ] Vector index persists across node restarts
 - [ ] Chat assistant has `dkg_search` tool and uses it for natural language questions

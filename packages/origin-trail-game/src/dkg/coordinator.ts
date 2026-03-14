@@ -102,7 +102,7 @@ export interface TurnProposal {
   event?: { type: string; description: string };
   actionSuccess?: boolean;
   turnQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-  merkleRoot?: Uint8Array;
+  merkleRoot?: Uint8Array | string;
   proposalTimestamp: number;
   participantSignatures: Map<string, ParticipantSignature>;
 }
@@ -856,6 +856,10 @@ export class OriginTrailGameCoordinator {
     const turn = this.swarms.get(swarmId)?.currentTurn;
 
     const timer = setInterval(async () => {
+      try {
+        if (!this.agent.peerId) return;
+      } catch { return; }
+
       const swarm = this.swarms.get(swarmId);
       if (!swarm || swarm.currentTurn !== turn || this.allAliveVoted(swarm)) {
         this.stopVoteHeartbeat(swarmId);
@@ -1613,10 +1617,13 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.pendingProposal?.hash === msg.proposalHash) {
       const pp = swarm.pendingProposal;
+      const ppRootHex = pp.merkleRoot
+        ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot))
+        : null;
       if (
         msg.winningAction !== pp.winningAction ||
         msg.resolution !== pp.resolution ||
-        (msg.merkleRoot ?? null) !== (pp.merkleRoot ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot)) : null)
+        (ppRootHex != null && msg.merkleRoot != null && msg.merkleRoot !== ppRootHex)
       ) {
         this.log(`Duplicate proposal hash but mismatched fields for ${msg.swarmId} turn ${msg.turn} — rejecting`);
         return;
@@ -1762,6 +1769,7 @@ export class OriginTrailGameCoordinator {
       deaths,
       event: msg.event,
       turnQuads: localTurnQuads.length > 0 ? localTurnQuads : undefined,
+      merkleRoot: localMerkleRootHex,
       proposalTimestamp: msg.timestamp,
       participantSignatures: peerSigs,
     };
@@ -1878,7 +1886,7 @@ export class OriginTrailGameCoordinator {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         if (swarm.status === 'finished') {
           const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
-          const relevantTs = lastTurn?.timestamp ?? swarm.createdAt;
+          const relevantTs = lastTurn?.timestamp ?? now;
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
@@ -2237,25 +2245,27 @@ export class OriginTrailGameCoordinator {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
           {
-            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
+            SELECT ?player (MAX(?s) AS ?maxScore) (MAX(?ft) AS ?latestFinished) WHERE {
               ?e a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
-                 <${rdf.OT}score> ?s .
+                 <${rdf.OT}score> ?s ;
+                 <${rdf.OT}finishedAt> ?ft .
             } GROUP BY ?player
           }
           ?entry a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}finishedAt> ?latestFinished ;
                  <${rdf.OT}displayName> ?displayName ;
                  <${rdf.OT}outcome> ?outcome ;
                  <${rdf.OT}epochs> ?epochs ;
                  <${rdf.OT}survivors> ?survivors ;
                  <${rdf.OT}partySize> ?partySize ;
-                 <${rdf.OT}swarm> ?swarm ;
-                 <${rdf.OT}finishedAt> ?finishedAt .
+                 <${rdf.OT}swarm> ?swarm .
           BIND(?maxScore AS ?score)
+          BIND(?latestFinished AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score)`,
+        } ORDER BY DESC(?score) LIMIT 50`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2317,10 +2327,6 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
       timestamp: Date.now(),
     };
-    this.chatMessages.push(chatMsg);
-    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
-      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
-    }
 
     const gossipMsg: proto.ChatMsg = {
       app: proto.APP_ID,
@@ -2333,11 +2339,16 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
     };
     await this.broadcast(gossipMsg);
+
+    this.chatMessages.push(chatMsg);
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
+    }
     return chatMsg;
   }
 
   getChatMessages(limit = 50): Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
-    return this.chatMessages.slice(-limit);
+    return [...this.chatMessages].sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   private onRemoteChatMessage(msg: proto.ChatMsg): void {

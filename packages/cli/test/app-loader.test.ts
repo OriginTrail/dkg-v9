@@ -389,6 +389,11 @@ describe('deriveOrigin', () => {
   it('handles Host header without port', () => {
     expect(deriveOrigin(fakeReq('mynode.local'), 19300)).toBe('http://mynode.local:19300');
   });
+
+  it('rejects non-HTTP protocols and falls back to http', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'ftp'), 19300)).toBe('http://mynode.local:19300');
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'javascript'), 19300)).toBe('http://mynode.local:19300');
+  });
 });
 
 function httpGetPort(port: number, path: string): Promise<{ status: number; body: string }> {

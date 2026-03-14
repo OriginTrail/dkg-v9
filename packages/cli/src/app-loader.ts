@@ -11,7 +11,7 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { join, dirname, resolve, relative } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { repoDir } from './config.js';
@@ -45,17 +45,28 @@ const MIME: Record<string, string> = {
 
 /**
  * Discover and load all installed DKG apps.
- * Scans node_modules for packages with a `dkgApp` field in package.json.
+ * Scans dependencies for packages with a `dkgApp` field in package.json.
+ *
+ * In a monorepo checkout, scans the repo root's package.json.
+ * For standalone NPM installs (no monorepo), falls back to scanning
+ * the CLI package's own package.json dependencies.
  */
 export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: string) => void): Promise<LoadedApp[]> {
   const apps: LoadedApp[] = [];
   const root = repoDir();
-  if (!root) return apps;
-  const require = createRequire(join(root, 'package.json'));
+  let pkgJsonBase: string;
+  if (root) {
+    pkgJsonBase = root;
+  } else {
+    const cliDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    if (!existsSync(join(cliDir, 'package.json'))) return apps;
+    pkgJsonBase = cliDir;
+  }
+  const require = createRequire(join(pkgJsonBase, 'package.json'));
 
   let rootPkg: { dependencies?: Record<string, string> };
   try {
-    rootPkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf-8'));
+    rootPkg = JSON.parse(await readFile(join(pkgJsonBase, 'package.json'), 'utf-8'));
   } catch {
     return apps;
   }

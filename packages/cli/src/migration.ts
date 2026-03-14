@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
 
 /**
  * One-time migration from old single-directory layout to blue-green slots.
@@ -69,8 +69,11 @@ export async function migrateToBlueGreen(
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
-  const slotEntry = (slotDir: string) => join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-  const slotReady = (slotDir: string) => existsSync(join(slotDir, '.git')) && existsSync(slotEntry(slotDir));
+  const slotReady = (slotDir: string) => {
+    const entry = slotEntryPoint(slotDir);
+    if (!entry) return false;
+    return existsSync(join(slotDir, '.git')) || existsSync(join(slotDir, 'package.json'));
+  };
   if (hadCurrentLink && slotReady(slotA) && slotReady(slotB)) return;
 
   log('Migrating to blue-green release slots...');

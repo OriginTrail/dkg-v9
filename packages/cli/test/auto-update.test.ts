@@ -13,6 +13,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     readFile: vi.fn(),
     writeFile: vi.fn(),
+    mkdir: vi.fn(),
+    rm: vi.fn(),
     symlink: vi.fn(),
     rename: vi.fn(),
     unlink: vi.fn(),
@@ -22,7 +24,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, existsSync: vi.fn(() => true) };
+  return {
+    ...actual,
+    existsSync: vi.fn(() => true),
+    openSync: vi.fn(() => 99),
+    closeSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn(() => `${process.pid}:${Date.now()}:testtoken`),
+    unlinkSync: vi.fn(),
+  };
 });
 
 const fetchMock = vi.fn();
@@ -41,15 +51,22 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
-import { checkForNewCommitWithStatus, checkForUpdate, performUpdate } from '../src/daemon.js';
+import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
 const mockedReadFile = vi.mocked(readFile);
 const mockedWriteFile = vi.mocked(writeFile);
+const mockedMkdir = vi.mocked(mkdir);
+const mockedRm = vi.mocked(rm);
 const mockedExistsSync = vi.mocked(existsSync);
+const mockedOpenSync = vi.mocked(openSync);
+const mockedCloseSync = vi.mocked(closeSync);
+const mockedFsWriteFileSync = vi.mocked(fsWriteFileSync);
+const mockedReadFileSync = vi.mocked(readFileSync);
+const mockedUnlinkSync = vi.mocked(unlinkSync);
 const mockedSwapSlot = vi.mocked(swapSlot);
 const mockedExec = vi.mocked(exec);
 const mockedExecFile = vi.mocked(execFile);
@@ -89,6 +106,13 @@ describe('blue-green checkForUpdate', () => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    mockedMkdir.mockResolvedValue(undefined as any);
+    mockedRm.mockResolvedValue(undefined as any);
+    mockedOpenSync.mockReturnValue(99 as any);
+    mockedCloseSync.mockReturnValue(undefined as any);
+    mockedFsWriteFileSync.mockReturnValue(undefined as any);
+    mockedReadFileSync.mockReturnValue(`${process.pid}:${Date.now()}:testtoken` as any);
+    mockedUnlinkSync.mockReturnValue(undefined as any);
     (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
     (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));
   });
@@ -549,5 +573,173 @@ describe('blue-green checkForUpdate', () => {
     const result = await performUpdate({ ...AU, allowPrerelease: true }, vi.fn());
     expect(result).toBe(true);
     expect(mockedSwapSlot).toHaveBeenCalled();
+  });
+});
+
+describe('checkForNpmVersionUpdate tag precedence', () => {
+  function makeRegistryResponse(distTags: Record<string, string>) {
+    return {
+      ok: true,
+      json: async () => ({ 'dist-tags': distTags }),
+    } as any;
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-version')) return '9.0.0-beta.3' as any;
+      throw new Error('ENOENT');
+    });
+  });
+
+  it('uses latest tag when allowPrerelease=false and latest is stable', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0',
+      dev: '9.2.0-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, false);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.1.0');
+  });
+
+  it('skips when allowPrerelease=false and latest is a prerelease', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0-beta.1',
+      dev: '9.2.0-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, false);
+    expect(result.status).toBe('up-to-date');
+  });
+
+  it('picks highest version across dev/latest/beta when allowPrerelease=true', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.0.0-beta.4',
+      dev: '9.0.0-beta.4-dev.999.abc1234',
+      beta: '9.0.0-beta.3',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.4-dev.999.abc1234');
+  });
+
+  it('prefers stable latest over older dev tag when allowPrerelease=true', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0',
+      dev: '9.0.0-beta.4-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.1.0');
+  });
+
+  it('returns error on registry failure', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503 } as any);
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('error');
+  });
+
+  it('returns up-to-date when current version matches latest', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.0.0-beta.3',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('up-to-date');
+  });
+});
+
+describe('performNpmUpdate', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockActiveSlot = 'a';
+    mockedExistsSync.mockReturnValue(true);
+    mockedMkdir.mockResolvedValue(undefined as any);
+    mockedRm.mockResolvedValue(undefined as any);
+    mockedWriteFile.mockResolvedValue(undefined as any);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
+      throw new Error(`Unexpected readFile: ${p}`);
+    });
+    mockedExec.mockImplementation((_cmd: any, _opts: any, cb: any) => cb(null, '', '') as any);
+  });
+
+  it('installs package and swaps slot on success', async () => {
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', log);
+    expect(result).toBe('updated');
+    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
+    expect(mockedWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('.current-version'),
+      '9.0.0-beta.4-dev.100.abc1234',
+    );
+  });
+
+  it('returns failed when npm install throws', async () => {
+    mockedExec.mockImplementation((_cmd: any, _opts: any, cb: any) =>
+      cb(new Error('npm ERR! 404'), '', '') as any);
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.99.0', log);
+    expect(result).toBe('failed');
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('returns failed when entry point missing after install', async () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      if (String(p).includes('cli.js')) return false;
+      return true;
+    });
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('failed');
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('recovers pending state if swap succeeded but version was not written', async () => {
+    mockActiveSlot = 'b';
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.update-pending.json')) {
+        return JSON.stringify({
+          target: 'b',
+          commit: '',
+          version: '9.0.0-beta.4-dev.200.def5678',
+          ref: 'npm:9.0.0-beta.4-dev.200.def5678',
+          createdAt: new Date().toISOString(),
+        }) as any;
+      }
+      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.200.def5678' }) as any;
+      throw new Error(`Unexpected readFile: ${p}`);
+    });
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.200.def5678', log);
+    expect(result).toBe('updated');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('recovered pending'));
+    expect(mockedWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('.current-version'),
+      '9.0.0-beta.4-dev.200.def5678',
+    );
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('returns failed when slot swap throws', async () => {
+    mockedSwapSlot.mockRejectedValueOnce(new Error('EPERM'));
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('failed');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
   });
 });

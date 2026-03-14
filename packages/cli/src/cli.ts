@@ -7,18 +7,21 @@ import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
+  slotEntryPoint, isStandaloneInstall,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import {
   runDaemon,
   performUpdateWithStatus,
   checkForNewCommitWithStatus,
+  checkForNpmVersionUpdate,
+  performNpmUpdate,
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
@@ -48,10 +51,11 @@ function getCliVersion(): string {
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
-  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
-  return existsSync(rDir) && existsSync(currentLink)
-    ? currentLink
-    : fileURLToPath(import.meta.url);
+  if (existsSync(rDir)) {
+    const entry = slotEntryPoint(join(rDir, 'current'));
+    if (entry) return entry;
+  }
+  return fileURLToPath(import.meta.url);
 }
 
 async function runDaemonSupervisor(): Promise<void> {
@@ -1307,6 +1311,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
+async function stopDaemonIfRunning(): Promise<boolean> {
+  const pid = await readPid();
+  if (!pid || !isProcessRunning(pid)) return true;
+  console.log('Stopping daemon...');
+  try { process.kill(pid, 'SIGTERM'); } catch (err: any) {
+    if (err?.code !== 'ESRCH') throw err;
+  }
+  for (let i = 0; i < 20; i++) {
+    await sleep(500);
+    if (!isProcessRunning(pid)) return true;
+  }
+  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
+  return false;
+}
+
 // ─── dkg update ──────────────────────────────────────────────────────
 
 program
@@ -1325,6 +1345,58 @@ program
       allowPrerelease: true,
       checkIntervalMinutes: 30,
     };
+    const standalone = isStandaloneInstall();
+    const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
+
+    if (standalone) {
+      const logFn = (msg: string) => console.log(msg);
+
+      if (opts.check) {
+        console.log('Checking NPM registry for updates...');
+        const check = await checkForNpmVersionUpdate(logFn, allowPre);
+        if (check.status === 'available' && check.version) {
+          console.log(`Update available: ${check.version}`);
+        } else if (check.status === 'up-to-date') {
+          console.log('No updates available.');
+        } else {
+          console.error('Update check failed. See logs above for details.');
+          process.exit(1);
+        }
+        return;
+      }
+
+      let version = versionOrRef ?? null;
+      if (!version) {
+        console.log('Checking NPM registry for updates...');
+        const check = await checkForNpmVersionUpdate(logFn, allowPre);
+        if (check.status === 'available' && check.version) {
+          version = check.version;
+        } else if (check.status === 'up-to-date') {
+          console.log('No update needed — already on latest.');
+          return;
+        } else {
+          console.error('Update check failed. See logs above for details.');
+          process.exit(1);
+        }
+      }
+
+      console.log(`Updating to ${version} via NPM...`);
+      const updateStatus = await performNpmUpdate(version!, logFn);
+      if (updateStatus === 'updated') {
+        const stopped = await stopDaemonIfRunning();
+        if (!stopped) {
+          console.error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
+          process.exit(1);
+        }
+        console.log('Update applied. Run "dkg start" to start with the new version.');
+      } else {
+        console.error('Update failed. Check logs and retry.');
+        process.exit(1);
+      }
+      return;
+    }
+
+    // --- Git-based update path (monorepo / install.sh installs) ---
 
     const refOverride = versionOrRef ? normalizeVersionTagRef(versionOrRef) : undefined;
     const verifyTagSignature = Boolean(refOverride && refOverride.startsWith('refs/tags/')) && opts.verifyTag !== false;
@@ -1402,8 +1474,8 @@ program
       console.error(`Slot ${target} does not exist. Cannot roll back.`);
       process.exit(1);
     }
-    const targetEntry = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
-    if (!existsSync(targetEntry)) {
+    const targetEntry = slotEntryPoint(targetDir);
+    if (!targetEntry) {
       console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
       process.exit(1);
     }
@@ -1429,20 +1501,33 @@ program
     await swapSlot(target);
     const commitFile = join(dkgDir(), '.current-commit');
     const versionFile = join(dkgDir(), '.current-version');
-    try {
-      const commit = execSync('git rev-parse HEAD', {
-        cwd: targetDir,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-      }).trim();
-      await writeFile(commitFile, commit);
-    } catch (err: any) {
-      console.warn(`Warning: failed to update rollback commit metadata: ${err?.message ?? String(err)}`);
+    if (existsSync(join(targetDir, '.git'))) {
+      try {
+        const commit = execSync('git rev-parse HEAD', {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          stdio: 'pipe',
+        }).trim();
+        await writeFile(commitFile, commit);
+      } catch (err: any) {
+        console.warn(`Warning: failed to read rollback commit: ${err?.message ?? String(err)}`);
+      }
+    } else {
+      try { await unlink(commitFile); } catch { /* already absent */ }
     }
     try {
-      const pkgRaw = readFileSync(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
-      const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
-      if (version) await writeFile(versionFile, version);
+      // Try git layout first, then NPM layout for version metadata.
+      const candidates = [
+        join(targetDir, 'packages', 'cli', 'package.json'),
+        join(targetDir, 'node_modules', '@origintrail-official', 'dkg', 'package.json'),
+      ];
+      for (const pkgPath of candidates) {
+        try {
+          const pkgRaw = readFileSync(pkgPath, 'utf-8');
+          const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+          if (version) { await writeFile(versionFile, version); break; }
+        } catch { /* try next */ }
+      }
     } catch (err: any) {
       console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
     }

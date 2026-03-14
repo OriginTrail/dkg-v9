@@ -13,12 +13,15 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
+  slotEntryPoint, isStandaloneInstall,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import {
   runDaemon,
   performUpdateWithStatus,
   checkForNewCommitWithStatus,
+  checkForNpmVersionUpdate,
+  performNpmUpdate,
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
@@ -48,10 +51,11 @@ function getCliVersion(): string {
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
-  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
-  return existsSync(rDir) && existsSync(currentLink)
-    ? currentLink
-    : fileURLToPath(import.meta.url);
+  if (existsSync(rDir)) {
+    const entry = slotEntryPoint(join(rDir, 'current'));
+    if (entry) return entry;
+  }
+  return fileURLToPath(import.meta.url);
 }
 
 async function runDaemonSupervisor(): Promise<void> {
@@ -1307,6 +1311,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+async function stopDaemonIfRunning(): Promise<void> {
+  const pid = await readPid();
+  if (pid && isProcessRunning(pid)) {
+    console.log('Stopping daemon...');
+    try { process.kill(pid, 'SIGTERM'); } catch (err: any) {
+      if (err?.code !== 'ESRCH') throw err;
+    }
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      if (!isProcessRunning(pid)) break;
+    }
+    if (isProcessRunning(pid)) {
+      console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
+    }
+  }
+}
+
 // ─── dkg update ──────────────────────────────────────────────────────
 
 program
@@ -1325,6 +1346,54 @@ program
       allowPrerelease: true,
       checkIntervalMinutes: 30,
     };
+    const standalone = isStandaloneInstall();
+    const allowPre = opts.allowPrerelease ?? au.allowPrerelease ?? true;
+
+    if (standalone) {
+      const logFn = (msg: string) => console.log(msg);
+
+      if (opts.check) {
+        console.log('Checking NPM registry for updates...');
+        const check = await checkForNpmVersionUpdate(logFn, allowPre);
+        if (check.status === 'available' && check.version) {
+          console.log(`Update available: ${check.version}`);
+        } else if (check.status === 'up-to-date') {
+          console.log('No updates available.');
+        } else {
+          console.error('Update check failed. See logs above for details.');
+          process.exit(1);
+        }
+        return;
+      }
+
+      let version = versionOrRef ?? null;
+      if (!version) {
+        console.log('Checking NPM registry for updates...');
+        const check = await checkForNpmVersionUpdate(logFn, allowPre);
+        if (check.status === 'available' && check.version) {
+          version = check.version;
+        } else if (check.status === 'up-to-date') {
+          console.log('No update needed — already on latest.');
+          return;
+        } else {
+          console.error('Update check failed. See logs above for details.');
+          process.exit(1);
+        }
+      }
+
+      console.log(`Updating to ${version} via NPM...`);
+      const updateStatus = await performNpmUpdate(version!, logFn);
+      if (updateStatus === 'updated') {
+        await stopDaemonIfRunning();
+        console.log('Update applied. Run "dkg start" to start with the new version.');
+      } else {
+        console.error('Update failed. Check logs and retry.');
+        process.exit(1);
+      }
+      return;
+    }
+
+    // --- Git-based update path (monorepo / install.sh installs) ---
 
     const refOverride = versionOrRef ? normalizeVersionTagRef(versionOrRef) : undefined;
     const verifyTagSignature = Boolean(refOverride && refOverride.startsWith('refs/tags/')) && opts.verifyTag !== false;

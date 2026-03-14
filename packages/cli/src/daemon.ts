@@ -43,6 +43,9 @@ import {
   swapSlot,
   gitCommandEnv,
   gitCommandArgs,
+  isStandaloneInstall,
+  slotEntryPoint,
+  CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { readFileSync } from 'node:fs';
@@ -72,15 +75,16 @@ import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
 
-const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '' };
+const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
-  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
-  return existsSync(rDir) && existsSync(currentLink)
-    ? currentLink
-    : fileURLToPath(import.meta.url);
+  if (existsSync(rDir)) {
+    const entry = slotEntryPoint(join(rDir, 'current'));
+    if (entry) return entry;
+  }
+  return fileURLToPath(import.meta.url);
 }
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
@@ -379,16 +383,43 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       log(`Auto-update disabled — version check only: ${au.repo}@${au.branch}`);
     }
 
+    const standalone = isStandaloneInstall();
+    const allowPre = au.allowPrerelease ?? true;
+
     const runCheck = async () => {
-      const commitStatus = await checkForNewCommitWithStatus(au, log);
-      if (commitStatus.status !== 'error') {
-        lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
-        lastUpdateCheck.checkedAt = Date.now();
-        if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+      let updateAvailable = false;
+      let targetNpmVersion = '';
+
+      if (standalone) {
+        const npmStatus = await checkForNpmVersionUpdate(log, allowPre);
+        if (npmStatus.status !== 'error') {
+          lastUpdateCheck.upToDate = npmStatus.status === 'up-to-date';
+          lastUpdateCheck.checkedAt = Date.now();
+          if (npmStatus.version) lastUpdateCheck.latestVersion = npmStatus.version;
+        }
+        if (npmStatus.status === 'available' && npmStatus.version) {
+          updateAvailable = true;
+          targetNpmVersion = npmStatus.version;
+        }
+      } else {
+        const commitStatus = await checkForNewCommitWithStatus(au, log);
+        if (commitStatus.status !== 'error') {
+          lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
+          lastUpdateCheck.checkedAt = Date.now();
+          if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+        }
+        updateAvailable = commitStatus.status === 'available';
       }
-      if (au.enabled && commitStatus.status === 'available') {
+
+      if (au.enabled && updateAvailable) {
         isUpdating = true;
-        const updated = await checkForUpdate(au, log);
+        let updated = false;
+        if (standalone && targetNpmVersion) {
+          const status = await performNpmUpdate(targetNpmVersion, log);
+          updated = status === 'updated';
+        } else {
+          updated = await checkForUpdate(au, log);
+        }
         isUpdating = false;
         if (updated) {
           if (foreground) {
@@ -1134,6 +1165,7 @@ async function handleRequest(
       autoUpdate: config.autoUpdate?.enabled ?? false,
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
+      latestVersion: lastUpdateCheck.latestVersion || null,
     });
   }
 
@@ -2496,6 +2528,166 @@ async function writePendingUpdateState(state: PendingUpdateState): Promise<void>
   await writeFile(pendingFile, JSON.stringify(state, null, 2));
 }
 
+// ─── NPM-based auto-update helpers ──────────────────────────────────
+
+/**
+ * Query the NPM registry for the latest published version of the CLI package.
+ * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
+ * checks `beta` / `next` tags and picks the highest semver.
+ */
+async function resolveLatestNpmVersion(
+  log: (msg: string) => void,
+  allowPrerelease = true,
+): Promise<string | null> {
+  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: 'application/vnd.npm.install-v1+json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      log(`Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`);
+      return null;
+    }
+    const data = await res.json() as { 'dist-tags'?: Record<string, string> };
+    const tags = data['dist-tags'];
+    if (!tags) return null;
+
+    const latest = tags.latest ?? null;
+    if (!allowPrerelease || !latest) return latest;
+
+    const candidates = [latest, tags.beta, tags.next].filter(Boolean) as string[];
+    candidates.sort((a, b) => compareSemver(b, a));
+    return candidates[0] ?? latest;
+  } catch (err: any) {
+    log(`Auto-update (npm): registry check failed (${err?.message ?? String(err)})`);
+    return null;
+  }
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split(/[-+]/)[0].split('.').map(Number);
+  const pb = b.replace(/^v/, '').split(/[-+]/)[0].split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  }
+  const preA = a.includes('-') ? a.split('-').slice(1).join('-') : '';
+  const preB = b.includes('-') ? b.split('-').slice(1).join('-') : '';
+  if (!preA && preB) return 1;
+  if (preA && !preB) return -1;
+  return preA.localeCompare(preB, undefined, { numeric: true });
+}
+
+function getCurrentCliVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    return String(pkg.version ?? '').trim();
+  } catch { return ''; }
+}
+
+export type NpmVersionStatus = {
+  status: 'available' | 'up-to-date' | 'error';
+  version?: string;
+};
+
+export async function checkForNpmVersionUpdate(
+  log: (msg: string) => void,
+  allowPrerelease = true,
+): Promise<NpmVersionStatus> {
+  const versionFile = join(dkgDir(), '.current-version');
+  let currentVersion = '';
+  try {
+    currentVersion = (await readFile(versionFile, 'utf-8')).trim();
+  } catch {
+    currentVersion = getCurrentCliVersion();
+  }
+
+  if (!currentVersion) {
+    log('Auto-update (npm): unable to determine current version');
+    return { status: 'error' };
+  }
+
+  const latest = await resolveLatestNpmVersion(log, allowPrerelease);
+  if (!latest) return { status: 'error' };
+
+  if (latest === currentVersion) return { status: 'up-to-date' };
+  if (compareSemver(latest, currentVersion) <= 0) return { status: 'up-to-date' };
+
+  return { status: 'available', version: latest };
+}
+
+/**
+ * Install a specific version of the CLI package into a blue-green slot via npm.
+ * The slot contains a minimal package.json; `npm install` fetches the
+ * pre-built package and all its dependencies.
+ */
+async function _performNpmUpdateInner(
+  targetVersion: string,
+  log: (msg: string) => void,
+): Promise<UpdateStatus> {
+  const rDir = releasesDir();
+  await mkdir(rDir, { recursive: true });
+
+  const active = await activeSlot();
+  const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
+  const targetDir = join(rDir, target);
+
+  log(`Auto-update (npm): installing ${CLI_NPM_PACKAGE}@${targetVersion} into slot ${target}...`);
+
+  try {
+    await mkdir(targetDir, { recursive: true });
+    const slotPkg = {
+      name: 'dkg-release-slot',
+      private: true,
+      dependencies: { [CLI_NPM_PACKAGE]: targetVersion },
+    };
+    await writeFile(join(targetDir, 'package.json'), JSON.stringify(slotPkg, null, 2));
+
+    const installStart = Date.now();
+    await execAsync(`npm install --production --no-audit --no-fund`, {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 180_000,
+    });
+    const installMs = Date.now() - installStart;
+    log(`Auto-update (npm): npm install completed in ${installMs}ms.`);
+  } catch (installErr: any) {
+    log(`Auto-update (npm): npm install failed — ${installErr?.message ?? String(installErr)}`);
+    return 'failed';
+  }
+
+  const entry = slotEntryPoint(targetDir);
+  if (!entry) {
+    log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
+    return 'failed';
+  }
+
+  const versionFile = join(dkgDir(), '.current-version');
+  await writePendingUpdateState({
+    target: target as 'a' | 'b',
+    commit: '',
+    version: targetVersion,
+    ref: `npm:${targetVersion}`,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    log(`Auto-update (npm): swapping active slot to ${target}...`);
+    await swapSlot(target as 'a' | 'b');
+    await writeFile(versionFile, targetVersion);
+    await clearPendingUpdateState();
+    log(`Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${targetVersion}).`);
+  } catch (swapErr: any) {
+    await clearPendingUpdateState();
+    log(`Auto-update (npm): symlink swap failed — ${swapErr.message}`);
+    return 'failed';
+  }
+
+  return 'updated';
+}
+
+// ─── Git-based auto-update helpers ──────────────────────────────────
+
 /**
  * Check GitHub for a new commit on the configured branch.
  * Returns the latest commit SHA if an update is available, null otherwise.
@@ -2524,7 +2716,6 @@ export async function checkForNewCommitWithStatus(
     try {
       currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
     } catch {
-      // First-run node (or missing slots/metadata): treat as unknown current commit and still allow check.
       currentCommit = '';
     }
   }
@@ -2894,6 +3085,28 @@ async function _performUpdateInner(
   );
   log('v9 auto-update test live leeroy jenkins');
   return 'updated';
+}
+
+export async function performNpmUpdate(
+  targetVersion: string,
+  log: (msg: string) => void,
+): Promise<UpdateStatus> {
+  if (_updateInProgress) {
+    log('Auto-update (npm): another update is already in progress, skipping');
+    return 'failed';
+  }
+  _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return 'failed';
+  }
+  try {
+    return await _performNpmUpdateInner(targetVersion, log);
+  } finally {
+    await releaseUpdateLock();
+    _updateInProgress = false;
+  }
 }
 
 export async function checkForUpdate(

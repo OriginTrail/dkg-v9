@@ -362,3 +362,29 @@ export function isProcessRunning(pid: number): boolean {
     return false;
   }
 }
+
+// ─── NPM / standalone helpers ────────────────────────────────────────
+
+export const CLI_NPM_PACKAGE = '@origintrail-official/dkg';
+
+/**
+ * True when running from an `npm install`-ed package rather than a
+ * monorepo checkout. In standalone mode the auto-updater uses NPM
+ * instead of git to fetch new versions.
+ */
+export function isStandaloneInstall(): boolean {
+  return repoDir() === null;
+}
+
+/**
+ * Resolve the CLI entry point within a blue-green slot.
+ * Supports both git layout (packages/cli/dist/cli.js) and
+ * NPM layout (node_modules/@origintrail-official/dkg/dist/cli.js).
+ */
+export function slotEntryPoint(slotDir: string): string | null {
+  const gitPath = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
+  if (existsSync(gitPath)) return gitPath;
+  const npmPath = join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
+  if (existsSync(npmPath)) return npmPath;
+  return null;
+}

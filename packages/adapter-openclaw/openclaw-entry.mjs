@@ -66,8 +66,9 @@ export default function (api) {
   instance = dkg;
 
   // Reset singleton on gateway shutdown so in-process restart re-registers fresh.
-  // Safe no-op if the event doesn't exist in this gateway version.
-  api.on('shutdown', () => { instance = null; });
+  if (typeof api.on === 'function') {
+    api.on('shutdown', () => { instance = null; });
+  }
 
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

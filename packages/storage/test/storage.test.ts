@@ -108,7 +108,7 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       );
       expect(result.type).toBe('bindings');
       if (result.type === 'bindings') {
-        expect(result.bindings[0]['val']).toContain('42');
+        expect(result.bindings[0]['val']).toBe('"42"^^<http://www.w3.org/2001/XMLSchema#integer>');
       }
     });
 

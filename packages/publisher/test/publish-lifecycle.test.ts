@@ -711,7 +711,7 @@ describe('Update flow', () => {
     );
     expect(before.type).toBe('bindings');
     if (before.type === 'bindings') {
-      expect(before.bindings[0]['name']).toContain('OriginalBot');
+      expect(before.bindings[0]['name']).toBe('"OriginalBot"');
     }
 
     const updatedTriples = [
@@ -735,7 +735,7 @@ describe('Update flow', () => {
     expect(after.type).toBe('bindings');
     if (after.type === 'bindings') {
       expect(after.bindings).toHaveLength(1);
-      expect(after.bindings[0]['name']).toContain('UpdatedBot');
+      expect(after.bindings[0]['name']).toBe('"UpdatedBot"');
     }
   });
 
@@ -771,7 +771,7 @@ describe('Update flow', () => {
     );
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings).toHaveLength(1);
-      expect(nameResult.bindings[0]['name']).toContain('v2');
+      expect(nameResult.bindings[0]['name']).toBe('"PrivUpdateBot v2"');
     }
   });
 

@@ -173,7 +173,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Updated via update()');
+      expect(nameResult.bindings[0]['o']).toBe('"Updated via update()"');
     }
 
     const descResult = await store.query(
@@ -215,7 +215,7 @@ describe('UpdateHandler', () => {
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
-      expect(nameResult.bindings[0]['o']).toContain('Updated');
+      expect(nameResult.bindings[0]['o']).toBe('"Updated"');
     }
   });
 
@@ -252,7 +252,7 @@ describe('UpdateHandler', () => {
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
-      expect(nameResult.bindings[0]['o']).toContain('Legit update');
+      expect(nameResult.bindings[0]['o']).toBe('"Legit update"');
     }
   });
 
@@ -335,7 +335,7 @@ describe('UpdateHandler', () => {
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
-      expect(result.bindings[0]['o']).toContain('Update 1');
+      expect(result.bindings[0]['o']).toBe('"Update 1"');
     }
 
     // Now do update2 — its chain block will be chainBlock1 + N (strictly higher)
@@ -366,7 +366,7 @@ describe('UpdateHandler', () => {
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
-      expect(result.bindings[0]['o']).toContain('Update 2');
+      expect(result.bindings[0]['o']).toBe('"Update 2"');
     }
   });
 
@@ -421,7 +421,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Update 2');
+      expect(nameResult.bindings[0]['o']).toBe('"Update 2"');
     }
   });
 
@@ -459,7 +459,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Updated');
+      expect(nameResult.bindings[0]['o']).toBe('"Updated"');
     }
   });
 
@@ -502,7 +502,7 @@ describe('UpdateHandler', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Updated');
+      expect(nameResult.bindings[0]['o']).toBe('"Updated"');
     }
 
     const descResult = await store.query(

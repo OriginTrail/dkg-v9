@@ -164,8 +164,7 @@ export async function handleAppRequest(
     const app = apps.find(a => a.id === appId);
     if (!app) return false;
 
-    const apiOrigin = deriveOrigin(req, req.socket.localPort ?? 9200);
-    return serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', authToken, apiOrigin);
+    return serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', authToken);
   }
 
   return false;

@@ -2536,10 +2536,12 @@ async function writePendingUpdateState(state: PendingUpdateState): Promise<void>
  * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
  * checks `beta` / `next` tags and picks the highest semver.
  */
+type NpmVersionResult = { version: string; error?: false } | { version: null; error: true } | { version: null; error: false };
+
 async function resolveLatestNpmVersion(
   log: (msg: string) => void,
   allowPrerelease = true,
-): Promise<string | null> {
+): Promise<NpmVersionResult> {
   const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
   try {
     const res = await fetch(url, {
@@ -2548,27 +2550,26 @@ async function resolveLatestNpmVersion(
     });
     if (!res.ok) {
       log(`Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`);
-      return null;
+      return { version: null, error: true };
     }
     const data = await res.json() as { 'dist-tags'?: Record<string, string> };
     const tags = data['dist-tags'];
-    if (!tags) return null;
+    if (!tags) return { version: null, error: true };
 
-    const latest = tags.latest ?? null;
+    const latest = tags.dev ?? tags.latest ?? null;
     if (!allowPrerelease) {
-      // Reject pre-release versions (those containing '-') when prereleases disabled.
-      if (latest && !latest.includes('-')) return latest;
+      if (latest && !latest.includes('-')) return { version: latest };
       log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
-      return null;
+      return { version: null, error: false };
     }
-    if (!latest) return latest;
+    if (!latest) return { version: null, error: false };
 
     const candidates = [latest, tags.beta, tags.next].filter(Boolean) as string[];
     candidates.sort((a, b) => compareSemver(b, a));
-    return candidates[0] ?? latest;
+    return { version: candidates[0] ?? latest };
   } catch (err: any) {
     log(`Auto-update (npm): registry check failed (${err?.message ?? String(err)})`);
-    return null;
+    return { version: null, error: true };
   }
 }
 
@@ -2614,13 +2615,13 @@ export async function checkForNpmVersionUpdate(
     return { status: 'error' };
   }
 
-  const latest = await resolveLatestNpmVersion(log, allowPrerelease);
-  if (latest === null) return { status: 'up-to-date' };
+  const result = await resolveLatestNpmVersion(log, allowPrerelease);
+  if (result.version === null) return { status: result.error ? 'error' : 'up-to-date' };
 
-  if (latest === currentVersion) return { status: 'up-to-date' };
-  if (compareSemver(latest, currentVersion) <= 0) return { status: 'up-to-date' };
+  if (result.version === currentVersion) return { status: 'up-to-date' };
+  if (compareSemver(result.version, currentVersion) <= 0) return { status: 'up-to-date' };
 
-  return { status: 'available', version: latest };
+  return { status: 'available', version: result.version };
 }
 
 /**
@@ -2668,27 +2669,38 @@ async function _performNpmUpdateInner(
     return 'failed';
   }
 
-  const npmEntry = join(targetDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
+  const npmPkgDir = join(targetDir, 'node_modules', '@origintrail-official', 'dkg');
+  const npmEntry = join(npmPkgDir, 'dist', 'cli.js');
   if (!existsSync(npmEntry)) {
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return 'failed';
+  }
+
+  let resolvedVersion = targetVersion;
+  try {
+    const installedPkg = JSON.parse(await readFile(join(npmPkgDir, 'package.json'), 'utf-8'));
+    if (installedPkg.version && typeof installedPkg.version === 'string') {
+      resolvedVersion = installedPkg.version;
+    }
+  } catch {
+    log(`Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`);
   }
 
   const versionFile = join(dkgDir(), '.current-version');
   await writePendingUpdateState({
     target: target as 'a' | 'b',
     commit: '',
-    version: targetVersion,
-    ref: `npm:${targetVersion}`,
+    version: resolvedVersion,
+    ref: `npm:${resolvedVersion}`,
     createdAt: new Date().toISOString(),
   });
 
   try {
     log(`Auto-update (npm): swapping active slot to ${target}...`);
     await swapSlot(target as 'a' | 'b');
-    await writeFile(versionFile, targetVersion);
+    await writeFile(versionFile, resolvedVersion);
     await clearPendingUpdateState();
-    log(`Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${targetVersion}).`);
+    log(`Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`);
   } catch (swapErr: any) {
     await clearPendingUpdateState();
     log(`Auto-update (npm): symlink swap failed — ${swapErr.message}`);

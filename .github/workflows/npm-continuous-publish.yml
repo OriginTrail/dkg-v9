@@ -75,6 +75,6 @@ jobs:
 
       - name: Publish all public packages
         if: ${{ secrets.NPM_TOKEN != '' }}
-        run: pnpm -r publish --no-git-checks --tag latest
+        run: pnpm -r publish --no-git-checks --tag dev
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

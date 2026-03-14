@@ -161,7 +161,7 @@ export class DkgNodePlugin {
   ): Promise<void> {
     // Check if any memories already exist in the graph
     const checkSparql = `SELECT (COUNT(?m) AS ?cnt) WHERE {
-      ?m a <http://dkg.io/ontology/ImportedMemory> .
+      GRAPH ?g { ?m a <http://dkg.io/ontology/ImportedMemory> . }
     }`;
 
     try {
@@ -176,6 +176,8 @@ export class DkgNodePlugin {
         : typeof countRaw === 'string'
           ? parseInt(countRaw.replace(/^"(\d+)".*$/, '$1'), 10)
           : 0;
+
+      api.logger.debug?.(`[dkg] Backlog check: count=${count}, raw=${JSON.stringify(countRaw)}`);
 
       if (count > 0) {
         api.logger.info?.(`[dkg] Backlog import skipped — ${count} memories already in graph`);

@@ -2,8 +2,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DkgNodePlugin } from './dist/index.js';
 
+let registered = false;
+
 export default function (api) {
   const log = api.logger ?? console;
+
+  if (registered) {
+    log.info?.('[dkg-entry] Skipping duplicate plugin load (gateway multi-phase init)');
+    return;
+  }
 
   // Read DKG config from workspace config.json (not openclaw.json)
   let workspaceDir = api.config?.agents?.defaults?.workspace;
@@ -55,5 +62,6 @@ export default function (api) {
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
+  registered = true;
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

@@ -1886,7 +1886,7 @@ export class OriginTrailGameCoordinator {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         if (swarm.status === 'finished') {
           const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
-          const relevantTs = lastTurn?.timestamp ?? swarm.createdAt;
+          const relevantTs = lastTurn?.timestamp ?? now;
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
@@ -2245,25 +2245,27 @@ export class OriginTrailGameCoordinator {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
           {
-            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
+            SELECT ?player (MAX(?s) AS ?maxScore) (MAX(?ft) AS ?latestFinished) WHERE {
               ?e a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
-                 <${rdf.OT}score> ?s .
+                 <${rdf.OT}score> ?s ;
+                 <${rdf.OT}finishedAt> ?ft .
             } GROUP BY ?player
           }
           ?entry a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}finishedAt> ?latestFinished ;
                  <${rdf.OT}displayName> ?displayName ;
                  <${rdf.OT}outcome> ?outcome ;
                  <${rdf.OT}epochs> ?epochs ;
                  <${rdf.OT}survivors> ?survivors ;
                  <${rdf.OT}partySize> ?partySize ;
-                 <${rdf.OT}swarm> ?swarm ;
-                 <${rdf.OT}finishedAt> ?finishedAt .
+                 <${rdf.OT}swarm> ?swarm .
           BIND(?maxScore AS ?score)
+          BIND(?latestFinished AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 500`,
+        } ORDER BY DESC(?score) LIMIT 50`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2346,7 +2348,7 @@ export class OriginTrailGameCoordinator {
   }
 
   getChatMessages(limit = 50): Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
-    return this.chatMessages.slice(-limit);
+    return [...this.chatMessages].sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   private onRemoteChatMessage(msg: proto.ChatMsg): void {

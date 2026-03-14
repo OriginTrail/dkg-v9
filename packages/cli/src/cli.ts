@@ -31,8 +31,9 @@ type ActionOpts = Record<string, any>;
 
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
-  if (!cleaned) return cleaned;
+  if (!cleaned) throw new Error(`Invalid version/ref: empty input`);
   const bare = cleaned.startsWith('v') ? cleaned.slice(1) : cleaned;
+  if (!bare) throw new Error(`Invalid version/ref: "${input}"`);
   if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bare)) {
     return `refs/tags/v${bare}`;
   }

@@ -743,3 +743,44 @@ describe('performNpmUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
   });
 });
+
+describe('compareSemver', () => {
+  let compareSemver: (a: string, b: string) => number;
+  beforeEach(async () => {
+    ({ compareSemver } = await import('../src/daemon.js'));
+  });
+
+  it('stable > prerelease for the same version', () => {
+    expect(compareSemver('9.0.0', '9.0.0-beta.1')).toBeGreaterThan(0);
+    expect(compareSemver('9.0.0-beta.1', '9.0.0')).toBeLessThan(0);
+  });
+
+  it('higher prerelease > lower prerelease', () => {
+    expect(compareSemver('9.0.0-beta.2', '9.0.0-beta.1')).toBeGreaterThan(0);
+    expect(compareSemver('9.0.0-beta.1', '9.0.0-beta.2')).toBeLessThan(0);
+  });
+
+  it('ignores build metadata for ordering', () => {
+    expect(compareSemver('1.2.3-alpha+1', '1.2.3-alpha+2')).toBe(0);
+    expect(compareSemver('9.0.0+build.1', '9.0.0+build.2')).toBe(0);
+  });
+
+  it('handles dev suffix with numeric comparison', () => {
+    expect(compareSemver('9.0.0-beta.4-dev.200', '9.0.0-beta.4-dev.100')).toBeGreaterThan(0);
+  });
+
+  it('equal versions return 0', () => {
+    expect(compareSemver('9.0.0', '9.0.0')).toBe(0);
+    expect(compareSemver('9.0.0-beta.1', '9.0.0-beta.1')).toBe(0);
+  });
+
+  it('major/minor/patch ordering', () => {
+    expect(compareSemver('10.0.0', '9.99.99')).toBeGreaterThan(0);
+    expect(compareSemver('9.1.0', '9.0.99')).toBeGreaterThan(0);
+    expect(compareSemver('9.0.1', '9.0.0')).toBeGreaterThan(0);
+  });
+
+  it('strips v prefix', () => {
+    expect(compareSemver('v9.0.0', '9.0.0')).toBe(0);
+  });
+});

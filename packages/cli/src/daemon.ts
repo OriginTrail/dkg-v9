@@ -1116,6 +1116,10 @@ export function isValidOpenClawPersistTurnPayload(payload: {
     && typeof payload.assistantReply === 'string';
 }
 
+function resolveAutoUpdateEnabled(config: DkgConfig): boolean {
+  return isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false);
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1164,7 +1168,7 @@ async function handleRequest(
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
       hasOpenClawChannel: config.openclawAdapter === true || !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
-      autoUpdate: isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false),
+      autoUpdate: resolveAutoUpdateEnabled(config),
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
       latestVersion: lastUpdateCheck.latestVersion || null,
@@ -1196,7 +1200,7 @@ async function handleRequest(
       peers: uniquePeers.size,
       paranets: config.paranets?.length ?? 0,
       telemetry: config.telemetry?.enabled ?? false,
-      autoUpdate: isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false),
+      autoUpdate: resolveAutoUpdateEnabled(config),
       auth: config.auth?.enabled !== false,
     });
   }
@@ -2575,7 +2579,7 @@ async function resolveLatestNpmVersion(
   }
 }
 
-function compareSemver(a: string, b: string): number {
+export function compareSemver(a: string, b: string): number {
   const pa = a.replace(/^v/, '').split(/[-+]/)[0].split('.').map(Number);
   const pb = b.replace(/^v/, '').split(/[-+]/)[0].split('.').map(Number);
   for (let i = 0; i < 3; i++) {

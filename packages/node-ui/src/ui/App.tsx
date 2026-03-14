@@ -253,10 +253,18 @@ function NotificationBell() {
                 <div
                   key={n.id}
                   role={clickable ? 'link' : undefined}
+                  tabIndex={clickable ? 0 : undefined}
                   data-peer={n.peer ?? undefined}
                   onClick={clickable ? () => {
                     setOpen(false);
                     navigate(`/agent?tab=peers&peer=${encodeURIComponent(n.peer!)}`);
+                  } : undefined}
+                  onKeyDown={clickable ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setOpen(false);
+                      navigate(`/agent?tab=peers&peer=${encodeURIComponent(n.peer!)}`);
+                    }
                   } : undefined}
                   style={{
                     padding: '10px 16px', borderBottom: '1px solid var(--border)',

@@ -495,6 +495,13 @@ describe('clickable notifications', () => {
     expect(app).toContain('data-peer={n.peer');
   });
 
+  it('clickable notifications are keyboard-accessible', () => {
+    expect(app).toContain('tabIndex={clickable ? 0 : undefined}');
+    expect(app).toContain("e.key === 'Enter'");
+    expect(app).toContain("e.key === ' '");
+    expect(app).toContain('onKeyDown={clickable');
+  });
+
   it('AgentHub reads tab and peer from URL search params', () => {
     expect(agentHub).toContain('useSearchParams');
     expect(agentHub).toMatch(/searchParams\.get\(['"]tab['"]\)/);
@@ -505,8 +512,9 @@ describe('clickable notifications', () => {
     expect(agentHub).toMatch(/urlTab === ['"]peers['"].*['"]peers['"].*['"]agent['"]/);
   });
 
-  it('AgentHub clears URL params after reading them', () => {
+  it('AgentHub clears URL params with proper dependencies', () => {
     expect(agentHub).toContain('setSearchParams({}, { replace: true })');
+    expect(agentHub).toMatch(/\[urlTab, urlPeer, setSearchParams\]/);
   });
 
   it('PeerChatView accepts initialPeerId prop', () => {
@@ -514,9 +522,10 @@ describe('clickable notifications', () => {
     expect(agentHub).toContain('initialPeerId?: string');
   });
 
-  it('PeerChatView auto-selects initial peer from prop', () => {
+  it('PeerChatView auto-selects initial peer from prop and retries on change', () => {
     expect(agentHub).toContain('initialPeerApplied');
     expect(agentHub).toContain('peers.find(p => p.peerId === initialPeerId)');
+    expect(agentHub).toContain('initialPeerApplied.current === initialPeerId');
   });
 
   it('AgentHub passes urlPeer to PeerChatView', () => {

@@ -453,7 +453,7 @@ function PeerChatView({ initialPeerId }: { initialPeerId?: string }) {
   const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const initialPeerApplied = useRef(false);
+  const initialPeerApplied = useRef<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -483,13 +483,6 @@ function PeerChatView({ initialPeerId }: { initialPeerId?: string }) {
 
   useEffect(() => { loadPeers(); }, [loadPeers]);
 
-  useEffect(() => {
-    if (initialPeerApplied.current || !initialPeerId || peers.length === 0) return;
-    initialPeerApplied.current = true;
-    const match = peers.find(p => p.peerId === initialPeerId);
-    if (match) selectPeer(match);
-  }, [peers, initialPeerId, selectPeer]);
-
   const loadMessages = useCallback(async (peerId: string) => {
     try {
       const res = await fetchMessages({ peer: peerId, limit: 100 });
@@ -502,6 +495,16 @@ function PeerChatView({ initialPeerId }: { initialPeerId?: string }) {
     setPeerMessages([]);
     loadMessages(peer.peerId);
   }, [loadMessages]);
+
+  useEffect(() => {
+    if (!initialPeerId || peers.length === 0) return;
+    if (initialPeerApplied.current === initialPeerId) return;
+    const match = peers.find(p => p.peerId === initialPeerId);
+    if (match) {
+      initialPeerApplied.current = initialPeerId;
+      selectPeer(match);
+    }
+  }, [peers, initialPeerId, selectPeer]);
 
   useEffect(() => {
     if (!selectedPeer) return;
@@ -1332,7 +1335,7 @@ export function AgentHubPage() {
     if (urlTab || urlPeer) {
       setSearchParams({}, { replace: true });
     }
-  }, []);
+  }, [urlTab, urlPeer, setSearchParams]);
   const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);

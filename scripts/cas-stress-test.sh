@@ -68,7 +68,9 @@ join_with_retry() {
   local node="$1" swarm_id="$2" player="$3"
   for attempt in 1 2 3 4 5 6 7 8; do
     local result
-    result=$(api "$node" POST "$APP/join" -d "{\"swarmId\":\"$swarm_id\",\"playerName\":\"$player\"}")
+    if ! result=$(api "$node" POST "$APP/join" -d "{\"swarmId\":\"$swarm_id\",\"playerName\":\"$player\"}"); then
+      sleep 3; continue
+    fi
     local err
     err=$(swarm_field error "$result")
     if [[ -z "$err" ]]; then

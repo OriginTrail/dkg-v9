@@ -2052,7 +2052,7 @@ export class OriginTrailGameCoordinator {
 
   private static readonly CRITICAL_MSG_TYPES = new Set([
     'swarm:created', 'swarm:joined', 'expedition:launched',
-    'turn:proposal', 'turn:resolved',
+    'turn:proposal', 'turn:approve', 'turn:resolved',
   ]);
 
   private async broadcast(msg: proto.OTMessage): Promise<void> {

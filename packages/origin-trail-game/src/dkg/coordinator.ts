@@ -1610,6 +1610,8 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    if (swarm.pendingProposal?.hash === msg.proposalHash) return;
+
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];

@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-AUTH="$(grep -v '^#' .devnet/node1/auth.token 2>/dev/null | tr -d '[:space:]')"
+AUTH="$(grep -v '^#' .devnet/node1/auth.token 2>/dev/null | tr -d '[:space:]' || true)"
 
 APP="/api/apps/origin-trail-game"
 NODE1="http://127.0.0.1:9201"
@@ -25,8 +25,12 @@ fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo "  ✗ $1"; }
 api() {
   local node="$1" method="$2" path="$3"
   shift 3
+  local auth_args=()
+  if [[ -n "$AUTH" ]]; then
+    auth_args=(-H "Authorization: Bearer $AUTH")
+  fi
   curl -sf --connect-timeout 5 --max-time 30 -X "$method" \
-    -H "Authorization: Bearer $AUTH" \
+    "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     "$node$path" "$@" 2>/dev/null
 }
@@ -142,7 +146,7 @@ elif [[ "$S1" == "traveling" && "$S2" == "traveling" ]]; then
   fail "BOTH launches returned traveling — CAS may not be working"
 else
   sleep 1
-  FINAL=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+  FINAL=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
   FSTATUS=$(swarm_field status "$FINAL")
   if [[ "$FSTATUS" == "traveling" ]]; then
     ok "Swarm is traveling (second request correctly rejected: ${E2:-$E1})"
@@ -157,7 +161,7 @@ echo "Phase 4: Cross-node state consistency"
 sleep 10
 
 for node_port in 9201 9202 9203; do
-  STATE=$(api "http://127.0.0.1:$node_port" GET "$APP/swarm/$SWARM_ID")
+  STATE=$(api "http://127.0.0.1:$node_port" GET "$APP/swarm/$SWARM_ID" || echo '{}')
   NSTATUS=$(swarm_field status "$STATE")
   NPC=$(swarm_field playerCount "$STATE")
   TURN=$(swarm_field currentTurn "$STATE")
@@ -181,7 +185,7 @@ wait || true
 
 sleep 10
 
-AFTER_VOTE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+AFTER_VOTE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
 ATURN=$(swarm_field currentTurn "$AFTER_VOTE")
 ASTATUS=$(swarm_field status "$AFTER_VOTE")
 
@@ -191,7 +195,7 @@ else
   echo "  Turn didn't auto-advance (turn=$ATURN). Force-resolving..."
   api "$NODE1" POST "$APP/force-resolve" -d "{\"swarmId\":\"$SWARM_ID\"}" > /dev/null
   sleep 3
-  AFTER_FORCE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+  AFTER_FORCE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
   ATURN=$(swarm_field currentTurn "$AFTER_FORCE")
   ASTATUS=$(swarm_field status "$AFTER_FORCE")
   if [[ "$ATURN" -ge 2 ]]; then
@@ -232,7 +236,7 @@ echo "Phase 7: Verify workspace graph — swarm triples preserved after CAS"
 
 SPARQL="SELECT ?p ?o WHERE { <https://origintrail-game.dkg.io/swarm/${SWARM_ID}> ?p ?o }"
 QUERY_RESULT=$(api "$NODE1" POST "/api/query" \
-  -d "{\"sparql\":\"$SPARQL\",\"paranetId\":\"origin-trail-game\",\"includeWorkspace\":true}")
+  -d "{\"sparql\":\"$SPARQL\",\"paranetId\":\"origin-trail-game\",\"includeWorkspace\":true}" || echo '{}')
 BINDING_COUNT=$(echo "$QUERY_RESULT" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -255,7 +259,7 @@ fi
 echo ""
 echo "Phase 8: Second vote round + turn resolution"
 
-CURRENT_TURN=$(swarm_field currentTurn "$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")")
+CURRENT_TURN=$(swarm_field currentTurn "$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')")
 echo "  Current turn: $CURRENT_TURN"
 
 api "$NODE1" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"syncMemory\"}" > /dev/null &
@@ -265,7 +269,7 @@ wait || true
 
 sleep 10
 
-ROUND2=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+ROUND2=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
 R2TURN=$(swarm_field currentTurn "$ROUND2")
 R2STATUS=$(swarm_field status "$ROUND2")
 
@@ -274,7 +278,7 @@ if [[ "$R2TURN" -gt "$CURRENT_TURN" ]]; then
 else
   api "$NODE1" POST "$APP/force-resolve" -d "{\"swarmId\":\"$SWARM_ID\"}" > /dev/null
   sleep 3
-  R2AFTER=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+  R2AFTER=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
   R2TURN=$(swarm_field currentTurn "$R2AFTER")
   R2STATUS=$(swarm_field status "$R2AFTER")
   if [[ "$R2TURN" -gt "$CURRENT_TURN" ]]; then

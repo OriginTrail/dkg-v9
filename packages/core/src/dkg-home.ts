@@ -1,0 +1,82 @@
+/**
+ * Shared helpers for resolving DKG_HOME, API port, PID, and auth tokens.
+ *
+ * These were previously duplicated across cli, mcp-server, and adapter-openclaw.
+ * Centralizing them here ensures consistent behavior everywhere.
+ */
+
+import { readFile } from 'node:fs/promises';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+/** Resolve the DKG home directory ($DKG_HOME or ~/.dkg). */
+export function dkgHomeDir(): string {
+  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+}
+
+/** Read the daemon PID from $DKG_HOME/daemon.pid. */
+export async function readDaemonPid(dkgHome?: string): Promise<number | null> {
+  try {
+    const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'daemon.pid'), 'utf-8');
+    return parseInt(raw.trim(), 10);
+  } catch {
+    return null;
+  }
+}
+
+/** Check whether a process with the given PID is alive. */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read the API port from $DKG_API_PORT env or $DKG_HOME/api.port file. */
+export async function readDkgApiPort(dkgHome?: string): Promise<number | null> {
+  const envPort = process.env.DKG_API_PORT
+    ? parseInt(process.env.DKG_API_PORT, 10)
+    : null;
+  if (envPort) return envPort;
+
+  try {
+    const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'api.port'), 'utf-8');
+    return parseInt(raw.trim(), 10);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the first non-comment, non-blank line from $DKG_HOME/auth.token.
+ * Returns undefined if the file does not exist or is unreadable.
+ */
+export function loadAuthTokenSync(dkgHome?: string): string | undefined {
+  const filePath = join(dkgHome ?? dkgHomeDir(), 'auth.token');
+  if (!existsSync(filePath)) return undefined;
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t.length > 0 && !t.startsWith('#')) return t;
+    }
+  } catch { /* unreadable */ }
+  return undefined;
+}
+
+/** Async variant of loadAuthTokenSync. */
+export async function loadAuthToken(dkgHome?: string): Promise<string | undefined> {
+  const filePath = join(dkgHome ?? dkgHomeDir(), 'auth.token');
+  if (!existsSync(filePath)) return undefined;
+  try {
+    const raw = await readFile(filePath, 'utf-8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t.length > 0 && !t.startsWith('#')) return t;
+    }
+  } catch { /* unreadable */ }
+  return undefined;
+}

@@ -2192,7 +2192,7 @@ export class OriginTrailGameCoordinator {
                  <${rdf.OT}finishedAt> ?finishedAt .
           BIND(?maxScore AS ?score)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 50`,
+        } ORDER BY DESC(?score)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2214,7 +2214,9 @@ export class OriginTrailGameCoordinator {
           bestByPlayer.set(entry.player, entry);
         }
       }
-      return [...bestByPlayer.values()];
+      return [...bestByPlayer.values()]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 50);
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];
@@ -2240,11 +2242,16 @@ export class OriginTrailGameCoordinator {
   private chatMessages: Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> = [];
 
   async sendChatMessage(displayName: string, message: string): Promise<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
+    const trimmedMsg = (typeof message === 'string' ? message : '').trim().slice(0, 200);
+    if (!trimmedMsg) throw new Error('Message must not be empty');
+    const safeName = (typeof displayName === 'string' && displayName.trim())
+      ? displayName.trim().slice(0, 50)
+      : this.myPeerId.slice(0, 8);
     const chatMsg = {
       id: randomUUID(),
       peerId: this.myPeerId,
-      displayName,
-      message,
+      displayName: safeName,
+      message: trimmedMsg,
       timestamp: Date.now(),
     };
     this.chatMessages.push(chatMsg);
@@ -2259,8 +2266,8 @@ export class OriginTrailGameCoordinator {
       peerId: this.myPeerId,
       timestamp: chatMsg.timestamp,
       id: chatMsg.id,
-      displayName,
-      message,
+      displayName: safeName,
+      message: trimmedMsg,
     };
     await this.broadcast(gossipMsg);
     return chatMsg;

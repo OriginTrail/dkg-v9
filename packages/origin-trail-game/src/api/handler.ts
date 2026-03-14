@@ -86,7 +86,10 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
 
       if (req.method === 'GET' && subpath === '/chat') {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-        const limit = Number(url.searchParams.get('limit') ?? '50');
+        const rawLimit = Number(url.searchParams.get('limit') ?? '50');
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(Math.floor(rawLimit), 200)
+          : 50;
         return json(res, 200, { messages: coordinator.getChatMessages(limit) });
       }
 
@@ -121,8 +124,13 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (subpath === '/chat') {
         const { message, displayName } = body;
         if (!message || typeof message !== 'string') return json(res, 400, { error: 'Missing or invalid message' });
-        const name = typeof displayName === 'string' && displayName ? displayName : coordinator.myPeerId.slice(0, 8);
-        const chatMsg = await coordinator.sendChatMessage(name, message);
+        const trimmed = message.trim();
+        if (trimmed.length === 0) return json(res, 400, { error: 'Message must not be empty' });
+        if (trimmed.length > 200) return json(res, 400, { error: 'Message exceeds 200 character limit' });
+        const name = typeof displayName === 'string' && displayName.trim()
+          ? displayName.trim().slice(0, 50)
+          : coordinator.myPeerId.slice(0, 8);
+        const chatMsg = await coordinator.sendChatMessage(name, trimmed);
         return json(res, 200, chatMsg);
       }
 

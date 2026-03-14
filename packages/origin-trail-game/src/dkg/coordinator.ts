@@ -1845,7 +1845,7 @@ export class OriginTrailGameCoordinator {
         }
         mySwarms.push(swarm);
       } else if (swarm.status === 'recruiting') {
-        if (now - swarm.createdAt > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
+        if (now - swarm.createdAt > STALE_SWARM_TTL_MS) continue;
         if (swarm.players.length < swarm.maxPlayers) {
           openSwarms.push(swarm);
         }
@@ -2184,7 +2184,7 @@ export class OriginTrailGameCoordinator {
           ?entry <${rdf.OT}swarm> ?swarm .
           ?entry <${rdf.OT}finishedAt> ?finishedAt .
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 50`,
+        } ORDER BY DESC(?score) LIMIT 500`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2207,7 +2207,7 @@ export class OriginTrailGameCoordinator {
           bestByPlayer.set(entry.player, entry);
         }
       }
-      return [...bestByPlayer.values()].sort((a, b) => b.score - a.score);
+      return [...bestByPlayer.values()].sort((a, b) => b.score - a.score).slice(0, 50);
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];

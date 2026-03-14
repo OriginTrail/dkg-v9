@@ -812,12 +812,12 @@ function Leaderboard() {
   useEffect(() => {
     api.leaderboard()
       .then((data: any) => {
-        const seen = new Map<string, any>();
+        const bestByPlayer = new Map<string, any>();
         for (const e of data?.entries ?? []) {
-          const existing = seen.get(e.displayName);
-          if (!existing || e.score > existing.score) seen.set(e.displayName, e);
+          const existing = bestByPlayer.get(e.player);
+          if (!existing || e.score > existing.score) bestByPlayer.set(e.player, e);
         }
-        setEntries([...seen.values()].sort((a, b) => b.score - a.score));
+        setEntries([...bestByPlayer.values()].sort((a, b) => b.score - a.score));
       })
       .catch((err: any) => setError(err?.message ?? 'Failed to load leaderboard'))
       .finally(() => setLoading(false));

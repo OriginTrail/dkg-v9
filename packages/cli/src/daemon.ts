@@ -2560,8 +2560,15 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
       try {
         const { readFileSync, unlinkSync } = await import('node:fs');
         const raw = String(readFileSync(lockPath, 'utf-8')).trim();
-        const pidStr = raw.split(':')[0] ?? raw;
+        const parts = raw.split(':');
+        const pidStr = parts[0] ?? raw;
         const lockPid = parseInt(pidStr, 10);
+        const lockTime = parseInt(parts[1] ?? '0', 10);
+        const STALE_MS = 15 * 60 * 1000; // 15 minutes
+        if (lockTime && Date.now() - lockTime > STALE_MS) {
+          try { unlinkSync(lockPath); } catch {}
+          return acquireUpdateLock(log);
+        }
         if (lockPid === process.pid) {
           _lockToken = raw;
           return true;
@@ -2845,7 +2852,7 @@ async function _performUpdateInner(
   } catch {
     // Version is optional metadata for operators; commit SHA remains source of truth.
   }
-  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? false;
+  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? true;
   if (nextVersion && !allowPrerelease && /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)) {
     log(`Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`);
     return 'failed';

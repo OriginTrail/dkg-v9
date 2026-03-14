@@ -151,7 +151,7 @@ program
     if (enableAutoUpdate) {
       const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
       const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
-      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? false;
+      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
       const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
       const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
@@ -1322,6 +1322,7 @@ program
       enabled: true,
       repo: 'OriginTrail/dkg-v9',
       branch: 'main',
+      allowPrerelease: true,
       checkIntervalMinutes: 30,
     };
 

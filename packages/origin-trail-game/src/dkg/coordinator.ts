@@ -215,6 +215,7 @@ export class OriginTrailGameCoordinator {
   private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
+  private destroyed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private graphSyncInitialTimer: ReturnType<typeof setTimeout> | null = null;
@@ -371,24 +372,33 @@ export class OriginTrailGameCoordinator {
       { paranetId: this.paranetId, includeWorkspace: true },
     );
 
-    const newSwarms = swarmsResult.bindings?.length ?? 0;
-    if (this.graphSyncLastSwarmCount !== newSwarms) {
-      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
-      this.graphSyncLastSwarmCount = newSwarms;
-    }
+    const STATUS_RANK: Record<string, number> = { recruiting: 0, traveling: 1, finished: 2 };
 
+    const deduped = new Map<string, { row: any; status: 'recruiting' | 'traveling' | 'finished'; swarmId: string }>();
     for (const row of swarmsResult.bindings ?? []) {
-      const swarmUri = row['swarm'] ?? '';
-      const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
+      const swarmUriVal = row['swarm'] ?? '';
+      const swarmIdMatch = swarmUriVal.match(/swarm\/(swarm-.+)$/);
       if (!swarmIdMatch) continue;
       const swarmId = swarmIdMatch[1];
-      if (this.swarmTombstones.has(swarmId)) continue;
-
       const statusRaw = stripQuotes(row['status'] ?? '');
       const status = statusRaw === 'recruiting' || statusRaw === 'traveling' || statusRaw === 'finished'
         ? statusRaw
         : null;
       if (!status) continue;
+      const existing = deduped.get(swarmId);
+      if (!existing || (STATUS_RANK[status] ?? 0) > (STATUS_RANK[existing.status] ?? 0)) {
+        deduped.set(swarmId, { row, status, swarmId });
+      }
+    }
+
+    const newSwarms = deduped.size;
+    if (this.graphSyncLastSwarmCount !== newSwarms) {
+      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
+      this.graphSyncLastSwarmCount = newSwarms;
+    }
+
+    for (const { row, status, swarmId } of deduped.values()) {
+      if (this.swarmTombstones.has(swarmId)) continue;
 
       const orchestratorUri = row['orchestrator'] ?? '';
       const orchestratorId = orchestratorUri.replace(/.*player\//, '');
@@ -404,12 +414,13 @@ export class OriginTrailGameCoordinator {
         ? graphMaxPlayers
         : MAX_PLAYERS;
 
+      const graphSwarmUri = row['swarm'] ?? '';
       const membersResult = await this.agent.query(
         `SELECT ?agent ?displayName ?joinedAt WHERE {
           ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
                       <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
                       <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
-                      <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
+                      <${rdf.SPARQL_PREFIXES.OT}swarm> <${graphSwarmUri}> .
           OPTIONAL { ?membership <${rdf.SPARQL_PREFIXES.OT}joinedAt> ?joinedAt }
         } ORDER BY ?joinedAt ?agent ?displayName`,
         { paranetId: this.paranetId, includeWorkspace: true },
@@ -472,10 +483,10 @@ export class OriginTrailGameCoordinator {
           existingSwarm.createdAt = createdAt;
           changed = true;
         }
-        const STATUS_RANK: Record<string, number> = { recruiting: 0, traveling: 1, finished: 2 };
         const incomingRank = STATUS_RANK[status] ?? 0;
         const currentRank = STATUS_RANK[existingSwarm.status] ?? 0;
         if (incomingRank > currentRank) {
+          this.log(`Graph sync: advancing status for "${existingSwarm.name}" from ${existingSwarm.status} → ${status}`);
           existingSwarm.status = status;
           changed = true;
         }
@@ -741,6 +752,7 @@ export class OriginTrailGameCoordinator {
 
     swarm.gameState = newGameState;
     swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+    this.log(`Status change: "${swarm.name}" recruiting → traveling (expedition launch)`);
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -767,6 +779,10 @@ export class OriginTrailGameCoordinator {
   async castVote(swarmId: string, action: string, params?: Record<string, any>): Promise<SwarmState> {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
+    if (swarm.status === 'recruiting' && swarm.currentTurn > 0) {
+      this.log(`BUG: swarm "${swarm.name}" has status=recruiting but turn=${swarm.currentTurn}; correcting to traveling`);
+      swarm.status = 'traveling';
+    }
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
     const playerIdx = swarm.players.findIndex(p => p.peerId === this.myPeerId);
     if (playerIdx === -1) throw new Error('You are not in this swarm');
@@ -880,6 +896,7 @@ export class OriginTrailGameCoordinator {
         const delay = OriginTrailGameCoordinator.MIN_TURN_INTERVAL_MS - elapsed;
         await new Promise(resolve => setTimeout(resolve, delay));
       }
+      if (this.destroyed) return;
       if (swarm.currentTurn !== scheduledTurn || swarm.status !== 'traveling' || !this.allAliveVoted(swarm) || swarm.pendingProposal) return;
       await this.proposeTurnResolution(swarm);
     } finally {
@@ -1038,6 +1055,7 @@ export class OriginTrailGameCoordinator {
     this.lastTurnResolvedAt.set(swarm.id, Date.now());
 
     if (newState.status !== 'active') {
+      this.log(`Status change: "${swarm.name}" traveling → finished (game ${newState.status})`);
       swarm.status = 'finished';
     } else {
       swarm.currentTurn++;
@@ -1132,6 +1150,10 @@ export class OriginTrailGameCoordinator {
   async forceResolveTurn(swarmId: string): Promise<SwarmState> {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
+    if (swarm.status === 'recruiting' && swarm.currentTurn > 0) {
+      this.log(`BUG: swarm "${swarm.name}" has status=recruiting but turn=${swarm.currentTurn}; correcting to traveling`);
+      swarm.status = 'traveling';
+    }
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
 
     const isLeader = swarm.leaderPeerId === this.myPeerId;
@@ -1785,6 +1807,10 @@ export class OriginTrailGameCoordinator {
   }
 
   formatSwarmState(swarm: SwarmState) {
+    if (swarm.status === 'recruiting' && swarm.currentTurn > 0) {
+      this.log(`BUG: swarm "${swarm.name}" has status=recruiting but turn=${swarm.currentTurn}; correcting to traveling`);
+      swarm.status = 'traveling';
+    }
     const allVoted = this.allAliveVoted(swarm);
     const voteStatus = swarm.status === 'traveling' ? {
       votes: swarm.players.map((p, i) => {
@@ -2123,6 +2149,7 @@ export class OriginTrailGameCoordinator {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.graphSyncInitialTimer) {
       clearTimeout(this.graphSyncInitialTimer);
       this.graphSyncInitialTimer = null;

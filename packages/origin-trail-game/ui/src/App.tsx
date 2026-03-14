@@ -486,6 +486,7 @@ export function App() {
     } catch (e: any) {
       if (e.status === 404) {
         setSwarm(null);
+        setError('');
         setView('lobby');
       } else {
         setError(e.message);

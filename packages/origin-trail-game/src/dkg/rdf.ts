@@ -108,6 +108,7 @@ export function expeditionLaunchedQuads(paranetId: string, swarmId: string, game
     quad(s, otUri('status'), literal('traveling'), g),
     quad(s, otUri('gameState'), literal(gameStateJson), g),
     quad(s, otUri('launchedAt'), literal(launchedAt), g),
+    quad(swarmUri(swarmId), otUri('status'), literal('traveling'), g),
   ];
 }
 

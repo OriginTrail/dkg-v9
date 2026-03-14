@@ -164,8 +164,10 @@ export async function handleAppRequest(
     const app = apps.find(a => a.id === appId);
     if (!app) return false;
 
-    const host = req.headers.host ?? 'localhost:9200';
-    const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || 'http';
+    const host = req.headers.host ?? `localhost:${req.socket.localPort ?? 9200}`;
+    const rawProto = req.headers['x-forwarded-proto'];
+    const protoHeader = Array.isArray(rawProto) ? rawProto[0] : rawProto;
+    const proto = protoHeader?.split(',')[0]?.trim()?.toLowerCase() || 'http';
     const apiOrigin = `${proto}://${host}`;
     return serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', authToken, apiOrigin);
   }

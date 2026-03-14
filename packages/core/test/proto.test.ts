@@ -112,6 +112,43 @@ describe('Protobuf: WorkspacePublishRequest round-trip', () => {
   });
 });
 
+describe('Protobuf: WorkspacePublishRequest CAS conditions round-trip', () => {
+  it('preserves casConditions through encode/decode', () => {
+    const original = {
+      paranetId: 'test-cas',
+      nquads: new TextEncoder().encode('<urn:e> <http://schema.org/name> "Test" .'),
+      manifest: [{ rootEntity: 'urn:e', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWTest',
+      workspaceOperationId: 'ws-cas-rt',
+      timestampMs: Date.now(),
+      casConditions: [
+        { subject: 'urn:e', predicate: 'http://example.org/status', expectedValue: '"recruiting"', expectAbsent: false },
+        { subject: 'urn:e', predicate: 'http://example.org/turn', expectedValue: '', expectAbsent: true },
+      ],
+    };
+    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    expect(decoded.casConditions).toHaveLength(2);
+    expect(decoded.casConditions![0].subject).toBe('urn:e');
+    expect(decoded.casConditions![0].predicate).toBe('http://example.org/status');
+    expect(decoded.casConditions![0].expectedValue).toBe('"recruiting"');
+    expect(decoded.casConditions![0].expectAbsent).toBe(false);
+    expect(decoded.casConditions![1].expectAbsent).toBe(true);
+  });
+
+  it('decodes absent casConditions as empty array', () => {
+    const original = {
+      paranetId: 'test-no-cas',
+      nquads: new TextEncoder().encode('<urn:e> <http://schema.org/name> "Test" .'),
+      manifest: [{ rootEntity: 'urn:e', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWTest',
+      workspaceOperationId: 'ws-no-cas',
+      timestampMs: Date.now(),
+    };
+    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    expect(decoded.casConditions ?? []).toHaveLength(0);
+  });
+});
+
 describe('Protobuf: AccessResponse round-trip', () => {
   it('encodes and decodes correctly', () => {
     const original = {

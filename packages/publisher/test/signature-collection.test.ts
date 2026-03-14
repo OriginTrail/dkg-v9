@@ -675,7 +675,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     expect(queryResult.type).toBe('bindings');
     if (queryResult.type === 'bindings') {
       expect(queryResult.bindings.length).toBe(1);
-      expect(queryResult.bindings[0]['o']).toContain('LocalStore');
+      expect(queryResult.bindings[0]['o']).toBe('"LocalStore"');
     }
   });
 });

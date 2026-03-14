@@ -89,7 +89,7 @@ describe('Private data isolation (2 nodes)', () => {
       { paranetId: PRIVATE_PARANET, graphSuffix: '_workspace' },
     );
     expect(onA.bindings.length).toBe(1);
-    expect(String(onA.bindings[0]['text'])).toContain('secret chat message');
+    expect(onA.bindings[0]['text']).toBe('"This is my secret chat message"');
 
     // Wait for any possible gossip propagation
     await sleep(3000);
@@ -142,7 +142,7 @@ describe('Private data isolation (2 nodes)', () => {
     );
     // GossipSub mesh may not form in time, so we check but don't hard-fail
     if (onB.bindings.length > 0) {
-      expect(String(onB.bindings[0]['name'])).toContain('Visible Data');
+      expect(onB.bindings[0]['name']).toBe('"Visible Data"');
     }
   }, 25000);
 

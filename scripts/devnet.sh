@@ -325,6 +325,12 @@ create_node_config() {
     fi
   fi
 
+  # Opt-in auth disable: set DEVNET_NO_AUTH=1 for frictionless local testing
+  local devnet_auth_block=""
+  if [ "${DEVNET_NO_AUTH:-}" = "1" ]; then
+    devnet_auth_block='"auth": { "enabled": false },'
+  fi
+
   # Create config
   cat > "$node_dir/config.json" <<EOCONF
 {
@@ -335,7 +341,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "paranets": ["devnet-test", "origin-trail-game"],
-  "auth": { "enabled": false },
+  ${devnet_auth_block}
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",

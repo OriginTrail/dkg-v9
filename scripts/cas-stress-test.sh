@@ -6,19 +6,21 @@
 set -euo pipefail
 
 AUTH="$(grep -v '^#' .devnet/node1/auth.token 2>/dev/null | tr -d '[:space:]')"
-# Auth may be disabled on devnet — that's fine, the header is harmless
 
 APP="/api/apps/origin-trail-game"
 NODE1="http://127.0.0.1:9201"
 NODE2="http://127.0.0.1:9202"
 NODE3="http://127.0.0.1:9203"
 
+TMPDIR_RUN=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
 PASS=0
 FAIL=0
 TOTAL=0
 
-ok()   { ((PASS++)); ((TOTAL++)); echo "  ✓ $1"; }
-fail() { ((FAIL++)); ((TOTAL++)); echo "  ✗ $1"; }
+ok()   { PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo "  ✗ $1"; }
 
 api() {
   local node="$1" method="$2" path="$3"
@@ -62,7 +64,6 @@ if [[ -z "$SWARM_ID" ]]; then
 fi
 ok "Created swarm $SWARM_ID on node1 (Alice = leader)"
 
-# Wait for gossip to propagate swarm to node2/node3, then join with retry
 join_with_retry() {
   local node="$1" swarm_id="$2" player="$3"
   for attempt in 1 2 3 4 5 6 7 8; do
@@ -80,8 +81,11 @@ join_with_retry() {
   return 1
 }
 join_with_retry "$NODE2" "$SWARM_ID" "Bob" &
+J1=$!
 join_with_retry "$NODE3" "$SWARM_ID" "Carol" &
-wait
+J2=$!
+wait "$J1" || true
+wait "$J2" || true
 sleep 3
 
 SWARM_STATE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
@@ -100,17 +104,17 @@ echo "Phase 3: CAS — concurrent launch attempt"
 echo "  (Two launch requests fired ~50ms apart."
 echo "   CAS should ensure only the first one succeeds.)"
 
-api "$NODE1" POST "$APP/start" -d "{\"swarmId\":\"$SWARM_ID\"}" > /tmp/cas_launch1.json &
+api "$NODE1" POST "$APP/start" -d "{\"swarmId\":\"$SWARM_ID\"}" > "$TMPDIR_RUN/launch1.json" &
 PID1=$!
 sleep 0.05
-api "$NODE1" POST "$APP/start" -d "{\"swarmId\":\"$SWARM_ID\"}" > /tmp/cas_launch2.json &
+api "$NODE1" POST "$APP/start" -d "{\"swarmId\":\"$SWARM_ID\"}" > "$TMPDIR_RUN/launch2.json" &
 PID2=$!
 
 wait $PID1 || true
 wait $PID2 || true
 
-R1=$(cat /tmp/cas_launch1.json 2>/dev/null || echo '{}')
-R2=$(cat /tmp/cas_launch2.json 2>/dev/null || echo '{}')
+R1=$(cat "$TMPDIR_RUN/launch1.json" 2>/dev/null || echo '{}')
+R2=$(cat "$TMPDIR_RUN/launch2.json" 2>/dev/null || echo '{}')
 
 S1=$(swarm_field status "$R1")
 S2=$(swarm_field status "$R2")
@@ -161,7 +165,7 @@ echo "Phase 5: Concurrent voting — 3 nodes vote simultaneously"
 api "$NODE1" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null &
 api "$NODE2" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"forage\"}" > /dev/null &
 api "$NODE3" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null &
-wait
+wait || true
 
 sleep 10
 
@@ -172,7 +176,6 @@ ASTATUS=$(swarm_field status "$AFTER_VOTE")
 if [[ "$ATURN" -ge 2 ]]; then
   ok "Turn resolved — now on turn $ATURN (status=$ASTATUS)"
 else
-  # Try force-resolve if consensus didn't happen
   echo "  Turn didn't auto-advance (turn=$ATURN). Force-resolving..."
   api "$NODE1" POST "$APP/force-resolve" -d "{\"swarmId\":\"$SWARM_ID\"}" > /dev/null
   sleep 3
@@ -192,16 +195,16 @@ echo "Phase 6: Rapid swarm creation storm (5 swarms in parallel)"
 
 for i in 1 2 3 4 5; do
   api "$NODE1" POST "$APP/create" \
-    -d "{\"playerName\":\"Alice\",\"swarmName\":\"Storm-$i\",\"maxPlayers\":3}" > "/tmp/cas_storm_$i.json" &
+    -d "{\"playerName\":\"Alice\",\"swarmName\":\"Storm-$i\",\"maxPlayers\":3}" > "$TMPDIR_RUN/storm_$i.json" &
 done
-wait
+wait || true
 sleep 2
 
 CREATED=0
 for i in 1 2 3 4 5; do
-  SID=$(cat "/tmp/cas_storm_$i.json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+  SID=$(cat "$TMPDIR_RUN/storm_$i.json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
   if [[ -n "$SID" ]]; then
-    ((CREATED++))
+    CREATED=$((CREATED+1))
   fi
 done
 
@@ -228,7 +231,6 @@ print(len(b))
 if [[ "$BINDING_COUNT" -ge 4 ]]; then
   ok "Swarm entity has $BINDING_COUNT triples in workspace (snapshot preserved)"
 else
-  # Show what we got for debugging
   echo "  (query returned: $QUERY_RESULT)"
   if [[ "$BINDING_COUNT" -gt 0 ]]; then
     fail "Swarm entity has only $BINDING_COUNT triples (expected ≥4 — snapshot may be incomplete)"
@@ -247,7 +249,7 @@ echo "  Current turn: $CURRENT_TURN"
 api "$NODE1" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"syncMemory\"}" > /dev/null &
 api "$NODE2" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"syncMemory\"}" > /dev/null &
 api "$NODE3" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null &
-wait
+wait || true
 
 sleep 10
 

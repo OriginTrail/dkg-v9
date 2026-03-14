@@ -2818,7 +2818,7 @@ async function _performUpdateInner(
   } catch {
     // Version is optional metadata for operators; commit SHA remains source of truth.
   }
-  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? false;
+  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? true;
   if (nextVersion && !allowPrerelease && /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)) {
     log(`Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`);
     return 'failed';

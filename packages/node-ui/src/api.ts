@@ -864,7 +864,9 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
         'Content-Length': s.size,
         'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
       });
-      createReadStream(filePath).pipe(res);
+      const stream = createReadStream(filePath);
+      stream.on('error', () => { if (!res.writableEnded) res.end(); });
+      stream.pipe(res);
     }
   } catch {
     res.writeHead(200, { 'Content-Type': 'text/html' });

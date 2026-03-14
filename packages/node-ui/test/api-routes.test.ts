@@ -32,6 +32,7 @@ function createMockRes(): {
     headers: Record<string, string>;
     body: string;
   };
+  finished: Promise<void>;
 } {
   const chunks: Buffer[] = [];
   const state = {
@@ -40,9 +41,18 @@ function createMockRes(): {
     body: '',
   };
 
+  let resolveFinished: () => void;
+  const finished = new Promise<void>((r) => { resolveFinished = r; });
+
+  const listeners = new Map<string, Function[]>();
+
   const res: any = {
     writableEnded: false,
     destroyed: false,
+    on(ev: string, fn: Function) { listeners.set(ev, [...(listeners.get(ev) ?? []), fn]); return res; },
+    once(ev: string, fn: Function) { return res.on(ev, fn); },
+    removeListener() { return res; },
+    emit(ev: string, ...args: any[]) { for (const fn of listeners.get(ev) ?? []) fn(...args); },
     writeHead(code: number, headers?: Record<string, string>) {
       state.statusCode = code;
       state.headers = headers ?? {};
@@ -58,11 +68,12 @@ function createMockRes(): {
       }
       state.body = Buffer.concat(chunks).toString('utf8');
       res.writableEnded = true;
+      resolveFinished();
       return res;
     },
   };
 
-  return { res: res as ServerResponse, state };
+  return { res: res as ServerResponse, state, finished };
 }
 
 function parseJsonBody(body: string): any {
@@ -653,11 +664,12 @@ describe('serveStatic path traversal prevention', () => {
   it('serves valid /ui/index.html normally', async () => {
     setup();
     const { req, url } = createMockReq({ method: 'GET', path: '/ui/index.html' });
-    const { res, state } = createMockRes();
+    const { res, state, finished } = createMockRes();
 
     await handleNodeUIRequest(
       req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
     );
+    await finished;
 
     expect(state.statusCode).toBe(200);
     expect(state.body).toContain('<html>');
@@ -675,11 +687,12 @@ describe('serveStatic path traversal prevention', () => {
   it('serves valid /ui/ root normally', async () => {
     setup();
     const { req, url } = createMockReq({ method: 'GET', path: '/ui/' });
-    const { res, state } = createMockRes();
+    const { res, state, finished } = createMockRes();
 
     await handleNodeUIRequest(
       req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
     );
+    await finished;
 
     expect(state.statusCode).toBe(200);
     expect(state.body).toContain('<html>');

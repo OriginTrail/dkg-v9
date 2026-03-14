@@ -32,12 +32,15 @@ type ActionOpts = Record<string, any>;
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
   if (!cleaned) throw new Error(`Invalid version/ref: empty input`);
-  let normalized = cleaned;
-  if (normalized.startsWith('refs/tags/')) normalized = normalized.slice('refs/tags/'.length);
-  if (normalized.startsWith('v')) normalized = normalized.slice(1);
-  if (!normalized) throw new Error(`Invalid version/ref: "${input}"`);
-  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(normalized)) {
-    return `refs/tags/v${normalized}`;
+  if (cleaned.startsWith('refs/')) {
+    const afterRefs = cleaned.replace(/^refs\/tags\/v?/, '');
+    if (!afterRefs) throw new Error(`Invalid version/ref: "${input}"`);
+    return cleaned;
+  }
+  const bare = cleaned.startsWith('v') ? cleaned.slice(1) : cleaned;
+  if (!bare) throw new Error(`Invalid version/ref: "${input}"`);
+  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bare)) {
+    return `refs/tags/v${bare}`;
   }
   return cleaned;
 }

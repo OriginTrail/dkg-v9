@@ -163,7 +163,9 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 }
 
 export function dkgDir(): string {
-  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+  if (process.env.DKG_HOME) return process.env.DKG_HOME;
+  if (repoDir()) return join(homedir(), '.dkg-dev');
+  return join(homedir(), '.dkg');
 }
 
 /**

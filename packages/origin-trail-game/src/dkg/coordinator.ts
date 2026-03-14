@@ -11,7 +11,7 @@
  * paranet — including relays — relays game coordination messages.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { gameEngine, GameEngine } from '../engine/game-engine.js';
@@ -1357,6 +1357,7 @@ export class OriginTrailGameCoordinator {
           case 'turn:proposal': await this.onRemoteTurnProposal(msg as proto.TurnProposalMsg); break;
           case 'turn:approve': await this.onRemoteTurnApproval(msg as proto.TurnApproveMsg); break;
           case 'turn:resolved': this.onRemoteTurnResolved(msg as proto.TurnResolvedMsg); break;
+          case 'chat:message': this.onRemoteChatMessage(msg as proto.ChatMsg); break;
         }
       } catch { /* ignore malformed */ }
     });
@@ -1828,17 +1829,26 @@ export class OriginTrailGameCoordinator {
 
   // ── Query helpers ─────────────────────────────────────────────────
 
+  static readonly FINISHED_SWARM_DISPLAY_TTL_MS = 60 * 60 * 1000;
+
   getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[]; recruitingSwarms: SwarmState[] } {
     const openSwarms: SwarmState[] = [];
     const mySwarms: SwarmState[] = [];
     const recruitingSwarms: SwarmState[] = [];
+    const now = Date.now();
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
+        if (swarm.status === 'finished') {
+          const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
+          const relevantTs = lastTurn?.timestamp ?? swarm.createdAt;
+          if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
+        }
         mySwarms.push(swarm);
-      } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
-        openSwarms.push(swarm);
-        recruitingSwarms.push(swarm);
       } else if (swarm.status === 'recruiting') {
+        if (swarm.createdAt > 0 && now - swarm.createdAt > STALE_SWARM_TTL_MS) continue;
+        if (swarm.players.length < swarm.maxPlayers) {
+          openSwarms.push(swarm);
+        }
         recruitingSwarms.push(swarm);
       }
     }
@@ -2163,22 +2173,30 @@ export class OriginTrailGameCoordinator {
     try {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
-          ?entry a <${rdf.OT}LeaderboardEntry> .
-          ?entry <${rdf.OT}player> ?player .
-          ?entry <${rdf.OT}displayName> ?displayName .
-          ?entry <${rdf.OT}score> ?score .
-          ?entry <${rdf.OT}outcome> ?outcome .
-          ?entry <${rdf.OT}epochs> ?epochs .
-          ?entry <${rdf.OT}survivors> ?survivors .
-          ?entry <${rdf.OT}partySize> ?partySize .
-          ?entry <${rdf.OT}swarm> ?swarm .
-          ?entry <${rdf.OT}finishedAt> ?finishedAt .
+          {
+            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
+              ?e a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?s .
+            } GROUP BY ?player
+          }
+          ?entry a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}displayName> ?displayName ;
+                 <${rdf.OT}outcome> ?outcome ;
+                 <${rdf.OT}epochs> ?epochs ;
+                 <${rdf.OT}survivors> ?survivors ;
+                 <${rdf.OT}partySize> ?partySize ;
+                 <${rdf.OT}swarm> ?swarm ;
+                 <${rdf.OT}finishedAt> ?finishedAt .
+          BIND(?maxScore AS ?score)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 50`,
+        } ORDER BY DESC(?score)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
-      return bindings.map((b: any) => ({
+      const entries = bindings.map((b: any) => ({
         player: stripQuotes(String(b.player ?? '')),
         displayName: stripQuotes(String(b.displayName ?? '')),
         score: Number(stripQuotes(String(b.score ?? '0'))),
@@ -2189,6 +2207,16 @@ export class OriginTrailGameCoordinator {
         swarmId: stripQuotes(String(b.swarmId ?? '')),
         finishedAt: Number(stripQuotes(String(b.finishedAt ?? '0'))),
       }));
+      const bestByPlayer = new Map<string, typeof entries[number]>();
+      for (const entry of entries) {
+        const existing = bestByPlayer.get(entry.player);
+        if (!existing || entry.score > existing.score || (entry.score === existing.score && entry.finishedAt > existing.finishedAt)) {
+          bestByPlayer.set(entry.player, entry);
+        }
+      }
+      return [...bestByPlayer.values()]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 50);
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];
@@ -2205,6 +2233,68 @@ export class OriginTrailGameCoordinator {
       this.log(`Sync Memory via DKG published for swarm ${swarm.id}, turn ${turn} (${tracSpent} TRAC spent)`);
     } catch (err: any) {
       this.log(`Failed to publish sync memory DKG: ${err.message}`);
+    }
+  }
+
+  // ── Lobby chat ──────────────────────────────────────────────────
+
+  private static readonly MAX_CHAT_MESSAGES = 200;
+  private chatMessages: Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> = [];
+
+  async sendChatMessage(displayName: string, message: string): Promise<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
+    const trimmedMsg = (typeof message === 'string' ? message : '').trim().slice(0, 200);
+    if (!trimmedMsg) throw new Error('Message must not be empty');
+    const safeName = (typeof displayName === 'string' && displayName.trim())
+      ? displayName.trim().slice(0, 50)
+      : this.myPeerId.slice(0, 8);
+    const chatMsg = {
+      id: randomUUID(),
+      peerId: this.myPeerId,
+      displayName: safeName,
+      message: trimmedMsg,
+      timestamp: Date.now(),
+    };
+    this.chatMessages.push(chatMsg);
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
+    }
+
+    const gossipMsg: proto.ChatMsg = {
+      app: proto.APP_ID,
+      type: 'chat:message',
+      swarmId: 'lobby',
+      peerId: this.myPeerId,
+      timestamp: chatMsg.timestamp,
+      id: chatMsg.id,
+      displayName: safeName,
+      message: trimmedMsg,
+    };
+    await this.broadcast(gossipMsg);
+    return chatMsg;
+  }
+
+  getChatMessages(limit = 50): Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
+    return this.chatMessages.slice(-limit);
+  }
+
+  private onRemoteChatMessage(msg: proto.ChatMsg): void {
+    if (msg.swarmId !== 'lobby') return;
+    if (typeof msg.id !== 'string' || !msg.id || msg.id.length > 128) return;
+    if (typeof msg.message !== 'string' || msg.message.trim().length === 0) return;
+    if (this.chatMessages.some(m => m.id === msg.id)) return;
+    const message = msg.message.trim().slice(0, 200);
+    const displayName = (typeof msg.displayName === 'string' && msg.displayName.trim())
+      ? msg.displayName.trim().slice(0, 50)
+      : msg.peerId?.slice(0, 8) ?? 'unknown';
+    this.chatMessages.push({
+      id: msg.id,
+      peerId: msg.peerId,
+      displayName,
+      message,
+      timestamp: Number.isFinite(msg.timestamp) ? msg.timestamp : Date.now(),
+    });
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
     }
   }
 

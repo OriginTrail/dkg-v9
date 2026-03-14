@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { handleAppRequest, startAppStaticServer, deriveOrigin, type LoadedApp } from '../src/app-loader.js';
+import { handleAppRequest, startAppStaticServer, deriveOrigin, loadApps, type LoadedApp } from '../src/app-loader.js';
 
 async function write(path: string, content: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
@@ -393,6 +393,78 @@ describe('deriveOrigin', () => {
   it('rejects non-HTTP protocols and falls back to http', () => {
     expect(deriveOrigin(fakeReq('mynode.local:443', 'ftp'), 19300)).toBe('http://mynode.local:19300');
     expect(deriveOrigin(fakeReq('mynode.local:443', 'javascript'), 19300)).toBe('http://mynode.local:19300');
+  });
+});
+
+describe('loadApps standalone fallback', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/config.js');
+    vi.doUnmock('node:url');
+  });
+
+  async function createFakeCliDir(deps: Record<string, string>, nodeModules?: Record<string, { pkgJson: object; handlerCode?: string }>) {
+    const fakeCliDir = join(tmpdir(), `app-loader-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+    const fakeDistDir = join(fakeCliDir, 'dist');
+    await mkdir(fakeDistDir, { recursive: true });
+    await writeFile(join(fakeCliDir, 'package.json'), JSON.stringify({ name: 'fake-cli', dependencies: deps }));
+    if (nodeModules) {
+      for (const [name, { pkgJson, handlerCode }] of Object.entries(nodeModules)) {
+        const modDir = join(fakeCliDir, 'node_modules', ...name.split('/'));
+        await mkdir(modDir, { recursive: true });
+        await writeFile(join(modDir, 'package.json'), JSON.stringify(pkgJson));
+        if (handlerCode) await writeFile(join(modDir, 'handler.js'), handlerCode);
+      }
+    }
+    return { fakeCliDir, fakeDistDir };
+  }
+
+  async function loadAppsWithFakeDir(fakeDistDir: string) {
+    const { pathToFileURL } = await import('node:url');
+    vi.resetModules();
+    vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
+    vi.doMock('node:url', () => ({
+      fileURLToPath: () => join(fakeDistDir, 'app-loader.js'),
+      pathToFileURL,
+    }));
+    const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
+    return loadAppsMocked;
+  }
+
+  it('discovers dkgApp packages from CLI deps when repoDir() is null', async () => {
+    const handlerCode = 'export default function createHandler() { return async () => false; }';
+    const { fakeCliDir, fakeDistDir } = await createFakeCliDir(
+      { 'fake-game': '*' },
+      { 'fake-game': {
+        pkgJson: { name: 'fake-game', type: 'module', dkgApp: { id: 'test-game', label: 'Test Game', apiHandler: './handler.js', staticDir: '.' } },
+        handlerCode,
+      }},
+    );
+    try {
+      const loadAppsMocked = await loadAppsWithFakeDir(fakeDistDir);
+      const messages: string[] = [];
+      const apps = await loadAppsMocked(null, {}, (msg: string) => messages.push(msg));
+
+      expect(apps).toHaveLength(1);
+      expect(apps[0].id).toBe('test-game');
+      expect(apps[0].label).toBe('Test Game');
+      expect(apps[0].path).toBe('/apps/test-game');
+      expect(messages.some(m => m.includes('test-game'))).toBe(true);
+    } finally {
+      await rm(fakeCliDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty array when repoDir() is null and no dkgApp deps exist', async () => {
+    const { fakeCliDir, fakeDistDir } = await createFakeCliDir({ commander: '^13' });
+    try {
+      const loadAppsMocked = await loadAppsWithFakeDir(fakeDistDir);
+      const apps = await loadAppsMocked(null, {});
+      expect(apps).toEqual([]);
+    } finally {
+      await rm(fakeCliDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -437,7 +437,7 @@ describe('loadApps standalone fallback', () => {
     const { fakeCliDir, fakeDistDir } = await createFakeCliDir(
       { 'fake-game': '*' },
       { 'fake-game': {
-        pkgJson: { name: 'fake-game', dkgApp: { id: 'test-game', label: 'Test Game', apiHandler: './handler.js', staticDir: '.' } },
+        pkgJson: { name: 'fake-game', type: 'module', dkgApp: { id: 'test-game', label: 'Test Game', apiHandler: './handler.js', staticDir: '.' } },
         handlerCode,
       }},
     );

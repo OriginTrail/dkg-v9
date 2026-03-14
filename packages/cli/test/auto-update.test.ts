@@ -551,3 +551,87 @@ describe('blue-green checkForUpdate', () => {
     expect(mockedSwapSlot).toHaveBeenCalled();
   });
 });
+
+describe('checkForNpmVersionUpdate tag precedence', () => {
+  function makeRegistryResponse(distTags: Record<string, string>) {
+    return {
+      ok: true,
+      json: async () => ({ 'dist-tags': distTags }),
+    } as any;
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-version')) return '9.0.0-beta.3' as any;
+      throw new Error('ENOENT');
+    });
+  });
+
+  it('uses latest tag when allowPrerelease=false and latest is stable', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0',
+      dev: '9.2.0-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, false);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.1.0');
+  });
+
+  it('skips when allowPrerelease=false and latest is a prerelease', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0-beta.1',
+      dev: '9.2.0-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, false);
+    expect(result.status).toBe('up-to-date');
+  });
+
+  it('picks highest version across dev/latest/beta when allowPrerelease=true', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.0.0-beta.4',
+      dev: '9.0.0-beta.4-dev.999.abc1234',
+      beta: '9.0.0-beta.3',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.4-dev.999.abc1234');
+  });
+
+  it('prefers stable latest over older dev tag when allowPrerelease=true', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.1.0',
+      dev: '9.0.0-beta.4-dev.123.abc1234',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.1.0');
+  });
+
+  it('returns error on registry failure', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503 } as any);
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('error');
+  });
+
+  it('returns up-to-date when current version matches latest', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+      latest: '9.0.0-beta.3',
+    }));
+    const log = vi.fn();
+    const result = await checkForNpmVersionUpdate(log, true);
+    expect(result.status).toBe('up-to-date');
+  });
+});

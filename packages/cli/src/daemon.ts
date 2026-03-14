@@ -2556,17 +2556,17 @@ async function resolveLatestNpmVersion(
     const tags = data['dist-tags'];
     if (!tags) return { version: null, error: true };
 
-    const latest = tags.dev ?? tags.latest ?? null;
+    const stable = tags.latest ?? null;
     if (!allowPrerelease) {
-      if (latest && !latest.includes('-')) return { version: latest };
+      if (stable && !stable.includes('-')) return { version: stable };
       log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
       return { version: null, error: false };
     }
-    if (!latest) return { version: null, error: false };
 
-    const candidates = [latest, tags.beta, tags.next].filter(Boolean) as string[];
+    const candidates = [stable, tags.dev, tags.beta, tags.next].filter(Boolean) as string[];
+    if (candidates.length === 0) return { version: null, error: false };
     candidates.sort((a, b) => compareSemver(b, a));
-    return { version: candidates[0] ?? latest };
+    return { version: candidates[0] };
   } catch (err: any) {
     log(`Auto-update (npm): registry check failed (${err?.message ?? String(err)})`);
     return { version: null, error: true };

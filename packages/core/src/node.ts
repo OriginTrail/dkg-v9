@@ -29,8 +29,10 @@ export interface DKGServices extends Record<string, unknown> {
   relay?: unknown;
 }
 
-const RELAY_WATCHDOG_BASE_INTERVAL_MS = 15_000;
+const RELAY_WATCHDOG_BASE_INTERVAL_MS = 10_000;
 const RELAY_WATCHDOG_MAX_INTERVAL_MS = 5 * 60_000;
+/** Short delay before redialing a disconnected relay to avoid hammering (ms). */
+const RELAY_REDIAL_DELAY_MS = 1_500;
 
 interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
@@ -74,7 +76,13 @@ export class DKGNode {
       peerDiscovery.push(mdns());
     }
 
-    const transports: any[] = [tcp(), webSockets(), circuitRelayTransport()];
+    // TCP keepAlive helps prevent idle relay connections from being dropped by
+    // middleboxes or remote timeouts (common cause of ECONNRESET).
+    const transports: any[] = [
+      tcp({ dialOpts: { keepAlive: true } }),
+      webSockets(),
+      circuitRelayTransport(),
+    ];
 
     const isCore = this.config.nodeRole === 'core';
     const enableRelay = this.config.enableRelayServer ?? isCore;
@@ -138,6 +146,8 @@ export class DKGNode {
       services,
       connectionManager: {
         minConnections: 0,
+        // Reserve capacity for relay peers so they are not evicted under load.
+        maxConnections: 500,
       },
     } as any);
 
@@ -221,6 +231,9 @@ export class DKGNode {
 
       allConnected = false;
       console.log(`[${ts()}] Relay watchdog: ${short(peerId.toString())} disconnected, redialing…`);
+      // Brief delay before redial to avoid hammering the relay after a drop.
+      const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
+      await new Promise(r => setTimeout(r, delayMs));
       try {
         await node.dial(addr);
         console.log(`[${ts()}] Relay watchdog: reconnected to ${short(peerId.toString())}`);

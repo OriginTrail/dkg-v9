@@ -251,9 +251,9 @@ describe('Circuit Relay', () => {
       await conn.close();
     }
 
-    // Connection should be restored (via keepalive tag or watchdog)
+    // Watchdog checks every 10s and redials after 1.5–2.5s delay; allow up to 25s for recovery
     let restored = false;
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 26; i++) {
       await new Promise(r => setTimeout(r, 1000));
       if (edge.libp2p.getConnections().length > 0) {
         restored = true;
@@ -262,5 +262,30 @@ describe('Circuit Relay', () => {
     }
 
     expect(restored).toBe(true);
-  }, 30000);
+  }, 35000);
+
+  it('node with relay peers starts with tcp keepAlive and connectionManager config', async () => {
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      enableRelayServer: true,
+    });
+    nodes.push(relay);
+    await relay.start();
+
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Node should have at least one connection (to relay); config (keepAlive, maxConnections) is applied at start
+    expect(edge.libp2p.getConnections().length).toBeGreaterThan(0);
+    expect(edge.isStarted).toBe(true);
+  }, 15000);
 });

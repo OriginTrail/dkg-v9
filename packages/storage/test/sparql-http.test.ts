@@ -225,7 +225,7 @@ if (liveQueryUrl && liveUpdateUrl) {
       expect(result.type).toBe('bindings');
       if (result.type === 'bindings') {
         expect(result.bindings.length).toBe(1);
-        expect(String(result.bindings[0]['name'])).toContain('Alice');
+        expect(result.bindings[0]['name']).toBe('"Alice"');
       }
       await store.deleteByPattern({ graph: 'http://ex.org/test/g' });
       await store.close();

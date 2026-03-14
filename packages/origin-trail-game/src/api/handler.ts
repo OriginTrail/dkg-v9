@@ -84,6 +84,15 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         return json(res, 200, coordinator.getNotifications());
       }
 
+      if (req.method === 'GET' && subpath === '/chat') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const rawLimit = Number(url.searchParams.get('limit') ?? '50');
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(Math.floor(rawLimit), 200)
+          : 50;
+        return json(res, 200, { messages: coordinator.getChatMessages(limit) });
+      }
+
       if (req.method === 'GET' && subpath === '/info') {
         return json(res, 200, {
           id: 'origin-trail-game',
@@ -99,6 +108,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (req.method === 'POST' && subpath === '/notifications/read') {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
         const body = JSON.parse(await readBody(req));
+        if (!body || typeof body !== 'object') return json(res, 400, { error: 'Invalid request body' });
         if (body.ids !== undefined && !Array.isArray(body.ids)) {
           return json(res, 400, { error: '"ids" must be an array of strings' });
         }
@@ -110,7 +120,22 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
       if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
 
-      const body = JSON.parse(await readBody(req));
+      const raw = JSON.parse(await readBody(req));
+      if (!raw || typeof raw !== 'object') return json(res, 400, { error: 'Invalid request body' });
+      const body = raw;
+
+      if (subpath === '/chat') {
+        const { message, displayName } = body;
+        if (!message || typeof message !== 'string') return json(res, 400, { error: 'Missing or invalid message' });
+        const trimmed = message.trim();
+        if (trimmed.length === 0) return json(res, 400, { error: 'Message must not be empty' });
+        if (trimmed.length > 200) return json(res, 400, { error: 'Message exceeds 200 character limit' });
+        const name = typeof displayName === 'string' && displayName.trim()
+          ? displayName.trim().slice(0, 50)
+          : coordinator.myPeerId.slice(0, 8);
+        const chatMsg = await coordinator.sendChatMessage(name, trimmed);
+        return json(res, 200, chatMsg);
+      }
 
       if (subpath === '/create') {
         const { playerName, swarmName, maxPlayers } = body;

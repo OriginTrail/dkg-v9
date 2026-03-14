@@ -275,7 +275,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       await sleep(500);
     }
     expect(bWorkspace.bindings.length).toBe(1);
-    expect(String(bWorkspace.bindings[0]['name'])).toContain('Finalization Chain Draft');
+    expect(bWorkspace.bindings[0]['name']).toBe('"Finalization Chain Draft"');
   }, 25000);
 
   it('A enshrines on-chain; B receives finalization and promotes to canonical', async () => {
@@ -298,7 +298,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       PARANET,
     );
     expect(aData.bindings.length).toBe(1);
-    expect(aData.bindings[0]['name']).toContain('Finalization Chain Draft');
+    expect(aData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
 
     // Poll until B promotes the data to its canonical graph
     const deadline = Date.now() + 15000;
@@ -313,7 +313,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     }
 
     expect(bData.bindings.length).toBe(1);
-    expect(bData.bindings[0]['name']).toContain('Finalization Chain Draft');
+    expect(bData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
   }, 60_000);
 
   it('B has confirmed KC metadata with real chain provenance', async () => {
@@ -417,6 +417,6 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       PARANET,
     );
     expect(data.bindings.length).toBe(1);
-    expect(data.bindings[0]['name']).toContain('Cleanup Entity');
+    expect(data.bindings[0]['name']).toBe('"Cleanup Entity"');
   }, 60_000);
 });

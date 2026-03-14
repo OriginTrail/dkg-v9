@@ -11,7 +11,7 @@
  * paranet — including relays — relays game coordination messages.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { gameEngine, GameEngine } from '../engine/game-engine.js';
@@ -36,6 +36,11 @@ interface DKGAgent {
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
   writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
+  writeConditionalToWorkspace?(
+    paranetId: string,
+    quads: any[],
+    conditions: Array<{ subject: string; predicate: string; expectedValue: string | null }>,
+  ): Promise<{ workspaceOperationId: string }>;
   publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
   enshrineFromWorkspace(
     paranetId: string,
@@ -165,6 +170,7 @@ function detectDeaths(
 }
 
 const STALE_SWARM_TTL_MS = 24 * 60 * 60 * 1000;
+const STATUS_RANK: Record<SwarmState['status'], number> = { recruiting: 0, traveling: 1, finished: 2 };
 
 function stripQuotes(s: string): string {
   if (s.startsWith('"')) {
@@ -469,14 +475,24 @@ export class OriginTrailGameCoordinator {
           existingSwarm.createdAt = createdAt;
           changed = true;
         }
-        if (existingSwarm.status !== status) {
+        // Never regress a swarm that is already traveling/finished back to
+        // recruiting — the graph may lag behind in-memory state because the
+        // expedition-launched publish is still in-flight or hasn't propagated.
+        const localRank = STATUS_RANK[existingSwarm.status];
+        const graphRank = STATUS_RANK[status as SwarmState['status']];
+        if (graphRank > localRank) {
           existingSwarm.status = status;
           changed = true;
         }
 
         // Reconcile recruiting roster additively (no removals) to avoid
         // stale graph memberships resurrecting players who already left.
-        if (status === 'recruiting' && players.length > 0) {
+        // Gate on the local (post-rank-check) status so stale graph data
+        // cannot mutate the player list of a traveling/finished swarm.
+        const canReconcileRoster =
+          existingSwarm.status === 'recruiting'
+          || (existingSwarm.status === 'traveling' && existingSwarm.currentTurn <= 1 && existingSwarm.turnHistory.length === 0);
+        if (canReconcileRoster && players.length > 0) {
           const existingByPeerId = new Map(existingSwarm.players.map((p) => [p.peerId, p]));
           for (const graphPlayer of players) {
             const local = existingByPeerId.get(graphPlayer.peerId);
@@ -502,11 +518,16 @@ export class OriginTrailGameCoordinator {
               changed = true;
             }
           }
-          const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
-          const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
-          if (needsReorder) {
-            existingSwarm.players = sortedPlayers;
-            changed = true;
+          if (existingSwarm.status === 'recruiting') {
+            const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
+            const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
+            if (needsReorder) {
+              existingSwarm.players = sortedPlayers;
+              changed = true;
+            }
+          } else if (existingSwarm.status === 'traveling') {
+            const reordered = this.reorderPlayersByPartyIndexMap(existingSwarm);
+            if (reordered) changed = true;
           }
         }
 
@@ -695,13 +716,23 @@ export class OriginTrailGameCoordinator {
     const gameStateJson = JSON.stringify(newGameState);
     const now = Date.now();
 
-    try {
-      await this.agent.writeToWorkspace(
+    const launchQuads = rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now);
+    const swarmUpdateQuads = rdf.swarmSnapshotQuads(
+      this.paranetId, swarmId, swarm.name, swarm.leaderPeerId,
+      swarm.createdAt, swarm.maxPlayers, 'traveling',
+    );
+    if (this.agent.writeConditionalToWorkspace) {
+      await this.agent.writeConditionalToWorkspace(
         this.paranetId,
-        rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
+        [...launchQuads, ...swarmUpdateQuads],
+        [{
+          subject: rdf.swarmUri(swarmId),
+          predicate: rdf.SWARM_STATUS_PREDICATE,
+          expectedValue: '"recruiting"',
+        }],
       );
-    } catch (err) {
-      this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
+    } else {
+      await this.agent.writeToWorkspace(this.paranetId, [...launchQuads, ...swarmUpdateQuads]);
     }
 
     // Create on-chain context graph with all participant identity IDs.
@@ -1326,6 +1357,7 @@ export class OriginTrailGameCoordinator {
           case 'turn:proposal': await this.onRemoteTurnProposal(msg as proto.TurnProposalMsg); break;
           case 'turn:approve': await this.onRemoteTurnApproval(msg as proto.TurnApproveMsg); break;
           case 'turn:resolved': this.onRemoteTurnResolved(msg as proto.TurnResolvedMsg); break;
+          case 'chat:message': this.onRemoteChatMessage(msg as proto.ChatMsg); break;
         }
       } catch { /* ignore malformed */ }
     });
@@ -1416,10 +1448,27 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
-    if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
-      swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+    if (msg.partyOrder) {
+      let appliedPartyOrder = false;
+      if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
+        swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+        this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+        appliedPartyOrder = true;
+      } else if (this.canBackfillPlayersFromPartyOrder(msg.partyOrder, swarm)) {
+        // Join gossip can be delayed. Backfill only from a safe partyOrder shape
+        // so malformed payloads cannot mutate existing local membership.
+        this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
+        if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
+          swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+          this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+          appliedPartyOrder = true;
+        }
+      }
+      if (!appliedPartyOrder) {
+        this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
+        swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+      }
     } else {
-      if (msg.partyOrder) this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
       swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     }
     swarm.status = 'traveling';
@@ -1442,6 +1491,73 @@ export class OriginTrailGameCoordinator {
     if (partyOrder.length !== currentPeerIds.size) return false;
     if (new Set(partyOrder).size !== partyOrder.length) return false;
     return partyOrder.every(pid => currentPeerIds.has(pid));
+  }
+
+  private canBackfillPlayersFromPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
+    if (new Set(partyOrder).size !== partyOrder.length) return false;
+    const currentPeerIds = new Set(swarm.players.map(p => p.peerId));
+    // Never allow backfill payloads that "drop" known local members.
+    for (const peerId of currentPeerIds) {
+      if (!partyOrder.includes(peerId)) return false;
+    }
+    const expectedPartySize = Array.isArray(swarm.gameState?.party) ? swarm.gameState.party.length : null;
+    // Ensure launch payload roster matches the game state's party cardinality.
+    if (expectedPartySize != null && partyOrder.length !== expectedPartySize) return false;
+    if (partyOrder.length > swarm.maxPlayers) return false;
+    return true;
+  }
+
+  private backfillPlayersFromPartyOrder(swarm: SwarmState, partyOrder: string[], joinedAt: number): void {
+    const existingPeerIds = new Set(swarm.players.map(p => p.peerId));
+    let added = 0;
+    for (const peerId of partyOrder) {
+      if (existingPeerIds.has(peerId)) continue;
+      swarm.players.push({
+        peerId,
+        displayName: peerId.slice(0, 8),
+        joinedAt,
+        isLeader: peerId === swarm.leaderPeerId,
+      });
+      existingPeerIds.add(peerId);
+      added++;
+    }
+    if (added > 0) {
+      this.log(`Backfilled ${added} missing swarm member(s) from launch partyOrder for ${swarm.id}`);
+    }
+    this.reorderPlayersToPartyOrder(swarm, partyOrder);
+  }
+
+  private reorderPlayersToPartyOrder(swarm: SwarmState, partyOrder: string[]): void {
+    const playersByPeerId = new Map(swarm.players.map(p => [p.peerId, p]));
+    const ordered: SwarmMember[] = [];
+    for (const peerId of partyOrder) {
+      const player = playersByPeerId.get(peerId);
+      if (player) ordered.push(player);
+    }
+    if (ordered.length === swarm.players.length && ordered.every((p, i) => p.peerId === swarm.players[i]?.peerId)) {
+      return;
+    }
+    if (ordered.length > 0) {
+      const remaining = swarm.players.filter(p => !partyOrder.includes(p.peerId)).sort(compareSwarmMembers);
+      swarm.players = [...ordered, ...remaining];
+    }
+  }
+
+  private reorderPlayersByPartyIndexMap(swarm: SwarmState): boolean {
+    if (!swarm.playerIndexMap || swarm.playerIndexMap.size === 0) return false;
+    const sorted = [...swarm.players].sort((a, b) => {
+      const ai = swarm.playerIndexMap.get(a.peerId);
+      const bi = swarm.playerIndexMap.get(b.peerId);
+      if (ai != null && bi != null) return ai - bi;
+      if (ai != null) return -1;
+      if (bi != null) return 1;
+      return compareSwarmMembers(a, b);
+    });
+    const changed = sorted.some((p, i) => p.peerId !== swarm.players[i]?.peerId);
+    if (changed) {
+      swarm.players = sorted;
+    }
+    return changed;
   }
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {
@@ -1713,17 +1829,26 @@ export class OriginTrailGameCoordinator {
 
   // ── Query helpers ─────────────────────────────────────────────────
 
+  static readonly FINISHED_SWARM_DISPLAY_TTL_MS = 60 * 60 * 1000;
+
   getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[]; recruitingSwarms: SwarmState[] } {
     const openSwarms: SwarmState[] = [];
     const mySwarms: SwarmState[] = [];
     const recruitingSwarms: SwarmState[] = [];
+    const now = Date.now();
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
+        if (swarm.status === 'finished') {
+          const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
+          const relevantTs = lastTurn?.timestamp ?? swarm.createdAt;
+          if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
+        }
         mySwarms.push(swarm);
-      } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
-        openSwarms.push(swarm);
-        recruitingSwarms.push(swarm);
       } else if (swarm.status === 'recruiting') {
+        if (swarm.createdAt > 0 && now - swarm.createdAt > STALE_SWARM_TTL_MS) continue;
+        if (swarm.players.length < swarm.maxPlayers) {
+          openSwarms.push(swarm);
+        }
         recruitingSwarms.push(swarm);
       }
     }
@@ -2048,22 +2173,30 @@ export class OriginTrailGameCoordinator {
     try {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
-          ?entry a <${rdf.OT}LeaderboardEntry> .
-          ?entry <${rdf.OT}player> ?player .
-          ?entry <${rdf.OT}displayName> ?displayName .
-          ?entry <${rdf.OT}score> ?score .
-          ?entry <${rdf.OT}outcome> ?outcome .
-          ?entry <${rdf.OT}epochs> ?epochs .
-          ?entry <${rdf.OT}survivors> ?survivors .
-          ?entry <${rdf.OT}partySize> ?partySize .
-          ?entry <${rdf.OT}swarm> ?swarm .
-          ?entry <${rdf.OT}finishedAt> ?finishedAt .
+          {
+            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
+              ?e a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?s .
+            } GROUP BY ?player
+          }
+          ?entry a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}displayName> ?displayName ;
+                 <${rdf.OT}outcome> ?outcome ;
+                 <${rdf.OT}epochs> ?epochs ;
+                 <${rdf.OT}survivors> ?survivors ;
+                 <${rdf.OT}partySize> ?partySize ;
+                 <${rdf.OT}swarm> ?swarm ;
+                 <${rdf.OT}finishedAt> ?finishedAt .
+          BIND(?maxScore AS ?score)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 50`,
+        } ORDER BY DESC(?score)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
-      return bindings.map((b: any) => ({
+      const entries = bindings.map((b: any) => ({
         player: stripQuotes(String(b.player ?? '')),
         displayName: stripQuotes(String(b.displayName ?? '')),
         score: Number(stripQuotes(String(b.score ?? '0'))),
@@ -2074,6 +2207,16 @@ export class OriginTrailGameCoordinator {
         swarmId: stripQuotes(String(b.swarmId ?? '')),
         finishedAt: Number(stripQuotes(String(b.finishedAt ?? '0'))),
       }));
+      const bestByPlayer = new Map<string, typeof entries[number]>();
+      for (const entry of entries) {
+        const existing = bestByPlayer.get(entry.player);
+        if (!existing || entry.score > existing.score || (entry.score === existing.score && entry.finishedAt > existing.finishedAt)) {
+          bestByPlayer.set(entry.player, entry);
+        }
+      }
+      return [...bestByPlayer.values()]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 50);
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];
@@ -2090,6 +2233,68 @@ export class OriginTrailGameCoordinator {
       this.log(`Sync Memory via DKG published for swarm ${swarm.id}, turn ${turn} (${tracSpent} TRAC spent)`);
     } catch (err: any) {
       this.log(`Failed to publish sync memory DKG: ${err.message}`);
+    }
+  }
+
+  // ── Lobby chat ──────────────────────────────────────────────────
+
+  private static readonly MAX_CHAT_MESSAGES = 200;
+  private chatMessages: Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> = [];
+
+  async sendChatMessage(displayName: string, message: string): Promise<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
+    const trimmedMsg = (typeof message === 'string' ? message : '').trim().slice(0, 200);
+    if (!trimmedMsg) throw new Error('Message must not be empty');
+    const safeName = (typeof displayName === 'string' && displayName.trim())
+      ? displayName.trim().slice(0, 50)
+      : this.myPeerId.slice(0, 8);
+    const chatMsg = {
+      id: randomUUID(),
+      peerId: this.myPeerId,
+      displayName: safeName,
+      message: trimmedMsg,
+      timestamp: Date.now(),
+    };
+    this.chatMessages.push(chatMsg);
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
+    }
+
+    const gossipMsg: proto.ChatMsg = {
+      app: proto.APP_ID,
+      type: 'chat:message',
+      swarmId: 'lobby',
+      peerId: this.myPeerId,
+      timestamp: chatMsg.timestamp,
+      id: chatMsg.id,
+      displayName: safeName,
+      message: trimmedMsg,
+    };
+    await this.broadcast(gossipMsg);
+    return chatMsg;
+  }
+
+  getChatMessages(limit = 50): Array<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
+    return this.chatMessages.slice(-limit);
+  }
+
+  private onRemoteChatMessage(msg: proto.ChatMsg): void {
+    if (msg.swarmId !== 'lobby') return;
+    if (typeof msg.id !== 'string' || !msg.id || msg.id.length > 128) return;
+    if (typeof msg.message !== 'string' || msg.message.trim().length === 0) return;
+    if (this.chatMessages.some(m => m.id === msg.id)) return;
+    const message = msg.message.trim().slice(0, 200);
+    const displayName = (typeof msg.displayName === 'string' && msg.displayName.trim())
+      ? msg.displayName.trim().slice(0, 50)
+      : msg.peerId?.slice(0, 8) ?? 'unknown';
+    this.chatMessages.push({
+      id: msg.id,
+      peerId: msg.peerId,
+      displayName,
+      message,
+      timestamp: Number.isFinite(msg.timestamp) ? msg.timestamp : Date.now(),
+    });
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
     }
   }
 

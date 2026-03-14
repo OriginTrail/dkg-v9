@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -37,6 +37,8 @@ export interface DKGPublisherConfig {
   workspaceOwnedEntities?: Map<string, Map<string, string>>;
   /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
   knownBatchParanets?: Map<string, string>;
+  /** Shared write lock map. Pass to WorkspaceHandler so gossip writes serialize against CAS writes. */
+  writeLocks?: Map<string, Promise<void>>;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -47,6 +49,34 @@ export interface WriteToWorkspaceOptions {
 export interface WriteToWorkspaceResult {
   workspaceOperationId: string;
   message: Uint8Array;
+}
+
+export interface CASCondition {
+  subject: string;
+  predicate: string;
+  /**
+   * Expected current object value as a SPARQL term (e.g. `"recruiting"`,
+   * `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`, `<http://example.org/>`).
+   * `null` means the triple must not exist.
+   */
+  expectedValue: string | null;
+}
+
+export class StaleWriteError extends Error {
+  readonly condition: CASCondition;
+  readonly actualValue: string | null;
+  constructor(condition: CASCondition, actualValue: string | null) {
+    const exp = condition.expectedValue === null ? '<absent>' : `"${condition.expectedValue}"`;
+    const act = actualValue === null ? '<absent>' : `"${actualValue}"`;
+    super(`CAS failed: <${condition.subject}> <${condition.predicate}> expected ${exp}, found ${act}`);
+    this.name = 'StaleWriteError';
+    this.condition = condition;
+    this.actualValue = actualValue;
+  }
+}
+
+export interface WriteConditionalToWorkspaceOptions extends WriteToWorkspaceOptions {
+  conditions: CASCondition[];
 }
 
 
@@ -68,6 +98,7 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
+  readonly writeLocks: Map<string, Promise<void>>;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -95,16 +126,47 @@ export class DKGPublisher implements Publisher {
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
     this.knownBatchParanets = config.knownBatchParanets ?? new Map();
+    this.writeLocks = config.writeLocks ?? new Map();
+  }
+
+  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    const uniqueKeys = [...new Set(keys)].sort();
+    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
+    let resolve!: () => void;
+    const gate = new Promise<void>(r => { resolve = r; });
+    for (const k of uniqueKeys) {
+      this.writeLocks.set(k, gate);
+    }
+    await predecessor;
+    try {
+      return await fn();
+    } finally {
+      resolve();
+      for (const k of uniqueKeys) {
+        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
+      }
+    }
   }
 
   /**
    * Write quads to the paranet's workspace graph (no chain, no TRAC).
    * Validates, stores locally in workspace + workspace_meta, returns encoded message for the agent to broadcast on the workspace topic.
+   * Acquires per-entity write locks to serialize against concurrent CAS writes.
    */
   async writeToWorkspace(
     paranetId: string,
     quads: Quad[],
     options: WriteToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    const subjects = [...new Set(quads.map(q => q.subject))];
+    const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
+    return this.withWriteLocks(lockKeys, () => this._writeToWorkspaceImpl(paranetId, quads, options));
+  }
+
+  private async _writeToWorkspaceImpl(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteToWorkspaceOptions & { conditions?: CASCondition[] },
   ): Promise<WriteToWorkspaceResult> {
     const ctx = options.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
@@ -167,6 +229,13 @@ export class DKGPublisher implements Publisher {
       )
       .join('\n');
 
+    const casConditions = options.conditions?.map(c => ({
+      subject: c.subject,
+      predicate: c.predicate,
+      expectedValue: c.expectedValue ?? '',
+      expectAbsent: c.expectedValue === null,
+    }));
+
     const message = encodeWorkspacePublishRequest({
       paranetId,
       nquads: new TextEncoder().encode(nquadsStr),
@@ -179,6 +248,7 @@ export class DKGPublisher implements Publisher {
       workspaceOperationId,
       timestampMs: Date.now(),
       operationId: ctx.operationId,
+      casConditions,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -240,6 +310,70 @@ export class DKGPublisher implements Publisher {
 
     this.log.info(ctx, `Workspace write complete: ${workspaceOperationId}`);
     return { workspaceOperationId, message };
+  }
+
+  /**
+   * Compare-and-swap workspace write. Checks each condition against the
+   * current workspace graph state before applying the write atomically.
+   * Serializes against both CAS and plain writes via per-entity write
+   * locks so check-then-write cannot interleave with any concurrent
+   * store mutations on the same subjects.
+   * Throws StaleWriteError if any condition fails.
+   */
+  async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteConditionalToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    for (const cond of options.conditions) {
+      assertSafeIri(cond.subject);
+      assertSafeIri(cond.predicate);
+      if (cond.expectedValue !== null) {
+        assertSafeRdfTerm(cond.expectedValue);
+      }
+    }
+
+    const conditionSubjects = options.conditions.map(c => c.subject);
+    const quadSubjects = [...new Set(quads.map(q => q.subject))];
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${paranetId}\0${s}`);
+
+    return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(paranetId, quads, options));
+  }
+
+  private async _executeConditionalWrite(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteConditionalToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    const ctx = options.operationCtx ?? createOperationContext('workspace');
+
+    await this.graphManager.ensureParanet(paranetId);
+    const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
+
+    for (const cond of options.conditions) {
+      const ask = cond.expectedValue === null
+        ? `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
+        : `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+      const result = await this.store.query(ask);
+
+      if (result.type !== 'boolean') {
+        throw new Error(`CAS condition query returned unexpected type "${result.type}" for <${cond.subject}> <${cond.predicate}>`);
+      }
+
+      const shouldExist = cond.expectedValue !== null;
+      if (result.value !== shouldExist) {
+        const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
+        const cur = await this.store.query(sel);
+        const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
+        throw new StaleWriteError(cond, actual);
+      }
+    }
+
+    this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
+    return this._writeToWorkspaceImpl(paranetId, quads, {
+      ...options,
+      conditions: options.conditions,
+    });
   }
 
   /**

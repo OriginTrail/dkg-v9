@@ -5,8 +5,27 @@ function getBaseUrl(): string {
   return origin ? `${origin}${API_PATH}` : API_PATH;
 }
 
-async function request(method: string, path: string, body?: unknown) {
+async function waitForToken(timeoutMs = 3000): Promise<string | undefined> {
   const token = (window as any).__DKG_TOKEN__;
+  if (token) return token;
+  if (window.parent === window) return undefined;
+  return new Promise(resolve => {
+    const check = setInterval(() => {
+      if ((window as any).__DKG_TOKEN__) {
+        clearInterval(check);
+        clearTimeout(timer);
+        resolve((window as any).__DKG_TOKEN__);
+      }
+    }, 100);
+    const timer = setTimeout(() => {
+      clearInterval(check);
+      resolve(undefined);
+    }, timeoutMs);
+  });
+}
+
+async function request(method: string, path: string, body?: unknown) {
+  const token = (window as any).__DKG_TOKEN__ ?? await waitForToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -15,8 +34,12 @@ async function request(method: string, path: string, body?: unknown) {
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  let data: any;
+  try { data = await res.json(); } catch { data = {}; }
+  if (!res.ok) {
+    const msg = data.error || (res.status === 401 ? 'Connection to node lost — try refreshing the page' : 'Request failed');
+    throw new Error(msg);
+  }
   return data;
 }
 
@@ -38,6 +61,8 @@ export const api = {
     request('POST', '/vote', { swarmId, voteAction, params }),
   forceResolve: (swarmId: string) =>
     request('POST', '/force-resolve', { swarmId }),
+  chat: (limit?: number) => request('GET', `/chat${limit ? `?limit=${limit}` : ''}`),
+  sendChat: (message: string, displayName?: string) => request('POST', '/chat', { message, displayName }),
   notifications: () => request('GET', '/notifications'),
   markNotificationsRead: (ids?: string[]) =>
     request('POST', '/notifications/read', ids ? { ids } : {}),

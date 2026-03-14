@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { startTestCluster, stopTestCluster, nodeApi, sleep, type TestNode } from './helpers.js';
+import { startTestCluster, stopTestCluster, nodeApi, sleep, readNodeLog, type TestNode } from './helpers.js';
 
 describe('OriginTrail Game: 3 player game', () => {
   let nodes: TestNode[];
@@ -177,4 +177,62 @@ describe('OriginTrail Game: 3 player game', () => {
     expect(wagonA.currentTurn).toBe(4);
     expect(wagonA.lastTurn.winningAction).toBe('syncMemory');
   });
+
+  it('plays 20 turns total and logs contain no critical errors', async () => {
+    const TARGET_TURN = 20;
+    const TURN_RESOLVE_MS = 6000;
+    let lastTurn = (await apiA.swarm(swarmId)).currentTurn;
+
+    while (lastTurn < TARGET_TURN) {
+      await apiA.vote(swarmId, 'advance', { pace: 2 });
+      await sleep(400);
+      await apiB.vote(swarmId, 'advance', { pace: 2 });
+      await sleep(400);
+      await apiC.vote(swarmId, 'advance', { pace: 2 });
+      await sleep(TURN_RESOLVE_MS);
+
+      const wagon = await apiA.swarm(swarmId);
+      lastTurn = wagon.currentTurn;
+      expect(wagon.lastTurn).toBeTruthy();
+      expect(wagon.lastTurn.approvers.length).toBeGreaterThanOrEqual(2);
+    }
+
+    expect(lastTurn).toBe(TARGET_TURN);
+
+    const [wA, wB, wC] = await Promise.all([
+      apiA.swarm(swarmId),
+      apiB.swarm(swarmId),
+      apiC.swarm(swarmId),
+    ]);
+    expect(wA.currentTurn).toBe(wB.currentTurn);
+    expect(wB.currentTurn).toBe(wC.currentTurn);
+
+    // Critical: no fatal errors in any node log (transient relay/sync WARNs are allowed)
+    const errorPatterns = [
+      /ELIFECYCLE\s+Command failed/i,
+      /Uncaught\s+Exception/i,
+      /Unhandled\s+Rejection/i,
+      /FATAL/i,
+      /ECONNREFUSED.*1920[0-9]/, // our e2e API ports
+    ];
+
+    const allowedInErrorLines = [
+      'Gossip on-chain verification failed',
+      'stored as tentative',
+      '[ProtocolRouter] handler error', // stream timeout/close; recoverable
+      'Sync page retry',
+      'Workspace sync page retry',
+    ];
+
+    for (let i = 0; i < nodes.length; i++) {
+      const log = readNodeLog(nodes[i]);
+      for (const re of errorPatterns) {
+        const match = log.match(re);
+        expect(match, `Node ${i + 1} log should not contain ${re.source}`).toBeNull();
+      }
+      const errorLines = log.split('\n').filter(l => /\[ERROR\]|\[error\]/.test(l) && !/\[WARN\]/.test(l));
+      const fatalErrors = errorLines.filter(l => !allowedInErrorLines.some(a => l.includes(a)));
+      expect(fatalErrors, `Node ${i + 1} should have no fatal error lines`).toEqual([]);
+    }
+  }, 300_000);
 });

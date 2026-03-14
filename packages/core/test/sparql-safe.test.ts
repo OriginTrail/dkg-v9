@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertSafeIri,
+  assertSafeRdfTerm,
   isSafeIri,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,
   sparqlInt,
+  assertSafeRdfTerm,
 } from '../src/index.js';
 
 describe('assertSafeIri', () => {
@@ -185,6 +187,94 @@ describe('sparqlInt', () => {
   it('enforces max bound', () => {
     expect(() => sparqlInt(1001, { max: 1000 })).toThrow('above maximum');
     expect(sparqlInt(1000, { max: 1000 })).toBe('1000');
+  });
+});
+
+describe('assertSafeRdfTerm', () => {
+  it('accepts plain string literal', () => {
+    expect(() => assertSafeRdfTerm('"hello"')).not.toThrow();
+  });
+
+  it('accepts string with valid escape sequences', () => {
+    expect(() => assertSafeRdfTerm('"line\\none"')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"tab\\there"')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"back\\\\slash"')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"escaped\\"quote"')).not.toThrow();
+  });
+
+  it('accepts typed literal', () => {
+    expect(() => assertSafeRdfTerm('"42"^^<http://www.w3.org/2001/XMLSchema#integer>')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"2024-01-01"^^<http://www.w3.org/2001/XMLSchema#date>')).not.toThrow();
+  });
+
+  it('accepts language-tagged literal', () => {
+    expect(() => assertSafeRdfTerm('"hello"@en')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"bonjour"@fr-FR')).not.toThrow();
+  });
+
+  it('accepts language tags with numeric subtags (BCP47)', () => {
+    expect(() => assertSafeRdfTerm('"name"@de-CH-1996')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"text"@sl-rozaj-1994')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"foo"@zh-Hant-TW')).not.toThrow();
+  });
+
+  it('rejects language tags starting with digits', () => {
+    expect(() => assertSafeRdfTerm('"x"@123')).toThrow();
+  });
+
+  it('rejects language tags with empty subtags', () => {
+    expect(() => assertSafeRdfTerm('"x"@en-')).toThrow();
+    expect(() => assertSafeRdfTerm('"x"@en--GB')).toThrow();
+  });
+
+  it('accepts IRI in angle brackets', () => {
+    expect(() => assertSafeRdfTerm('<http://example.org/resource>')).not.toThrow();
+    expect(() => assertSafeRdfTerm('<urn:test:123>')).not.toThrow();
+  });
+
+  it('accepts unicode escape sequences', () => {
+    expect(() => assertSafeRdfTerm('"caf\\u00E9"')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"emoji\\U0001F600"')).not.toThrow();
+  });
+
+  it('rejects raw newlines inside literal', () => {
+    expect(() => assertSafeRdfTerm('"line\nbreak"')).toThrow('Unsafe RDF term');
+    expect(() => assertSafeRdfTerm('"line\rbreak"')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects invalid backslash escape sequences', () => {
+    expect(() => assertSafeRdfTerm('"bad\\xescape"')).toThrow('Unsafe RDF term');
+    expect(() => assertSafeRdfTerm('"bad\\aescape"')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects SPARQL injection in literal', () => {
+    expect(() => assertSafeRdfTerm('"recruiting" } } . DROP ALL #')).toThrow('Unsafe RDF term');
+    expect(() => assertSafeRdfTerm('"x" . <urn:a> <urn:b> "pwned"')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects SPARQL injection in IRI term', () => {
+    expect(() => assertSafeRdfTerm('<http://x> } DROP ALL #<y>')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects injection through language tag', () => {
+    expect(() => assertSafeRdfTerm('"x"@en> } DROP ALL #')).toThrow();
+  });
+
+  it('rejects empty string', () => {
+    expect(() => assertSafeRdfTerm('')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects bare unquoted string', () => {
+    expect(() => assertSafeRdfTerm('recruiting')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects literal with unclosed quote', () => {
+    expect(() => assertSafeRdfTerm('"unclosed')).toThrow('Unsafe RDF term');
+  });
+
+  it('rejects IRI with unsafe characters', () => {
+    expect(() => assertSafeRdfTerm('<http://x"y>')).toThrow('Unsafe RDF term');
+    expect(() => assertSafeRdfTerm('<http://x y>')).toThrow('Unsafe RDF term');
   });
 });
 

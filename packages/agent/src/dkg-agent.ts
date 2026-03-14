@@ -14,9 +14,9 @@ import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConf
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal,
+  PublishJournal, StaleWriteError,
   computeTripleHash, computeFlatKCRoot, autoPartition,
-  type PublishResult, type PhaseCallback, type KAMetadata,
+  type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -36,6 +36,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
+/** Per-page timeout for sync when we have budget (relay links can be slow). */
+const SYNC_PAGE_TIMEOUT_MS = 30_000;
+/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
+const SYNC_ROUTER_ATTEMPTS = 3;
 const DEFAULT_WORKSPACE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -130,6 +134,8 @@ export class DKGAgent {
   private readonly chain: ChainAdapter;
   /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  /** Shared write locks so gossip writes serialize against local CAS writes. */
+  private readonly writeLocks: Map<string, Promise<void>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
@@ -155,6 +161,7 @@ export class DKGAgent {
     eventBus: TypedEventBus,
     chain: ChainAdapter,
     workspaceOwnedEntities: Map<string, Map<string, string>>,
+    writeLocks: Map<string, Promise<void>>,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -163,6 +170,7 @@ export class DKGAgent {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
+    this.writeLocks = writeLocks;
     this.eventBus = eventBus;
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
@@ -236,6 +244,7 @@ export class DKGAgent {
 
     const node = new DKGNode(nodeConfig);
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
+    const writeLocks = new Map<string, Promise<void>>();
     const publisher = new DKGPublisher({
       store,
       chain,
@@ -243,6 +252,7 @@ export class DKGAgent {
       keypair,
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
+      writeLocks,
     });
 
     try {
@@ -260,7 +270,7 @@ export class DKGAgent {
 
     return new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities,
+      workspaceOwnedEntities, writeLocks,
     );
   }
 
@@ -592,8 +602,15 @@ export class DKGAgent {
 
           const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
 
+          // Cap per-call timeout so ProtocolRouter.send (3 internal retries) stays within deadline
+          const remainingMs = Math.max(0, deadline - Date.now());
+          const timeoutMs = Math.min(
+            SYNC_PAGE_TIMEOUT_MS,
+            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
+          );
+
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
@@ -682,8 +699,14 @@ export class DKGAgent {
 
           const payload = new TextEncoder().encode(`workspace:${pid}|${offset}|${SYNC_PAGE_SIZE}`);
 
+          const remainingMs = Math.max(0, deadline - Date.now());
+          const timeoutMs = Math.min(
+            SYNC_PAGE_TIMEOUT_MS,
+            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
+          );
+
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
@@ -1200,6 +1223,35 @@ export class DKGAgent {
   }
 
   /**
+   * Compare-and-swap workspace write. Verifies each condition against the
+   * current workspace graph before applying the write atomically.
+   * Throws StaleWriteError if any condition fails.
+   */
+  async writeConditionalToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    conditions: CASCondition[],
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+  ): Promise<{ workspaceOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
+    const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      conditions,
+    });
+    if (!opts?.localOnly) {
+      const topic = paranetWorkspaceTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+    return { workspaceOperationId };
+  }
+
+  /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
@@ -1514,6 +1566,7 @@ export class DKGAgent {
     if (!this.workspaceHandler) {
       this.workspaceHandler = new WorkspaceHandler(this.store, this.eventBus, {
         workspaceOwnedEntities: this.workspaceOwnedEntities,
+        writeLocks: this.writeLocks,
       });
     }
     return this.workspaceHandler;

@@ -104,7 +104,7 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
         path: `/apps/${manifest.id}`,
         staticDir,
         handler,
-        destroy: typeof (handler as any).destroy === 'function' ? (handler as any).destroy : undefined,
+        destroy: typeof (handler as any).destroy === 'function' ? () => (handler as any).destroy() : undefined,
       });
 
       log?.(`App loaded: ${manifest.label} (${manifest.id}) → /apps/${manifest.id}/`);

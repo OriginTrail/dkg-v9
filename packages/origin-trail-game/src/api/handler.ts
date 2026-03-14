@@ -39,7 +39,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
     });
   }
 
-  const handler = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
+  const handler = (async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const path = url.pathname;
     if (!path.startsWith(PREFIX)) return false;
 
@@ -197,8 +197,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
     } catch (err: any) {
       return json(res, 400, { error: err.message });
     }
-  };
-
+  }) as AppRequestHandler & { destroy: () => void };
   handler.destroy = () => coordinator?.destroy();
-  return handler as AppRequestHandler & { destroy: () => void };
+  return handler;
 }

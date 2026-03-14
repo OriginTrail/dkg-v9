@@ -824,7 +824,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
     clearInterval(pingTimer);
-    for (const app of installedApps) app.destroy?.();
+    for (const app of installedApps) {
+      try { app.destroy?.(); } catch (err: any) { log(`App ${app.id} destroy error: ${err.message}`); }
+    }
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();

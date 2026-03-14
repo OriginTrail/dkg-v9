@@ -257,10 +257,11 @@ Publishers configure via `search.embeddablePredicates: string[]` in node config.
 ```
 
 > **Path canonicalization:** `paranetId` is user-controlled input and must
-> not be used directly as a filesystem path segment. Canonicalize it to a
-> safe slug (e.g., `paranetId.replace(/[^a-zA-Z0-9_-]/g, '_')`) and
-> resolve the final path with `path.resolve(baseDir, slug)`. Reject the
-> operation if the resolved path escapes `~/.dkg/embeddings/`.
+> not be used directly as a filesystem path segment. To prevent collisions
+> (e.g., `a/b` and `a_b` both mapping to `a_b`), use a collision-resistant
+> slug: `slugify(paranetId) + '-' + createHash('sha256').update(paranetId).digest('hex').slice(0, 8)`.
+> Resolve the final path with `path.resolve(baseDir, slug)` and reject
+> the operation if the resolved path escapes `~/.dkg/embeddings/`.
 
 Search queries over enshrined data never touch the workspace index, and vice versa. The `includeWorkspace` flag on search requests controls whether workspace results are merged. This isolation ensures draft/workspace vectors cannot leak into general search results even if a filter path is missed.
 
@@ -347,7 +348,7 @@ sequenceDiagram
 
 **Training trigger:**
 - Periodic (e.g., every 6 hours or after N new KAs published)
-- On-demand via API (`POST /api/embeddings/retrain`)
+- On-demand via API (`POST /api/embeddings/retrain`) — **requires local-admin auth**. Rate limited: max 1 concurrent training job, 30-minute cooldown between requests. Returns 429 if a job is already running or cooldown has not elapsed. Jobs are queued (max depth 1) to prevent DoS.
 - Incremental update for new entities (approximate — add new vectors using learned relation vectors without full retrain)
 
 ### 2.2 PyKEEN integration
@@ -443,6 +444,8 @@ Where:
   - Context graph membership (enshrined facts score higher than workspace drafts)
 
 **Default weights:** `α=0.5, β=0.3, γ=0.2` (tunable per paranet).
+
+**Fallback when graph embeddings are unavailable:** If entity extraction from the query returns no entities or low confidence, set `β=0` and renormalize: `α'=α/(α+γ), γ'=γ/(α+γ)`. This ensures pure text-only queries are not penalized by a zero graph_sim term. The same fallback applies before Phase 2 graph embeddings are trained.
 
 ### 3.2 Query flow
 

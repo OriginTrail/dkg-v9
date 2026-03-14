@@ -146,7 +146,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     );
 
     expect(queryResult.bindings).toHaveLength(1);
-    expect(queryResult.bindings[0]['name']).toContain('ImageBot');
+    expect(queryResult.bindings[0]['name']).toBe('"ImageBot"');
 
     // Query for skills
     const skillResult = await engineB.query(
@@ -154,7 +154,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
       { paranetId: PARANET },
     );
     expect(skillResult.bindings).toHaveLength(1);
-    expect(skillResult.bindings[0]['skill']).toContain('ImageAnalysis');
+    expect(skillResult.bindings[0]['skill']).toBe('"ImageAnalysis"');
   }, 20000);
 
   it('publishes with private triples and accesses them', async () => {

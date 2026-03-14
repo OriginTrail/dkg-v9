@@ -394,10 +394,10 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     );
 
     const statuses = statusResult.bindings.map(b => b['status']);
-    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
+    const hasConfirmed = statuses.some(s => s === '"confirmed"');
     expect(hasConfirmed).toBe(true);
 
-    const hasTentative = statuses.some(s => s?.includes('tentative'));
+    const hasTentative = statuses.some(s => s === '"tentative"');
     expect(hasTentative).toBe(false);
   }, 25000);
 
@@ -445,10 +445,10 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     );
 
     const statuses = statusResult.bindings.map(b => b['status']);
-    const hasTentative = statuses.some(s => s?.includes('tentative'));
+    const hasTentative = statuses.some(s => s === '"tentative"');
     expect(hasTentative).toBe(true);
 
-    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
+    const hasConfirmed = statuses.some(s => s === '"confirmed"');
     expect(hasConfirmed).toBe(false);
   }, 25000);
 });

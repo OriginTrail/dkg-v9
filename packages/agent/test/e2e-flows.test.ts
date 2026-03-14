@@ -58,8 +58,8 @@ describe('Publish → Query (single agent)', () => {
     );
     expect(qr.bindings.length).toBe(2);
     const names = qr.bindings.map(b => b['name']).sort();
-    expect(names[0]).toContain('Alice');
-    expect(names[1]).toContain('Bob');
+    expect(names[0]).toBe('"Alice"');
+    expect(names[1]).toBe('"Bob"');
   }, 15000);
 
   it('publishes with private triples and stores private root in manifest', async () => {
@@ -91,7 +91,7 @@ describe('Publish → Query (single agent)', () => {
       'priv-test',
     );
     expect(qr.bindings.length).toBe(1);
-    expect(qr.bindings[0]['name']).toContain('SecretBot');
+    expect(qr.bindings[0]['name']).toBe('"SecretBot"');
   }, 15000);
 });
 
@@ -130,7 +130,7 @@ describe('Publish → Replicate → Query (two agents)', () => {
       'rep-test',
     );
     expect(qr.bindings.length).toBeGreaterThanOrEqual(1);
-    expect(qr.bindings[0]['name']).toContain('Carol');
+    expect(qr.bindings[0]['name']).toBe('"Carol"');
   }, 20000);
 });
 
@@ -163,7 +163,7 @@ describe('Update flow (agent level)', () => {
       'SELECT ?name WHERE { <did:dkg:test:Doc> <http://schema.org/name> ?name }',
       'upd-test',
     );
-    expect(before.bindings[0]['name']).toContain('Doc v1');
+    expect(before.bindings[0]['name']).toBe('"Doc v1"');
 
     // Update
     const updated = await agent.update(kcId, 'upd-test', [
@@ -184,7 +184,7 @@ describe('Update flow (agent level)', () => {
       'upd-test',
     );
     expect(after.bindings).toHaveLength(1);
-    expect(after.bindings[0]['name']).toContain('Doc v2');
+    expect(after.bindings[0]['name']).toBe('"Doc v2"');
   }, 15000);
 
   it('update with private triples replaces old private triples', async () => {
@@ -214,7 +214,7 @@ describe('Update flow (agent level)', () => {
       'priv-upd',
     );
     expect(qr.bindings).toHaveLength(1);
-    expect(qr.bindings[0]['name']).toContain('PrivDoc v2');
+    expect(qr.bindings[0]['name']).toBe('"PrivDoc v2"');
   }, 15000);
 });
 
@@ -390,14 +390,14 @@ describe('Multi-paranet queries', () => {
       'para-a',
     );
     expect(qrA.bindings).toHaveLength(1);
-    expect(qrA.bindings[0]['name']).toContain('XEntity');
+    expect(qrA.bindings[0]['name']).toBe('"XEntity"');
 
     const qrB = await agent.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
       'para-b',
     );
     expect(qrB.bindings).toHaveLength(1);
-    expect(qrB.bindings[0]['name']).toContain('YEntity');
+    expect(qrB.bindings[0]['name']).toBe('"YEntity"');
 
     // Query without paranet scope (should search default graph or all)
     const qrAll = await agent.query(

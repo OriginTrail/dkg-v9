@@ -226,7 +226,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       'memes',
     );
     expect(qrA.bindings.length).toBe(1);
-    expect(qrA.bindings[0]['name']).toContain('Rare Pepe');
+    expect(qrA.bindings[0]['name']).toBe('"Rare Pepe #1"');
 
     // NodeB should have A's triples via GossipSub
     const qrB = await nodeB.query(
@@ -234,7 +234,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       'memes',
     );
     expect(qrB.bindings.length).toBe(1);
-    expect(qrB.bindings[0]['name']).toContain('Rare Pepe');
+    expect(qrB.bindings[0]['name']).toBe('"Rare Pepe #1"');
 
     // NodeC should also have them
     const qrC = await nodeC.query(
@@ -306,7 +306,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       'memes',
     );
     expect(filterResult.bindings.length).toBeGreaterThanOrEqual(1);
-    expect(filterResult.bindings[0]['name']).toContain('Pepe');
+    expect(filterResult.bindings[0]['name']).toBe('"Rare Pepe #1"');
 
     // Multi-property query
     const detailResult = await nodeA.query(
@@ -317,8 +317,8 @@ describe('Network E2E (3 nodes + relay)', () => {
       'memes',
     );
     expect(detailResult.bindings.length).toBe(1);
-    expect(detailResult.bindings[0]['name']).toContain('Doge');
-    expect(detailResult.bindings[0]['desc']).toContain('Much knowledge');
+    expect(detailResult.bindings[0]['name']).toBe('"Doge"');
+    expect(detailResult.bindings[0]['desc']).toBe('"Much knowledge. Very DKG. Wow."');
   }, 10000);
 
   // ── Step 10: Chat via relay ───────────────────────────────────────
@@ -378,6 +378,6 @@ describe('Network E2E (3 nodes + relay)', () => {
       'science',
     );
     expect(scienceResult.bindings.length).toBe(1);
-    expect(scienceResult.bindings[0]['name']).toContain('Attention Is All You Need');
+    expect(scienceResult.bindings[0]['name']).toBe('"Attention Is All You Need"');
   }, 10000);
 });

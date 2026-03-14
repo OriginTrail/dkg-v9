@@ -26,6 +26,8 @@ jobs:
     # Only run when CI passes (this job depends on the CI workflow via branch protection).
     # Skip if the commit message is a version bump from this workflow.
     if: "!startsWith(github.event.head_commit.message, 'chore: continuous publish')"
+    env:
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +76,7 @@ jobs:
           "
 
       - name: Publish all public packages
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.HAS_NPM_TOKEN == 'true'
         run: pnpm -r publish --no-git-checks --tag dev
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

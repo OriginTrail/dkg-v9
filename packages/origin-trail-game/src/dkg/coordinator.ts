@@ -223,6 +223,7 @@ export class OriginTrailGameCoordinator {
   private subscribed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private proposalHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private graphSyncInitialTimer: ReturnType<typeof setTimeout> | null = null;
   private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
   private graphSyncInFlight = false;
@@ -683,6 +684,7 @@ export class OriginTrailGameCoordinator {
       this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
       this.workspaceOps.delete(swarmId);
+      this.stopProposalHeartbeat(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
@@ -890,6 +892,31 @@ export class OriginTrailGameCoordinator {
     }
   }
 
+  private startProposalHeartbeat(swarmId: string, proposalMsg: proto.TurnProposalMsg): void {
+    this.stopProposalHeartbeat(swarmId);
+    const turn = proposalMsg.turn;
+
+    const timer = setInterval(async () => {
+      const swarm = this.swarms.get(swarmId);
+      if (!swarm || swarm.currentTurn !== turn || !swarm.pendingProposal || swarm.pendingProposal.turn !== turn) {
+        this.stopProposalHeartbeat(swarmId);
+        return;
+      }
+      await this.broadcast(proposalMsg);
+      this.log(`Proposal heartbeat: re-broadcast for turn ${turn} on ${swarmId}`);
+    }, 5_000);
+
+    this.proposalHeartbeatTimers.set(swarmId, timer);
+  }
+
+  private stopProposalHeartbeat(swarmId: string): void {
+    const timer = this.proposalHeartbeatTimers.get(swarmId);
+    if (timer) {
+      clearInterval(timer);
+      this.proposalHeartbeatTimers.delete(swarmId);
+    }
+  }
+
   // ── Turn resolution (GM only) ────────────────────────────────────
 
   private async proposeTurnResolution(swarm: SwarmState): Promise<void> {
@@ -968,6 +995,7 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
     this.log(`Turn ${swarm.currentTurn} proposal broadcast for ${swarm.id} (hash=${hash.slice(0, 8)})`);
+    this.startProposalHeartbeat(swarm.id, msg);
 
     await this.checkProposalThreshold(swarm);
   }
@@ -1024,6 +1052,7 @@ export class OriginTrailGameCoordinator {
 
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
+    this.stopProposalHeartbeat(swarm.id);
 
     const newState: GameState = JSON.parse(proposal.newStateJson);
     if (proposal.winningAction) swarm.gameState = newState;
@@ -1129,6 +1158,10 @@ export class OriginTrailGameCoordinator {
         proposalHash: proposal.hash,
       };
       await this.broadcast(resolvedMsg);
+
+      const rebroadcast = () => this.broadcast(resolvedMsg).catch(() => {});
+      setTimeout(rebroadcast, 2_000);
+      setTimeout(rebroadcast, 5_000);
     }
   }
 
@@ -1431,6 +1464,7 @@ export class OriginTrailGameCoordinator {
       });
       this.swarms.delete(msg.swarmId);
       this.workspaceOps.delete(msg.swarmId);
+      this.stopProposalHeartbeat(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
@@ -1665,6 +1699,7 @@ export class OriginTrailGameCoordinator {
       }
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.stopProposalHeartbeat(swarm.id);
       this.workspaceOps.delete(msg.swarmId);
       swarm.gameState = newState;
 
@@ -1832,6 +1867,7 @@ export class OriginTrailGameCoordinator {
       const proposal = swarm.pendingProposal;
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.stopProposalHeartbeat(swarm.id);
       this.workspaceOps.delete(msg.swarmId);
 
       const newState: GameState = JSON.parse(proposal.newStateJson);
@@ -2376,6 +2412,9 @@ export class OriginTrailGameCoordinator {
     }
     for (const swarmId of this.voteHeartbeatTimers.keys()) {
       this.stopVoteHeartbeat(swarmId);
+    }
+    for (const swarmId of this.proposalHeartbeatTimers.keys()) {
+      this.stopProposalHeartbeat(swarmId);
     }
     this.workspaceOps.clear();
     this.agent.gossip.offMessage(this.topic, this.handleMessage);

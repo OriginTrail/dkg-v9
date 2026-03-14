@@ -191,7 +191,8 @@ sequenceDiagram
     Publisher->>Embedder: embed(rootEntity, literals)
     
     Note over Embedder: For each KA in the KC
-    Embedder->>Embedder: concat subject label + all literal values
+    Embedder->>Embedder: filter to embeddable fields (see allowlist below)
+    Embedder->>Embedder: concat subject label + allowed literal values
     Embedder->>Embedder: sentence-transformers encode → 384-dim vector
     Embedder->>VecIndex: upsert(entityUri, vector, metadata)
     
@@ -202,6 +203,33 @@ sequenceDiagram
 - On local publish (after `KC_PUBLISHED` event)
 - On receiving gossip publish (after `GossipPublishHandler` stores triples)
 - On workspace write (tentative, lower priority)
+
+**When to remove/update vectors:**
+- On workspace overwrite or clear: delete stale vectors from the workspace index, then re-embed the new data
+- On KC rollback/reorg: remove vectors for the affected KA URIs from the enshrined index
+- On enshrine: promote workspace vectors to the enshrined index (copy + delete from workspace)
+- On retraction (future): delete vectors matching the retracted entity URIs
+
+All vector lifecycle hooks must be registered alongside the store hooks to prevent orphaned vectors.
+
+**Embeddable field allowlist:**
+Only public, non-sensitive literal predicates are included in the embedding text. Encrypted fields, private quads, and access-controlled attributes are excluded by default:
+
+| Predicate pattern | Include? | Reason |
+|-------------------|----------|--------|
+| `rdfs:label`, `schema:name`, `schema:description` | ✅ | Core searchable metadata |
+| `dcterms:title`, `dcterms:abstract` | ✅ | Document metadata |
+| Custom predicates not in denylist | ✅ | Extensible |
+| `dkg:encryptedValue`, `dkg:privatePayload` | ❌ | Encrypted/sensitive |
+| Any literal from private quads (via `accessPolicy`) | ❌ | Private data |
+
+Publishers can override via a `search.embeddablePredicates` config.
+
+**Authorization for workspace search:**
+- Workspace search results are only returned to authenticated callers on the local node (owner)
+- Remote peers cannot query another node's workspace index
+- The `includeWorkspace: true` flag requires valid local auth; unauthenticated requests receive only enshrined results
+- Future: ACL-based workspace sharing can extend this to privileged peers
 
 ### 1.2 Vector index
 
@@ -440,7 +468,7 @@ Add a `dkg_search` tool alongside the existing `dkg_query`:
 ```typescript
 {
   name: 'dkg_search',
-  description: 'Search the knowledge graph using natural language. Returns ranked results based on semantic similarity and graph structure.',
+  description: 'Search the knowledge graph using natural language. Returns ranked results based on semantic text similarity. (Graph-structural ranking is added in Phase 3 after graph embeddings are available.)',
   parameters: {
     query: { type: 'string', description: 'Natural language search query' },
     paranetId: { type: 'string', description: 'Paranet to search' },

@@ -2254,7 +2254,7 @@ export class OriginTrailGameCoordinator {
               ?e a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?s .
-            } GROUP BY ?player
+            } GROUP BY ?player ORDER BY DESC(?maxScore) LIMIT 100
           }
           ?entry a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
@@ -2269,7 +2269,7 @@ export class OriginTrailGameCoordinator {
           BIND(?maxScore AS ?score)
           BIND(?ft AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 100`,
+        } ORDER BY DESC(?score) DESC(?finishedAt)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];

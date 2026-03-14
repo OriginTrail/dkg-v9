@@ -9,7 +9,7 @@ const OT = 'https://origintrail-game.dkg.io/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'https://schema.org/name';
 const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
-const DEFAULT_DEFAULT_MAX_EPOCHS = 1000;
+const DEFAULT_MAX_EPOCHS = 1000;
 
 function HeroBanner() {
   return (

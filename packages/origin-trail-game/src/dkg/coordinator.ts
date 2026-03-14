@@ -1078,76 +1078,6 @@ export class OriginTrailGameCoordinator {
     }
 
     if (isLeader) {
-      try {
-        const collectedSigs = [...proposal.participantSignatures.values()];
-        let turnQuads = proposal.turnQuads ?? [];
-
-        if (turnQuads.length === 0) {
-          const voteAttestors = proposal.votes.map(v => ({
-            peerId: v.peerId,
-            timestamp: proposal.proposalTimestamp,
-          }));
-          turnQuads = this.computeTurnQuads(
-            swarm.id, proposal.turn, proposal.winningAction,
-            proposal.newStateJson, proposal.votes.map(v => v.peerId),
-            voteAttestors, proposal.resolution, proposal.hash,
-          );
-          if (turnQuads.length > 0) {
-            this.log(`Turn ${proposal.turn}: recomputed ${turnQuads.length} turn quads from proposal data`);
-          }
-        }
-
-        if (turnQuads.length === 0) {
-          this.log(`Turn ${proposal.turn}: no quads to publish after recomputation, skipping enshrinement`);
-        } else {
-          const reqSigs = swarm.requiredSignatures ?? 0;
-          let useContextGraph = !!swarm.contextGraphId;
-          if (useContextGraph && collectedSigs.length < reqSigs) {
-            this.log(`Turn ${proposal.turn}: only ${collectedSigs.length}/${reqSigs} signatures, falling back to plain publish`);
-            useContextGraph = false;
-          }
-
-          const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
-          let publishResult: DKGPublishReturn | undefined;
-          try {
-            publishResult = await this.enshrineToContextGraph(
-              effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
-              useContextGraph ? collectedSigs : undefined,
-            );
-          } catch (ctxErr: any) {
-            if (useContextGraph) {
-              this.log(`Context-graph enshrinement failed for turn ${proposal.turn}: ${ctxErr.message}. Falling back to plain publish.`);
-              publishResult = await this.enshrineToContextGraph(
-                { ...swarm, contextGraphId: undefined }, turnQuads,
-                `Turn ${proposal.turn} (fallback)`,
-              );
-            } else {
-              throw ctxErr;
-            }
-          }
-
-          if (publishResult) {
-            const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
-            await this.publishProvenanceChain(turnEntity, publishResult);
-          }
-        }
-      } catch (err: any) {
-        this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
-        await this.writeFailedLineage(opsSnapshot).catch(() => {});
-      }
-
-      if (swarm.status === 'finished') {
-        await this.publishStrategyPatterns(swarm);
-      }
-
-      if (proposal.winningAction === 'syncMemory' && proposal.actionSuccess !== false) {
-        this.publishSyncMemoryDkg(swarm, proposal.turn, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
-      }
-
-      if (swarm.status === 'finished') {
-        this.publishLeaderboardEntries(swarm).catch(() => {});
-      }
-
       const resolvedMsg: proto.TurnResolvedMsg = {
         app: proto.APP_ID,
         type: 'turn:resolved',
@@ -1158,10 +1088,89 @@ export class OriginTrailGameCoordinator {
         proposalHash: proposal.hash,
       };
       await this.broadcast(resolvedMsg);
-
       const rebroadcast = () => this.broadcast(resolvedMsg).catch(() => {});
       setTimeout(rebroadcast, 2_000);
       setTimeout(rebroadcast, 5_000);
+
+      this.publishTurnToDkg(swarm, proposal, opsSnapshot).catch((err) => {
+        this.log(`Background DKG publish failed for turn ${proposal.turn}: ${err.message}`);
+      });
+    }
+  }
+
+  private async publishTurnToDkg(
+    swarm: SwarmState,
+    proposal: NonNullable<SwarmState['pendingProposal']>,
+    opsSnapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>,
+  ): Promise<void> {
+    try {
+      const collectedSigs = [...proposal.participantSignatures.values()];
+      let turnQuads = proposal.turnQuads ?? [];
+
+      if (turnQuads.length === 0) {
+        const voteAttestors = proposal.votes.map(v => ({
+          peerId: v.peerId,
+          timestamp: proposal.proposalTimestamp,
+        }));
+        turnQuads = this.computeTurnQuads(
+          swarm.id, proposal.turn, proposal.winningAction,
+          proposal.newStateJson, proposal.votes.map(v => v.peerId),
+          voteAttestors, proposal.resolution, proposal.hash,
+        );
+        if (turnQuads.length > 0) {
+          this.log(`Turn ${proposal.turn}: recomputed ${turnQuads.length} turn quads from proposal data`);
+        }
+      }
+
+      if (turnQuads.length === 0) {
+        this.log(`Turn ${proposal.turn}: no quads to publish after recomputation, skipping enshrinement`);
+      } else {
+        const reqSigs = swarm.requiredSignatures ?? 0;
+        let useContextGraph = !!swarm.contextGraphId;
+        if (useContextGraph && collectedSigs.length < reqSigs) {
+          this.log(`Turn ${proposal.turn}: only ${collectedSigs.length}/${reqSigs} signatures, falling back to plain publish`);
+          useContextGraph = false;
+        }
+
+        const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
+        let publishResult: DKGPublishReturn | undefined;
+        try {
+          publishResult = await this.enshrineToContextGraph(
+            effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
+            useContextGraph ? collectedSigs : undefined,
+          );
+        } catch (ctxErr: any) {
+          if (useContextGraph) {
+            this.log(`Context-graph enshrinement failed for turn ${proposal.turn}: ${ctxErr.message}. Falling back to plain publish.`);
+            publishResult = await this.enshrineToContextGraph(
+              { ...swarm, contextGraphId: undefined }, turnQuads,
+              `Turn ${proposal.turn} (fallback)`,
+            );
+          } else {
+            throw ctxErr;
+          }
+        }
+
+        if (publishResult) {
+          const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
+          await this.publishProvenanceChain(turnEntity, publishResult);
+        }
+      }
+    } catch (err: any) {
+      this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
+      await this.writeFailedLineage(opsSnapshot).catch(() => {});
+    }
+
+    if (swarm.status === 'finished') {
+      await this.publishStrategyPatterns(swarm);
+    }
+
+    if (proposal.winningAction === 'syncMemory' && proposal.actionSuccess !== false) {
+      this.publishSyncMemoryDkg(swarm, proposal.turn, GameEngine.SYNC_MEMORY_TRAC_COST).catch(() => {});
+    }
+
+    if (swarm.status === 'finished') {
+      this.publishLeaderboardEntries(swarm).catch(() => {});
     }
   }
 

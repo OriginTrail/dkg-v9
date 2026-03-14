@@ -138,11 +138,11 @@ When TransE learns embeddings for the DKG, it processes every triple `(subject, 
 graph LR
     subgraph published [Published Knowledge]
         AgentA["Agent A publishes:"]
-        T1["CompanyX --acquiredBy--> CompanyY"]
+        T1["CompanyX --acquired--> CompanyY"]
         T2["CompanyY --location--> Berlin"]
         
         AgentB["Agent B publishes:"]
-        T3["CompanyZ --acquiredBy--> CompanyW"]
+        T3["CompanyZ --acquired--> CompanyW"]
         T4["CompanyW --location--> Munich"]
         T5["CompanyZ --industry--> Automotive"]
     end
@@ -150,7 +150,7 @@ graph LR
     subgraph embeddings [After TransE Training]
         E1["embed(CompanyX) ≈ embed(CompanyZ)"]
         E2["embed(CompanyY) ≈ embed(CompanyW)"]
-        E3["embed(acquiredBy) encodes 'acquisition' direction"]
+        E3["embed(acquired) encodes 'acquisition' direction"]
         E4["embed(Berlin) ≈ embed(Munich) — both cities"]
     end
 
@@ -216,15 +216,18 @@ All vector lifecycle hooks must be registered alongside the store hooks to preve
 **Embeddable field allowlist:**
 Only public, non-sensitive literal predicates are included in the embedding text. Encrypted fields, private quads, and access-controlled attributes are excluded by default:
 
+**Default policy: allowlist-only.** Only explicitly listed predicates are embedded. Custom predicates must be opted in via config, not opted out via denylist, to prevent accidental embedding of newly introduced sensitive fields.
+
 | Predicate pattern | Include? | Reason |
 |-------------------|----------|--------|
 | `rdfs:label`, `schema:name`, `schema:description` | ✅ | Core searchable metadata |
 | `dcterms:title`, `dcterms:abstract` | ✅ | Document metadata |
-| Custom predicates not in denylist | ✅ | Extensible |
-| `dkg:encryptedValue`, `dkg:privatePayload` | ❌ | Encrypted/sensitive |
-| Any literal from private quads (via `accessPolicy`) | ❌ | Private data |
+| Custom predicates added to `search.embeddablePredicates` | ✅ | Explicit opt-in |
+| `dkg:encryptedValue`, `dkg:privatePayload` | ❌ | Encrypted/sensitive (always excluded) |
+| Any literal from private quads (via `accessPolicy`) | ❌ | Private data (always excluded) |
+| All other predicates | ❌ | Not in allowlist |
 
-Publishers can override via a `search.embeddablePredicates` config.
+Publishers configure via `search.embeddablePredicates: string[]` in node config. The default allowlist ships with the standard RDF vocabulary predicates above.
 
 **Authorization for workspace search:**
 - Workspace search results are only returned to authenticated callers on the local node (owner)
@@ -248,10 +251,16 @@ Publishers can override via a `search.embeddablePredicates` config.
 
 ```
 ~/.dkg/embeddings/
-  <paranetId>/
-    enshrined.vectra    — confirmed on-chain KCs (public)
-    workspace.vectra    — draft workspace writes (private, node-local)
+  <paranetSlug>/          — slugified paranetId (see canonicalization below)
+    enshrined.vectra      — confirmed on-chain KCs (public)
+    workspace.vectra      — draft workspace writes (private, node-local)
 ```
+
+> **Path canonicalization:** `paranetId` is user-controlled input and must
+> not be used directly as a filesystem path segment. Canonicalize it to a
+> safe slug (e.g., `paranetId.replace(/[^a-zA-Z0-9_-]/g, '_')`) and
+> resolve the final path with `path.resolve(baseDir, slug)`. Reject the
+> operation if the resolved path escapes `~/.dkg/embeddings/`.
 
 Search queries over enshrined data never touch the workspace index, and vice versa. The `includeWorkspace` flag on search requests controls whether workspace results are merged. This isolation ensures draft/workspace vectors cannot leak into general search results even if a filter path is missed.
 

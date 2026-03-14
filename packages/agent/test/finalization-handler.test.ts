@@ -161,7 +161,7 @@ describe('FinalizationHandler', () => {
     expect(metaResult.type).toBe('bindings');
     const metaBindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
     expect(metaBindings.length).toBe(1);
-    expect(metaBindings[0]['status']).toContain('confirmed');
+    expect(metaBindings[0]['status']).toBe('"confirmed"');
 
     // Workspace data should be cleaned up
     const wsResult = await store.query(
@@ -324,7 +324,7 @@ describe('FinalizationHandler', () => {
     expect(metaResult.type).toBe('bindings');
     const metaBindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
     expect(metaBindings.length).toBe(1);
-    expect(metaBindings[0]['status']).toContain('confirmed');
+    expect(metaBindings[0]['status']).toBe('"confirmed"');
   });
 
   it('skips promotion when UAL is already confirmed (dedup guard)', async () => {

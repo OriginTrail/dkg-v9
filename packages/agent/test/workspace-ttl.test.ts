@@ -74,8 +74,8 @@ describe('Workspace TTL', () => {
     expect(subjects).not.toContain(STALE_ENTITY);
 
     const names = result.bindings.map((b: any) => String(b['name']));
-    expect(names.some((n: string) => n.includes('Still Fresh'))).toBe(true);
-    expect(names.some((n: string) => n.includes('Will Expire'))).toBe(false);
+    expect(names.some((n: string) => n === '"Still Fresh"')).toBe(true);
+    expect(names.some((n: string) => n === '"Will Expire"')).toBe(false);
   }, 5000);
 });
 
@@ -181,7 +181,7 @@ describe('Workspace TTL sync filtering', () => {
     expect(subjects).not.toContain('urn:ttl-sync:old');
 
     const names = result.bindings.map((b: any) => String(b['name']));
-    expect(names.some((n: string) => n.includes('New Data'))).toBe(true);
-    expect(names.some((n: string) => n.includes('Old Data'))).toBe(false);
+    expect(names.some((n: string) => n === '"New Data"')).toBe(true);
+    expect(names.some((n: string) => n === '"Old Data"')).toBe(false);
   }, 25000);
 });

@@ -29,7 +29,7 @@ export type AppRequestHandler = (req: IncomingMessage, res: ServerResponse, url:
  * (workspace + gossipsub + context graph). Without an agent, it falls back
  * to in-memory-only mode (useful for development/testing without a node).
  */
-export default function createHandler(agent?: any, config?: any, _options?: unknown): AppRequestHandler {
+export default function createHandler(agent?: any, config?: any, _options?: unknown): AppRequestHandler & { destroy: () => void } {
   let coordinator: OriginTrailGameCoordinator | null = null;
 
   if (agent && typeof agent.peerId === 'string' && agent.gossip) {
@@ -39,7 +39,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
     });
   }
 
-  return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
+  const handler = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const path = url.pathname;
     if (!path.startsWith(PREFIX)) return false;
 
@@ -198,4 +198,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       return json(res, 400, { error: err.message });
     }
   };
+
+  handler.destroy = () => coordinator?.destroy();
+  return handler as AppRequestHandler & { destroy: () => void };
 }

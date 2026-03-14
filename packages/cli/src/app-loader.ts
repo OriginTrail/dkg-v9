@@ -29,6 +29,7 @@ export interface LoadedApp {
   path: string;
   staticDir: string;
   handler: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
+  destroy?: () => void;
 }
 
 const MIME: Record<string, string> = {
@@ -103,6 +104,7 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
         path: `/apps/${manifest.id}`,
         staticDir,
         handler,
+        destroy: typeof (handler as any).destroy === 'function' ? (handler as any).destroy : undefined,
       });
 
       log?.(`App loaded: ${manifest.label} (${manifest.id}) → /apps/${manifest.id}/`);

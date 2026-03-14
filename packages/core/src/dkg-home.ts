@@ -19,7 +19,7 @@ export function dkgHomeDir(): string {
 export async function readDaemonPid(dkgHome?: string): Promise<number | null> {
   try {
     const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'daemon.pid'), 'utf-8');
-    return parseStrictInt(raw.trim());
+    return parseStrictPosInt(raw.trim());
   } catch {
     return null;
   }
@@ -35,12 +35,14 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Read the API port from $DKG_API_PORT env or $DKG_HOME/api.port file. Returns null if missing or invalid. */
+/**
+ * Read the API port from $DKG_API_PORT env or $DKG_HOME/api.port file.
+ * If $DKG_API_PORT is set but invalid, returns null immediately (does not
+ * fall through to the file) to avoid silently connecting to a stale port.
+ */
 export async function readDkgApiPort(dkgHome?: string): Promise<number | null> {
-  const envPort = process.env.DKG_API_PORT
-    ? parsePort(process.env.DKG_API_PORT)
-    : null;
-  if (envPort) return envPort;
+  const envRaw = process.env.DKG_API_PORT?.trim();
+  if (envRaw) return parsePort(envRaw);
 
   try {
     const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'api.port'), 'utf-8');
@@ -67,16 +69,22 @@ export function loadAuthTokenSync(dkgHome?: string): string | undefined {
   return undefined;
 }
 
-/** Parse a string as a strict integer, returning null for NaN or non-integer values. */
-function parseStrictInt(value: string): number | null {
+const DECIMAL_INT_RE = /^[0-9]+$/;
+
+/**
+ * Parse a string as a strict positive decimal integer.
+ * Rejects empty strings, hex (0x...), scientific notation (1e3), floats, and negative values.
+ */
+function parseStrictPosInt(value: string): number | null {
+  if (!DECIMAL_INT_RE.test(value)) return null;
   const n = Number(value);
-  return Number.isInteger(n) ? n : null;
+  return n > 0 ? n : null;
 }
 
-/** Parse a string as a valid port number (1–65535), returning null for invalid values. */
+/** Parse a string as a valid TCP port (1–65535). Only accepts decimal digit strings. */
 function parsePort(value: string): number | null {
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+  const n = parseStrictPosInt(value);
+  if (n === null || n > 65535) return null;
   return n;
 }
 

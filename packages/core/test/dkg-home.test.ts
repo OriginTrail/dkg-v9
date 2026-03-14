@@ -64,6 +64,26 @@ describe('readDaemonPid', () => {
   it('returns null when file does not exist', async () => {
     expect(await readDaemonPid(tempDir)).toBeNull();
   });
+
+  it('returns null for empty file', async () => {
+    await writeFile(join(tempDir, 'daemon.pid'), '');
+    expect(await readDaemonPid(tempDir)).toBeNull();
+  });
+
+  it('returns null for hex notation like "0x1234"', async () => {
+    await writeFile(join(tempDir, 'daemon.pid'), '0x1234');
+    expect(await readDaemonPid(tempDir)).toBeNull();
+  });
+
+  it('returns null for scientific notation like "1e3"', async () => {
+    await writeFile(join(tempDir, 'daemon.pid'), '1e3');
+    expect(await readDaemonPid(tempDir)).toBeNull();
+  });
+
+  it('returns null for "0"', async () => {
+    await writeFile(join(tempDir, 'daemon.pid'), '0');
+    expect(await readDaemonPid(tempDir)).toBeNull();
+  });
 });
 
 describe('readDkgApiPort', () => {
@@ -105,6 +125,22 @@ describe('readDkgApiPort', () => {
 
   it('returns null for port 0', async () => {
     process.env.DKG_API_PORT = '0';
+    expect(await readDkgApiPort(tempDir)).toBeNull();
+  });
+
+  it('does NOT fall through to file when env is set but invalid', async () => {
+    process.env.DKG_API_PORT = 'invalid';
+    await writeFile(join(tempDir, 'api.port'), '9200');
+    expect(await readDkgApiPort(tempDir)).toBeNull();
+  });
+
+  it('rejects hex port like "0x2390"', async () => {
+    process.env.DKG_API_PORT = '0x2390';
+    expect(await readDkgApiPort(tempDir)).toBeNull();
+  });
+
+  it('rejects scientific notation like "1e3"', async () => {
+    process.env.DKG_API_PORT = '1e3';
     expect(await readDkgApiPort(tempDir)).toBeNull();
   });
 

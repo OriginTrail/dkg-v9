@@ -2278,6 +2278,7 @@ export class OriginTrailGameCoordinator {
   }
 
   private onRemoteChatMessage(msg: proto.ChatMsg): void {
+    if (msg.swarmId !== 'lobby') return;
     if (typeof msg.id !== 'string' || !msg.id) return;
     if (typeof msg.message !== 'string' || msg.message.trim().length === 0) return;
     if (this.chatMessages.some(m => m.id === msg.id)) return;

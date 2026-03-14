@@ -9,6 +9,7 @@ const OT = 'https://origintrail-game.dkg.io/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'https://schema.org/name';
 const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
+const MAX_EPOCHS = 1000;
 
 function HeroBanner() {
   return (
@@ -149,7 +150,7 @@ function buildContextTriples(swarm: any): Triple[] {
   triples.push({ subject: swarmUri, predicate: RDF_TYPE, object: `${OT}AgentSwarm` });
   triples.push({ subject: swarmUri, predicate: SCHEMA_NAME, object: lit(swarm.name) });
   triples.push({ subject: swarmUri, predicate: `${OT}status`, object: lit(gs.status) });
-  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: lit(`${gs.epochs}/2000`) });
+  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: lit(`${gs.epochs}/${MAX_EPOCHS}`) });
 
   // Party members
   for (const m of gs.party ?? []) {
@@ -540,12 +541,7 @@ export function App() {
         <div className="ot-section">
           <h2>Your Swarms</h2>
           {(() => {
-            const activeSwarms = (lobby?.mySwarms ?? []).filter((w: any) => {
-              if (w.status !== 'finished') return true;
-              const lastActivity = w.lastTurn?.timestamp ?? w.createdAt;
-              if (!lastActivity) return true;
-              return Date.now() - lastActivity < 3600000;
-            });
+            const activeSwarms = lobby?.mySwarms ?? [];
             return activeSwarms.length ? activeSwarms.map((w: any) => (
               <div key={w.id} className="ot-card ot-clickable" onClick={async () => {
                 try { const fresh = await api.swarm(w.id); setSwarm(fresh); setView('swarm'); }
@@ -734,7 +730,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
   return (
     <div className="ot-game-state">
       <div className="ot-stats">
-        <div><label>Epochs <Tooltip text="Training epochs completed. Reach 1000 to achieve AGI." /></label><span>{state.epochs} / 1000</span></div>
+        <div><label>Epochs <Tooltip text={`Training epochs completed. Reach ${MAX_EPOCHS} to achieve AGI.`} /></label><span>{state.epochs} / {MAX_EPOCHS}</span></div>
         <div><label>Tokens <Tooltip text="Training tokens fuel your AI models. Running out damages your party." /></label><span>{state.trainingTokens}</span></div>
         <div><label>API Credits <Tooltip text="Used for advanced operations and skill upgrades." /></label><span>{state.apiCredits}</span></div>
         <div><label>GPUs <Tooltip text="Compute units power your training runs. More GPUs = faster progress." /></label><span>{state.computeUnits}</span></div>
@@ -742,7 +738,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
         <div><label>Date <Tooltip text="Current position on the AI Frontier timeline." /></label><span>Epoch {state.epochs}</span></div>
       </div>
       <div className="ot-trail-bar">
-        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / 1000) * 100)}%` }} />
+        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / MAX_EPOCHS) * 100)}%` }} />
       </div>
       <div className="ot-party">
         <h4>Swarm Members</h4>
@@ -813,12 +809,7 @@ function Leaderboard() {
   useEffect(() => {
     api.leaderboard()
       .then((data: any) => {
-        const bestByPlayer = new Map<string, any>();
-        for (const e of data?.entries ?? []) {
-          const existing = bestByPlayer.get(e.player);
-          if (!existing || e.score > existing.score) bestByPlayer.set(e.player, e);
-        }
-        setEntries([...bestByPlayer.values()].sort((a, b) => b.score - a.score));
+        setEntries(data?.entries ?? []);
       })
       .catch((err: any) => setError(err?.message ?? 'Failed to load leaderboard'))
       .finally(() => setLoading(false));
@@ -868,7 +859,7 @@ function Leaderboard() {
               <span className={`ot-lb-outcome ${entry.outcome === 'won' ? 'ot-lb-won' : 'ot-lb-lost'}`}>
                 {entry.outcome === 'won' ? 'AGI ✓' : 'Failed'}
               </span>
-              <span className="ot-lb-epochs">{entry.epochs}/1000</span>
+              <span className="ot-lb-epochs">{entry.epochs}/{MAX_EPOCHS}</span>
               <span className="ot-lb-survivors">{entry.survivors}/{entry.partySize}</span>
             </div>
           ))}

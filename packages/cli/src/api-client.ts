@@ -1,6 +1,11 @@
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
+export type QueryResult =
+  | { type: 'bindings'; bindings: Array<Record<string, string>> }
+  | { type: 'boolean'; value: boolean }
+  | { type?: undefined; [key: string]: unknown };
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
@@ -121,7 +126,7 @@ export class ApiClient {
     return this.post('/api/workspace/enshrine', { paranetId, selection, clearAfter });
   }
 
-  async query(sparql: string, paranetId?: string): Promise<{ result: Record<string, unknown> }> {
+  async query(sparql: string, paranetId?: string): Promise<{ result: QueryResult }> {
     return this.post('/api/query', { sparql, paranetId });
   }
 

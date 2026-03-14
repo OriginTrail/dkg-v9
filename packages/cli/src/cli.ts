@@ -27,7 +27,8 @@ import {
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
 
-type ActionOpts = Record<string, unknown>;
+/** Commander action callbacks receive parsed .option() values with loose types. */
+type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
@@ -664,12 +665,12 @@ program
       const { result } = await client.query(sparql, paranet);
 
       if (result?.type === 'bindings' && result.bindings) {
-        if (result.bindings.length === 0) {
+        const { bindings } = result;
+        if (bindings.length === 0) {
           console.log('No results.');
           return;
         }
-        const keys = Object.keys(result.bindings[0]);
-        const bindings = result.bindings as Array<Record<string, string>>;
+        const keys = Object.keys(bindings[0]);
         const widths = keys.map(k => Math.max(k.length, ...bindings.map(
           (row) => stripQuotes(String(row[k] ?? '')).length,
         )));
@@ -708,10 +709,10 @@ program
       const client = await ApiClient.connect();
 
       let lookupType: string;
-      const request: Record<string, unknown> = {
+      const request: Record<string, any> = { // eslint-disable-line @typescript-eslint/no-explicit-any
         paranetId: opts.paranet,
-        limit: parseInt(opts.limit as string, 10),
-        timeout: parseInt(opts.timeout as string, 10),
+        limit: parseInt(opts.limit, 10),
+        timeout: parseInt(opts.timeout, 10),
       };
 
       if (opts.ual) {

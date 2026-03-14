@@ -105,7 +105,7 @@ describe('Private triple confidentiality via GossipSub', () => {
       PARANET,
     );
     expect(publicResult.bindings.length).toBeGreaterThanOrEqual(1);
-    expect(publicResult.bindings[0]['name']).toContain('PublicAgent');
+    expect(publicResult.bindings[0]['name']).toBe('"PublicAgent"');
 
     // Agent B should NOT have the private triples
     const apiKeyResult = await agentB.query(
@@ -172,7 +172,7 @@ describe('Private triple confidentiality via GossipSub', () => {
     expect(directResult.type).toBe('bindings');
     if (directResult.type === 'bindings') {
       expect(directResult.bindings).toHaveLength(1);
-      expect(directResult.bindings[0]['val']).toContain('top-secret-value');
+      expect(directResult.bindings[0]['val']).toBe('"top-secret-value"');
     }
 
     // Receiver B should have public but NOT private
@@ -373,7 +373,7 @@ describe('Paranet isolation', () => {
       'isolated-a',
     );
     expect(ownResult.bindings).toHaveLength(1);
-    expect(ownResult.bindings[0]['val']).toContain('TOP SECRET');
+    expect(ownResult.bindings[0]['val']).toBe('"TOP SECRET"');
   }, 15000);
 
   it('private triples in paranet A are not visible in paranet B queries', async () => {
@@ -494,7 +494,7 @@ describe('Access protocol round-trip', () => {
     expect(predicates).toContain('http://ex.org/modelPath');
 
     const apiKeyQuad = accessResult.quads.find(q => q.predicate === 'http://ex.org/apiKey');
-    expect(apiKeyQuad!.object).toContain('secret-api-key');
+    expect(apiKeyQuad!.object).toBe('"secret-api-key"');
   }, 20000);
 });
 

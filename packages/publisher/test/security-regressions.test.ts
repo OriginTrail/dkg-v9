@@ -86,7 +86,7 @@ describe('Prefix deletion safety', () => {
       expect(fooResult.type).toBe('bindings');
       if (fooResult.type === 'bindings') {
         expect(fooResult.bindings.length).toBe(1);
-        expect(fooResult.bindings[0]['o']).toContain('Foo Updated');
+        expect(fooResult.bindings[0]['o']).toBe('"Foo Updated"');
       }
 
       const foobarResult = await store.query(
@@ -95,7 +95,7 @@ describe('Prefix deletion safety', () => {
       expect(foobarResult.type).toBe('bindings');
       if (foobarResult.type === 'bindings') {
         expect(foobarResult.bindings.length).toBe(1);
-        expect(foobarResult.bindings[0]['o']).toContain('Foobar');
+        expect(foobarResult.bindings[0]['o']).toBe('"Foobar"');
       }
     });
   });
@@ -153,7 +153,7 @@ describe('Prefix deletion safety', () => {
       expect(foobarResult.type).toBe('bindings');
       if (foobarResult.type === 'bindings') {
         expect(foobarResult.bindings.length).toBe(1);
-        expect(foobarResult.bindings[0]['o']).toContain('Foobar');
+        expect(foobarResult.bindings[0]['o']).toBe('"Foobar"');
       }
     });
   });
@@ -209,7 +209,7 @@ describe('Prefix deletion safety', () => {
       expect(foobarResult.type).toBe('bindings');
       if (foobarResult.type === 'bindings') {
         expect(foobarResult.bindings.length).toBe(1);
-        expect(foobarResult.bindings[0]['o']).toContain('Foobar');
+        expect(foobarResult.bindings[0]['o']).toBe('"Foobar"');
       }
     });
   });
@@ -262,7 +262,7 @@ describe('Workspace metadata precision', () => {
     expect(bResult.type).toBe('bindings');
     if (bResult.type === 'bindings') {
       expect(bResult.bindings.length).toBe(1);
-      expect(bResult.bindings[0]['o']).toContain('B');
+      expect(bResult.bindings[0]['o']).toBe('"B"');
     }
 
     // entityB must still have a rootEntity link in workspace_meta
@@ -321,7 +321,7 @@ describe('chainId=none validation', () => {
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
-      expect(result.bindings[0]['o']).toContain('Original');
+      expect(result.bindings[0]['o']).toBe('"Original"');
     }
   });
 
@@ -354,7 +354,7 @@ describe('chainId=none validation', () => {
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
-      expect(result.bindings[0]['o']).toContain('Hello');
+      expect(result.bindings[0]['o']).toBe('"Hello"');
     }
   });
 
@@ -542,7 +542,7 @@ describe('Same-block ordering', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Update 2');
+      expect(result.bindings[0]['o']).toBe('"Update 2"');
     }
   });
 
@@ -592,7 +592,7 @@ describe('Same-block ordering', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Updated');
+      expect(result.bindings[0]['o']).toBe('"Updated"');
     }
   });
 });
@@ -632,7 +632,7 @@ describe('publisher.update() atomicity', () => {
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
-      expect(nameResult.bindings[0]['o']).toContain('Original');
+      expect(nameResult.bindings[0]['o']).toBe('"Original"');
     }
   });
 });
@@ -731,7 +731,7 @@ describe('Workspace peerId spoofing', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Legit');
+      expect(result.bindings[0]['o']).toBe('"Legit"');
     }
   });
 });
@@ -918,7 +918,7 @@ describe('Mock same-block txIndex ordering', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Update txIdx=1');
+      expect(result.bindings[0]['o']).toBe('"Update txIdx=1"');
     }
   });
 });
@@ -972,7 +972,7 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('Updated');
+      expect(result.bindings[0]['o']).toBe('"Updated"');
     }
   });
 
@@ -1221,7 +1221,7 @@ describe('parseCountLiteral robustness', () => {
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toContain('CountB');
+      expect(result.bindings[0]['o']).toBe('"CountB"');
     }
 
     // Verify entity A has the updated value
@@ -1231,7 +1231,7 @@ describe('parseCountLiteral robustness', () => {
     expect(resultA.type).toBe('bindings');
     if (resultA.type === 'bindings') {
       expect(resultA.bindings.length).toBe(1);
-      expect(resultA.bindings[0]['o']).toContain('CountA-v2');
+      expect(resultA.bindings[0]['o']).toBe('"CountA-v2"');
     }
   });
 });

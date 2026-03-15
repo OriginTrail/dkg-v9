@@ -93,7 +93,7 @@ describe('requestFaucetFunding', () => {
     const body = JSON.parse(call[1].body);
     expect(body.callerId).toBe('dkg-node:my-special-node');
     const headers = call[1].headers;
-    expect(headers['Idempotency-Key']).toMatch(/^init-my-special-node-/);
+    expect(headers['Idempotency-Key']).toMatch(/^init-test-my-special-node-/);
   });
 
   it('sanitizes non-ASCII node names in Idempotency-Key header', async () => {
@@ -104,7 +104,7 @@ describe('requestFaucetFunding', () => {
     const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const headers = call[1].headers;
     const key = headers['Idempotency-Key'];
-    expect(key).toMatch(/^init-mon-n_ud-_l_ve-0xAAA$/);
+    expect(key).toMatch(/^init-test-mon-n_ud-_l_ve-0xAAA$/);
     expect(key).toMatch(/^[\x20-\x7E]+$/);
   });
 });

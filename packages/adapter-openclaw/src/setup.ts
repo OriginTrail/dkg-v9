@@ -432,16 +432,15 @@ export function readWallets(): string[] {
     return [];
   }
 
-  const wallets = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+  const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+  // The daemon writes { wallets: [{ address, privateKey }] }.
+  // Handle this shape first, then fall back to other formats.
+  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
+    : Array.isArray(raw) ? raw
+    : [];
   const addresses: string[] = [];
-  if (Array.isArray(wallets)) {
-    for (const w of wallets) {
-      if (w?.address) addresses.push(w.address);
-    }
-  } else if (typeof wallets === 'object') {
-    for (const key of Object.keys(wallets)) {
-      if (wallets[key]?.address) addresses.push(wallets[key].address);
-    }
+  for (const w of walletList) {
+    if (w?.address) addresses.push(w.address);
   }
 
   if (addresses.length) {
@@ -657,12 +656,12 @@ export async function verifySetup(apiPort: number): Promise<void> {
     warn(`Could not reach daemon at port ${apiPort}: ${err.message}`);
   }
 
-  // Check wallets exist
+  // Check wallets exist (daemon writes { wallets: [...] })
   const walletsPath = join(dkgDir(), 'wallets.json');
   if (existsSync(walletsPath)) {
-    const wallets = JSON.parse(readFileSync(walletsPath, 'utf-8'));
-    const count = Array.isArray(wallets) ? wallets.length : Object.keys(wallets).length;
-    log(`${count} wallet(s) found`);
+    const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+    const list = Array.isArray(raw?.wallets) ? raw.wallets : Array.isArray(raw) ? raw : [];
+    log(`${list.length} wallet(s) found`);
   } else {
     warn('wallets.json not found');
   }

@@ -978,11 +978,11 @@ openclawCmd
     const { execFileSync } = await import('node:child_process');
     const extraArgs = process.argv.slice(process.argv.indexOf('setup') + 1);
     try {
-      // On Windows, npx is a .cmd shim that requires shell execution.
-      // execFileSync with shell: true on Windows, shell: false elsewhere.
-      const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      execFileSync(npxBin, ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
+      // On Windows, npx is a .cmd shim that requires shell: true.
+      // Arguments are passed as an array so the shell does not interpret them.
+      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
         stdio: 'inherit',
+        shell: process.platform === 'win32',
       });
     } catch (err: any) {
       if (err.status) {

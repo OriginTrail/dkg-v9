@@ -193,7 +193,7 @@ export function installDkgCli(): void {
 
 export function discoverWorkspace(override?: string): { configPath: string; workspaceDir: string } {
   if (override) {
-    const ws = resolve(override);
+    const ws = resolve(override.replace(/^~/, homedir()));
     if (!existsSync(ws)) throw new Error(`Workspace directory does not exist: ${ws}`);
     return { configPath: '', workspaceDir: ws };
   }
@@ -432,7 +432,13 @@ export function readWallets(): string[] {
     return [];
   }
 
-  const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+  let raw: any;
+  try {
+    raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+  } catch {
+    warn('wallets.json is malformed or still being written — skipping');
+    return [];
+  }
   // The daemon writes { wallets: [{ address, privateKey }] }.
   // Handle this shape first, then fall back to other formats.
   const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
@@ -659,9 +665,13 @@ export async function verifySetup(apiPort: number): Promise<void> {
   // Check wallets exist (daemon writes { wallets: [...] })
   const walletsPath = join(dkgDir(), 'wallets.json');
   if (existsSync(walletsPath)) {
-    const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
-    const list = Array.isArray(raw?.wallets) ? raw.wallets : Array.isArray(raw) ? raw : [];
-    log(`${list.length} wallet(s) found`);
+    try {
+      const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+      const list = Array.isArray(raw?.wallets) ? raw.wallets : Array.isArray(raw) ? raw : [];
+      log(`${list.length} wallet(s) found`);
+    } catch {
+      warn('wallets.json is malformed — cannot verify wallet count');
+    }
   } else {
     warn('wallets.json not found');
   }

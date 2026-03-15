@@ -976,7 +976,11 @@ openclawCmd
   .allowUnknownOption(true)
   .action(async () => {
     const { execFileSync } = await import('node:child_process');
-    const extraArgs = process.argv.slice(process.argv.indexOf('setup') + 1);
+    // Forward args after "openclaw setup" to the adapter setup script.
+    // Find "openclaw" first (unique subcommand name), then skip past "setup".
+    const oclawIdx = process.argv.indexOf('openclaw');
+    const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
+    const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
     try {
       // On Windows, npx is a .cmd shim that requires shell: true.
       // Arguments are passed as an array so the shell does not interpret them.

@@ -1,5 +1,4 @@
 import { defineConfig } from 'vitest/config';
-import { coverageThresholds } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
@@ -8,7 +7,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
       reportsDirectory: './coverage',
-      thresholds: coverageThresholds,
+      thresholds: { lines: 65, functions: 70, branches: 55, statements: 65 },
     },
   },
 });

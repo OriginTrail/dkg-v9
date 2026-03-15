@@ -976,18 +976,35 @@ openclawCmd
   .allowUnknownOption(true)
   .action(async () => {
     const { execFileSync } = await import('node:child_process');
+    const { createRequire } = await import('node:module');
     // Forward args after "openclaw setup" to the adapter setup script.
-    // Find "openclaw" first (unique subcommand name), then skip past "setup".
     const oclawIdx = process.argv.indexOf('openclaw');
     const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
     const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
     try {
-      // On Windows, npx is a .cmd shim that requires shell: true.
-      // Arguments are passed as an array so the shell does not interpret them.
-      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
-        stdio: 'inherit',
-        shell: process.platform === 'win32',
-      });
+      // Prefer locally installed adapter (deterministic, no version drift).
+      // Falls back to npx only for first-time setup when adapter isn't installed.
+      let adapterCli: string | null = null;
+      try {
+        const require = createRequire(import.meta.url);
+        const adapterPkg = require.resolve('@origintrail-official/dkg-adapter-openclaw/package.json');
+        adapterCli = join(adapterPkg, '..', 'dist', 'setup-cli.js');
+        if (!existsSync(adapterCli)) adapterCli = null;
+      } catch { /* not installed locally */ }
+
+      if (adapterCli) {
+        execFileSync(process.execPath, [adapterCli, 'setup', ...extraArgs], {
+          stdio: 'inherit',
+        });
+      } else {
+        // First-time: use npx to download and run the adapter setup.
+        // The setup script's ensureGlobalAdapter() will install it globally
+        // so subsequent runs use the local path above.
+        execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        });
+      }
     } catch (err: any) {
       if (err.status) {
         process.exit(err.status);

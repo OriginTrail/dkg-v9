@@ -518,11 +518,6 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   const raw = readFileSync(openclawConfigPath, 'utf-8');
   const config = JSON.parse(raw);
 
-  // Backup before modifying
-  const backupPath = `${openclawConfigPath}.bak.${Date.now()}`;
-  writeFileSync(backupPath, raw);
-  log(`Backed up ${openclawConfigPath}`);
-
   // Ensure plugins structure exists
   if (!config.plugins) config.plugins = {};
   if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
@@ -552,18 +547,30 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   }
 
   // Add to entries or ensure enabled (preserves other plugin-specific fields)
-  if (!config.plugins.entries[pluginId]) {
+  // Normalize non-object entries (e.g. boolean/string from legacy config)
+  const entry = config.plugins.entries[pluginId];
+  if (!entry || typeof entry !== 'object') {
     config.plugins.entries[pluginId] = { enabled: true };
     log(`Added ${pluginId} to plugins.entries`);
-  } else if (!config.plugins.entries[pluginId].enabled) {
-    config.plugins.entries[pluginId].enabled = true;
+  } else if (!entry.enabled) {
+    entry.enabled = true;
     log(`Re-enabled ${pluginId} in plugins.entries`);
   } else {
     log(`${pluginId} already in plugins.entries`);
   }
 
-  writeFileSync(openclawConfigPath, JSON.stringify(config, null, 2) + '\n');
-  log(`Updated ${openclawConfigPath}`);
+  const updated = JSON.stringify(config, null, 2) + '\n';
+  if (updated === raw) {
+    log('openclaw.json already up to date — no changes needed');
+    return;
+  }
+
+  // Backup only when content actually changes
+  const backupPath = `${openclawConfigPath}.bak.${Date.now()}`;
+  writeFileSync(backupPath, raw);
+
+  writeFileSync(openclawConfigPath, updated);
+  log(`Updated ${openclawConfigPath} (backed up original)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -757,9 +764,16 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 6: Read wallets and optionally fund
+  // Retry a few times since wallets.json may be written slightly after daemon start.
   let walletAddresses: string[] = [];
   if (!dryRun) {
     walletAddresses = readWallets();
+    if (!walletAddresses.length && shouldStart) {
+      for (let i = 0; i < 5 && !walletAddresses.length; i++) {
+        await sleep(1_000);
+        walletAddresses = readWallets();
+      }
+    }
     if (shouldFund && walletAddresses.length > 0) {
       await fundWallets(walletAddresses);
     } else if (!shouldFund) {

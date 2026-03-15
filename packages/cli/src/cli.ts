@@ -9,9 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import { requestFaucetFunding } from './faucet.js';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
+  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
 } from './config.js';
@@ -28,6 +29,15 @@ import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
+
+const STARTUP_BANNER = `
+\x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
+██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝\x1b[0m
+`;
 
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
@@ -207,9 +217,6 @@ program
       existingAuthEnabled ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
-    console.log('\nOperational wallets are stored in ~/.dkg/wallets.json');
-    console.log('They are auto-generated on first start. You can edit the file to add your own keys.');
-
     rl.close();
 
     const config = {
@@ -224,6 +231,17 @@ program
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
     };
     await saveConfig(config);
+
+    // Generate wallets eagerly so they're available for faucet funding
+    let walletAddresses: string[] = [];
+    try {
+      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
+      const opWallets = await loadOpWallets(dkgDir());
+      walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
+    } catch (err: any) {
+      console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
+      console.warn('Wallets will be auto-generated on first "dkg start".');
+    }
 
     console.log(`\nConfig saved to ${configPath()}`);
     console.log(`  name:       ${config.name}`);
@@ -247,6 +265,32 @@ program
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
+    if (walletAddresses.length) {
+      console.log(`  wallets:    ${walletAddresses.join(', ')}`);
+    }
+
+    // Auto-fund from testnet faucet if available
+    if (network?.faucet?.url && walletAddresses.length > 0) {
+      if (walletAddresses.length > 3) {
+        console.log(`\nNote: faucet supports up to 3 wallets; funding the first 3.`);
+      }
+      console.log(`\nRequesting testnet tokens from faucet...`);
+      try {
+        const result = await requestFaucetFunding(
+          network.faucet.url, network.faucet.mode, walletAddresses, config.name,
+        );
+        if (result.success) {
+          console.log(`  Funded: ${result.funded.join(', ')}`);
+        } else if (result.error) {
+          console.log(`  Faucet request failed (${result.error}). Fund manually or retry later.`);
+        } else {
+          console.log('  Faucet returned no successful transactions (you may already have tokens or hit a cooldown).');
+        }
+      } catch (err: any) {
+        console.log(`  Faucet unavailable: ${err?.message ?? String(err)}. Fund your wallet manually.`);
+      }
+    }
+
     console.log(`\nRun "dkg start" to start the node.`);
   });
 
@@ -361,16 +405,37 @@ program
     );
     child.unref();
 
-    // Wait for daemon to write its PID file
+    // Wait for daemon to write its PID file and API port
+    let startedPid: number | null = null;
     for (let i = 0; i < 30; i++) {
       await sleep(500);
       const newPid = await readPid();
       if (newPid && isProcessRunning(newPid)) {
-        const config = await loadConfig();
-        console.log(`DKG node "${config.name}" started (PID ${newPid}).`);
-        console.log(`Logs: ${logPath()}`);
-        return;
+        startedPid = newPid;
+        const rawPort = await readApiPort().catch(() => null);
+        if (Number.isFinite(rawPort) && rawPort! > 0) break;
       }
+    }
+    if (startedPid && isProcessRunning(startedPid)) {
+      const config = await loadConfig();
+      const rawPort = await readApiPort().catch(() => null);
+      const port = (Number.isFinite(rawPort) && rawPort! > 0) ? rawPort : (config.apiPort ?? 9200);
+      const host = config.apiHost && config.apiHost !== '0.0.0.0' ? config.apiHost : '127.0.0.1';
+      const hostDisplay = host.includes(':') ? `[${host}]` : host;
+      const isTTY = process.stdout.isTTY;
+      const cyan = (s: string) => isTTY ? `\x1b[4m\x1b[36m${s}\x1b[0m` : s;
+      const yellow = (s: string) => isTTY ? `\x1b[33m${s}\x1b[0m` : s;
+      console.log(isTTY ? STARTUP_BANNER : '');
+      console.log(`  Node:       ${config.name} (PID ${startedPid})`);
+      console.log(`  Node UI:    ${cyan(`http://${hostDisplay}:${port}/ui`)}`);
+      console.log(`  GitHub:     ${cyan('https://github.com/OriginTrail/dkg-v9')}`);
+      console.log(`  Discord:    ${cyan('https://discord.com/invite/xCaY7hvNwD')}`);
+      console.log(`  Logs:       ${logPath()}`);
+      console.log('');
+      console.log(`  ${yellow('This is an experimental testnet node. Things will break.')}`);
+      console.log(`  ${yellow('Not intended for production use.')}`);
+      console.log('');
+      return;
     }
     console.error('Daemon did not start within 15s. Check logs:', logPath());
     process.exit(1);

@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "9.0.0-beta.5",
+  "version": "9.0.0-beta.6",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
@@ -24,7 +24,7 @@
   },
   "devDependencies": {
     "@types/n3": "^1.26.1",
-    "vitest": "^3"
+    "vitest": "^4.0.18"
   },
   "publishConfig": {
     "access": "public"

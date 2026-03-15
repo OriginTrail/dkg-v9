@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   streamChatMessage,
   streamChatPersistenceEvents,
@@ -442,7 +443,7 @@ interface PeerMsg {
   text: string;
 }
 
-function PeerChatView() {
+function PeerChatView({ initialPeerId, onPeerSelected }: { initialPeerId?: string; onPeerSelected?: () => void }) {
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
   const [peerMessages, setPeerMessages] = useState<PeerMsg[]>([]);
@@ -452,7 +453,6 @@ function PeerChatView() {
   const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [peerMessages]);
@@ -493,6 +493,15 @@ function PeerChatView() {
     setPeerMessages([]);
     loadMessages(peer.peerId);
   }, [loadMessages]);
+
+  useEffect(() => {
+    if (!initialPeerId || peers.length === 0) return;
+    const match = peers.find(p => p.peerId === initialPeerId);
+    if (match) {
+      selectPeer(match);
+      onPeerSelected?.();
+    }
+  }, [peers, initialPeerId, selectPeer, onPeerSelected]);
 
   useEffect(() => {
     if (!selectedPeer) return;
@@ -1296,7 +1305,17 @@ function OpenClawChatView() {
 }
 
 export function AgentHubPage() {
-  const [mode, setMode] = useState<'agent' | 'peers' | 'openclaw'>('agent');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlTab = searchParams.get('tab');
+  const urlPeer = searchParams.get('peer');
+
+  const [deepLinkPeer, setDeepLinkPeer] = useState<{ peerId: string; nonce: number } | null>(
+    urlPeer ? { peerId: urlPeer, nonce: Date.now() } : null,
+  );
+
+  const [mode, setMode] = useState<'agent' | 'peers' | 'openclaw'>(
+    urlTab === 'peers' ? 'peers' : 'agent',
+  );
   const [nodeStatus, setNodeStatus] = useState<{ name?: string; hasOpenClawChannel?: boolean } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1304,8 +1323,24 @@ export function AgentHubPage() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    if (nodeStatus?.hasOpenClawChannel) setMode(prev => prev === 'agent' ? 'openclaw' : prev);
-  }, [nodeStatus]);
+    if (nodeStatus?.hasOpenClawChannel && mode === 'agent' && urlTab !== 'peers') {
+      setMode('openclaw');
+    }
+  }, [nodeStatus, urlTab, mode]);
+
+  useEffect(() => {
+    if (urlTab === 'peers') setMode('peers');
+    if (urlPeer) setDeepLinkPeer({ peerId: urlPeer, nonce: Date.now() });
+  }, [urlTab, urlPeer]);
+
+  useEffect(() => {
+    if (urlTab || urlPeer) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('tab');
+      next.delete('peer');
+      setSearchParams(next, { replace: true });
+    }
+  }, [urlTab, urlPeer, searchParams, setSearchParams]);
   const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -2693,7 +2728,7 @@ export function AgentHubPage() {
 
       {mode === 'peers' ? (
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          <PeerChatView />
+          <PeerChatView initialPeerId={deepLinkPeer?.peerId} onPeerSelected={() => setDeepLinkPeer(null)} />
         </div>
       ) : mode === 'openclaw' ? (
         <div style={{ flex: 1, overflow: 'hidden' }}>

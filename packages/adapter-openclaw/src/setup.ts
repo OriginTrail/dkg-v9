@@ -123,9 +123,17 @@ function ensureGlobalAdapter(): void {
     if (candidates.some(c => existsSync(c))) return; // already installed
   } catch { /* fall through */ }
 
-  log('Installing adapter globally for stable plugin path...');
+  // Pin to the current adapter version for reproducibility
+  let versionSuffix = '';
   try {
-    execSync('npm install -g @origintrail-official/dkg-adapter-openclaw', { stdio: 'inherit' });
+    const pkgPath = resolve(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+    if (pkg.version) versionSuffix = `@${pkg.version}`;
+  } catch { /* install latest as fallback */ }
+
+  log(`Installing adapter globally for stable plugin path...`);
+  try {
+    execSync(`npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`, { stdio: 'inherit' });
   } catch {
     warn('Could not install adapter globally — using current path (may be ephemeral npx cache)');
   }
@@ -347,13 +355,14 @@ export async function startDaemon(apiPort: number): Promise<void> {
             return;
           }
         } catch { /* not reachable on expected port */ }
-        // Daemon is running but not on the expected port — warn and continue
-        // (we won't kill the existing daemon; user must reconcile manually)
+        // PID is alive but not reachable — could be a stale PID, PID reuse,
+        // or a port mismatch. Warn and fall through to attempt dkg start,
+        // which will either succeed (if the PID wasn't actually DKG) or
+        // fail with a clear error (if port is genuinely in use).
         warn(
-          `DKG daemon is running (PID ${pid}) but not reachable on port ${apiPort}. ` +
-          'If you changed --port, stop the existing daemon first (dkg stop) and re-run setup.',
+          `PID ${pid} is alive but daemon not reachable on port ${apiPort}. ` +
+          'Attempting to start — if this fails, run "dkg stop" first.',
         );
-        return;
       }
     } catch { /* stale pid file */ }
   }
@@ -555,9 +564,9 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): voi
   existing['dkg-node'] = {
     ...dkgNode,
     daemonUrl: `http://127.0.0.1:${apiPort}`,
-    memory: { enabled: true, ...dkgNode.memory },
-    channel: { enabled: true, ...dkgNode.channel },
-    game: { enabled: true, ...dkgNode.game },
+    memory: { ...dkgNode.memory, enabled: true },
+    channel: { ...dkgNode.channel, enabled: true },
+    game: { ...dkgNode.game, enabled: true },
   };
 
   mkdirSync(workspaceDir, { recursive: true });

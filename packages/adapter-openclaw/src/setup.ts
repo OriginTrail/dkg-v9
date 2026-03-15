@@ -475,6 +475,8 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   }
 
   // Add to load paths (idempotent — check normalized versions)
+  // Filter out non-string entries from legacy/malformed configs
+  config.plugins.load.paths = config.plugins.load.paths.filter((p: unknown) => typeof p === 'string');
   const existingPaths = config.plugins.load.paths.map((p: string) => p.replace(/\\/g, '/'));
   if (!existingPaths.includes(normalizedPath)) {
     config.plugins.load.paths.push(normalizedPath);

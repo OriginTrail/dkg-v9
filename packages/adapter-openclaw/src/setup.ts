@@ -633,7 +633,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const shouldFund = options.fund !== false;
   const shouldVerify = options.verify !== false;
   const shouldStart = options.start !== false;
-  const apiPort = parseInt(options.port ?? '9200', 10);
+  const apiPort = Number(options.port ?? '9200');
   if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535) {
     throw new Error(`Invalid port "${options.port}" — must be an integer between 1 and 65535`);
   }
@@ -661,9 +661,19 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   log(`Agent name: ${agentName}`);
 
   // Step 4: Write DKG config
-  const network = loadNetworkConfig();
+  let network: NetworkConfig | null = null;
+  try {
+    network = loadNetworkConfig();
+  } catch (err: any) {
+    if (dryRun) {
+      warn(`Could not load network config: ${err.message}`);
+      log('[dry-run] Skipping config write (network config unavailable)');
+    } else {
+      throw err;
+    }
+  }
   let effectivePort = apiPort;
-  if (!dryRun) {
+  if (!dryRun && network) {
     writeDkgConfig(agentName, network, apiPort, {
       nameExplicit: options.name != null,
       portExplicit: options.port != null,
@@ -677,7 +687,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
         effectivePort = merged.apiPort;
       }
     } catch { /* use apiPort */ }
-  } else {
+  } else if (network) {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
 

@@ -114,24 +114,35 @@ function adapterRoot(): string {
  * a stable path. Called before writing `openclaw.json`.
  */
 function ensureGlobalAdapter(): void {
+  // Read the current (running) adapter version
+  let currentVersion = '';
+  try {
+    const pkgPath = resolve(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+    currentVersion = pkg.version ?? '';
+  } catch { /* unknown */ }
+
+  // Check if a global install exists and whether its version matches
   try {
     const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     const candidates = [
       join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
       join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
     ];
-    if (candidates.some(c => existsSync(c))) return; // already installed
-  } catch { /* fall through */ }
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        const installed = JSON.parse(readFileSync(candidate, 'utf-8'));
+        if (installed.version === currentVersion || !currentVersion) {
+          return; // version matches (or we can't determine current version)
+        }
+        log(`Global adapter ${installed.version} differs from current ${currentVersion} — upgrading`);
+        break;
+      }
+    }
+  } catch { /* fall through to install */ }
 
-  // Pin to the current adapter version for reproducibility
-  let versionSuffix = '';
-  try {
-    const pkgPath = resolve(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-    if (pkg.version) versionSuffix = `@${pkg.version}`;
-  } catch { /* install latest as fallback */ }
-
-  log(`Installing adapter globally for stable plugin path...`);
+  const versionSuffix = currentVersion ? `@${currentVersion}` : '';
+  log('Installing adapter globally for stable plugin path...');
   try {
     execSync(`npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`, { stdio: 'inherit' });
   } catch {

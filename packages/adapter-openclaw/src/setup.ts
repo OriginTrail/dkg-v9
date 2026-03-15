@@ -191,7 +191,10 @@ export function discoverWorkspace(override?: string): { configPath: string; work
     config?.workspaceDir;
 
   if (workspaceDir) {
-    const resolved = resolve(workspaceDir.replace(/^~/, homedir()));
+    const expanded = workspaceDir.replace(/^~/, homedir());
+    // Resolve relative paths from the config file's directory, not cwd,
+    // so setup produces the same result regardless of working directory.
+    const resolved = resolve(dirname(configPath), expanded);
     return { configPath, workspaceDir: resolved };
   }
 
@@ -336,7 +339,20 @@ export async function startDaemon(apiPort: number): Promise<void> {
     try {
       const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10);
       if (pid && isProcessRunning(pid)) {
-        log(`DKG daemon already running (PID ${pid})`);
+        // Verify the running daemon is reachable on the expected port
+        try {
+          const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
+          if (res.ok) {
+            log(`DKG daemon already running (PID ${pid}, port ${apiPort})`);
+            return;
+          }
+        } catch { /* not reachable on expected port */ }
+        // Daemon is running but not on the expected port — warn and continue
+        // (we won't kill the existing daemon; user must reconcile manually)
+        warn(
+          `DKG daemon is running (PID ${pid}) but not reachable on port ${apiPort}. ` +
+          'If you changed --port, stop the existing daemon first (dkg stop) and re-run setup.',
+        );
         return;
       }
     } catch { /* stale pid file */ }

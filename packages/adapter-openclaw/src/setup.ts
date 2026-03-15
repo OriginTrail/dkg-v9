@@ -16,7 +16,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -130,7 +130,8 @@ export function installDkgCli(): void {
 export function discoverWorkspace(override?: string): { configPath: string; workspaceDir: string } {
   if (override) {
     const ws = resolve(override.replace(/^~/, homedir()));
-    if (!existsSync(ws)) throw new Error(`Workspace directory does not exist: ${ws}`);
+    if (!existsSync(ws)) throw new Error(`Workspace path does not exist: ${ws}`);
+    if (!statSync(ws).isDirectory()) throw new Error(`Workspace path is not a directory: ${ws}`);
     return { configPath: '', workspaceDir: ws };
   }
 

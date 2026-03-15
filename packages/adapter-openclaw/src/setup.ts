@@ -146,7 +146,13 @@ function ensureGlobalAdapter(): void {
   try {
     execSync(`npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`, { stdio: 'inherit' });
   } catch {
-    warn('Could not install adapter globally — using current path (may be ephemeral npx cache)');
+    // Don't silently continue with an ephemeral npx cache path —
+    // that would break after cache cleanup.
+    throw new Error(
+      'Could not install the adapter globally. A global install is required ' +
+      'so that the plugin path in openclaw.json remains stable. Run:\n' +
+      `  npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`,
+    );
   }
 }
 
@@ -514,9 +520,9 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
 
   // Ensure plugins structure exists
   if (!config.plugins) config.plugins = {};
-  if (!config.plugins.allow) config.plugins.allow = [];
+  if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
   if (!config.plugins.load) config.plugins.load = {};
-  if (!config.plugins.load.paths) config.plugins.load.paths = [];
+  if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
   if (!config.plugins.entries) config.plugins.entries = {};
 
   const pluginId = 'adapter-openclaw';
@@ -723,8 +729,9 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     // an existing config had a different apiPort that was preserved.
     try {
       const merged = JSON.parse(readFileSync(join(dkgDir(), 'config.json'), 'utf-8'));
-      if (merged.apiPort && Number.isInteger(merged.apiPort)) {
-        effectivePort = merged.apiPort;
+      const mergedPort = Number(merged.apiPort);
+      if (Number.isInteger(mergedPort) && mergedPort >= 1 && mergedPort <= 65535) {
+        effectivePort = mergedPort;
       }
     } catch { /* use apiPort */ }
   } else if (network) {
@@ -754,12 +761,16 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 7: Merge adapter into openclaw.json
-  // Ensure adapter is globally installed so we get a stable path
-  // (npx cache paths are ephemeral and break after cleanup)
-  if (!dryRun) {
+  // Resolve a stable adapter path for openclaw.json. In a monorepo checkout,
+  // adapterRoot() returns the monorepo path directly. For npx runs, we ensure
+  // a global install exists so the path survives cache cleanup.
+  let resolvedAdapterPath = adapterRoot();
+  const isMonorepo = existsSync(join(resolvedAdapterPath, 'openclaw-entry.mjs'))
+    && existsSync(join(resolvedAdapterPath, '..', '..', 'package.json'));
+  if (!dryRun && !isMonorepo) {
     ensureGlobalAdapter();
+    resolvedAdapterPath = adapterRoot(); // re-resolve to pick up stable global path
   }
-  const resolvedAdapterPath = adapterRoot();
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
   } else {

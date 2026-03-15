@@ -134,6 +134,18 @@ describe('readDkgApiPort', () => {
     expect(await readDkgApiPort(tempDir)).toBeNull();
   });
 
+  it('does NOT fall through to file when env is whitespace-only', async () => {
+    process.env.DKG_API_PORT = '   ';
+    await writeFile(join(tempDir, 'api.port'), '9200');
+    expect(await readDkgApiPort(tempDir)).toBeNull();
+  });
+
+  it('does NOT fall through to file when env is empty string', async () => {
+    process.env.DKG_API_PORT = '';
+    await writeFile(join(tempDir, 'api.port'), '9200');
+    expect(await readDkgApiPort(tempDir)).toBeNull();
+  });
+
   it('rejects hex port like "0x2390"', async () => {
     process.env.DKG_API_PORT = '0x2390';
     expect(await readDkgApiPort(tempDir)).toBeNull();

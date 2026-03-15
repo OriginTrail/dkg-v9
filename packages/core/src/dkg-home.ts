@@ -41,8 +41,9 @@ export function isProcessAlive(pid: number): boolean {
  * fall through to the file) to avoid silently connecting to a stale port.
  */
 export async function readDkgApiPort(dkgHome?: string): Promise<number | null> {
-  const envRaw = process.env.DKG_API_PORT?.trim();
-  if (envRaw) return parsePort(envRaw);
+  if (process.env.DKG_API_PORT !== undefined) {
+    return parsePort(process.env.DKG_API_PORT.trim());
+  }
 
   try {
     const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'api.port'), 'utf-8');

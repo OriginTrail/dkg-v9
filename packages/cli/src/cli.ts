@@ -964,6 +964,29 @@ paranetCmd
     }
   });
 
+// ─── dkg openclaw ───────────────────────────────────────────────────
+
+const openclawCmd = program
+  .command('openclaw')
+  .description('OpenClaw adapter management');
+
+openclawCmd
+  .command('setup')
+  .description('Set up the DKG OpenClaw adapter (runs npx setup script)')
+  .allowUnknownOption(true)
+  .action(async () => {
+    const { execSync } = await import('node:child_process');
+    const args = process.argv.slice(process.argv.indexOf('setup') + 1).join(' ');
+    try {
+      execSync(`npx @origintrail-official/dkg-adapter-openclaw setup ${args}`, {
+        stdio: 'inherit',
+      });
+    } catch {
+      console.log('\nIf the adapter is not installed, run:');
+      console.log('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+    }
+  });
+
 // ─── dkg index ──────────────────────────────────────────────────────
 
 program

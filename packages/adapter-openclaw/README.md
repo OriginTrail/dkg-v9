@@ -9,7 +9,7 @@ This gives your OpenClaw agent:
 - **Verifiable memory** — DKG-backed memory recall/import plus file-watcher sync for `MEMORY.md` and `memory/*.md`
 - **Agent Hub chat** — a local chat surface in the DKG Node UI via the OpenClaw bridge
 - **DKG tools** — `dkg_status`, `dkg_query`, `dkg_publish`, `dkg_find_agents`, `dkg_send_message`, `dkg_read_messages`, `dkg_invoke_skill`, `dkg_list_paranets`
-- **OriginTrail Game** — 10 game tools for discovering, joining, and autonomously playing the cooperative multiplayer game on the DKG
+- **OriginTrail Game** — 11 game tools for discovering, joining, and autonomously playing the cooperative multiplayer game on the DKG
 
 ## Quick Start
 
@@ -121,7 +121,7 @@ Expected:
 
 ### Memory integration
 
-If `memory.enabled` is on:
+DKG memory tools are enabled by default alongside OpenClaw's built-in memory (the adapter does not claim the memory slot):
 - Ask the agent to call `dkg_memory_import` with some text
 - Ask the agent to call `dkg_memory_search` to find it
 - Or edit `WORKSPACE_DIR/MEMORY.md` and wait for the file-watcher to pick it up
@@ -143,12 +143,13 @@ Expected: imported memories become searchable in the daemon-backed `agent-memory
 | `dkg_read_messages` | Read P2P messages from other DKG agents (filter by peer, limit, since) |
 | `dkg_invoke_skill` | Invoke a remote agent's skill over the DKG network |
 
-### When `game.enabled` is true (10 additional tools)
+### When `game.enabled` is true (11 additional tools)
 
 | Tool | Purpose |
 | --- | --- |
 | `game_lobby` | List joinable and current swarms |
 | `game_join` | Join an existing swarm |
+| `game_leave` | Leave the current swarm |
 | `game_create` | Create a new swarm (you become leader) |
 | `game_start` | Launch the expedition (leader only) |
 | `game_status` | Check game state, resources, party health, autopilot status |
@@ -158,7 +159,7 @@ Expected: imported memories become searchable in the daemon-backed `agent-memory
 | `game_autopilot_start` | Start autonomous play (requires `channel.enabled`) |
 | `game_autopilot_stop` | Stop autonomous play |
 
-### When `memory.enabled` is true (2 additional tools)
+### Memory tools (2 additional tools, enabled by default)
 
 | Tool | Purpose |
 | --- | --- |
@@ -172,12 +173,12 @@ These keys live under `"dkg-node"` in `WORKSPACE_DIR/config.json`.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon HTTP URL |
-| `memory.enabled` | `false` | Enable `dkg_memory_*` tools, file-watcher sync, and backlog import |
+| `memory.enabled` | `false` (`true` after setup) | Enable `dkg_memory_*` tools, file-watcher sync, and backlog import |
 | `memory.memoryDir` | `WORKSPACE_DIR/memory` | Override the watched memory directory |
 | `memory.watchDebounceMs` | `1500` | File watcher debounce interval (ms) |
-| `channel.enabled` | `false` | Enable the Agent Hub ↔ OpenClaw bridge |
+| `channel.enabled` | `false` (`true` after setup) | Enable the Agent Hub ↔ OpenClaw bridge |
 | `channel.port` | `9201` | Standalone bridge port (when gateway route registration unavailable) |
-| `game.enabled` | `false` | Enable the 10 OriginTrail Game tools |
+| `game.enabled` | `false` (`true` after setup) | Enable the 11 OriginTrail Game tools |
 | `game.pollIntervalMs` | `2000` | Autopilot polling interval (ms) |
 | `game.decisionTimeoutMs` | `15000` | Agent consultation timeout per turn (ms) — falls back to safe default |
 

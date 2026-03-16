@@ -167,6 +167,10 @@ export class ApiClient {
     return this.post('/api/subscribe', { paranetId, ...options });
   }
 
+  async unsubscribe(paranetId: string): Promise<{ unsubscribed: string }> {
+    return this.post('/api/unsubscribe', { paranetId });
+  }
+
   async catchupStatus(paranetId: string): Promise<{
     jobId: string;
     paranetId: string;
@@ -207,6 +211,9 @@ export class ApiClient {
       creator?: string;
       createdAt?: string;
       isSystem: boolean;
+      subscribed?: boolean;
+      synced?: boolean;
+      denyListed?: boolean;
     }>;
   }> {
     return this.get('/api/paranet/list');

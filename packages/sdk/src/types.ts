@@ -1,0 +1,309 @@
+export interface DKGClientOptions {
+  baseUrl: string;
+  token?: string;
+  timeoutMs?: number;
+  headers?: Record<string, string>;
+}
+
+export interface Quad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph: string;
+}
+
+export interface NodeStatus {
+  name: string;
+  peerId: string;
+  nodeRole?: string;
+  networkId?: string;
+  uptimeMs: number;
+  connectedPeers: number;
+  relayConnected: boolean;
+  multiaddrs: string[];
+}
+
+export interface DKGSDK {
+  node: {
+    status(): Promise<NodeStatus>;
+  };
+  paranet: {
+    list(): Promise<ListParanetsResponse>;
+    create(input: CreateParanetInput): Promise<CreateParanetResponse>;
+    exists(id: string): Promise<ParanetExistsResponse>;
+    subscribe(paranetId: string, options?: SubscribeParanetOptions): Promise<SubscribeParanetResponse>;
+    catchupStatus(paranetId: string): Promise<CatchupStatusResponse>;
+  };
+  publish: {
+    quads(input: PublishQuadsInput): Promise<PublishResult>;
+    workspaceWrite(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult>;
+    workspaceEnshrine(input: WorkspaceEnshrineInput): Promise<WorkspaceEnshrineResult>;
+  };
+  context: {
+    create(input: ContextCreateInput): Promise<ContextCreateResult>;
+  };
+  query: {
+    sparql(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+    remote(input: QueryRemoteInput): Promise<QueryRemoteResult>;
+  };
+  agent: {
+    list(filters?: AgentListFilters): Promise<AgentListResponse>;
+    skills(filters?: AgentSkillFilters): Promise<AgentSkillsResponse>;
+    invokeSkill(input: AgentInvokeSkillInput): Promise<AgentInvokeSkillResult>;
+    chat(input: AgentChatInput): Promise<AgentChatResult>;
+    messages(options?: AgentMessagesOptions): Promise<AgentMessagesResponse>;
+  };
+}
+
+export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+export interface KARef {
+  tokenId: string;
+  rootEntity: string;
+}
+
+export interface PublishResult {
+  kcId: string;
+  status: 'tentative' | 'confirmed';
+  kas: KARef[];
+  txHash?: string;
+  blockNumber?: number;
+  batchId?: string;
+  publisherAddress?: string;
+}
+
+export interface PublishQuadsInput {
+  paranetId: string;
+  quads: Quad[];
+  privateQuads?: Quad[];
+  accessPolicy?: AccessPolicy;
+  allowedPeers?: string[];
+}
+
+export interface WorkspaceWriteInput {
+  paranetId: string;
+  quads: Quad[];
+}
+
+export interface WorkspaceWriteResult {
+  workspaceOperationId: string;
+  paranetId: string;
+  graph: string;
+  triplesWritten: number;
+  skolemizedBlankNodes?: number;
+}
+
+export type WorkspaceSelection = 'all' | { rootEntities: string[] };
+
+export interface WorkspaceEnshrineInput {
+  paranetId: string;
+  selection?: WorkspaceSelection;
+  clearAfter?: boolean;
+  contextGraphId?: string | number | bigint;
+}
+
+export interface WorkspaceEnshrineResult {
+  kcId: string;
+  status: 'tentative' | 'confirmed';
+  kas: KARef[];
+  txHash?: string;
+  blockNumber?: number;
+  contextGraphId?: string;
+  contextGraphError?: string;
+}
+
+export interface ContextCreateInput {
+  participantIdentityIds: Array<number | string | bigint>;
+  requiredSignatures: number;
+}
+
+export interface ContextCreateResult {
+  contextGraphId: string;
+  success: boolean;
+}
+
+export interface QueryOptions {
+  paranetId?: string;
+}
+
+export interface QueryResult {
+  result: unknown;
+}
+
+export interface QueryRemoteInput {
+  peerId: string;
+  lookupType: string;
+  paranetId?: string;
+  ual?: string;
+  entityUri?: string;
+  rdfType?: string;
+  sparql?: string;
+  limit?: number;
+  timeout?: number;
+}
+
+export interface QueryRemoteResult {
+  operationId: string;
+  status: string;
+  ntriples?: string;
+  bindings?: string;
+  entityUris?: string[];
+  truncated: boolean;
+  resultCount: number;
+  gasConsumed?: number;
+  error?: string;
+}
+
+export interface AgentListFilters {
+  framework?: string;
+  skillType?: string;
+}
+
+export interface AgentSummary {
+  agentUri: string;
+  name: string;
+  peerId: string;
+  framework?: string;
+  nodeRole?: string;
+  connectionStatus?: 'self' | 'connected' | 'disconnected';
+  connectionTransport?: 'direct' | 'relayed' | null;
+  connectionDirection?: string | null;
+  connectedSinceMs?: number | null;
+  lastSeen?: number | null;
+  latencyMs?: number | null;
+}
+
+export interface AgentListResponse {
+  agents: AgentSummary[];
+}
+
+export interface AgentSkillFilters {
+  skillType?: string;
+}
+
+export interface AgentSkill {
+  agentUri: string;
+  peerId?: string;
+  agentName: string;
+  skillType: string;
+  skillUri?: string;
+  description?: string;
+  pricePerCall?: number;
+  currency?: string;
+}
+
+export interface AgentSkillsResponse {
+  skills: AgentSkill[];
+}
+
+export interface AgentInvokeSkillInput {
+  peerId: string;
+  skillUri: string;
+  input?: string;
+}
+
+export interface AgentInvokeSkillResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+  executionTimeMs?: number;
+}
+
+export interface AgentChatInput {
+  to: string;
+  text: string;
+}
+
+export interface AgentChatResult {
+  delivered: boolean;
+  error?: string;
+  phases?: {
+    resolve?: number;
+    send?: number;
+    serverTotal?: number;
+  };
+}
+
+export interface AgentMessage {
+  ts: number;
+  direction: 'in' | 'out';
+  peer: string;
+  peerName?: string;
+  text: string;
+  delivered?: boolean;
+}
+
+export interface AgentMessagesOptions {
+  peer?: string;
+  since?: number;
+  limit?: number;
+}
+
+export interface AgentMessagesResponse {
+  messages: AgentMessage[];
+}
+
+export interface ParanetSummary {
+  id: string;
+  uri: string;
+  name: string;
+  description?: string;
+  creator?: string;
+  createdAt?: string;
+  isSystem: boolean;
+}
+
+export interface ListParanetsResponse {
+  paranets: ParanetSummary[];
+}
+
+export interface CreateParanetInput {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface CreateParanetResponse {
+  created: string;
+  uri: string;
+}
+
+export interface ParanetExistsResponse {
+  id: string;
+  exists: boolean;
+}
+
+export interface SubscribeParanetOptions {
+  includeWorkspace?: boolean;
+}
+
+export interface CatchupResult {
+  connectedPeers: number;
+  syncCapablePeers: number;
+  peersTried: number;
+  dataSynced: number;
+  workspaceSynced: number;
+}
+
+export interface QueuedCatchup {
+  status: 'queued';
+  includeWorkspace: boolean;
+  jobId: string;
+}
+
+export interface SubscribeParanetResponse {
+  subscribed: string;
+  catchup?: CatchupResult | QueuedCatchup;
+}
+
+export interface CatchupStatusResponse {
+  jobId: string;
+  paranetId: string;
+  includeWorkspace: boolean;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: CatchupResult;
+  error?: string;
+}

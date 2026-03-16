@@ -1,0 +1,17 @@
+{
+  "name": "@origintrail-official/dkg-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:integration": "vitest run test/integration-daemon.test.ts",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "vitest": "^3.2.4"
+  }
+}

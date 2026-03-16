@@ -32,6 +32,7 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), 'dkg-mig-'));
   dkgHome = join(tmpDir, '.dkg');
   vi.stubEnv('DKG_HOME', dkgHome);
+  vi.clearAllMocks();
   await mkdir(dkgHome, { recursive: true });
 });
 
@@ -132,6 +133,8 @@ describe('migrateToBlueGreen', () => {
     const { execSync, execFileSync } = await import('node:child_process');
     const mockedExecSync = vi.mocked(execSync);
     const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecSync.mockClear();
+    mockedExecFileSync.mockClear();
     const { migrateToBlueGreen } = await import('../src/migration.js');
     const log = vi.fn();
 
@@ -159,6 +162,7 @@ describe('migrateToBlueGreen', () => {
 
     const { execFileSync } = await import('node:child_process');
     const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecFileSync.mockClear();
     const { migrateToBlueGreen } = await import('../src/migration.js');
 
     await migrateToBlueGreen(vi.fn(), { allowRemoteBootstrap: true });
@@ -186,6 +190,7 @@ describe('migrateToBlueGreen', () => {
 
     const { execFileSync } = await import('node:child_process');
     const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecFileSync.mockClear();
     const { migrateToBlueGreen } = await import('../src/migration.js');
 
     await migrateToBlueGreen(vi.fn(), { allowRemoteBootstrap: true });
@@ -250,6 +255,7 @@ describe('migrateToBlueGreen', () => {
   it('when local repo exists, slot B clones from same local source path', async () => {
     const { execFileSync } = await import('node:child_process');
     const mockedExecFileSync = vi.mocked(execFileSync);
+    mockedExecFileSync.mockClear();
     const { repoDir } = await import('../src/config.js');
     const expectedSource = repoDir();
 

@@ -893,8 +893,11 @@ ul li { padding: 0.2rem 0; }
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 10px;
-  font-size: 11px;
-  white-space: nowrap;
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  white-space: normal;
+  max-width: 260px;
+  line-height: 1.4;
   z-index: 10;
   pointer-events: none;
   transition: opacity 0.15s;

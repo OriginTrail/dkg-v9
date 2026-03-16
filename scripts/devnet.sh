@@ -76,9 +76,10 @@ start_hardhat() {
 
   cd "$REPO_ROOT/packages/evm-module"
 
-  # Remove stale deployment artifacts so the fresh chain starts clean
+  # Remove stale deployment artifacts + marker so the fresh chain starts clean
   rm -f "$REPO_ROOT/packages/evm-module/deployments/hardhat_contracts.json"
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
+  rm -f "$DEVNET_DIR/hardhat/deployed"
 
   npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
@@ -299,12 +300,10 @@ create_node_config() {
     node_role="core"
   fi
 
-  # Node 1 (relay) sets relay="none" to prevent connecting to testnet relays.
-  # Other nodes get their relay set later in start_node() once node1 is running.
-  local relay_value=""
-  if [ "$node_num" -eq 1 ]; then
-    relay_value='"relay": "none",'
-  fi
+  # All devnet nodes start with relay="none" to prevent falling back to testnet
+  # relays from network/testnet.json. Nodes 2+ get their relay overridden in
+  # start_node() to point at node 1's local multiaddr.
+  local relay_value='"relay": "none",'
 
   # Backend assignment:
   #   Node 1-2: oxigraph-worker  (worker thread, file-persisted — production default)
@@ -436,35 +435,47 @@ start_node() {
   # compiles Solidity contracts which is CPU-intensive.
   local api_port=$((API_PORT_BASE + node_num - 1))
   local max_wait=30
-  [ "$node_num" -eq 1 ] && max_wait=60
+  [ "$node_num" -eq 1 ] && max_wait=120
+  local ready=false
   for i in $(seq 1 "$max_wait"); do
     if curl -s "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
       log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
-
-      # For node 1 (relay), save its multiaddr so other nodes can connect
-      if [ "$node_num" -eq 1 ]; then
-        local peer_info
-        peer_info=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
-        local peer_id
-        peer_id=$(echo "$peer_info" | node -e "
-          let d=''; process.stdin.on('data',c=>d+=c);
-          process.stdin.on('end',()=>{
-            try{const j=JSON.parse(d);console.log(j.peerId||'')}catch{console.log('')}
-          })
-        " 2>/dev/null || echo "")
-
-        if [ -n "$peer_id" ]; then
-          local libp2p_port=$((LIBP2P_PORT_BASE))
-          echo "/ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}" > "$DEVNET_DIR/node1/multiaddr"
-          log "Relay multiaddr saved: /ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}"
-        fi
-      fi
-      return 0
+      ready=true
+      break
     fi
     sleep 1
   done
 
-  log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log)"
+  if [ "$ready" = false ]; then
+    log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log)"
+  fi
+
+  # For node 1 (relay), save its multiaddr so other nodes can connect.
+  # Retry a few times even if initial wait timed out — node may still be booting.
+  if [ "$node_num" -eq 1 ]; then
+    local peer_id=""
+    for attempt in $(seq 1 10); do
+      local peer_info
+      peer_info=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
+      peer_id=$(echo "$peer_info" | node -e "
+        let d=''; process.stdin.on('data',c=>d+=c);
+        process.stdin.on('end',()=>{
+          try{const j=JSON.parse(d);console.log(j.peerId||'')}catch{console.log('')}
+        })
+      " 2>/dev/null || echo "")
+      [ -n "$peer_id" ] && break
+      sleep 3
+    done
+
+    if [ -n "$peer_id" ]; then
+      local libp2p_port=$((LIBP2P_PORT_BASE))
+      echo "/ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}" > "$DEVNET_DIR/node1/multiaddr"
+      log "Relay multiaddr saved: /ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}"
+    else
+      log "ERROR: Could not extract relay multiaddr for node 1 — aborting devnet start"
+      return 1
+    fi
+  fi
 }
 
 stop_devnet_nodes_only() {

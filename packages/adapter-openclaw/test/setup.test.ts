@@ -40,24 +40,32 @@ describe('discoverAgentName', () => {
     expect(discoverAgentName('/nonexistent', 'my-agent')).toBe('my-agent');
   });
 
-  it('parses name from IDENTITY.md', () => {
+  it('parses name from IDENTITY.md with Name field', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nAlice\n');
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\n- **Name**: Alice\n- **Role**: Assistant\n');
     expect(discoverAgentName(ws)).toBe('Alice');
   });
 
-  it('skips heading lines in IDENTITY.md', () => {
+  it('parses name from plain Name: format', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'IDENTITY.md'), '# My Agent\n## Sub\nBob\n');
+    writeFileSync(join(ws, 'IDENTITY.md'), '# My Agent\nName: Bob\n');
     expect(discoverAgentName(ws)).toBe('Bob');
   });
 
-  it('falls back to directory name when IDENTITY.md is missing', () => {
+  it('falls back to generated name when IDENTITY.md has no Name field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls back to generated name when IDENTITY.md is missing', () => {
     const ws = join(testDir, 'my-workspace');
     mkdirSync(ws, { recursive: true });
-    expect(discoverAgentName(ws)).toBe('my-workspace');
+    const name = discoverAgentName(ws);
+    expect(name).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 });
 

@@ -182,16 +182,17 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
   const identityPath = join(workspaceDir, 'IDENTITY.md');
   if (existsSync(identityPath)) {
     const raw = readFileSync(identityPath, 'utf-8');
-    // Parse first non-empty, non-heading line as the name
+    // Look for a "Name: value" field (common IDENTITY.md format)
     for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith('#')) return trimmed;
+      const nameMatch = line.match(/^\s*[-*]*\s*\**Name\**\s*:\s*(.+)/i);
+      if (nameMatch) return nameMatch[1].trim();
     }
   }
 
-  // Fallback to directory name
-  const name = workspaceDir.split(/[/\\]/).filter(Boolean).pop() ?? 'dkg-agent';
-  warn(`Could not read IDENTITY.md — using "${name}" as agent name`);
+  // Fallback: generate a unique name
+  const id = Math.random().toString(36).slice(2, 8);
+  const name = `openclaw-agent-${id}`;
+  warn(`Could not determine agent name from IDENTITY.md — using "${name}"`);
   return name;
 }
 

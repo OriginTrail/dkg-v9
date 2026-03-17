@@ -48,6 +48,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { handleCapture, EpcisValidationError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
 function getNodeVersion(): string {
@@ -2215,6 +2216,36 @@ async function handleRequest(
     jsonResponse(res, 200, { ok: true });
     setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100);
     return;
+  }
+
+  // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
+  if (req.method === 'POST' && path === '/api/epcis/capture') {
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    }
+    const body = await readBody(req);
+    const { epcisDocument, publishOptions } = JSON.parse(body);
+    if (!epcisDocument) {
+      return jsonResponse(res, 400, { error: 'Missing "epcisDocument" in request body' });
+    }
+    const epcisPublisher: EpcisPublisher = {
+      async publish(paranetId, content, opts) {
+        const result = await agent.publish(paranetId, content as any, opts as any);
+        return { ual: result.ual, kcId: String(result.kcId), status: result.status };
+      },
+    };
+    try {
+      const result = await handleCapture(
+        { epcisDocument, publishOptions },
+        { paranetId: config.epcis.paranetId, publisher: epcisPublisher },
+      );
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      if (err instanceof EpcisValidationError) {
+        return jsonResponse(res, 400, { error: err.message, details: err.errors });
+      }
+      throw err;
+    }
   }
 
   jsonResponse(res, 404, { error: 'Not found' });

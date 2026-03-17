@@ -12,6 +12,9 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   review:
     name: Codex Review
@@ -28,7 +31,13 @@ jobs:
           fetch-depth: 0
 
       - name: Generate PR diff
-        run: git diff ${{ github.event.pull_request.base.sha }}...HEAD > pr-diff.patch
+        run: |
+          git diff ${{ github.event.pull_request.base.sha }}...HEAD > pr-diff.patch
+          DIFF_LINES=$(wc -l < pr-diff.patch)
+          echo "Diff size: ${DIFF_LINES} lines"
+          if [ "$DIFF_LINES" -eq 0 ]; then
+            echo "::warning::PR diff is empty — nothing to review"
+          fi
 
       - name: Run Codex review
         id: codex
@@ -46,12 +55,14 @@ jobs:
           REVIEW_JSON: ${{ steps.codex.outputs.final-message }}
         with:
           script: |
+            const raw = process.env.REVIEW_JSON || '';
+            console.log(`Raw Codex output (${raw.length} chars): ${raw.slice(0, 1000)}`);
+
             let review;
             try {
-              review = JSON.parse(process.env.REVIEW_JSON);
+              review = JSON.parse(raw);
             } catch (e) {
               console.error('Failed to parse Codex output:', e.message);
-              console.error('Raw output:', process.env.REVIEW_JSON?.slice(0, 500));
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -106,6 +117,8 @@ jobs:
               }
             }
 
+            console.log(`Valid comment locations: ${validLines.size}`);
+
             // Partition comments into valid (on right-side diff lines) and dropped
             const comments = Array.isArray(review.comments) ? review.comments : [];
             const validComments = [];
@@ -125,8 +138,26 @@ jobs:
               }
             }
 
+            if (droppedComments.length > 0) {
+              console.log('Dropped out-of-diff comments:');
+              for (const c of droppedComments) {
+                console.log(`  ${c.path}:${c.line} — ${c.body.slice(0, 80)}`);
+              }
+            }
+
             if (validComments.length === 0) {
-              console.log('No inline comments to post; skipping review creation.');
+              console.log(`No valid inline comments (${comments.length} total from Codex, ${droppedComments.length} dropped).`);
+              // Always post a review so the PR author knows the check ran
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                body: droppedComments.length > 0
+                  ? `Codex review produced ${droppedComments.length} comment(s) but all targeted lines outside the diff and were dropped. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`
+                  : 'Codex review completed — no issues found.',
+                event: 'COMMENT',
+                comments: [],
+              });
               return;
             }
 

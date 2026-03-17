@@ -48,16 +48,22 @@ test.describe('Memory Explorer - Paranet filter', () => {
     test.slow();
     await page.goto(EXPLORER_BASE);
 
-    // Wait for paranet dropdown to be populated
     const paranetSelect = page.locator('.graph-toolbar select').first();
     await expect(paranetSelect).toBeVisible();
 
-    await page.waitForTimeout(3000);
-    const options = await paranetSelect.locator('option').allTextContents();
-    const paranetOptions = options.filter((t) => t.trim() && t !== 'All Paranets');
-
-    if (paranetOptions.length === 0) {
-      test.skip(true, 'No paranets available to filter');
+    // Wait for paranets to load via API — the /api/paranet/list endpoint can
+    // be very slow or unresponsive, so retry with generous intervals and skip
+    // rather than fail when paranets aren't available.
+    let paranetOptions: string[] = [];
+    try {
+      await expect(async () => {
+        const options = await paranetSelect.locator('option').allTextContents();
+        paranetOptions = options.filter((t) => t.trim() && t !== 'All Paranets');
+        expect(paranetOptions.length).toBeGreaterThan(0);
+      }).toPass({ timeout: 30_000, intervals: [2_000, 3_000, 5_000] });
+    } catch {
+      test.skip(true, 'No paranets loaded — /api/paranet/list may be unresponsive');
+      return;
     }
 
     // Select first non-empty paranet (e.g. "Origin Trail Game" or similar)

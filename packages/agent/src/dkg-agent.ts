@@ -33,6 +33,16 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
+interface PublishOpts {
+  onPhase?: PhaseCallback;
+  operationCtx?: OperationContext;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
+}
+
+type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
+type JsonLdContent = JsonLdDocument | { public?: JsonLdDocument; private?: JsonLdDocument };
+
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
@@ -1103,16 +1113,35 @@ export class DKGAgent {
     }
   }
 
+  // Overload: raw quads
+  async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[], opts?: PublishOpts): Promise<PublishResult>;
+  // Overload: JSON-LD (bare doc = private, or { public?, private? } envelope)
+  async publish(paranetId: string, content: JsonLdContent, opts?: PublishOpts): Promise<PublishResult>;
   async publish(
+    paranetId: string,
+    input: Quad[] | JsonLdContent,
+    thirdArg?: Quad[] | PublishOpts,
+    fourthArg?: PublishOpts,
+  ): Promise<PublishResult> {
+    // JSON-LD: convert to quads, then publish
+    if (!Array.isArray(input)) {
+      const { publicQuads, privateQuads } = await jsonLdToQuads(input);
+      return this._publish(paranetId, publicQuads, privateQuads, thirdArg as PublishOpts);
+    }
+    // Quad[]: pass through directly
+    return this._publish(
+      paranetId,
+      input as Quad[],
+      Array.isArray(thirdArg) ? thirdArg : undefined,
+      Array.isArray(thirdArg) ? fourthArg : (thirdArg as PublishOpts),
+    );
+  }
+
+  private async _publish(
     paranetId: string,
     quads: Quad[],
     privateQuads?: Quad[],
-    opts?: {
-      onPhase?: PhaseCallback;
-      operationCtx?: OperationContext;
-      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-      allowedPeers?: string[];
-    },
+    opts?: PublishOpts,
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
@@ -2332,6 +2361,55 @@ function parseNQuads(text: string): Quad[] {
     }
   }
   return quads;
+}
+
+/**
+ * Convert a JSON-LD content object into public and private Quad arrays.
+ *
+ * Accepts either:
+ * - A bare JSON-LD document (defaults to private)
+ * - An envelope: { public?: JsonLdDoc, private?: JsonLdDoc }
+ */
+async function jsonLdToQuads(
+  content: JsonLdContent,
+): Promise<{ publicQuads: Quad[]; privateQuads: Quad[] }> {
+  const jsonld = await import('jsonld');
+
+  const obj = content as Record<string, unknown>;
+  const isEnvelope = !Array.isArray(content) && ('public' in obj || 'private' in obj);
+  const publicDoc = isEnvelope ? (obj.public as object | undefined) : undefined;
+  const privateDoc = isEnvelope ? (obj.private as object | undefined) : content;
+
+  let publicQuads: Quad[] = [];
+  let privateQuads: Quad[] = [];
+
+  if (publicDoc) {
+    const nquads = await jsonld.default.toRDF(publicDoc, { format: 'application/n-quads' }) as string;
+    publicQuads = parseNQuads(nquads);
+  }
+
+  if (privateDoc) {
+    const nquads = await jsonld.default.toRDF(privateDoc, { format: 'application/n-quads' }) as string;
+    privateQuads = parseNQuads(nquads);
+  }
+
+  if (publicQuads.length === 0 && privateQuads.length === 0) {
+    throw new Error('JSON-LD document produced no RDF quads');
+  }
+
+  // When there are private quads but no public quads, generate a synthetic
+  // anchor so the publisher has something to merkle-root and partition.
+  if (publicQuads.length === 0 && privateQuads.length > 0) {
+    const anchorId = `urn:dkg:private:${crypto.randomUUID()}`;
+    publicQuads = [{
+      subject: anchorId,
+      predicate: `${DKG_NS}privateDataAnchor`,
+      object: '"true"',
+      graph: '',
+    }];
+  }
+
+  return { publicQuads, privateQuads };
 }
 
 const DKG_NS = 'http://dkg.io/ontology/';

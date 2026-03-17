@@ -159,6 +159,9 @@ importers:
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      jsonld:
+        specifier: ^8.3.3
+        version: 8.3.3(web-streams-polyfill@3.3.3)
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18

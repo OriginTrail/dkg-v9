@@ -104,3 +104,10 @@ export interface EventsQueryResult {
     offset: number;
   };
 }
+
+export interface TrackItemResult {
+  summary: string;
+  epc: string;
+  eventCount: number;
+  events: EpcisEventResult[];
+}

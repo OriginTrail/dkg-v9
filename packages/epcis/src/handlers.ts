@@ -1,7 +1,7 @@
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from './utils.js';
-import type { Publisher, CaptureResult, CaptureOptions, QueryEngine, EventsQueryResult, EpcisEventResult } from './types.js';
+import type { Publisher, CaptureResult, CaptureOptions, QueryEngine, EventsQueryResult, EpcisEventResult, TrackItemResult } from './types.js';
 
 export interface CaptureConfig {
   paranetId: string;
@@ -52,7 +52,20 @@ export async function handleEventsQuery(
   const sparql = buildEpcisQuery(params, config.paranetId);
   const result = await config.queryEngine.query(sparql, { paranetId: config.paranetId });
 
-  const events: EpcisEventResult[] = result.bindings.map((row) => ({
+  const events = bindingsToEvents(result.bindings);
+
+  return {
+    events,
+    count: events.length,
+    pagination: {
+      limit: Math.min(Math.max(params.limit ?? 100, 1), 1000),
+      offset: Math.max(params.offset ?? 0, 0),
+    },
+  };
+}
+
+function bindingsToEvents(bindings: Record<string, string>[]): EpcisEventResult[] {
+  return bindings.map((row) => ({
     eventType: row['eventType'] ?? '',
     eventTime: row['eventTime'] ?? '',
     bizStep: row['bizStep'] ?? '',
@@ -67,14 +80,50 @@ export async function handleEventsQuery(
     outputEPCs: row['outputEPCs'] ?? '',
     ual: row['ual'] ?? '',
   }));
+}
+
+function buildTrackItemSummary(epc: string, events: EpcisEventResult[]): string {
+  let summary = `Tracking: ${epc}\n`;
+  summary += `Found ${events.length} event(s) in the supply chain.\n`;
+
+  if (events.length === 0) return summary;
+
+  summary += '\nJourney Timeline:\n';
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    const time = event.eventTime || 'Unknown time';
+    const step = event.bizStep
+      ? event.bizStep.split('-').pop()
+      : event.eventType?.split('/').pop() || 'Unknown';
+    const location = event.bizLocation || event.readPoint || 'Unknown location';
+    summary += `${i + 1}. [${time}] ${step} @ ${location}\n`;
+  }
+
+  return summary;
+}
+
+export async function handleTrackItem(
+  searchParams: URLSearchParams,
+  config: EventsQueryConfig,
+): Promise<TrackItemResult> {
+  const epc = searchParams.get('epc')?.trim();
+
+  if (!epc) {
+    throw new EpcisQueryError('Missing required parameter: epc', 400);
+  }
+
+  const sparql = buildEpcisQuery({ epc, fullTrace: true }, config.paranetId);
+  const result = await config.queryEngine.query(sparql, { paranetId: config.paranetId });
+
+  const events = bindingsToEvents(result.bindings);
+  // Sort chronologically (ascending by eventTime)
+  events.sort((a, b) => (a.eventTime < b.eventTime ? -1 : a.eventTime > b.eventTime ? 1 : 0));
 
   return {
+    summary: buildTrackItemSummary(epc, events),
+    epc,
+    eventCount: events.length,
     events,
-    count: events.length,
-    pagination: {
-      limit: Math.min(Math.max(params.limit ?? 100, 1), 1000),
-      offset: Math.max(params.offset ?? 0, 0),
-    },
   };
 }
 

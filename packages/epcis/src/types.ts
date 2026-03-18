@@ -51,7 +51,7 @@ export interface Publisher {
   publish(
     paranetId: string,
     content: unknown,
-    opts?: { accessPolicy?: string; allowedPeers?: string[] },
+    opts?: CaptureOptions,
   ): Promise<{ ual: string; kcId: string; status: string }>;
 }
 
@@ -67,7 +67,12 @@ export interface EpcisQueryParams {
   childEPC?: string;
   inputEPC?: string;
   outputEPC?: string;
-  fullTrace?: boolean;
+  anyEPC?: string;
+  eventType?: string;
+  action?: string;
+  disposition?: string;
+  readPoint?: string;
+  perPage?: number;
   limit?: number;
   offset?: number;
 }
@@ -80,28 +85,17 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
-export interface EpcisEventResult {
-  eventType: string;
-  eventTime: string;
-  bizStep: string;
-  bizLocation: string;
-  disposition: string;
-  readPoint: string;
-  action: string;
-  parentID: string;
-  epcList: string;
-  childEPCList: string;
-  inputEPCs: string;
-  outputEPCs: string;
-  ual: string;
-}
-
-export interface EventsQueryResult {
-  events: EpcisEventResult[];
-  count: number;
-  pagination: {
-    limit: number;
-    offset: number;
+export interface EPCISQueryDocumentResponse {
+  '@context': Array<string | Record<string, string>>;
+  type: 'EPCISQueryDocument';
+  schemaVersion: '2.0';
+  epcisBody: {
+    queryResults: {
+      queryName: 'SimpleEventQuery';
+      resultsBody: {
+        eventList: Record<string, unknown>[];
+      };
+    };
   };
 }
 
@@ -109,5 +103,5 @@ export interface TrackItemResult {
   summary: string;
   epc: string;
   eventCount: number;
-  events: EpcisEventResult[];
+  events: Record<string, unknown>[];
 }

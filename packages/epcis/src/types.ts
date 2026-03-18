@@ -54,3 +54,47 @@ export interface Publisher {
     opts?: CaptureOptions,
   ): Promise<{ ual: string; kcId: string; status: string }>;
 }
+
+// --- Events query types ---
+
+export interface EpcisQueryParams {
+  epc?: string;
+  bizStep?: string;
+  bizLocation?: string;
+  from?: string;
+  to?: string;
+  parentID?: string;
+  childEPC?: string;
+  inputEPC?: string;
+  outputEPC?: string;
+  anyEPC?: string;
+  eventType?: string;
+  action?: string;
+  disposition?: string;
+  readPoint?: string;
+  perPage?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */
+export interface QueryEngine {
+  query(
+    sparql: string,
+    opts?: { paranetId?: string },
+  ): Promise<{ bindings: Record<string, string>[] }>;
+}
+
+export interface EPCISQueryDocumentResponse {
+  '@context': Array<string | Record<string, string>>;
+  type: 'EPCISQueryDocument';
+  schemaVersion: '2.0';
+  epcisBody: {
+    queryResults: {
+      queryName: 'SimpleEventQuery';
+      resultsBody: {
+        eventList: Record<string, unknown>[];
+      };
+    };
+  };
+}

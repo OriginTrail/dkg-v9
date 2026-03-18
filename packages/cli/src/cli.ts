@@ -1029,6 +1029,41 @@ paranetCmd
     }
   });
 
+// ─── dkg openclaw ───────────────────────────────────────────────────
+
+const openclawCmd = program
+  .command('openclaw')
+  .description('OpenClaw adapter management');
+
+openclawCmd
+  .command('setup')
+  .description('Set up the DKG OpenClaw adapter (runs npx setup script)')
+  .allowUnknownOption(true)
+  .action(async () => {
+    const { execFileSync } = await import('node:child_process');
+    // Forward args after "openclaw setup" to the adapter setup script.
+    const oclawIdx = process.argv.indexOf('openclaw');
+    const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
+    const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
+    try {
+      // This is a thin convenience wrapper — the primary entry point is:
+      //   npx @origintrail-official/dkg-adapter-openclaw setup
+      // The adapter's own setup script warns if running from an ephemeral
+      // npx cache and advises users to install globally.
+      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      });
+    } catch (err: any) {
+      if (err.status) {
+        process.exit(err.status);
+      }
+      console.error('\nTo set up the OpenClaw adapter, run:');
+      console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+      process.exit(1);
+    }
+  });
+
 // ─── dkg index ──────────────────────────────────────────────────────
 
 program

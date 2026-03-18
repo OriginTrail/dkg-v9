@@ -25,8 +25,11 @@
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
+  "bin": {
+    "dkg-openclaw": "./dist/setup-cli.js"
+  },
   "dependencies": {
-    "@origintrail-official/dkg-core": "workspace:*"
+    "commander": "^13"
   },
   "openclaw": {
     "extensions": [

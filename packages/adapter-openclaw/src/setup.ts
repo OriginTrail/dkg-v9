@@ -459,7 +459,7 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   // Ensure plugins structure exists
   if (!config.plugins) config.plugins = {};
   if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-  if (!config.plugins.load) config.plugins.load = {};
+  if (!config.plugins.load || typeof config.plugins.load !== 'object') config.plugins.load = {};
   if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
   if (!config.plugins.entries) config.plugins.entries = {};
 

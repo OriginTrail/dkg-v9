@@ -39,11 +39,35 @@ Check node status — peer ID, connected peers, multiaddrs, and wallet addresses
 ### `dkg_list_paranets`
 List paranets known to the node before publishing or querying paranet-scoped data.
 
+### `dkg_paranet_create`
+Create a new paranet on the DKG node. A paranet is a scoped knowledge domain for organizing published knowledge.
+
+- `name` (required): human-readable name, e.g. `"My Research Paranet"`
+- `description` (optional): what this paranet contains
+- `id` (optional): custom slug override — auto-generated from name if omitted (e.g. `"My Research"` → `"my-research"`)
+
+Use `dkg_list_paranets` first to check if the paranet already exists.
+
+### `dkg_subscribe`
+Subscribe to a paranet to receive its data and updates. Subscription is immediate; data sync from peers happens in the background.
+
+- `paranet_id` (required): paranet ID to subscribe to
+- `include_workspace` (optional): set to `"false"` to skip syncing draft data (default: true)
+
+Use `dkg_list_paranets` to check sync status afterward.
+
+### `dkg_wallet_balances`
+Check TRAC and ETH token balances for the node's operational wallets. Use this before publishing to verify sufficient funds.
+
+No parameters required. Returns per-wallet ETH and TRAC balances, chain ID, and RPC URL.
+
 ### `dkg_publish`
-Publish knowledge as RDF triples in N-Quads format to a DKG paranet.
+Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default, published data is private (`ownerOnly`).
 
 - `paranet_id` (required): target paranet, for example `"testing"` or `"my-research"`
 - `nquads` (required): N-Quads string, one triple per line
+- `access_policy` (optional): `"ownerOnly"` (default — only you can read), `"public"` (anyone can read), or `"allowList"` (only listed peers)
+- `allowed_peers` (optional): comma-separated peer IDs, required when `access_policy` is `"allowList"`
 
 **N-Quads format**
 - each line is `<subject> <predicate> <object> .`
@@ -62,6 +86,7 @@ Run a read-only SPARQL query (`SELECT`, `CONSTRUCT`, `ASK`, `DESCRIBE`) against 
 
 - `sparql` (required): SPARQL query string
 - `paranet_id` (optional): limit query scope to a specific paranet
+- `include_workspace` (optional): set to `"true"` to also search workspace (draft/ephemeral) data
 
 Example queries:
 - list everything: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20`
@@ -110,9 +135,15 @@ Use `dkg_find_agents` with `skill_type` first to discover which agents offer the
 1. When the user asks you to remember something, call `dkg_memory_import`.
 2. Store a concise but durable memory, not raw noise.
 
+### Create or join a paranet
+1. Call `dkg_list_paranets` to see available paranets.
+2. If you need a new one, call `dkg_paranet_create` with an ID and name.
+3. To join an existing paranet, call `dkg_subscribe` with its ID.
+4. Call `dkg_wallet_balances` to check that you have sufficient TRAC before publishing.
+
 ### Publish and verify
 1. Call `dkg_list_paranets` if you are not sure which paranet to use.
-2. Call `dkg_publish` with N-Quads.
+2. Call `dkg_publish` with N-Quads. Data is private by default — set `access_policy` to `"public"` if you want it readable by anyone.
 3. Call `dkg_query` to verify the stored data.
 
 ### Find and contact another agent

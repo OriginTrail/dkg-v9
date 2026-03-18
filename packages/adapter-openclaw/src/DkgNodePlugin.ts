@@ -303,6 +303,15 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, _params) => this.handleStatus(),
       },
       {
+        name: 'dkg_wallet_balances',
+        description:
+          'Check TRAC and ETH token balances for the node\'s operational wallets. ' +
+          'Use this before publishing to verify sufficient funds. Returns per-wallet balances, ' +
+          'chain ID, and RPC URL.',
+        parameters: { type: 'object', properties: {}, required: [] },
+        execute: async (_toolCallId, _params) => this.handleWalletBalances(),
+      },
+      {
         name: 'dkg_list_paranets',
         description:
           'List all paranets this node knows about. Returns paranet IDs, names, subscription status, ' +
@@ -311,16 +320,78 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, _params) => this.handleListParanets(),
       },
       {
+        name: 'dkg_paranet_create',
+        description:
+          'Create a new paranet on the DKG node. A paranet is a scoped knowledge domain ' +
+          'that organizes published knowledge. Use dkg_list_paranets first to check if the ' +
+          'paranet already exists. Returns the paranet ID and URI (did:dkg:paranet:<id>). ' +
+          'The ID is auto-generated from the name if not provided.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: {
+              type: 'string',
+              description: 'Human-readable paranet name (e.g. "My Research Paranet")',
+            },
+            description: {
+              type: 'string',
+              description: 'Optional description of what this paranet contains',
+            },
+            id: {
+              type: 'string',
+              description: 'Optional custom paranet ID slug. Auto-generated from name if omitted (e.g. "My Research" → "my-research").',
+            },
+          },
+          required: ['name'],
+        },
+        execute: async (_toolCallId, args) => this.handleParanetCreate(args),
+      },
+      {
+        name: 'dkg_subscribe',
+        description:
+          'Subscribe to a paranet to receive its data and updates. Subscription is immediate; ' +
+          'data sync from connected peers happens in the background and may take time depending on ' +
+          'the paranet size. Use dkg_list_paranets to check sync status afterward.',
+        parameters: {
+          type: 'object',
+          properties: {
+            paranet_id: {
+              type: 'string',
+              description: 'Paranet ID to subscribe to (e.g. "my-research")',
+            },
+            include_workspace: {
+              type: 'string',
+              description: 'Set to "false" to skip syncing workspace/draft data. Default: true.',
+            },
+          },
+          required: ['paranet_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleSubscribe(args),
+      },
+      {
         name: 'dkg_publish',
         description:
           'Publish RDF triples (N-Quads format) to a DKG paranet. ' +
           'Each line is: <subject> <predicate> <object> . (with angle brackets and a trailing dot). ' +
-          'Example N-Quads: <did:dkg:entity:alice> <https://schema.org/name> "Alice" .',
+          'Example N-Quads: <did:dkg:entity:alice> <https://schema.org/name> "Alice" . ' +
+          'By default, published data is private (ownerOnly). Set access_policy to "public" to make it readable by anyone.',
         parameters: {
           type: 'object',
           properties: {
             paranet_id: { type: 'string', description: 'Target paranet ID (e.g. "testing", "my-research")' },
             nquads: { type: 'string', description: 'N-Quads triples, one per line. Each line: <subject> <predicate> "literal" or <uri> .' },
+            access_policy: {
+              type: 'string',
+              description:
+                'Access control: "ownerOnly" (only you can read — the default), ' +
+                '"public" (anyone can read), or "allowList" (only listed peers).',
+            },
+            allowed_peers: {
+              type: 'string',
+              description:
+                'Comma-separated peer IDs allowed to read the data. ' +
+                'Required when access_policy is "allowList". Must not be set for other policies.',
+            },
           },
           required: ['paranet_id', 'nquads'],
         },
@@ -337,6 +408,7 @@ export class DkgNodePlugin {
           properties: {
             sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE)' },
             paranet_id: { type: 'string', description: 'Optional paranet scope — omit to query all data' },
+            include_workspace: { type: 'string', description: 'Set to "true" to also search workspace (draft/ephemeral) data. Default: false.' },
           },
           required: ['sparql'],
         },
@@ -444,8 +516,44 @@ export class DkgNodePlugin {
           'Example: <did:dkg:entity:x> <https://schema.org/name> "Hello" .',
         );
       }
-      const result = await this.client.publish(paranetId, quads);
-      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, triplesPublished: quads.length });
+
+      // Access policy: default to ownerOnly (private) when not specified
+      const VALID_POLICIES = ['public', 'ownerOnly', 'allowList'] as const;
+      const accessPolicy = args.access_policy
+        ? String(args.access_policy)
+        : 'ownerOnly';
+
+      if (!VALID_POLICIES.includes(accessPolicy as any)) {
+        return this.error(
+          `Invalid access_policy "${accessPolicy}". Must be one of: ${VALID_POLICIES.join(', ')}.`,
+        );
+      }
+
+      // Parse allowed_peers from comma-separated string
+      let allowedPeers: string[] | undefined;
+      if (args.allowed_peers) {
+        allowedPeers = String(args.allowed_peers)
+          .split(',')
+          .map(p => p.trim())
+          .filter(p => p.length > 0);
+      }
+
+      if (accessPolicy === 'allowList' && (!allowedPeers || allowedPeers.length === 0)) {
+        return this.error(
+          '"allowList" access_policy requires non-empty "allowed_peers" (comma-separated peer IDs).',
+        );
+      }
+      if (accessPolicy !== 'allowList' && allowedPeers && allowedPeers.length > 0) {
+        return this.error(
+          '"allowed_peers" is only valid when access_policy is "allowList".',
+        );
+      }
+
+      const result = await this.client.publish(paranetId, quads, undefined, {
+        accessPolicy,
+        allowedPeers,
+      });
+      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, triplesPublished: quads.length, accessPolicy });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -455,7 +563,11 @@ export class DkgNodePlugin {
     try {
       const sparql = String(args.sparql);
       const paranetId = args.paranet_id ? String(args.paranet_id) : undefined;
-      const result = await this.client.query(sparql, { paranetId });
+      const includeWorkspace = args.include_workspace === 'true' || args.include_workspace === true;
+      const result = await this.client.query(sparql, {
+        paranetId,
+        includeWorkspace: includeWorkspace || undefined,
+      });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
@@ -514,6 +626,64 @@ export class DkgNodePlugin {
       return this.daemonError(err);
     }
   }
+
+  private async handleParanetCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const name = String(args.name ?? '').trim();
+      if (!name) {
+        return this.error('"name" is required.');
+      }
+      const explicitId = args.id != null && String(args.id).trim();
+      const id = explicitId || slugify(name);
+      if (!id) {
+        return this.error('Could not derive a valid paranet ID from the name. Provide an explicit "id".');
+      }
+      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(id)) {
+        return this.error(
+          `Invalid paranet ID "${id}". Use lowercase letters, numbers, and hyphens (e.g. "my-research"). ` +
+          'Must start and end with a letter or number.',
+        );
+      }
+      const description = args.description ? String(args.description).trim() : undefined;
+      const result = await this.client.createParanet(id, name, description);
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const paranetId = String(args.paranet_id ?? '').trim();
+      if (!paranetId) {
+        return this.error('"paranet_id" is required.');
+      }
+      const includeWorkspace = args.include_workspace === 'false' ? false : undefined;
+      const result = await this.client.subscribe(paranetId, {
+        includeWorkspace,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleWalletBalances(): Promise<OpenClawToolResult> {
+    try {
+      const result = await this.client.getWalletBalances();
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+}
+
+/** Convert a human-readable name into a URL-safe slug (e.g. "My Research Paranet" → "my-research-paranet"). */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')  // replace non-alphanumeric runs with a single hyphen
+    .replace(/^-+|-+$/g, '');      // strip leading/trailing hyphens
 }
 
 function parseNQuadsText(text: string): Array<{ subject: string; predicate: string; object: string; graph?: string }> {

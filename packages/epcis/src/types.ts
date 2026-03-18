@@ -51,6 +51,6 @@ export interface Publisher {
   publish(
     paranetId: string,
     content: unknown,
-    opts?: { accessPolicy?: string; allowedPeers?: string[] },
+    opts?: CaptureOptions,
   ): Promise<{ ual: string; kcId: string; status: string }>;
 }

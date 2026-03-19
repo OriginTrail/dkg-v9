@@ -58,6 +58,11 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
   // Must be an EPCIS event type
   filterClauses.push('FILTER(STRSTARTS(STR(?eventType), "https://gs1.github.io/EPCIS/"))');
 
+  // eventID filter — matches the RDF subject (the event's @id / rootEntity)
+  if (params.eventID) {
+    filterClauses.push(`FILTER(?event = <${escapeSparql(params.eventID)}>)`);
+  }
+
   // eventType filter — narrow to a specific EPCIS event type
   if (params.eventType) {
     filterClauses.push(`FILTER(?eventType = <https://gs1.github.io/EPCIS/${escapeSparql(params.eventType)}>)`);
@@ -114,9 +119,11 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
     optionalClauses.push('OPTIONAL { ?event epcis:bizStep ?bizStep . }');
   }
 
-  // BizLocation filter
+  // BizLocation filter — JSON-LD stores bizLocation as a URI node, match with angle brackets.
+  // Also bind ?bizLocation so it appears in SELECT results for toEpcisEvent.
   if (params.bizLocation) {
-    wherePatterns.push(`?event epcis:bizLocation "${escapeSparql(params.bizLocation)}" .`);
+    wherePatterns.push(`?event epcis:bizLocation <${escapeSparql(params.bizLocation)}> .`);
+    optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
   }
@@ -154,10 +161,11 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
     optionalClauses.push('OPTIONAL { ?event epcis:disposition ?disposition . }');
   }
 
-  // ReadPoint filter — required when filtered, OPTIONAL otherwise
+  // ReadPoint filter — JSON-LD stores readPoint as a URI node, match with angle brackets.
+  // Also bind ?readPoint so it appears in SELECT results for toEpcisEvent.
   if (params.readPoint) {
-    wherePatterns.push('?event epcis:readPoint ?readPoint .');
-    filterClauses.push(`FILTER(STR(?readPoint) = "${escapeSparql(params.readPoint)}")`);
+    wherePatterns.push(`?event epcis:readPoint <${escapeSparql(params.readPoint)}> .`);
+    optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
   }

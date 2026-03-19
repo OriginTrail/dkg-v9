@@ -16,7 +16,7 @@ export function encodePageToken(offset: number): string {
   return btoa(`offset:${offset}`);
 }
 
-const FILTER_KEYS = ['epc', 'bizStep', 'bizLocation', 'from', 'to', 'parentID', 'childEPC', 'inputEPC', 'outputEPC', 'eventType', 'action', 'disposition', 'readPoint'] as const;
+const FILTER_KEYS = ['eventID', 'epc', 'bizStep', 'bizLocation', 'from', 'to', 'parentID', 'childEPC', 'inputEPC', 'outputEPC', 'eventType', 'action', 'disposition', 'readPoint'] as const;
 
 /** Maps EPCIS 2.0 standard parameter names to internal canonical names. */
 const STANDARD_TO_CANONICAL: Record<string, keyof EpcisQueryParams> = {

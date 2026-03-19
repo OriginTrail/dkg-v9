@@ -2263,9 +2263,11 @@ async function handleRequest(
     }
     const epcisPublisher: EpcisPublisher = {
       async publish(paranetId, content, opts) {
+        // Using { public: content } because bare JSON-LD (private) publishing
+        // silently drops triples — see GitHub issue #221.
         const result = await agent.publish(
           paranetId,
-          content as Record<string, unknown>,
+          { public: content } as Record<string, unknown>,
           opts,
         );
         return { ual: result.ual, kcId: String(result.kcId), status: result.status };

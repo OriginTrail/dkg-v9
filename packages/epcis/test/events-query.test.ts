@@ -71,9 +71,30 @@ describe('handleEventsQuery', () => {
 
   it('returns multiple events in eventList', async () => {
     const engine = mockQueryEngine([
-      makeBindings({ event: 'urn:uuid:event-1', eventTime: '2024-03-01T08:00:00Z' }),
-      makeBindings({ event: 'urn:uuid:event-2', eventTime: '2024-03-02T08:00:00Z' }),
-      makeBindings({ event: 'urn:uuid:event-3', eventTime: '2024-03-03T08:00:00Z' }),
+      makeBindings({
+        event: 'urn:uuid:event-1',
+        eventTime: '2024-03-01T08:00:00Z',
+        ual: 'did:dkg:mock:1',
+        epcList: 'urn:epc:id:sgtin:001.001.001',
+      }),
+      makeBindings({
+        event: 'urn:uuid:event-2',
+        eventType: 'https://gs1.github.io/EPCIS/AggregationEvent',
+        eventTime: '2024-03-02T08:00:00Z',
+        ual: 'did:dkg:mock:2',
+        epcList: '',
+        parentID: 'urn:epc:id:sscc:001',
+        childEPCList: 'urn:child:1, urn:child:2',
+      }),
+      makeBindings({
+        event: 'urn:uuid:event-3',
+        eventType: 'https://gs1.github.io/EPCIS/TransformationEvent',
+        eventTime: '2024-03-03T08:00:00Z',
+        ual: 'did:dkg:mock:3',
+        epcList: '',
+        inputEPCs: 'urn:in:1, urn:in:2',
+        outputEPCs: 'urn:out:1',
+      }),
     ]);
 
     const { body } = await handleEventsQuery(
@@ -81,13 +102,42 @@ describe('handleEventsQuery', () => {
       { ...defaultConfig, queryEngine: engine },
     );
 
-    expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(3);
+    const eventList = body.epcisBody.queryResults.resultsBody.eventList;
+    expect(eventList).toHaveLength(3);
+    expect(eventList.map((event) => event['dkg:ual'])).toEqual([
+      'did:dkg:mock:1',
+      'did:dkg:mock:2',
+      'did:dkg:mock:3',
+    ]);
+    expect(eventList[1]).toMatchObject({
+      type: 'AggregationEvent',
+      parentID: 'urn:epc:id:sscc:001',
+      childEPCs: ['urn:child:1', 'urn:child:2'],
+      'dkg:ual': 'did:dkg:mock:2',
+    });
+    expect(eventList[2]).toMatchObject({
+      type: 'TransformationEvent',
+      inputEPCList: ['urn:in:1', 'urn:in:2'],
+      outputEPCList: ['urn:out:1'],
+      'dkg:ual': 'did:dkg:mock:3',
+    });
   });
 
   it('allows no-filter query (returns recent events)', async () => {
     const engine = mockQueryEngine([
-      makeBindings({ event: 'urn:uuid:event-1' }),
-      makeBindings({ event: 'urn:uuid:event-2' }),
+      makeBindings({
+        event: 'urn:uuid:event-1',
+        ual: 'did:dkg:mock:no-filter-1',
+        epcList: 'urn:epc:id:sgtin:001.001.001',
+      }),
+      makeBindings({
+        event: 'urn:uuid:event-2',
+        eventType: 'https://gs1.github.io/EPCIS/TransformationEvent',
+        ual: 'did:dkg:mock:no-filter-2',
+        epcList: '',
+        inputEPCs: 'urn:in:1',
+        outputEPCs: 'urn:out:1',
+      }),
     ]);
 
     const { body } = await handleEventsQuery(
@@ -95,7 +145,19 @@ describe('handleEventsQuery', () => {
       { ...defaultConfig, queryEngine: engine },
     );
 
-    expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(2);
+    expect(body.epcisBody.queryResults.resultsBody.eventList).toEqual([
+      expect.objectContaining({
+        type: 'ObjectEvent',
+        epcList: ['urn:epc:id:sgtin:001.001.001'],
+        'dkg:ual': 'did:dkg:mock:no-filter-1',
+      }),
+      expect.objectContaining({
+        type: 'TransformationEvent',
+        inputEPCList: ['urn:in:1'],
+        outputEPCList: ['urn:out:1'],
+        'dkg:ual': 'did:dkg:mock:no-filter-2',
+      }),
+    ]);
     expect(engine.query).toHaveBeenCalledOnce();
   });
 
@@ -160,7 +222,7 @@ describe('handleEventsQuery', () => {
     );
 
     const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('FILTER(STR(?readPoint) = "urn:epc:id:sgln:4012345.00001.0")');
+    expect(sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('returns Link header when more pages exist (perPage+1 trick)', async () => {

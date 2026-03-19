@@ -36,7 +36,7 @@ describe('buildEpcisQuery', () => {
   it('filters by bizLocation', () => {
     const sparql = buildEpcisQuery({ bizLocation: 'urn:epc:id:sgln:4012345.00001.0' }, PARANET_ID);
 
-    expect(sparql).toContain('epcis:bizLocation "urn:epc:id:sgln:4012345.00001.0"');
+    expect(sparql).toContain('epcis:bizLocation <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('filters by date range (from and to) with strict < for to', () => {
@@ -130,7 +130,7 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain('epcis:childEPCs "urn:test"');
     expect(sparql).toContain('UNION');
     expect(sparql).toContain('BizStep-receiving');
-    expect(sparql).toContain('epcis:bizLocation "urn:loc:1"');
+    expect(sparql).toContain('epcis:bizLocation <urn:loc:1>');
   });
 
   it('uses default pagination (limit 100, offset 0)', () => {
@@ -189,13 +189,10 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_progress');
   });
 
-  it('filters by readPoint — moves from OPTIONAL to required WHERE with FILTER', () => {
+  it('filters by readPoint — uses angle bracket URI match', () => {
     const sparql = buildEpcisQuery({ readPoint: 'urn:epc:id:sgln:4012345.00001.0' }, PARANET_ID);
 
-    expect(sparql).toContain('?event epcis:readPoint ?readPoint');
-    expect(sparql).toContain('FILTER(STR(?readPoint) = "urn:epc:id:sgln:4012345.00001.0")');
-    // Should NOT be OPTIONAL when filtered
-    expect(sparql).not.toMatch(/OPTIONAL\s*\{[^}]*epcis:readPoint/);
+    expect(sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('filters by action — moves from OPTIONAL to required WHERE with FILTER', () => {

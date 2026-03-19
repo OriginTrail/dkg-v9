@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { execSync, exec, execFile, spawn } from 'node:child_process';
+import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -77,15 +77,6 @@ export const DAEMON_EXIT_CODE_RESTART = 75;
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
-
-function resolveDaemonEntryPoint(): string {
-  const rDir = releasesDir();
-  if (existsSync(rDir)) {
-    const entry = slotEntryPoint(join(rDir, 'current'));
-    if (entry) return entry;
-  }
-  return fileURLToPath(import.meta.url);
-}
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -373,7 +364,6 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   // Version check + auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
-  let pendingForegroundRestart = false;
   const au = config.autoUpdate;
   const standalone = isStandaloneInstall();
   const hasGitConfig = !!(au?.repo && au?.branch);
@@ -424,14 +414,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         }
         isUpdating = false;
         if (updated) {
-          if (foreground) {
-            log('Auto-update: update activated; restarting foreground daemon in-place.');
-            pendingForegroundRestart = true;
-            await shutdown(0);
-            return;
-          }
-          log('Auto-update: update activated; restarting daemon process.');
+          log('Auto-update: update activated; exiting for supervised restart.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
+          return;
         }
       }
     };
@@ -874,25 +859,6 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     await removePid();
     await removeApiPort();
     log('Stopped.');
-
-    if (pendingForegroundRestart) {
-      pendingForegroundRestart = false;
-      const entryPoint = resolveDaemonEntryPoint();
-      log(`Auto-update: launching updated foreground daemon from ${entryPoint}`);
-      try {
-        spawn(
-          process.execPath,
-          [...process.execArgv, entryPoint, 'start', '--foreground'],
-          {
-            stdio: 'inherit',
-            env: process.env,
-          },
-        );
-      } catch (err: any) {
-        log(`Auto-update: failed to relaunch foreground daemon — ${err.message}`);
-        process.exit(1);
-      }
-    }
     process.exit(exitCode);
   }
 

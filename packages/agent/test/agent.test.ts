@@ -613,6 +613,186 @@ describe('Genesis Knowledge', () => {
     await agent1.stop().catch(() => {});
     await agent2.stop().catch(() => {});
   });
+
+  it('publishes, approves, lists, and resolves CCL policies per paranet', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'PolicyBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-policy', name: 'Ops Policy' });
+
+    const published = await agent.publishCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+
+    expect(published.policyUri).toContain('did:dkg:policy:');
+    expect(published.hash).toContain('sha256:');
+
+    await agent.approveCclPolicy({ paranetId: 'ops-policy', policyUri: published.policyUri });
+
+    const listed = await agent.listCclPolicies({ paranetId: 'ops-policy' });
+    expect(listed).toHaveLength(1);
+    expect(listed[0].name).toBe('incident-review');
+    expect(listed[0].isActiveDefault).toBe(true);
+
+    const resolved = await agent.resolveCclPolicy({ paranetId: 'ops-policy', name: 'incident-review', includeBody: true });
+    expect(resolved?.policyUri).toBe(published.policyUri);
+    expect(resolved?.body).toContain('rules: []');
+
+    const evaluation = await agent.evaluateCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      facts: [['claim', 'c1']],
+      snapshotId: 'snap-1',
+    });
+    expect(evaluation.policy.policyUri).toBe(published.policyUri);
+    expect(evaluation.factSetHash).toContain('sha256:');
+    expect(evaluation.result.derived).toEqual({});
+
+    const publishedEval = await agent.evaluateAndPublishCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      facts: [['claim', 'c1']],
+      snapshotId: 'snap-2',
+    });
+    expect(publishedEval.evaluationUri).toContain('did:dkg:ccl-eval:');
+    expect(publishedEval.publish.status).toBeDefined();
+
+    const storedEval = await store.query(
+      `SELECT ?hash WHERE { GRAPH <did:dkg:paranet:ops-policy> { <${publishedEval.evaluationUri}> <https://dkg.network/ontology#factSetHash> ?hash } }`,
+    );
+    expect(storedEval.type).toBe('bindings');
+    if (storedEval.type === 'bindings') {
+      expect(storedEval.bindings.length).toBe(1);
+    }
+
+    const listedEvals = await agent.listCclEvaluations({
+      paranetId: 'ops-policy',
+      snapshotId: 'snap-2',
+    });
+    expect(listedEvals).toHaveLength(1);
+    expect(listedEvals[0].evaluationUri).toBe(publishedEval.evaluationUri);
+    expect(listedEvals[0].results).toEqual([]);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('prefers stricter per-context policy overrides when resolving CCL policy', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'ContextPolicyBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-context', name: 'Ops Context' });
+
+    const base = await agent.publishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    await agent.approveCclPolicy({ paranetId: 'ops-context', policyUri: base.policyUri });
+
+    const override = await agent.publishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      version: '0.2.0',
+      contextType: 'incident_review',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+    await agent.approveCclPolicy({ paranetId: 'ops-context', policyUri: override.policyUri, contextType: 'incident_review' });
+
+    const resolvedDefault = await agent.resolveCclPolicy({ paranetId: 'ops-context', name: 'incident-review' });
+    expect(resolvedDefault?.policyUri).toBe(base.policyUri);
+
+    const resolvedContext = await agent.resolveCclPolicy({ paranetId: 'ops-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedContext?.policyUri).toBe(override.policyUri);
+    expect(resolvedContext?.activeContexts).toContain('incident_review');
+
+    const evaluatedContext = await agent.evaluateCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      contextType: 'incident_review',
+      facts: [['claim', 'c2']],
+    });
+    expect(evaluatedContext.policy.policyUri).toBe(override.policyUri);
+
+    const publishedContextEval = await agent.evaluateAndPublishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      contextType: 'incident_review',
+      facts: [['claim', 'c2']],
+      snapshotId: 'snap-ctx',
+    });
+    const listedByContext = await agent.listCclEvaluations({
+      paranetId: 'ops-context',
+      contextType: 'incident_review',
+      snapshotId: 'snap-ctx',
+    });
+    expect(listedByContext.some(entry => entry.evaluationUri === publishedContextEval.evaluationUri)).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('restricts CCL policy approval to the paranet owner', async () => {
+    const store = new OxigraphStore();
+    const owner = await DKGAgent.create({
+      name: 'OwnerBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const other = await DKGAgent.create({
+      name: 'OtherBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    await owner.start();
+    await other.start();
+    await owner.createParanet({ id: 'ops-owner', name: 'Ops Owner' });
+
+    const published = await owner.publishCclPolicy({
+      paranetId: 'ops-owner',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+
+    await expect(other.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can approve policies/);
+
+    await expect(owner.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
+      .resolves.toBeTruthy();
+
+    await owner.stop().catch(() => {});
+    await other.stop().catch(() => {});
+  });
 });
 
 describe('Node Roles', () => {

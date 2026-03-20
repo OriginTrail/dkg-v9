@@ -22,9 +22,11 @@
     "@noble/curves": "^2",
     "@noble/ed25519": "^3",
     "@noble/hashes": "^2",
-    "ethers": "^6"
+    "ethers": "^6",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

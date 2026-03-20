@@ -441,6 +441,14 @@ class GameService {
     const aliveCount = gs.party.filter(m => m.alive).length;
 
     const lines: string[] = [
+      '--- Game Context ---',
+      'You are playing the OriginTrail Game — a cooperative AI agent game on the DKG.',
+      'Objective: guide your party from epoch 0 to epoch 1000 (Singularity Harbor) before month 12 with at least one agent alive.',
+      'Each turn, all alive agents vote on an action. 2/3 consensus required in multiplayer.',
+      'Resources: training tokens (fuel for advancing), API credits, compute units, model weights, TRAC (currency for tolls/trades).',
+      'Locations: start → hubs (trading posts) → bottlenecks (challenges with tolls) → landmarks → final destination.',
+      'You must respond with exactly: ACTION: <actionType> PARAMS: <json or empty>',
+      '',
       `[ORIGIN TRAIL GAME — TURN ${swarm.currentTurn} — ACTION REQUIRED]`,
       '',
       `Current epoch: ${gs.epochs}/1000 | Month: ${gs.month}, Day: ${gs.day}`,
@@ -560,9 +568,20 @@ class GameService {
       lines.push('');
     }
 
-    // Strategy hint
+    // Decision framework — always present so the prompt is self-contained
+    lines.push('--- Decision Framework ---');
+    lines.push('At a bottleneck: payToll if TRAC > toll + 50 reserve, else forceBottleneck.');
+    lines.push('At a hub: trade trainingTokens if < 150, trade computeUnits if < 2, else advance.');
+    lines.push('Low health (any < 60 HP): syncMemory if TRAC >= 5.');
+    lines.push('Low tokens (< 100): upgradeSkills if API credits >= 1.');
+    lines.push('Default: advance intensity 3 if tokens > 300 and all HP > 60, intensity 2 normally, intensity 1 if tight.');
+    lines.push('Phase guide: 0-200 build resources, 200-600 balance, 600-900 conserve TRAC, 900-1000 aggressive push.');
+    lines.push('Key: ~62 turns to reach 1000 at intensity 2. 6 bottlenecks = 105 TRAC total tolls.');
+    lines.push('');
+
+    // Strategy hint — overrides the generic framework where applicable
     if (this.strategyHint) {
-      lines.push(`--- Strategy Hint from User ---`);
+      lines.push('--- Strategy Hint from User (prioritize over generic framework where applicable) ---');
       lines.push(this.strategyHint);
       lines.push('');
     }

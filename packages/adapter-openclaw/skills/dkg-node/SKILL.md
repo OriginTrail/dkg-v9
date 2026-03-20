@@ -39,29 +39,102 @@ Check node status — peer ID, connected peers, multiaddrs, and wallet addresses
 ### `dkg_list_paranets`
 List paranets known to the node before publishing or querying paranet-scoped data.
 
+### `dkg_paranet_create`
+Create a new paranet on the DKG. A paranet is a scoped knowledge domain for organizing published knowledge.
+
+- `name` (required): human-readable name, e.g. `"My Research Paranet"`
+- `description` (optional): what this paranet contains
+- `id` (optional): custom slug override — auto-generated from name if omitted (e.g. `"My Research"` → `"my-research"`)
+
+Use `dkg_list_paranets` first to check if the paranet already exists.
+
+### `dkg_subscribe`
+Subscribe to a paranet to receive its data and updates. Subscription is immediate; data sync from peers happens in the background.
+
+- `paranet_id` (required): paranet ID to subscribe to
+- `include_workspace` (optional): set to `"false"` to skip syncing draft data (default: true)
+
+Use `dkg_list_paranets` to check sync status afterward.
+
+### `dkg_wallet_balances`
+Check TRAC and ETH token balances for the node's operational wallets. Use this before publishing to verify sufficient funds.
+
+No parameters required. Returns per-wallet ETH and TRAC balances, chain ID, and RPC URL.
+
 ### `dkg_publish`
-Publish knowledge as RDF triples in N-Quads format to a DKG paranet.
+Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default, published data is private (`ownerOnly`).
 
 - `paranet_id` (required): target paranet, for example `"testing"` or `"my-research"`
-- `nquads` (required): N-Quads string, one triple per line
+- `nquads` (required): N-Quads string, one triple per line (see format rules below)
+- `access_policy` (optional): `"ownerOnly"` (default — only you can read), `"public"` (anyone can read), or `"allowList"` (only listed peers)
+- `allowed_peers` (optional): comma-separated peer IDs, required when `access_policy` is `"allowList"`
 
-**N-Quads format**
-- each line is `<subject> <predicate> <object> .`
-- URIs go in angle brackets: `<https://example.org/thing>`
-- literals go in quotes: `"Hello World"`
+**N-Quads format rules** (the tool will reject malformed input):
+- Every line is exactly: `<subject> <predicate> <object> .`
+- **Subject**: always a URI in angle brackets: `<urn:my:entity>`
+- **Predicate**: always a URI in angle brackets: `<https://schema.org/name>`
+- **Object**: either a URI in angle brackets `<https://schema.org/Person>` or a literal in double quotes `"Alice"`
+- Each line **must** end with a space and dot: ` .`
+- Blank lines and lines starting with `#` are ignored
 
-Example:
+**Literal types and languages** (optional):
+- Typed literal: `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`
+- Language-tagged literal: `"Bonjour"@fr`
+
+**Common mistakes to avoid:**
+- Do NOT omit angle brackets around URIs — `urn:x` is wrong, `<urn:x>` is correct
+- Do NOT omit the trailing ` .` — each line must end with it
+- Do NOT use single quotes — only double quotes `"..."` for literals
+- Do NOT put a literal as the subject or predicate — only URIs
+- Do NOT double-escape quotes in literals — `"Alice"` is correct, `"\"Alice\""` stores literal quote characters in the value
+
+**How to structure quads:**
+
+Your job is to convert the user's input (documents, research data, messages, etc.) into a knowledge graph using appropriate ontologies and domain-specific URIs. Use standard ontologies where they exist (schema.org, Dublin Core, domain-specific vocabularies). Use meaningful URIs that reflect the content — do NOT invent `did:dkg:` URIs (those are assigned by the system for on-chain provenance).
+
+**Example — a person (using schema.org):**
 ```nquads
-<did:dkg:entity:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<did:dkg:entity:alice> <https://schema.org/name> "Alice" .
-<did:dkg:entity:alice> <https://schema.org/description> "A researcher on the DKG network" .
+<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/alice> <https://schema.org/name> "Alice Johnson" .
+<https://example.org/people/alice> <https://schema.org/jobTitle> "Research Scientist" .
 ```
+
+**Example — clinical trial data (using a domain ontology):**
+```nquads
+<urn:trial:NCT01364597> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://oxpg.org/ontology/clinical-trial-ontology#ClinicalTrial> .
+<urn:trial:NCT01364597> <https://schema.org/name> "Brivaracetam Phase III Study" .
+<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#interventionName> "Brivaracetam" .
+<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#groundingTerm> "brivaracetam" .
+```
+
+**Example — multiple entities (multiple Knowledge Assets in one publish):**
+```nquads
+<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/alice> <https://schema.org/name> "Alice" .
+<https://example.org/people/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/bob> <https://schema.org/name> "Bob" .
+<https://example.org/people/bob> <https://schema.org/knows> <https://example.org/people/alice> .
+```
+
+**Understanding the response:**
+
+The publish response includes `kcId` and `kaCount`:
+- **KC (Knowledge Collection)**: the batch of all triples from this publish call, identified by `kcId` (an on-chain token ID). Each `dkg_publish` call creates exactly one KC.
+- **KA (Knowledge Asset)**: a subset of the KC grouped by subject URI. Each unique subject in your N-Quads becomes one KA. The subject URI is the KA's **root entity**.
+- The system assigns a `did:dkg:{chainId}/{address}/{tokenId}` UAL to the KC for on-chain provenance — you do not create these.
+
+For example, publishing the multi-entity example above produces:
+- 1 KC (kcId: some number)
+- 2 KAs: one with root entity `https://example.org/people/alice` (2 triples), one with root entity `https://example.org/people/bob` (3 triples)
+
+Use `kcId` to reference the published collection in updates or queries.
 
 ### `dkg_query`
 Run a read-only SPARQL query (`SELECT`, `CONSTRUCT`, `ASK`, `DESCRIBE`) against the local knowledge graph.
 
 - `sparql` (required): SPARQL query string
 - `paranet_id` (optional): limit query scope to a specific paranet
+- `include_workspace` (optional): set to `"true"` to also search workspace (draft/ephemeral) data
 
 Example queries:
 - list everything: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20`
@@ -110,9 +183,15 @@ Use `dkg_find_agents` with `skill_type` first to discover which agents offer the
 1. When the user asks you to remember something, call `dkg_memory_import`.
 2. Store a concise but durable memory, not raw noise.
 
+### Create or join a paranet
+1. Call `dkg_list_paranets` to see available paranets.
+2. If you need a new one, call `dkg_paranet_create` with a name.
+3. To join an existing paranet, call `dkg_subscribe` with its ID.
+4. Call `dkg_wallet_balances` to check that you have sufficient TRAC before publishing.
+
 ### Publish and verify
 1. Call `dkg_list_paranets` if you are not sure which paranet to use.
-2. Call `dkg_publish` with N-Quads.
+2. Call `dkg_publish` with N-Quads. Data is private by default — set `access_policy` to `"public"` if you want it readable by anyone.
 3. Call `dkg_query` to verify the stored data.
 
 ### Find and contact another agent

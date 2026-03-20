@@ -15,11 +15,33 @@ export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandle
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export {
+  CclEvaluator,
+  parseCclPolicy,
+  hashCclFacts,
+  type CclFactTuple,
+  type CclCanonicalPolicy,
+  type CclCondition,
+  type CclEvaluationResult,
+} from './ccl-evaluator.js';
+export {
+  buildCclEvaluationQuads,
+  type PublishCclEvaluationInput,
+} from './ccl-evaluation-publish.js';
+export {
+  buildCclPolicyQuads,
+  buildPolicyApprovalQuads,
+  hashCclPolicy,
+  type PublishCclPolicyInput,
+  type CclPolicyRecord,
+  type PolicyApprovalBinding,
+} from './ccl-policy.js';
+export {
   DKGAgent,
   type DKGAgentConfig,
   type ContextGraphSub,
   type ParanetSub,
   type PeerHealth,
 } from './dkg-agent.js';
+export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';

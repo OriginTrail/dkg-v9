@@ -8,7 +8,7 @@ import {
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, withRetry,
+  Logger, createOperationContext, withRetry, sparqlString,
   type DKGNodeConfig, type OperationContext, type GetView,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -35,6 +35,28 @@ import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { buildCclPolicyQuads, buildPolicyApprovalQuads, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
+import { CclEvaluator, hashCclFacts, parseCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
+import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
+
+export interface CclPublishedResultEntry {
+  entryUri: string;
+  kind: 'derived' | 'decision';
+  name: string;
+  tuple: unknown[];
+}
+
+export interface CclPublishedEvaluationRecord {
+  evaluationUri: string;
+  policyUri: string;
+  factSetHash: string;
+  createdAt?: string;
+  view?: string;
+  snapshotId?: string;
+  scopeUal?: string;
+  contextType?: string;
+  results: CclPublishedResultEntry[];
+}
 
 interface PublishOpts {
   onPhase?: PhaseCallback;
@@ -2010,6 +2032,387 @@ export class DKGAgent {
     }
   }
 
+  async publishCclPolicy(opts: {
+    paranetId: string;
+    name: string;
+    version: string;
+    content: string;
+    description?: string;
+    contextType?: string;
+    language?: string;
+    format?: string;
+  }): Promise<{ policyUri: string; hash: string; status: 'proposed' }> {
+    const ctx = createOperationContext('system');
+    if (!(await this.paranetExists(opts.paranetId))) {
+      throw new Error(`Paranet "${opts.paranetId}" does not exist. Create it first with createParanet().`);
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const now = new Date().toISOString();
+    const { policyUri, hash, quads } = buildCclPolicyQuads(opts, `did:dkg:agent:${this.peerId}`, ontologyGraph, now);
+    await this.store.insert(quads);
+    await this.publishOntologyQuads(policyUri, quads);
+    this.log.info(ctx, `Published CCL policy ${opts.name}@${opts.version} for paranet "${opts.paranetId}"`);
+    return { policyUri, hash, status: 'proposed' };
+  }
+
+  async approveCclPolicy(opts: {
+    paranetId: string;
+    policyUri: string;
+    contextType?: string;
+  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
+    const ctx = createOperationContext('system');
+    await this.assertParanetOwner(opts.paranetId);
+    const record = await this.getCclPolicyByUri(opts.policyUri);
+    if (!record) throw new Error(`CCL policy not found: ${opts.policyUri}`);
+    if (record.paranetId !== opts.paranetId) {
+      throw new Error(`CCL policy ${opts.policyUri} belongs to paranet "${record.paranetId}", not "${opts.paranetId}"`);
+    }
+    if (record.contextType && opts.contextType && record.contextType !== opts.contextType) {
+      throw new Error(`CCL policy contextType mismatch: policy=${record.contextType}, requested=${opts.contextType}`);
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const approvedAt = new Date().toISOString();
+    const effectiveContextType = opts.contextType ?? record.contextType;
+    const { bindingUri, quads } = buildPolicyApprovalQuads({
+      paranetId: opts.paranetId,
+      policyUri: opts.policyUri,
+      policyName: record.name,
+      creator: `did:dkg:agent:${this.peerId}`,
+      graph: ontologyGraph,
+      approvedAt,
+      contextType: effectiveContextType,
+    });
+
+    quads.push(
+      { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_POLICY_STATUS, object: sparqlString('approved'), graph: ontologyGraph },
+      { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_BY, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
+      { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_AT, object: sparqlString(approvedAt), graph: ontologyGraph },
+    );
+
+    await this.store.insert(quads);
+    await this.publishOntologyQuads(bindingUri, quads);
+    this.log.info(ctx, `Approved CCL policy ${record.name}@${record.version} for paranet "${opts.paranetId}"${effectiveContextType ? ` (context ${effectiveContextType})` : ''}`);
+    return { policyUri: opts.policyUri, bindingUri, contextType: effectiveContextType, approvedAt };
+  }
+
+  async listCclPolicies(opts: {
+    paranetId?: string;
+    name?: string;
+    contextType?: string;
+    status?: string;
+    includeBody?: boolean;
+  } = {}): Promise<CclPolicyRecord[]> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const filters: string[] = [];
+    if (opts.paranetId) filters.push(`?paranet = <did:dkg:paranet:${opts.paranetId}>`);
+    if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
+    if (opts.contextType) filters.push(`?contextType = ${sparqlString(opts.contextType)}`);
+    if (opts.status) filters.push(`?status = ${sparqlString(opts.status)}`);
+    const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
+    const bodyClause = opts.includeBody ? `OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_POLICY_BODY}> ?body }` : '';
+
+    const result = await this.store.query(`
+      SELECT ?policy ?paranet ?name ?version ?hash ?language ?format ?status ?creator ?created ?approvedBy ?approvedAt ?desc ?contextType ${opts.includeBody ? '?body' : ''} WHERE {
+        GRAPH <${ontologyGraph}> {
+          ?policy <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CCL_POLICY}> ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET}> ?paranet ;
+                  <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_VERSION}> ?version ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_HASH}> ?hash ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_LANGUAGE}> ?language ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_FORMAT}> ?format ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_STATUS}> ?status .
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_APPROVED_BY}> ?approvedBy }
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_APPROVED_AT}> ?approvedAt }
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+          OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_POLICY_CONTEXT_TYPE}> ?contextType }
+          ${bodyClause}
+          ${filterBlock}
+        }
+      }
+      ORDER BY ?name ?version
+    `);
+
+    const bindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: opts.name });
+    const latestByScope = new Map<string, PolicyApprovalBinding>();
+    for (const binding of bindings) {
+      const key = `${binding.paranetId}|${binding.name}|${binding.contextType ?? ''}`;
+      const current = latestByScope.get(key);
+      if (!current || binding.approvedAt > current.approvedAt) {
+        latestByScope.set(key, binding);
+      }
+    }
+
+    const records = new Map<string, CclPolicyRecord>();
+    if (result.type === 'bindings') {
+      for (const row of result.bindings as Record<string, string>[]) {
+        const paranetUri = row['paranet'];
+        const paranetId = paranetUri.startsWith('did:dkg:paranet:') ? paranetUri.slice('did:dkg:paranet:'.length) : paranetUri;
+        const name = stripLiteral(row['name']);
+        const defaultActive = latestByScope.get(`${paranetId}|${name}|`);
+        const activeContexts = Array.from(latestByScope.values())
+          .filter(binding => binding.paranetId === paranetId && binding.name === name && binding.contextType && binding.policyUri === row['policy'])
+          .map(binding => binding.contextType as string)
+          .sort();
+        const nextRecord: CclPolicyRecord = {
+          policyUri: row['policy'],
+          paranetId,
+          name,
+          version: stripLiteral(row['version']),
+          hash: stripLiteral(row['hash']),
+          language: stripLiteral(row['language']),
+          format: stripLiteral(row['format']),
+          status: stripLiteral(row['status']),
+          creator: row['creator'],
+          createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
+          approvedBy: row['approvedBy'],
+          approvedAt: row['approvedAt'] ? stripLiteral(row['approvedAt']) : undefined,
+          description: row['desc'] ? stripLiteral(row['desc']) : undefined,
+          contextType: row['contextType'] ? stripLiteral(row['contextType']) : undefined,
+          body: row['body'] ? stripLiteral(row['body']) : undefined,
+          isActiveDefault: defaultActive?.policyUri === row['policy'],
+          activeContexts,
+        };
+
+        const current = records.get(row['policy']);
+        if (!current || (current.status !== 'approved' && nextRecord.status === 'approved')) {
+          records.set(row['policy'], nextRecord);
+        }
+      }
+    }
+
+    return Array.from(records.values()).sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`));
+  }
+
+  async resolveCclPolicy(opts: {
+    paranetId: string;
+    name: string;
+    contextType?: string;
+    includeBody?: boolean;
+  }): Promise<CclPolicyRecord | null> {
+    const bindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: opts.name });
+    const matching = bindings
+      .filter(binding => binding.contextType === opts.contextType)
+      .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
+    const fallback = bindings
+      .filter(binding => binding.contextType == null)
+      .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
+    const selected = matching[0] ?? fallback[0];
+    if (!selected) return null;
+    const record = await this.getCclPolicyByUri(selected.policyUri, { includeBody: opts.includeBody });
+    if (!record) return null;
+    record.isActiveDefault = !selected.contextType;
+    record.activeContexts = selected.contextType ? [selected.contextType] : record.activeContexts;
+    return record;
+  }
+
+  async evaluateCclPolicy(opts: {
+    paranetId: string;
+    name: string;
+    facts: CclFactTuple[];
+    contextType?: string;
+    view?: string;
+    snapshotId?: string;
+    scopeUal?: string;
+  }): Promise<{
+    policy: Pick<CclPolicyRecord, 'policyUri' | 'paranetId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
+    context: {
+      paranetId: string;
+      contextType?: string;
+      view?: string;
+      snapshotId?: string;
+      scopeUal?: string;
+    };
+    factSetHash: string;
+    result: CclEvaluationResult;
+  }> {
+    const policy = await this.resolveCclPolicy({
+      paranetId: opts.paranetId,
+      name: opts.name,
+      contextType: opts.contextType,
+      includeBody: true,
+    });
+    if (!policy?.body) {
+      throw new Error(`No approved policy found for ${opts.paranetId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`);
+    }
+
+    const parsed = parseCclPolicy(policy.body);
+    const evaluator = new CclEvaluator(parsed, opts.facts);
+    const result = evaluator.run();
+
+    return {
+      policy: {
+        policyUri: policy.policyUri,
+        paranetId: policy.paranetId,
+        name: policy.name,
+        version: policy.version,
+        hash: policy.hash,
+        language: policy.language,
+        format: policy.format,
+        contextType: opts.contextType ?? policy.contextType,
+      },
+      context: {
+        paranetId: opts.paranetId,
+        contextType: opts.contextType,
+        view: opts.view,
+        snapshotId: opts.snapshotId,
+        scopeUal: opts.scopeUal,
+      },
+      factSetHash: hashCclFacts(opts.facts),
+      result,
+    };
+  }
+
+  async evaluateAndPublishCclPolicy(opts: {
+    paranetId: string;
+    name: string;
+    facts: CclFactTuple[];
+    contextType?: string;
+    view?: string;
+    snapshotId?: string;
+    scopeUal?: string;
+  }): Promise<{
+    evaluationUri: string;
+    publish: PublishResult;
+    evaluation: {
+      policy: Pick<CclPolicyRecord, 'policyUri' | 'paranetId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
+      context: {
+        paranetId: string;
+        contextType?: string;
+        view?: string;
+        snapshotId?: string;
+        scopeUal?: string;
+      };
+      factSetHash: string;
+      result: CclEvaluationResult;
+    };
+  }> {
+    const evaluation = await this.evaluateCclPolicy(opts);
+    const graph = paranetDataGraphUri(opts.paranetId);
+    const { evaluationUri, quads } = buildCclEvaluationQuads({
+      paranetId: opts.paranetId,
+      policyUri: evaluation.policy.policyUri,
+      factSetHash: evaluation.factSetHash,
+      result: evaluation.result,
+      evaluatedAt: new Date().toISOString(),
+      view: evaluation.context.view,
+      snapshotId: evaluation.context.snapshotId,
+      scopeUal: evaluation.context.scopeUal,
+      contextType: evaluation.context.contextType,
+    }, graph);
+    const publish = await this.publish(opts.paranetId, quads);
+    return { evaluationUri, publish, evaluation };
+  }
+
+  async listCclEvaluations(opts: {
+    paranetId: string;
+    policyUri?: string;
+    snapshotId?: string;
+    view?: string;
+    contextType?: string;
+    resultKind?: 'derived' | 'decision';
+    resultName?: string;
+  }): Promise<CclPublishedEvaluationRecord[]> {
+    const graph = paranetDataGraphUri(opts.paranetId);
+    const filters: string[] = [];
+    if (opts.policyUri) filters.push(`?policy = <${opts.policyUri}>`);
+    if (opts.snapshotId) filters.push(`?snapshotId = ${sparqlString(opts.snapshotId)}`);
+    if (opts.view) filters.push(`?view = ${sparqlString(opts.view)}`);
+    if (opts.contextType) filters.push(`?contextType = ${sparqlString(opts.contextType)}`);
+    if (opts.resultKind) filters.push(`?kind = ${sparqlString(opts.resultKind)}`);
+    if (opts.resultName) filters.push(`?resultName = ${sparqlString(opts.resultName)}`);
+    const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
+
+    const result = await this.store.query(`
+      SELECT ?evaluation ?policy ?factSetHash ?createdAt ?view ?snapshotId ?scopeUal ?contextType ?entry ?kind ?resultName ?arg ?argIndex ?argValue WHERE {
+        GRAPH <${graph}> {
+          ?evaluation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CCL_EVALUATION}> ;
+                      <${DKG_ONTOLOGY.DKG_EVALUATED_POLICY}> ?policy ;
+                      <${DKG_ONTOLOGY.DKG_FACT_SET_HASH}> ?factSetHash .
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?createdAt }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_VIEW}> ?view }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_SNAPSHOT_ID}> ?snapshotId }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_SCOPE_UAL}> ?scopeUal }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_POLICY_CONTEXT_TYPE}> ?contextType }
+          OPTIONAL {
+            ?evaluation <${DKG_ONTOLOGY.DKG_HAS_RESULT}> ?entry .
+            ?entry <${DKG_ONTOLOGY.DKG_RESULT_KIND}> ?kind ;
+                   <${DKG_ONTOLOGY.DKG_RESULT_NAME}> ?resultName .
+            OPTIONAL {
+              ?entry <${DKG_ONTOLOGY.DKG_HAS_RESULT_ARG}> ?arg .
+              ?arg <${DKG_ONTOLOGY.DKG_RESULT_ARG_INDEX}> ?argIndex ;
+                   <${DKG_ONTOLOGY.DKG_RESULT_ARG_VALUE}> ?argValue .
+            }
+          }
+          ${filterBlock}
+        }
+      }
+      ORDER BY DESC(?createdAt) ?evaluation ?kind ?resultName ?argIndex
+    `);
+
+    if (result.type !== 'bindings') return [];
+    const records = new Map<string, CclPublishedEvaluationRecord>();
+    const entryArgs = new Map<string, Map<number, unknown>>();
+    for (const row of result.bindings as Record<string, string>[]) {
+      const evaluationUri = row['evaluation'];
+      let record = records.get(evaluationUri);
+      if (!record) {
+        record = {
+          evaluationUri,
+          policyUri: row['policy'],
+          factSetHash: stripLiteral(row['factSetHash']),
+          createdAt: row['createdAt'] ? stripLiteral(row['createdAt']) : undefined,
+          view: row['view'] ? stripLiteral(row['view']) : undefined,
+          snapshotId: row['snapshotId'] ? stripLiteral(row['snapshotId']) : undefined,
+          scopeUal: row['scopeUal'] ? stripLiteral(row['scopeUal']) : undefined,
+          contextType: row['contextType'] ? stripLiteral(row['contextType']) : undefined,
+          results: [],
+        };
+        records.set(evaluationUri, record);
+      }
+
+      if (row['entry']) {
+        const entryUri = row['entry'];
+        let existing = record.results.find(resultEntry => resultEntry.entryUri === entryUri);
+        if (!existing) {
+          existing = {
+            entryUri,
+            kind: stripLiteral(row['kind']) as 'derived' | 'decision',
+            name: stripLiteral(row['resultName']),
+            tuple: [],
+          };
+          record.results.push(existing);
+        }
+
+        if (row['arg'] && row['argIndex'] && row['argValue']) {
+          let args = entryArgs.get(entryUri);
+          if (!args) {
+            args = new Map<number, unknown>();
+            entryArgs.set(entryUri, args);
+          }
+          args.set(Number(stripLiteral(row['argIndex'])), JSON.parse(stripLiteral(row['argValue'])));
+        }
+      }
+    }
+
+    for (const record of records.values()) {
+      for (const resultEntry of record.results) {
+        const args = entryArgs.get(resultEntry.entryUri);
+        if (args && args.size > 0) {
+          resultEntry.tuple = [...args.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([, value]) => value);
+        }
+      }
+    }
+
+    return Array.from(records.values());
+  }
+
   /**
    * Check whether a context graph is registered (definition triples exist in the
    * ontology graph). Always store-backed to avoid false positives from
@@ -2118,6 +2521,100 @@ export class DKGAgent {
 
   get peerId(): string {
     return this.node.peerId;
+  }
+
+  private async getCclPolicyByUri(policyUri: string, opts: { includeBody?: boolean } = {}): Promise<CclPolicyRecord | null> {
+    const records = await this.listCclPolicies({ includeBody: opts.includeBody });
+    return records.find(record => record.policyUri === policyUri) ?? null;
+  }
+
+  private async assertParanetOwner(paranetId: string): Promise<void> {
+    const owner = await this.getParanetOwner(paranetId);
+    const current = `did:dkg:agent:${this.peerId}`;
+    if (!owner) {
+      throw new Error(`Paranet "${paranetId}" has no registered owner; cannot approve policies.`);
+    }
+    if (owner !== current) {
+      throw new Error(`Only the paranet owner can approve policies for "${paranetId}". Owner=${owner}, current=${current}`);
+    }
+  }
+
+  private async getParanetOwner(paranetId: string): Promise<string | null> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = `did:dkg:paranet:${paranetId}`;
+    const result = await this.store.query(`
+      SELECT ?owner WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+        }
+      }
+      LIMIT 1
+    `);
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    return (result.bindings[0] as Record<string, string>)['owner'] ?? null;
+  }
+
+  private async listCclPolicyBindings(opts: {
+    paranetId?: string;
+    name?: string;
+  } = {}): Promise<PolicyApprovalBinding[]> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const filters: string[] = [];
+    if (opts.paranetId) filters.push(`?paranet = <did:dkg:paranet:${opts.paranetId}>`);
+    if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
+    const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
+    const result = await this.store.query(`
+      SELECT ?binding ?policy ?paranet ?name ?contextType ?approvedAt WHERE {
+        GRAPH <${ontologyGraph}> {
+          ?binding <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_POLICY_BINDING}> ;
+                   <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET}> ?paranet ;
+                   <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name ;
+                   <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> ?policy ;
+                   <${DKG_ONTOLOGY.DKG_APPROVED_AT}> ?approvedAt .
+          OPTIONAL { ?binding <${DKG_ONTOLOGY.DKG_POLICY_CONTEXT_TYPE}> ?contextType }
+          ${filterBlock}
+        }
+      }
+      ORDER BY DESC(?approvedAt)
+    `);
+
+    if (result.type !== 'bindings') return [];
+    return (result.bindings as Record<string, string>[]).map((row) => ({
+      bindingUri: row['binding'],
+      policyUri: row['policy'],
+      paranetId: row['paranet'].startsWith('did:dkg:paranet:') ? row['paranet'].slice('did:dkg:paranet:'.length) : row['paranet'],
+      name: stripLiteral(row['name']),
+      contextType: row['contextType'] ? stripLiteral(row['contextType']) : undefined,
+      approvedAt: stripLiteral(row['approvedAt']),
+    }));
+  }
+
+  private async publishOntologyQuads(ual: string, quads: Quad[]): Promise<void> {
+    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+    const nquads = quads.map(q => {
+      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
+    }).join('\n');
+
+    const msg = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(nquads),
+      paranetId: SYSTEM_PARANETS.ONTOLOGY,
+      kas: [],
+      publisherIdentity: this.wallet.keypair.publicKey,
+      publisherAddress: '',
+      startKAId: 0,
+      endKAId: 0,
+      chainId: '',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    try {
+      await this.gossip.publish(ontologyTopic, msg);
+    } catch {
+      // No peers subscribed — ok for local-only operation
+    }
   }
 
   get identityId(): bigint {
@@ -2561,10 +3058,19 @@ function strip(s: string): string {
 }
 
 function stripLiteral(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
+  if (s.startsWith('"') && s.endsWith('"')) return unescapeLiteralContent(s.slice(1, -1));
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
+  if (match) return unescapeLiteralContent(match[1]);
   return s;
+}
+
+function unescapeLiteralContent(value: string): string {
+  return value
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
 }
 
 /**

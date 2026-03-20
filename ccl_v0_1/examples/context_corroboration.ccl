@@ -1,0 +1,34 @@
+policy context_corroboration v0.1.0
+
+rule corroborated(C):
+  claim(C)
+  count_distinct E where
+    supports(E, C)
+    evidence_view(E, accepted)
+    independent(E)
+  >= 2
+  exists E where
+    supports(E, C)
+    evidence_view(E, accepted)
+    authority_class(E, vendor)
+  not exists C2 where
+    contradicts(C2, C)
+    accepted_status(C2, accepted)
+
+rule disputed(C):
+  claim(C)
+  exists C2 where
+    contradicts(C2, C)
+    accepted_status(C2, accepted)
+
+rule promotable(C):
+  corroborated(C)
+  claim_epoch(C, E)
+  quorum_epoch(incident_review, E)
+  quorum_reached(incident_review, 3, 4)
+
+decision propose_accept(C):
+  promotable(C)
+
+decision propose_reject(C):
+  disputed(C)

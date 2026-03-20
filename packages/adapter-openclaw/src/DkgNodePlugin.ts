@@ -101,7 +101,7 @@ export class DkgNodePlugin {
     const gameConfig = this.config.game;
     if (gameConfig?.enabled) {
       // Wire agent consultation through the channel bridge (if available).
-      // Uses identity "game-autopilot" → separate session from user chat.
+      // Uses per-game identity "game-autopilot-{swarmId}" → fresh session per game.
       const consultAgent = this.channelPlugin
         ? (prompt: string, correlationId: string, identity?: string) =>
             this.channelPlugin!.processInbound(prompt, correlationId, identity || 'game-autopilot')

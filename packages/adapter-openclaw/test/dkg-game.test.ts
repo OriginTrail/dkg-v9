@@ -1464,6 +1464,37 @@ describe('tool description guards', () => {
     expect(startTool.description).toContain('watcher');
   });
 
+  it('game_strategy sets and clears hint', async () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const tool = api.tools.find(t => t.name === 'game_strategy')!;
+
+    // Set a hint
+    const setResult = await tool.execute('call-1', { hint: 'play defensively' });
+    const setParsed = JSON.parse(setResult.content[0].text);
+    expect(setParsed.status).toBe('strategy_set');
+    expect(setParsed.hint).toBe('play defensively');
+
+    // Clear the hint
+    const clearResult = await tool.execute('call-2', { hint: '' });
+    const clearParsed = JSON.parse(clearResult.content[0].text);
+    expect(clearParsed.status).toBe('strategy_cleared');
+    expect(clearParsed.hint).toBeNull();
+  });
+
+  it('game_strategy trims whitespace-only hint to clear', async () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const tool = api.tools.find(t => t.name === 'game_strategy')!;
+    const result = await tool.execute('call-1', { hint: '   ' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe('strategy_cleared');
+  });
+
   it('game_autopilot_start does not suggest calling game_start', () => {
     const api = mockApi();
     const plugin = new DkgGamePlugin(mockClient(), {}, undefined);

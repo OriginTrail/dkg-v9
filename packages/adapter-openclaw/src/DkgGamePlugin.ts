@@ -748,7 +748,7 @@ export class DkgGamePlugin {
 
     this.registerTools(api);
 
-    api.logger.info?.('[dkg-game] Game plugin registered — 11 tools available');
+    api.logger.info?.('[dkg-game] Game plugin registered — 12 tools available');
   }
 
   /** Re-register tools into a new registry without recreating services. */
@@ -1144,6 +1144,7 @@ export class DkgGamePlugin {
               running: this.gameService!.isRunning,
               activeSwarmId: this.gameService!.activeSwarmId,
               lastResult: this.gameService!.lastResult,
+              strategyHint: this.strategyHint || null,
             };
             const watcher = this.getWatchState();
             return this.json({ ...formatSwarmDetail(state), autopilot, watcher });

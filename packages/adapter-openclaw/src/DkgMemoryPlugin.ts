@@ -1,5 +1,3 @@
-import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-
 /**
  * DkgMemoryPlugin — DKG-backed memory search.
  *
@@ -49,7 +47,11 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
   register(api: OpenClawPluginApi): void {
     this.api = api;
+    this.registerTools(api);
+  }
 
+  /** Re-register tools into a new registry without recreating state. */
+  registerTools(api: OpenClawPluginApi): void {
     api.registerTool({
       name: 'dkg_memory_search',
       description:
@@ -318,4 +320,16 @@ function bindingValue(v: unknown): string | undefined {
   return String(v);
 }
 
-const escapeSparqlString = escapeSparqlLiteral;
+/**
+ * Escape a string for safe interpolation into a SPARQL short string literal.
+ * Handles all characters required by SPARQL grammar (STRING_LITERAL2).
+ * Inlined from dkg-core to avoid pulling in the heavy libp2p dependency tree.
+ */
+function escapeSparqlString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}

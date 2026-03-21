@@ -222,10 +222,11 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
+  const unsubSet = new Set(config.unsubscribedParanets ?? []);
   const syncParanets = [...new Set([
     ...(config.paranets ?? []),
     ...(network?.defaultParanets ?? []),
-  ])];
+  ])].filter(p => !unsubSet.has(p));
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());
@@ -265,6 +266,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     syncParanets,
+    unsubscribedParanets: config.unsubscribedParanets,
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -329,7 +331,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   // Ensure configured paranets + network defaults are subscribed and available.
   // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
   // duplicate creator claims and to survive "already exists" gracefully.
-  const paranetsToSubscribe = new Set(syncParanets);
+  const paranetsToSubscribe = new Set([...syncParanets].filter(p => !unsubSet.has(p)));
   for (const p of paranetsToSubscribe) {
     try {
       await agent.ensureParanetLocal({
@@ -1988,12 +1990,44 @@ async function handleRequest(
     }
   }
 
+  // POST /api/unsubscribe  { paranetId: "..." }
+  if (req.method === 'POST' && path === '/api/unsubscribe') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { paranetId } = parsed;
+    if (!paranetId || typeof paranetId !== 'string') {
+      return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    }
+    try {
+      agent.unsubscribeFromParanet(paranetId);
+    } catch (err) {
+      return jsonResponse(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+    // Persist: remove from paranets, add to unsubscribedParanets
+    config.paranets = (config.paranets ?? []).filter(p => p !== paranetId);
+    const unsubs = new Set(config.unsubscribedParanets ?? []);
+    unsubs.add(paranetId);
+    config.unsubscribedParanets = [...unsubs];
+    await saveConfig(config);
+    return jsonResponse(res, 200, { unsubscribed: paranetId });
+  }
+
   // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
   if (req.method === 'POST' && path === '/api/subscribe') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { paranetId, includeWorkspace } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
     const shouldSyncWorkspace = includeWorkspace !== false;
+    // Clear deny list before subscribing so trackSyncParanet works.
+    // Only remove the unsubscribe tombstone — do NOT add to config.paranets
+    // here; that is the CLI --save flag's responsibility.
+    agent.clearUnsubscribed(paranetId);
+    const hadTombstone = (config.unsubscribedParanets ?? []).includes(paranetId);
+    if (hadTombstone) {
+      config.unsubscribedParanets = config.unsubscribedParanets!.filter(p => p !== paranetId);
+      await saveConfig(config);
+    }
     agent.subscribeToParanet(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

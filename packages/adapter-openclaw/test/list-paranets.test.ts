@@ -152,122 +152,112 @@ describe('dkg_publish tool', () => {
     vi.restoreAllMocks();
   });
 
-  it('parses N-Quads and publishes to daemon', async () => {
+  it('publishes quads array with literal objects', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    const nquads = '<urn:alice> <https://schema.org/name> "Alice" .\n<urn:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .';
-    const result = await tool.execute('call-1', { paranet_id: 'testing', nquads });
+    const quads = [
+      { subject: 'https://example.org/wine', predicate: 'https://schema.org/name', object: 'Cabernet Sauvignon' },
+      { subject: 'https://example.org/wine', predicate: 'https://schema.org/description', object: 'Full-bodied red wine' },
+    ];
+    const result = await tool.execute('call-1', { paranet_id: 'testing', quads });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.kcId).toBe('kc-123');
     expect(parsed.kaCount).toBe(1);
-    expect(parsed.triplesPublished).toBe(2);
+    expect(parsed.quadsPublished).toBe(2);
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.paranetId).toBe('testing');
     expect(body.quads).toHaveLength(2);
-    expect(body.quads[0].subject).toBe('urn:alice');
+    expect(body.quads[0].subject).toBe('https://example.org/wine');
+    expect(body.quads[0].object).toBe('"Cabernet Sauvignon"');
   });
 
-  it('returns error for invalid N-Quads', async () => {
-    const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-2', { paranet_id: 'testing', nquads: 'not valid nquads at all' });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.error).toContain('No valid N-Quads');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips comment and blank lines in N-Quads', async () => {
+  it('publishes quads array with URI objects (auto-detected)', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-456', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    const nquads = '# This is a comment\n\n<urn:x> <urn:y> "z" .\n';
-    const result = await tool.execute('call-3', { paranet_id: 'testing', nquads });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.triplesPublished).toBe(1);
-  });
-
-  it('auto-wraps bare URIs in angle brackets', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-bare', kas: [{ tokenId: '1', rootEntity: 'https://example.org/wine' }] }), { status: 200 }),
-    );
-
-    const tool = findTool('dkg_publish');
-    const nquads = 'https://example.org/wine https://schema.org/name "Cabernet" .\nhttps://example.org/wine http://www.w3.org/1999/02/22-rdf-syntax-ns#type https://schema.org/Product .';
-    const result = await tool.execute('call-bare', { paranet_id: 'testing', nquads });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.triplesPublished).toBe(2);
+    const quads = [
+      { subject: 'https://example.org/wine', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://schema.org/Product' },
+    ];
+    const result = await tool.execute('call-uri', { paranet_id: 'testing', quads });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].subject).toBe('https://example.org/wine');
-    expect(body.quads[0].predicate).toBe('https://schema.org/name');
-    expect(body.quads[0].object).toBe('"Cabernet"');
+    expect(body.quads[0].object).toBe('https://schema.org/Product');
   });
 
-  it('handles mix of bare and angle-bracketed URIs', async () => {
+  it('handles mixed URI and literal objects', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    const nquads = '<urn:a> https://schema.org/name "Alice" .\nurn:b <https://schema.org/name> "Bob" .';
-    const result = await tool.execute('call-mix', { paranet_id: 'testing', nquads });
+    const quads = [
+      { subject: 'https://example.org/wine', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://schema.org/Product' },
+      { subject: 'https://example.org/wine', predicate: 'https://schema.org/name', object: 'Cabernet' },
+      { subject: 'https://example.org/wine', predicate: 'https://schema.org/knows', object: 'urn:winemaker:alice' },
+    ];
+    const result = await tool.execute('call-mix', { paranet_id: 'testing', quads });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.triplesPublished).toBe(2);
+    expect(parsed.quadsPublished).toBe(3);
+
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(body.quads[0].object).toBe('https://schema.org/Product');
+    expect(body.quads[1].object).toBe('"Cabernet"');
+    expect(body.quads[2].object).toBe('urn:winemaker:alice');
   });
 
-  it('auto-wraps bare type URI in typed literals', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-typed', kas: [] }), { status: 200 }),
-    );
-
+  it('returns error for empty quads array', async () => {
     const tool = findTool('dkg_publish');
-    const nquads = '<urn:x> <urn:y> "14.5"^^http://www.w3.org/2001/XMLSchema#decimal .';
-    const result = await tool.execute('call-typed', { paranet_id: 'testing', nquads });
+    const result = await tool.execute('call-empty', { paranet_id: 'testing', quads: [] });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.triplesPublished).toBe(1);
+    expect(parsed.error).toContain('non-empty array');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('handles double-escaped quotes from LLMs', async () => {
+  it('returns error for missing quads', async () => {
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-missing', { paranet_id: 'testing' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('non-empty array');
+  });
+
+  it('escapes quotes in literal object values', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    // LLM sends \" as literal backslash-quote instead of JSON-parsed "
-    const nquads = 'https://example.org/wine https://schema.org/name \\"Test Wine\\" .';
-    const result = await tool.execute('call-esc', { paranet_id: 'testing', nquads });
-    const parsed = JSON.parse(result.content[0].text);
+    const quads = [
+      { subject: 'urn:a', predicate: 'urn:b', object: 'She said "hello"' },
+    ];
+    const result = await tool.execute('call-esc', { paranet_id: 'testing', quads });
 
-    expect(parsed.triplesPublished).toBe(1);
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].subject).toBe('https://example.org/wine');
-    expect(body.quads[0].object).toBe('"Test Wine"');
+    expect(body.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
-  it('does not wrap URIs inside quoted literals', async () => {
+  it('passes optional graph field', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-lit', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    const nquads = '<urn:x> <urn:y> "see https://example.org for details" .';
-    const result = await tool.execute('call-lit', { paranet_id: 'testing', nquads });
-    const parsed = JSON.parse(result.content[0].text);
+    const quads = [
+      { subject: 'urn:a', predicate: 'urn:b', object: 'hello', graph: 'urn:my-graph' },
+    ];
+    const result = await tool.execute('call-graph', { paranet_id: 'testing', quads });
 
-    expect(parsed.triplesPublished).toBe(1);
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].object).toBe('"see https://example.org for details"');
+    expect(body.quads[0].graph).toBe('urn:my-graph');
   });
 });
 
@@ -589,7 +579,7 @@ describe('dkg_publish access_policy', () => {
     vi.restoreAllMocks();
   });
 
-  const VALID_NQUADS = '<urn:a> <urn:b> "c" .';
+  const VALID_QUADS = [{ subject: 'urn:a', predicate: 'urn:b', object: 'c' }];
 
   it('defaults to ownerOnly when access_policy not specified', async () => {
     fetchSpy.mockResolvedValueOnce(
@@ -597,7 +587,7 @@ describe('dkg_publish access_policy', () => {
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-1', { paranet_id: 'testing', nquads: VALID_NQUADS });
+    const result = await tool.execute('call-1', { paranet_id: 'testing', quads: VALID_QUADS });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.accessPolicy).toBe('ownerOnly');
@@ -611,7 +601,7 @@ describe('dkg_publish access_policy', () => {
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-2', { paranet_id: 'testing', nquads: VALID_NQUADS, access_policy: 'public' });
+    const result = await tool.execute('call-2', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.accessPolicy).toBe('public');
@@ -621,7 +611,7 @@ describe('dkg_publish access_policy', () => {
 
   it('rejects invalid access_policy', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-3', { paranet_id: 'testing', nquads: VALID_NQUADS, access_policy: 'bogus' });
+    const result = await tool.execute('call-3', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'bogus' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('Invalid access_policy');
@@ -635,7 +625,7 @@ describe('dkg_publish access_policy', () => {
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-4', {
       paranet_id: 'testing',
-      nquads: VALID_NQUADS,
+      quads: VALID_QUADS,
       access_policy: 'allowList',
       allowed_peers: '12D3peer1, 12D3peer2',
     });
@@ -647,7 +637,7 @@ describe('dkg_publish access_policy', () => {
 
   it('rejects allowList without allowed_peers', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-5', { paranet_id: 'testing', nquads: VALID_NQUADS, access_policy: 'allowList' });
+    const result = await tool.execute('call-5', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'allowList' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('allowList');
@@ -658,7 +648,7 @@ describe('dkg_publish access_policy', () => {
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-6', {
       paranet_id: 'testing',
-      nquads: VALID_NQUADS,
+      quads: VALID_QUADS,
       access_policy: 'public',
       allowed_peers: '12D3peer1',
     });

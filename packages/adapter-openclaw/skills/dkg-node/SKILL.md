@@ -62,70 +62,66 @@ Check TRAC and ETH token balances for the node's operational wallets. Use this b
 No parameters required. Returns per-wallet ETH and TRAC balances, chain ID, and RPC URL.
 
 ### `dkg_publish`
-Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default, published data is private (`ownerOnly`).
+Publish knowledge to a DKG paranet as an array of quads. By default, published data is private (`ownerOnly`).
 
 - `paranet_id` (required): target paranet, for example `"testing"` or `"my-research"`
-- `nquads` (required): N-Quads string, one triple per line (see format rules below)
+- `quads` (required): array of `{subject, predicate, object}` objects (see format below)
 - `access_policy` (optional): `"ownerOnly"` (default — only you can read), `"public"` (anyone can read), or `"allowList"` (only listed peers)
 - `allowed_peers` (optional): comma-separated peer IDs, required when `access_policy` is `"allowList"`
 
-**N-Quads format rules** (the tool will reject malformed input):
-- Every line is exactly: `<subject> <predicate> <object> .`
-- **Subject**: always a URI in angle brackets: `<urn:my:entity>`
-- **Predicate**: always a URI in angle brackets: `<https://schema.org/name>`
-- **Object**: either a URI in angle brackets `<https://schema.org/Person>` or a literal in double quotes `"Alice"`
-- Each line **must** end with a space and dot: ` .`
-- Blank lines and lines starting with `#` are ignored
+**Quad format:**
 
-**Literal types and languages** (optional):
-- Typed literal: `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`
-- Language-tagged literal: `"Bonjour"@fr`
-
-**Common mistakes to avoid:**
-- Do NOT omit angle brackets around URIs — `urn:x` is wrong, `<urn:x>` is correct
-- Do NOT omit the trailing ` .` — each line must end with it
-- Do NOT use single quotes — only double quotes `"..."` for literals
-- Do NOT put a literal as the subject or predicate — only URIs
-- Do NOT double-escape quotes in literals — `"Alice"` is correct, `"\"Alice\""` stores literal quote characters in the value
+Each quad has three required fields:
+- `subject`: a URI identifying the entity (e.g. `"https://example.org/wine/cabernet"`)
+- `predicate`: a URI for the property (e.g. `"https://schema.org/name"`)
+- `object`: either a URI or a plain literal value — auto-detected:
+  - Starts with `http://`, `https://`, `urn:`, or `did:` → treated as a URI
+  - Anything else → treated as a string literal (e.g. `"Cabernet Sauvignon"`)
+- `graph` (optional): named graph URI
 
 **How to structure quads:**
 
 Your job is to convert the user's input (documents, research data, messages, etc.) into a knowledge graph using appropriate ontologies and domain-specific URIs. Use standard ontologies where they exist (schema.org, Dublin Core, domain-specific vocabularies). Use meaningful URIs that reflect the content — do NOT invent `did:dkg:` URIs (those are assigned by the system for on-chain provenance).
 
 **Example — a person (using schema.org):**
-```nquads
-<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<https://example.org/people/alice> <https://schema.org/name> "Alice Johnson" .
-<https://example.org/people/alice> <https://schema.org/jobTitle> "Research Scientist" .
+```json
+[
+  {"subject": "https://example.org/people/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person"},
+  {"subject": "https://example.org/people/alice", "predicate": "https://schema.org/name", "object": "Alice Johnson"},
+  {"subject": "https://example.org/people/alice", "predicate": "https://schema.org/jobTitle", "object": "Research Scientist"}
+]
 ```
 
 **Example — clinical trial data (using a domain ontology):**
-```nquads
-<urn:trial:NCT01364597> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://oxpg.org/ontology/clinical-trial-ontology#ClinicalTrial> .
-<urn:trial:NCT01364597> <https://schema.org/name> "Brivaracetam Phase III Study" .
-<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#interventionName> "Brivaracetam" .
-<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#groundingTerm> "brivaracetam" .
+```json
+[
+  {"subject": "urn:trial:NCT01364597", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "http://oxpg.org/ontology/clinical-trial-ontology#ClinicalTrial"},
+  {"subject": "urn:trial:NCT01364597", "predicate": "https://schema.org/name", "object": "Brivaracetam Phase III Study"},
+  {"subject": "urn:intervention:NCT01364597:brv", "predicate": "http://oxpg.org/ontology/clinical-trial-ontology#interventionName", "object": "Brivaracetam"}
+]
 ```
 
 **Example — multiple entities (multiple Knowledge Assets in one publish):**
-```nquads
-<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<https://example.org/people/alice> <https://schema.org/name> "Alice" .
-<https://example.org/people/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<https://example.org/people/bob> <https://schema.org/name> "Bob" .
-<https://example.org/people/bob> <https://schema.org/knows> <https://example.org/people/alice> .
+```json
+[
+  {"subject": "https://example.org/people/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person"},
+  {"subject": "https://example.org/people/alice", "predicate": "https://schema.org/name", "object": "Alice"},
+  {"subject": "https://example.org/people/bob", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person"},
+  {"subject": "https://example.org/people/bob", "predicate": "https://schema.org/name", "object": "Bob"},
+  {"subject": "https://example.org/people/bob", "predicate": "https://schema.org/knows", "object": "https://example.org/people/alice"}
+]
 ```
 
 **Understanding the response:**
 
 The publish response includes `kcId` and `kaCount`:
-- **KC (Knowledge Collection)**: the batch of all triples from this publish call, identified by `kcId` (an on-chain token ID). Each `dkg_publish` call creates exactly one KC.
-- **KA (Knowledge Asset)**: a subset of the KC grouped by subject URI. Each unique subject in your N-Quads becomes one KA. The subject URI is the KA's **root entity**.
+- **KC (Knowledge Collection)**: the batch of all quads from this publish call, identified by `kcId` (an on-chain token ID). Each `dkg_publish` call creates exactly one KC.
+- **KA (Knowledge Asset)**: a subset of the KC grouped by subject URI. Each unique subject becomes one KA. The subject URI is the KA's **root entity**.
 - The system assigns a `did:dkg:{chainId}/{address}/{tokenId}` UAL to the KC for on-chain provenance — you do not create these.
 
 For example, publishing the multi-entity example above produces:
 - 1 KC (kcId: some number)
-- 2 KAs: one with root entity `https://example.org/people/alice` (2 triples), one with root entity `https://example.org/people/bob` (3 triples)
+- 2 KAs: one with root entity `https://example.org/people/alice` (2 quads), one with root entity `https://example.org/people/bob` (3 quads)
 
 Use `kcId` to reference the published collection in updates or queries.
 

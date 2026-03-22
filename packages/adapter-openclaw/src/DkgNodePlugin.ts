@@ -371,15 +371,30 @@ export class DkgNodePlugin {
       {
         name: 'dkg_publish',
         description:
-          'Publish RDF triples (N-Quads format) to a DKG paranet. ' +
-          'Each line is: <subject> <predicate> <object> . (with angle brackets and a trailing dot). ' +
-          'Example N-Quads: <did:dkg:entity:alice> <https://schema.org/name> "Alice" . ' +
+          'Publish knowledge to a DKG paranet as an array of quads (subject/predicate/object). ' +
+          'Object values that look like URIs (http://, https://, urn:, did:) are treated as URIs; ' +
+          'all other values become string literals automatically. ' +
           'By default, published data is private (ownerOnly). Set access_policy to "public" to make it readable by anyone.',
         parameters: {
           type: 'object',
           properties: {
             paranet_id: { type: 'string', description: 'Target paranet ID (e.g. "testing", "my-research")' },
-            nquads: { type: 'string', description: 'N-Quads triples, one per line. Each line: <subject> <predicate> "literal" or <uri> .' },
+            quads: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  subject: { type: 'string', description: 'Subject URI (e.g. "https://example.org/wine/cabernet")' },
+                  predicate: { type: 'string', description: 'Predicate URI (e.g. "https://schema.org/name")' },
+                  object: { type: 'string', description: 'Object — URI or plain literal value (e.g. "Cabernet Sauvignon" or "https://schema.org/Product")' },
+                  graph: { type: 'string', description: 'Optional named graph URI' },
+                },
+                required: ['subject', 'predicate', 'object'],
+              },
+              description:
+                'Array of quads to publish. Each quad has subject (URI), predicate (URI), and object (URI or literal string). ' +
+                'URIs are auto-detected by prefix (http://, https://, urn:, did:); everything else becomes a literal.',
+            },
             access_policy: {
               type: 'string',
               enum: ['public', 'ownerOnly', 'allowList'],
@@ -394,7 +409,7 @@ export class DkgNodePlugin {
                 'Required when access_policy is "allowList". Must not be set for other policies.',
             },
           },
-          required: ['paranet_id', 'nquads'],
+          required: ['paranet_id', 'quads'],
         },
         execute: async (_toolCallId, args) => this.handlePublish(args),
       },
@@ -508,16 +523,24 @@ export class DkgNodePlugin {
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const paranetId = String(args.paranet_id);
-      // Normalize: LLMs often double-escape quotes (send \" as literal chars instead of JSON escapes)
-      const nquadsText = String(args.nquads).replace(/\\"/g, '"');
+      const rawQuads = args.quads;
 
-      const quads = parseNQuadsText(nquadsText);
-      if (quads.length === 0) {
-        return this.error(
-          'No valid N-Quads parsed from input. Each line must be: <subject> <predicate> <object> . ' +
-          'Example: <did:dkg:entity:x> <https://schema.org/name> "Hello" .',
-        );
+      if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
+        return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
       }
+
+      // Convert agent-friendly quads to daemon format:
+      // - subject/predicate: plain URI strings (passed as-is)
+      // - object: auto-detect URI vs literal — URIs passed as-is, literals wrapped in ""
+      const quads = rawQuads.map((q: any) => {
+        const objVal = String(q.object ?? '');
+        return {
+          subject: String(q.subject ?? ''),
+          predicate: String(q.predicate ?? ''),
+          object: isUri(objVal) ? objVal : `"${objVal.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+          graph: q.graph ? String(q.graph) : undefined,
+        };
+      });
 
       // Access policy: default to ownerOnly (private) when not specified
       const VALID_POLICIES = new Set(['public', 'ownerOnly', 'allowList']);
@@ -555,7 +578,7 @@ export class DkgNodePlugin {
         accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList',
         allowedPeers,
       });
-      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, triplesPublished: quads.length, accessPolicy });
+      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, quadsPublished: quads.length, accessPolicy });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -688,55 +711,7 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, '');      // strip leading/trailing hyphens
 }
 
-/** Wrap bare URIs (http://, https://, urn:, did:) in angle brackets if missing. */
-function wrapBareUris(line: string): string {
-  // Split into quoted literal vs non-quoted segments, only process non-quoted parts
-  const parts: string[] = [];
-  let remaining = line;
-  while (remaining) {
-    const quoteStart = remaining.indexOf('"');
-    if (quoteStart === -1) {
-      // No more quotes — process the rest
-      parts.push(wrapUrisInSegment(remaining));
-      break;
-    }
-    // Process text before the quote
-    parts.push(wrapUrisInSegment(remaining.slice(0, quoteStart)));
-    // Find matching close quote (handling escaped quotes)
-    let quoteEnd = quoteStart + 1;
-    while (quoteEnd < remaining.length) {
-      if (remaining[quoteEnd] === '"' && remaining[quoteEnd - 1] !== '\\') break;
-      quoteEnd++;
-    }
-    // Keep quoted segment as-is
-    parts.push(remaining.slice(quoteStart, quoteEnd + 1));
-    remaining = remaining.slice(quoteEnd + 1);
-  }
-  return parts.join('');
-}
-
-function wrapUrisInSegment(segment: string): string {
-  return segment.replace(
-    /(?<!<)(?:https?:\/\/|urn:|did:)\S+/gi,
-    match => `<${match}>`,
-  );
-}
-
-function parseNQuadsText(text: string): Array<{ subject: string; predicate: string; object: string; graph?: string }> {
-  const quads: Array<{ subject: string; predicate: string; object: string; graph?: string }> = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    // Try strict parse first, then retry with bare URI wrapping
-    const normalized = wrapBareUris(trimmed);
-    const match = normalized.match(/^<([^>]+)>\s+<([^>]+)>\s+("[^"]*(?:\\.[^"]*)*"(?:@\w+|(?:\^\^<[^>]+>))?|<[^>]+>)\s*(?:<([^>]+)>)?\s*\.?\s*$/);
-    if (!match) continue;
-    quads.push({
-      subject: match[1],
-      predicate: match[2],
-      object: match[3].startsWith('<') ? match[3].slice(1, -1) : match[3],
-      graph: match[4],
-    });
-  }
-  return quads;
+/** Check if a value looks like a URI (starts with a known scheme). */
+function isUri(value: string): boolean {
+  return /^(?:https?:\/\/|urn:|did:)/i.test(value);
 }

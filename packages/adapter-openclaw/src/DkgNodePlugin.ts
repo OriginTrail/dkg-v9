@@ -546,7 +546,7 @@ export class DkgNodePlugin {
           subject: String(q.subject ?? ''),
           predicate: String(q.predicate ?? ''),
           object: isUri(objVal) ? objVal : `"${objVal.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
-          graph: q.graph ? String(q.graph) : undefined,
+          graph: q.graph ? String(q.graph) : '',
         };
       });
 

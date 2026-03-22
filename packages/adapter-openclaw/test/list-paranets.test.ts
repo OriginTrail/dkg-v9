@@ -238,6 +238,23 @@ describe('dkg_publish tool', () => {
     expect(parsed.triplesPublished).toBe(1);
   });
 
+  it('handles double-escaped quotes from LLMs', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    // LLM sends \" as literal backslash-quote instead of JSON-parsed "
+    const nquads = 'https://example.org/wine https://schema.org/name \\"Test Wine\\" .';
+    const result = await tool.execute('call-esc', { paranet_id: 'testing', nquads });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.triplesPublished).toBe(1);
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(body.quads[0].subject).toBe('https://example.org/wine');
+    expect(body.quads[0].object).toBe('"Test Wine"');
+  });
+
   it('does not wrap URIs inside quoted literals', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ kcId: 'kc-lit', kas: [] }), { status: 200 }),

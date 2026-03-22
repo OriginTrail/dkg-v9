@@ -508,7 +508,8 @@ export class DkgNodePlugin {
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const paranetId = String(args.paranet_id);
-      const nquadsText = String(args.nquads);
+      // Normalize: LLMs often double-escape quotes (send \" as literal chars instead of JSON escapes)
+      const nquadsText = String(args.nquads).replace(/\\"/g, '"');
 
       const quads = parseNQuadsText(nquadsText);
       if (quads.length === 0) {

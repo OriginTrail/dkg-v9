@@ -58,6 +58,7 @@ export interface Publisher {
 // --- Events query types ---
 
 export interface EpcisQueryParams {
+  eventID?: string;
   epc?: string;
   bizStep?: string;
   bizLocation?: string;

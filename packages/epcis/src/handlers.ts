@@ -46,49 +46,61 @@ const MAX_PER_PAGE = 1000;
 
 const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 
+/**
+ * Strip N-Quads literal wrapping from a SPARQL binding value.
+ * The triplestore returns string literals as '"value"' or '"value"^^<type>'.
+ */
+function unwrapLiteral(value: string): string {
+  if (!value) return value;
+  // Handle typed literals: "value"^^<type>
+  const typedMatch = value.match(/^"(.*)"(?:\^\^<.*>)?$/s);
+  if (typedMatch) return typedMatch[1];
+  return value;
+}
+
 /** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
 export function toEpcisEvent(binding: Record<string, string>): Record<string, unknown> {
   const event: Record<string, unknown> = {};
 
   // Strip eventType URI prefix to short name
-  const rawType = binding['eventType'] ?? '';
+  const rawType = unwrapLiteral(binding['eventType'] ?? '');
   if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
     event.type = rawType.slice(EPCIS_TYPE_PREFIX.length);
   } else if (rawType) {
     event.type = rawType;
   }
 
-  // Simple string fields — include only when non-empty
-  const eventTime = binding['eventTime'];
+  // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
+  const eventTime = unwrapLiteral(binding['eventTime']);
   if (eventTime) event.eventTime = eventTime;
 
-  const action = binding['action'];
+  const action = unwrapLiteral(binding['action']);
   if (action) event.action = action;
 
-  const bizStep = binding['bizStep'];
+  const bizStep = unwrapLiteral(binding['bizStep']);
   if (bizStep) event.bizStep = bizStep;
 
-  const disposition = binding['disposition'];
+  const disposition = unwrapLiteral(binding['disposition']);
   if (disposition) event.disposition = disposition;
 
-  const parentID = binding['parentID'];
+  const parentID = unwrapLiteral(binding['parentID']);
   if (parentID) event.parentID = parentID;
 
   // DKG provenance — namespaced field
-  const ual = binding['ual'];
+  const ual = unwrapLiteral(binding['ual']);
   if (ual) event['dkg:ual'] = ual;
 
-  // Wrap location fields in { id } objects
-  const readPoint = binding['readPoint'];
+  // Wrap location fields in { id } objects — unwrap literal quoting from URI values
+  const readPoint = unwrapLiteral(binding['readPoint']);
   if (readPoint) {
     event.readPoint = { id: readPoint };
   }
-  const bizLocation = binding['bizLocation'];
+  const bizLocation = unwrapLiteral(binding['bizLocation']);
   if (bizLocation) {
     event.bizLocation = { id: bizLocation };
   }
 
-  // Split GROUP_CONCAT strings into arrays
+  // Split GROUP_CONCAT strings into arrays — unwrap literal quoting first
   const concatFields: Array<[string, string]> = [
     ['epcList', 'epcList'],
     ['childEPCList', 'childEPCs'],
@@ -96,7 +108,7 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
     ['outputEPCs', 'outputEPCList'],
   ];
   for (const [bindingKey, eventKey] of concatFields) {
-    const val = binding[bindingKey];
+    const val = unwrapLiteral(binding[bindingKey]);
     if (val) {
       event[eventKey] = val.split(', ').map((s) => s.trim()).filter(Boolean);
     }
@@ -175,6 +187,12 @@ export async function handleCapture(
   if (!validation.valid) {
     throw new EpcisValidationError(validation.errors!);
   }
+
+  // REVISIT: eventID (EPCIS 2.0 §7.4.1) maps to @id in JSON-LD, giving each event a
+  // named URI as its RDF subject. Without it, blank nodes are auto-assigned uuid: URIs
+  // (like dkg.js v8), so publishing works either way. However, user-provided eventIDs
+  // are preferred because they're deterministic and meaningful for provenance queries.
+  // Consider making eventID mandatory once the EPCIS plugin is stable.
 
   const opts = request.publishOptions
     ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }

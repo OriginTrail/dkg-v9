@@ -45,7 +45,7 @@ describe('parseQueryParams', () => {
   it('ignores non-numeric limit/offset', () => {
     const params = parseQueryParams(new URLSearchParams('limit=abc&offset=xyz'));
 
-    expect(params.limit).toBeUndefined();
+    expect(params.perPage).toBeUndefined();
     expect(params.offset).toBeUndefined();
   });
 

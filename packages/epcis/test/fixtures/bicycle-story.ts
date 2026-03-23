@@ -8,6 +8,7 @@ export const VALID_OBJECT_EVENT_DOC: EPCISDocument = {
     'cbv': 'https://ref.gs1.org/cbv/',
     'type': '@type',
     'id': '@id',
+    'eventID': '@id',
   },
   type: 'EPCISDocument',
   schemaVersion: '2.0',
@@ -15,6 +16,7 @@ export const VALID_OBJECT_EVENT_DOC: EPCISDocument = {
   epcisBody: {
     eventList: [
       {
+        eventID: 'urn:uuid:fixture-obj-1',
         type: 'ObjectEvent',
         eventTime: '2024-03-01T08:00:00.000Z',
         eventTimeZoneOffset: '+00:00',
@@ -37,6 +39,7 @@ export const VALID_TRANSFORMATION_EVENT_DOC: EPCISDocument = {
     'cbv': 'https://ref.gs1.org/cbv/',
     'type': '@type',
     'id': '@id',
+    'eventID': '@id',
   },
   type: 'EPCISDocument',
   schemaVersion: '2.0',
@@ -44,6 +47,7 @@ export const VALID_TRANSFORMATION_EVENT_DOC: EPCISDocument = {
   epcisBody: {
     eventList: [
       {
+        eventID: 'urn:uuid:fixture-transform-1',
         type: 'TransformationEvent',
         eventTime: '2024-03-01T12:00:00.000Z',
         eventTimeZoneOffset: '+00:00',
@@ -71,6 +75,7 @@ export const VALID_AGGREGATION_EVENT_DOC: EPCISDocument = {
     'cbv': 'https://ref.gs1.org/cbv/',
     'type': '@type',
     'id': '@id',
+    'eventID': '@id',
   },
   type: 'EPCISDocument',
   schemaVersion: '2.0',
@@ -78,6 +83,7 @@ export const VALID_AGGREGATION_EVENT_DOC: EPCISDocument = {
   epcisBody: {
     eventList: [
       {
+        eventID: 'urn:uuid:fixture-aggregation-1',
         type: 'AggregationEvent',
         eventTime: '2024-03-01T14:00:00.000Z',
         eventTimeZoneOffset: '+00:00',
@@ -105,6 +111,7 @@ export const EMPTY_EVENT_LIST_DOC: EPCISDocument = {
     '@vocab': 'https://gs1.github.io/EPCIS/',
     'type': '@type',
     'id': '@id',
+    'eventID': '@id',
   },
   type: 'EPCISDocument',
   schemaVersion: '2.0',

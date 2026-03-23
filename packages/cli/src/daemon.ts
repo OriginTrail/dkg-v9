@@ -48,7 +48,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
-import { handleCapture, EpcisValidationError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
 function getNodeVersion(): string {
@@ -2218,6 +2218,33 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  if (req.method === 'GET' && path === '/api/epcis/events') {
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    }
+    const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
+    const epcisQueryEngine = {
+      query: (sparql: string, opts?: { paranetId?: string }) => agent.query(sparql, opts),
+    };
+    try {
+      const result = await handleEventsQuery(searchParams, {
+        paranetId: config.epcis.paranetId,
+        queryEngine: epcisQueryEngine,
+        basePath: '/api/epcis/events',
+      });
+      if (result.headers?.link) {
+        res.setHeader('Link', result.headers.link);
+      }
+      return jsonResponse(res, 200, result.body);
+    } catch (err) {
+      if (err instanceof EpcisQueryError) {
+        return jsonResponse(res, err.statusCode, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
   // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
   if (req.method === 'POST' && path === '/api/epcis/capture') {
     if (!config.epcis?.paranetId) {
@@ -2236,9 +2263,11 @@ async function handleRequest(
     }
     const epcisPublisher: EpcisPublisher = {
       async publish(paranetId, content, opts) {
+        // Using { public: content } because bare JSON-LD (private) publishing
+        // silently drops triples — see GitHub issue #221.
         const result = await agent.publish(
           paranetId,
-          content as Record<string, unknown>,
+          { public: content } as Record<string, unknown>,
           opts,
         );
         return { ual: result.ual, kcId: String(result.kcId), status: result.status };

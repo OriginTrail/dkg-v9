@@ -302,7 +302,29 @@ export function SettingsPage() {
                       </div>
                       <div className="detail-item">
                         <span className="detail-label">Token</span>
-                        <span className="detail-value">{r.syncEnabled ? 'Configured' : 'Not configured'}</span>
+                        <span className="detail-value">
+                          {r.hasToken ? 'Configured' : 'Not configured'}
+                          {!r.hasToken && token && (
+                            <button
+                              className="btn btn-small btn-secondary"
+                              style={{ marginLeft: 8 }}
+                              onClick={async () => {
+                                try {
+                                  await addRepo({ owner: r.owner, repo: r.repo, githubToken: token });
+                                  setMessage(`Token updated for ${r.owner}/${r.repo}`);
+                                  loadConfig();
+                                } catch (e: any) { setError(e.message); }
+                              }}
+                            >
+                              Apply Token
+                            </button>
+                          )}
+                          {!r.hasToken && !token && (
+                            <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                              Enter token above first
+                            </span>
+                          )}
+                        </span>
                       </div>
                     </div>
 

@@ -137,6 +137,20 @@ export class GitHubCollabCoordinator {
     privacyLevel?: 'local' | 'shared';
   }): Promise<{ paranetId: string; repoKey: string }> {
     const repoKey = `${config.owner}/${config.repo}`;
+    const existing = this.repos.get(repoKey);
+
+    // If repo already exists, merge updates (e.g., adding token to existing repo)
+    if (existing) {
+      if (config.githubToken) existing.githubToken = config.githubToken;
+      if (config.webhookSecret) existing.webhookSecret = config.webhookSecret;
+      if (config.pollIntervalMs) existing.pollIntervalMs = config.pollIntervalMs;
+      if (config.syncScope) existing.syncScope = config.syncScope;
+      // Re-register with sync engine to pick up new token
+      this.syncEngine.addRepo({ ...existing });
+      this.log(`Updated repo ${repoKey}${config.githubToken ? ' (token added)' : ''}`);
+      return { paranetId: existing.paranetId, repoKey };
+    }
+
     const privacy = config.privacyLevel ?? 'local';
     // For shared mode, generate a random suffix to make the paranet ID unique
     const suffix = config.suffix ?? (privacy === 'shared' && !config.paranetId ? generateParanetSuffix() : undefined);

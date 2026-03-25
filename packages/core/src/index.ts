@@ -1,4 +1,5 @@
 export * from './types.js';
+export { resolveVisibility, type ResolvedVisibility } from './visibility.js';
 export * from './constants.js';
 export * from './memory-model.js';
 export * from './event-bus.js';

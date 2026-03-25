@@ -145,7 +145,7 @@ export class SyncEngine {
       return { ok: false, event, action, quadsWritten: 0 };
     }
 
-    const graph = `did:dkg:paranet:${config.paranetId}/_workspace`;
+    const graph = `did:dkg:paranet:${config.paranetId}`;
     let quads: Quad[] = [];
 
     switch (event) {
@@ -222,7 +222,7 @@ export class SyncEngine {
     const client = this.clients.get(repoKey);
     if (!config || !client) return;
 
-    const graph = `did:dkg:paranet:${config.paranetId}/_workspace`;
+    const graph = `did:dkg:paranet:${config.paranetId}`;
     const { owner, repo } = config;
     let totalQuads = 0;
     const scopes: string[] = [];
@@ -322,7 +322,9 @@ export class SyncEngine {
     since?: string,
   ): Promise<void> {
     const { owner, repo, paranetId } = config;
-    const graph = `did:dkg:paranet:${paranetId}/_workspace`;
+    // Use the paranet data graph URI — the workspace handler manages graph scoping internally.
+    // Do NOT append /_workspace here; the DKG publisher validates quads against the paranet data graph.
+    const graph = `did:dkg:paranet:${paranetId}`;
 
     try {
       // Repository metadata
@@ -416,12 +418,16 @@ export class SyncEngine {
   }
 
   getSyncJobForRepo(repoKey: string): SyncJob | undefined {
+    // Return most recent job for this repo (any status — so UI can show errors)
+    let latest: SyncJob | undefined;
     for (const job of this.syncJobs.values()) {
-      if (job.repoKey === repoKey && (job.status === 'queued' || job.status === 'running')) {
-        return job;
+      if (job.repoKey === repoKey) {
+        if (!latest || job.startedAt > latest.startedAt) {
+          latest = job;
+        }
       }
     }
-    return undefined;
+    return latest;
   }
 
   // --- Cleanup ---

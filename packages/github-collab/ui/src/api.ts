@@ -14,6 +14,36 @@ function getAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * Parse an N-Triples binding value to a plain string.
+ * Handles: "value"^^<xsd:type>, "value"@lang, "value", and bare URIs.
+ */
+export function bv(raw: string | undefined | null): string {
+  if (!raw) return '';
+  const s = String(raw);
+  // Typed literal: "value"^^<type>
+  const typedMatch = s.match(/^"((?:[^"\\]|\\.)*)"(?:\^\^<[^>]+>)?$/);
+  if (typedMatch) return typedMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
+  // Language-tagged: "value"@lang
+  const langMatch = s.match(/^"((?:[^"\\]|\\.)*)"@\S+$/);
+  if (langMatch) return langMatch[1].replace(/\\"/g, '"');
+  // Plain quoted: "value"
+  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
+  // Bare URI or already clean
+  return s;
+}
+
+/** Clean all binding values in an array of SPARQL result bindings. */
+function cleanBindings(bindings: Record<string, string>[]): Record<string, string>[] {
+  return bindings.map(row => {
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(row)) {
+      clean[k] = bv(v);
+    }
+    return clean;
+  });
+}
+
 async function apiFetch(path: string, init?: RequestInit): Promise<any> {
   const origin = getApiOrigin();
   const url = `${origin}${PREFIX}${path}`;
@@ -101,8 +131,9 @@ export function fetchReviewStatus(sessionId: string) {
 
 // --- PRs ---
 
-export function fetchPullRequests(owner: string, repo: string, state = 'all', limit = 50) {
-  return apiFetch(`/repos/${owner}/${repo}/prs?state=${state}&limit=${limit}`);
+export async function fetchPullRequests(owner: string, repo: string, state = 'all', limit = 50) {
+  const raw = await apiFetch(`/repos/${owner}/${repo}/prs?state=${state}&limit=${limit}`);
+  return { ...raw, pullRequests: cleanBindings(raw.pullRequests ?? []) };
 }
 
 export function fetchPullRequest(owner: string, repo: string, number: number) {

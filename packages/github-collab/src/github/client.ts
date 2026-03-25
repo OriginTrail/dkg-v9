@@ -146,6 +146,22 @@ export class GitHubClient {
     return this.get(`/repos/${owner}/${repo}/commits/${sha}`);
   }
 
+  // --- Git Trees & Blobs ---
+
+  async getTree(owner: string, repo: string, treeSha: string, recursive = true): Promise<any> {
+    const params = recursive ? '?recursive=1' : '';
+    return this.get(`/repos/${owner}/${repo}/git/trees/${treeSha}${params}`);
+  }
+
+  async getBlob(owner: string, repo: string, blobSha: string): Promise<{ content: string; encoding: string; size: number }> {
+    return this.get(`/repos/${owner}/${repo}/git/blobs/${blobSha}`);
+  }
+
+  async getCommitSha(owner: string, repo: string, ref: string): Promise<{ commitSha: string; treeSha: string }> {
+    const data = await this.get(`/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`);
+    return { commitSha: data.sha, treeSha: data.commit.tree.sha };
+  }
+
   // --- Branches ---
 
   async listBranches(owner: string, repo: string, options: PaginationOptions = {}): Promise<any[]> {

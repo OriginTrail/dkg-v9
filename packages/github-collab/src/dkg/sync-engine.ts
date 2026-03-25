@@ -7,6 +7,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { GitHubClient } from '../github/client.js';
+import { CodeSync } from '../github/code-sync.js';
 import {
   transformRepository,
   transformPullRequest,
@@ -30,7 +31,7 @@ export interface RepoSyncConfig {
   paranetId: string;
 }
 
-export type SyncScope = 'pull_requests' | 'issues' | 'reviews' | 'commits' | 'comments';
+export type SyncScope = 'pull_requests' | 'issues' | 'reviews' | 'commits' | 'comments' | 'code_structure';
 
 export interface SyncJob {
   jobId: string;
@@ -403,6 +404,19 @@ export class SyncEngine {
           }
           job.progress.issues.synced++;
         }
+      }
+
+      // Code Structure
+      if (scopes.includes('code_structure')) {
+        job.progress.codeStructure = { total: 0, synced: 0 };
+        const codeSync = new CodeSync(client);
+        const defaultBranch = (await client.getRepository(owner, repo)).default_branch ?? 'main';
+        const result = await codeSync.syncFileTree(owner, repo, defaultBranch, graph);
+        job.progress.codeStructure.total = result.fileCount;
+        if (result.quads.length > 0) {
+          await this.writeQuads(paranetId, result.quads);
+        }
+        job.progress.codeStructure.synced = result.fileCount;
       }
 
       job.status = 'completed';

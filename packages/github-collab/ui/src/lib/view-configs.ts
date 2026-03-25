@@ -107,9 +107,54 @@ WHERE {
 } LIMIT 500`,
 };
 
+export const CODE_STRUCTURE_VIEW: ViewConfig = {
+  name: 'Code Structure',
+  palette: 'midnight',
+  nodeTypes: {
+    [`${GH}File`]: { color: '#34d399', shape: 'circle' },
+    [`${GH}Directory`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 1.4 },
+    [`${GH}Repository`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 2.0 },
+  },
+  circleTypes: ['File'],
+  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+WHERE {
+  { ?s a <${GH}File> ; ?p ?o }
+  UNION
+  { ?s a <${GH}Directory> ; ?p ?o }
+} LIMIT 500`,
+};
+
+export const DEPENDENCY_FLOW_VIEW: ViewConfig = {
+  name: 'Dependency Flow',
+  palette: 'midnight',
+  nodeTypes: {
+    [`${GH}File`]: { color: '#34d399', shape: 'circle' },
+    [`${GH}Import`]: { color: '#fbbf24', shape: 'circle' },
+    [`${GH}Class`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 1.3 },
+    [`${GH}Function`]: { color: '#ec4899', shape: 'circle' },
+  },
+  circleTypes: ['File', 'Import', 'Function'],
+  animation: {
+    linkParticles: true,
+    linkParticleCount: 1,
+    linkParticleSpeed: 0.003,
+    linkParticleColor: 'rgba(251, 191, 36, 0.4)',
+  },
+  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+WHERE {
+  { ?s a <${GH}File> ; <${GH}imports> ?o . ?s ?p ?o }
+  UNION
+  { ?s a <${GH}Class> ; ?p ?o }
+  UNION
+  { ?s a <${GH}Function> ; ?p ?o }
+} LIMIT 500`,
+};
+
 export const ALL_VIEWS: Record<string, ViewConfig> = {
   'pr-impact': PR_IMPACT_VIEW,
   'repo-overview': REPO_OVERVIEW_VIEW,
+  'code-structure': CODE_STRUCTURE_VIEW,
+  'dependency-flow': DEPENDENCY_FLOW_VIEW,
   'branch-diff': BRANCH_DIFF_VIEW,
   'issues': ISSUES_VIEW,
   'agent-activity': AGENT_ACTIVITY_VIEW,

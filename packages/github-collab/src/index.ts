@@ -22,9 +22,18 @@ export {
   GH, RDF, XSD, PROV, RDFS,
   repoUri, userUri, prUri, issueUri, commitUri, branchUri,
   reviewUri, reviewCommentUri, issueCommentUri, labelUri, milestoneUri, fileDiffUri,
+  fileUri, directoryUri,
   paranetId, generateParanetSuffix,
 } from './rdf/uri.js';
 export type { Quad } from './rdf/uri.js';
+
+// Code transformer
+export { transformFileTree, detectLanguage } from './rdf/code-transformer.js';
+export type { GitTreeEntry } from './rdf/code-transformer.js';
+
+// Code sync
+export { CodeSync } from './github/code-sync.js';
+export type { CodeSyncOptions, CodeSyncResult } from './github/code-sync.js';
 
 // GitHub client
 export { GitHubClient, GitHubApiError } from './github/client.js';

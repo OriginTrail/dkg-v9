@@ -61,6 +61,14 @@ export function fileDiffUri(owner: string, repo: string, prNumber: number, path:
   return `urn:github:${owner}/${repo}/pr/${prNumber}/file/${encodeURIComponent(path)}`;
 }
 
+export function fileUri(owner: string, repo: string, path: string): string {
+  return `urn:github:${owner}/${repo}/file/${encodeURIComponent(path)}`;
+}
+
+export function directoryUri(owner: string, repo: string, path: string): string {
+  return `urn:github:${owner}/${repo}/dir/${encodeURIComponent(path)}`;
+}
+
 // --- Graph URIs ---
 
 export function generateParanetSuffix(): string {

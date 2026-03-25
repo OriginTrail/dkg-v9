@@ -219,7 +219,7 @@ export class GitHubCollabCoordinator {
       githubToken: config.githubToken,
       webhookSecret: config.webhookSecret,
       pollIntervalMs: config.pollIntervalMs ?? 300_000,
-      syncScope: config.syncScope ?? ['pull_requests', 'issues', 'reviews', 'commits'],
+      syncScope: config.syncScope ?? ['pull_requests', 'issues', 'reviews', 'commits', 'code_structure'],
       paranetId: pId,
       suffix,
       privacyLevel: privacy,

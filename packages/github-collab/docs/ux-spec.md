@@ -70,7 +70,9 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 - Preview fetched via GitHub public API (no auth needed for public repos)
 - For private repos: shows lock icon, prompts auth first
 
-**Step 2: Authenticate GitHub**
+**Step 2: Authenticate GitHub (optional for public repos)**
+- For public repos, show: "GitHub token is optional for public repositories. Without a token, API rate limits are lower (60 req/hr vs 5,000 req/hr). Add a token for faster syncing or to access private repos."
+- Skip button: "Continue without token" (only for public repos)
 - Input for GitHub Personal Access Token (PAT)
 - Required scopes displayed: `repo` (for private repos), `read:org` (optional)
 - "Test Connection" button validates token against GitHub API
@@ -80,10 +82,11 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 
 **Step 3: Configure Repository Settings**
 - **Branch selection**: Multi-select of branches to track (default: main/master + open PR branches)
-- **Privacy level**: Radio group with descriptions
-  - `workspace_only` — "Local Only: data stays on this node. Not visible to other DKG nodes." (default)
-  - `paranet_shared` — "Shared: data is published to a paranet. Nodes that subscribe can query it."
+- **Privacy level**: Radio group with descriptions (default: `workspace_only`)
+  - `workspace_only` — "Local Only: data stays on this node. Not visible to other DKG nodes." **(default, pre-selected)**
+  - `paranet_shared` — "Shared: data is stored in a paranet workspace. You can invite other DKG V9 nodes to subscribe and query this data. See Section 14 for full details."
   - For private repos, show warning: "This is a private repository. Selecting 'Shared' will make PR titles, issue descriptions, and code references visible to collaborating nodes."
+  - **IMPORTANT**: The default MUST be `workspace_only` (Local Only). Users must explicitly opt in to sharing.
 - **File filters**:
   - Include patterns (default: `**/*.{ts,js,py,sol,go,rs,java,md,json,yaml,toml}`)
   - Exclude patterns (default: `node_modules/**, dist/**, .git/**`)
@@ -159,11 +162,53 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 
 ### 3.3 Branch Visualization Flow
 
+#### 3.3.1 Branch Selection Model (addresses feedback #7)
+
+The branch selector is the primary mechanism for scoping what the Graph Explorer and other views show. The design must serve both human users browsing interactively and AI agents querying programmatically.
+
+**Design Decision**: A branch selector dropdown that defaults to the repository's default branch (usually `main` or `master`).
+
+```
+┌──────────────────────────────────────────────────┐
+│  Branch: [main ▾]                                │
+│          ┌────────────────────────┐              │
+│          │ ● main (default)       │              │
+│          │   feat/auth            │              │
+│          │   feat/new-api         │              │
+│          │   fix/login-timeout    │              │
+│          │ ─────────────────────  │              │
+│          │   All branches         │              │
+│          └────────────────────────┘              │
+└──────────────────────────────────────────────────┘
+```
+
+**Behavior**:
+- **Default**: Shows the repo's default branch (from GitHub API `default_branch` field)
+- **Single branch selected**: Graph Explorer shows entities that exist on that branch. PRs page filters to PRs targeting or originating from that branch.
+- **"All branches" option**: Shows everything across all synced branches. Entities that exist on multiple branches appear once. Useful for getting a complete picture, but may be noisy for large repos.
+- **Branch indicator**: The selected branch is shown persistently in the Graph Explorer toolbar so users always know their scope.
+
+**Agent API**:
+- Agents specify a branch via query parameter: `GET /repos/:id/graph?branch=feat/auth`
+- Default: the repo's default branch (same as UI)
+- `branch=*` returns all branches (equivalent to "All branches" in the UI)
+- Agents can also specify branches in SPARQL queries via the `ghc:branch` predicate
+
+**Why this design**:
+- Defaulting to the main branch gives the most stable, useful view for both humans and agents
+- A dropdown is simpler than showing all branches simultaneously (which creates visual noise)
+- The "All branches" escape hatch exists for users who want the full picture
+- Agents get the same scoping via API parameters, keeping the model consistent
+
+#### 3.3.2 Branch Diff View
+
+For comparing two branches, a separate diff mode is available:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   BRANCH VIEW                                 │
+│                   BRANCH DIFF                                 │
 │                                                              │
-│  Branch: [main ▾]  Compare: [feat/auth ▾]   [Diff Mode ▾]  │
+│  Base: [main ▾]  Compare: [feat/auth ▾]   [Diff Mode ▾]    │
 │                                                              │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │                                                        │  │
@@ -273,17 +318,46 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 - Status badge: Idle / Syncing / Error
 - Last sync timestamp with relative time
 - Sync schedule display with next run
-- Manual "Sync Now" button
+- Manual "Sync Now" button (see interaction spec below)
 - Sync history table (last 20 syncs)
 - Pending changes feed (changes detected but not yet synced)
 
-### 3.6 Agent Coordination Flow
+**"Sync Now" Button — Interaction Spec (addresses feedback #1, #2)**:
+
+The "Sync Now" button MUST provide continuous feedback. A sync with no visible progress is indistinguishable from a broken sync.
+
+1. **On click**: Button text changes to "Syncing..." with a spinner icon. Button is disabled to prevent double-clicks.
+2. **Progress phases** (displayed inline below the button or in a progress panel):
+   - Phase 1: "Connecting to GitHub..." (0-2s typically)
+   - Phase 2: "Fetching PRs and issues..." with count: "Found 12 PRs, 34 issues"
+   - Phase 3: "Fetching commits..." with count: "Found 156 commits on 3 branches"
+   - Phase 4: "Building knowledge graph..." with triple count: "Created 2,847 triples"
+   - Phase 5: "Sync complete" with summary: "+45 new, ~12 updated, -3 removed"
+3. **On error**: Red error message with details. "Retry" button appears. Common errors:
+   - "GitHub API rate limit exceeded. Resets at {time}."
+   - "GitHub token expired or revoked. Update in Settings."
+   - "Repository not found. Check the URL in Settings."
+   - "Network error. Check your connection and try again."
+4. **On empty result** (no changes found): Show "No changes since last sync ({time ago})" — this is success, not an error.
+5. **Timeout**: If sync exceeds 5 minutes, show "Sync is taking longer than expected. Large repositories may take up to 15 minutes for initial sync." with a "Cancel" option.
+6. **Technical**: Progress is delivered via SSE (Server-Sent Events) from `GET /repos/:id/sync/stream` or by polling `GET /repos/:id/sync` every 2 seconds during active sync.
+
+### 3.6 Agent & Peer Coordination Flow (addresses feedback #9)
+
+**Important terminology**: "Agents" in this context refers to **DKG V9 network peers** — other DKG nodes that have subscribed to the same paranet. These may be AI coding agents (like Claude Code or Cursor) running on other nodes, or human operators using their own DKG nodes. The tab should make this clear to avoid confusion.
+
+**Tab header**: "Peers & Agents" (not just "Agents")
+**Tab description** (shown as subtitle text below the tab header):
+> "DKG V9 nodes subscribed to this repository's paranet. These peers can query the knowledge graph, participate in reviews, and coordinate work."
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGENT COORDINATION                          │
+│  PEERS & AGENTS                                              │
+│  DKG V9 nodes subscribed to this repository's paranet.       │
+│  These peers can query the knowledge graph, participate in   │
+│  reviews, and coordinate work.                               │
 │                                                              │
-│  Active Agents (3)                                           │
+│  Connected Peers (3)                                         │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │  ● claude-code-1  │ Reviewing PR #42   │ 3 files    │    │
 │  │  ● claude-code-2  │ Analyzing imports  │ src/       │    │
@@ -380,7 +454,7 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 │   ├── <Router>                             # React Router (hash-based for iframe compat)
 │   │   ├── <AppShell>                       # Top-level layout
 │   │   │   ├── <TopBar>                     # Tab navigation + repo selector + sync badge
-│   │   │   │   ├── <TabNav>                 # [Overview, Graph, PRs, Agents, Settings]
+│   │   │   │   ├── <TabNav>                 # [Overview, Graph, PRs, Peers & Agents, Settings]
 │   │   │   │   ├── <RepoSelector>           # Dropdown of ingested repos
 │   │   │   │   └── <SyncBadge>              # Sync status indicator
 │   │   │   │
@@ -435,7 +509,7 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 │   │   │       │       ├── <LinkedPrs>
 │   │   │       │       └── <RelatedEntities>
 │   │   │       │
-│   │   │       ├── <AgentsPage>             # Agent coordination
+│   │   │       ├── <AgentsPage>             # Peers & Agents — DKG V9 network peer coordination
 │   │   │       │   ├── <AgentRoster>        # Online agents + current tasks
 │   │   │       │   ├── <TaskBoard>          # Kanban: claimed/active/done
 │   │   │       │   ├── <FileClaimTable>     # Agent file locks
@@ -468,14 +542,17 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 |---------|------|-------------|
 | Tab navigation | Static labels: Overview, Graph, PRs, Collaboration, Settings | Click → route change |
 | **Repo selector** | List from `GET /status` → `repos[].repoKey` | Dropdown → sets active repo context in `RepoContext` |
-| Sync badge | Sync status per selected repo | Click → navigates to sync details |
+| Sync badge | Sync status per selected repo | Click → navigates to sync details. **Must show actual privacy level from repo config** (see feedback #6 fix in Section 14.3). |
 
 **Repo selector details:**
 - Populated from `GET /status` → shows `repoKey` with sync status dot (green/amber/red)
 - "All Repositories" option at top (Overview and PRs only — Graph Explorer requires specific repo)
 - "Add Repository" option at bottom → navigates to Settings
 - If no repos configured, show onboarding CTA instead of dropdown
-- Each entry shows: `{owner}/{repo}` with privacy badge (lock or globe icon) and sync status dot
+- Each entry shows: `{owner}/{repo}` with privacy badge and sync status dot
+  - Privacy badge: lock icon + "Local" for `workspace_only`, globe icon + "Shared" for `paranet_shared`
+  - The privacy badge MUST be visible both in the dropdown entries and on the selected repo display in the top bar
+  - **Bug fix (feedback #6)**: The top-right `<SyncBadge>` must reflect the actual privacy level of the selected repo, NOT a hardcoded "shared" label. Read privacy from repo config via `GET /status`.
 - Selected repo stored in React context, consumed by all pages
 
 **Layout**: Horizontal bar, border-bottom, `background: var(--bg)`. Tabs use underline active indicator (2px `var(--green)` bottom border).
@@ -493,26 +570,46 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 
 **Stat cards**: Files indexed, Code entities, Triples in graph, Active agents. Each uses `.stat-card` pattern with accent bar.
 
-### 5.3 Graph Explorer Page
+### 5.3 Graph Explorer Page (addresses feedback #7, #10)
 
 **Layout**: Three-panel — sidebar (240px) | canvas (fluid) | detail panel (300px, conditional).
 
+**Subtab descriptions** (shown as brief helper text under each subtab when the user first visits):
+| Subtab | Purpose Description |
+|--------|---------------------|
+| Code Structure | "Browse files, functions, classes, and their relationships. The default view for understanding how the codebase is organized." |
+| Dependencies | "Visualize import/require chains between files and packages. Find highly-connected modules and circular dependencies." |
+| Branch Diff | "Compare two branches to see what entities were added, modified, or removed. Useful for reviewing PRs visually." |
+| PR Impact | "See which code entities are affected by a pull request. Shows the blast radius of changes." |
+
+These descriptions appear as muted subtitle text below each subtab label. After the user has visited a subtab, the description can be collapsed to save space (stored in local component state).
+
+**Branch selector** (in sidebar, top position):
+- Dropdown defaulting to the repo's default branch
+- Options: all synced branches + "All branches" separator option
+- Changing the branch re-runs the CONSTRUCT query scoped to that branch
+- See Section 3.3.1 for full branch selection design
+
 | Panel | Content | Data Source |
 |-------|---------|-------------|
-| Sidebar | Branch selector, entity type checkboxes, predicate chips, search input, legend | Local state + paranet query |
-| Canvas | `<RdfGraph>` with ViewConfig | SPARQL CONSTRUCT on repo paranet |
+| Sidebar | **Branch selector** (top), entity type checkboxes, predicate chips, search input, legend | Local state + paranet query |
+| Canvas | `<RdfGraph>` with ViewConfig | SPARQL CONSTRUCT on repo paranet, scoped to selected branch |
 | Detail | Selected node properties, relationships, actions | Model lookup from viz instance |
 
-**SPARQL query pattern**:
+**SPARQL query pattern** (branch-scoped):
 ```sparql
 CONSTRUCT { ?s ?p ?o }
 WHERE {
   ?s ?p ?o .
   ?s a ?type .
+  ?s ghc:branch ?branch .
   FILTER(?type IN (ghc:File, ghc:Function, ghc:Class, ghc:Interface, ghc:Import))
+  FILTER(?branch = "main")
 }
 LIMIT 10000
 ```
+
+When "All branches" is selected, the `ghc:branch` filter is omitted.
 
 **Interaction**: Click node → detail panel slides in. Double-click → `viz.focus(nodeId, 2)`. Search → `viz.highlightNodes(matchingIds)`. Entity type toggle → re-runs filtered CONSTRUCT.
 
@@ -539,16 +636,20 @@ LIMIT 10000
 
 **PR detail** uses `<RdfGraph>` with the PR node as `focal` entity, connected to changed files and affected code entities.
 
-### 5.6 Agents Page
+### 5.6 Peers & Agents Page (addresses feedback #9)
 
-**Layout**: Grid — agent roster (top) + task board (middle) + activity log (bottom).
+**Layout**: Grid — peer roster (top) + task board (middle) + activity log (bottom).
+
+**Header**: "Peers & Agents" with description text: "DKG V9 nodes subscribed to this repository's paranet. These peers can query the knowledge graph, participate in reviews, and coordinate work."
+
+**Empty state** (no peers connected): "No peers are connected to this paranet. To collaborate, share your paranet ID with other DKG V9 node operators, or invite them from the Settings page."
 
 | Section | Data Source | Update |
 |---------|-------------|--------|
-| Agent roster | SPARQL: agents with active sessions on this paranet | Poll 10s |
+| Peer roster | SPARQL: agents/nodes with active sessions on this paranet | Poll 10s |
 | Task board | SPARQL: tasks by status | Poll 15s |
 | File claims | SPARQL: file claim assertions | Poll 15s |
-| Activity log | SPARQL: recent agent actions, ordered by time | Poll 10s |
+| Activity log | SPARQL: recent agent/peer actions, ordered by time | Poll 10s |
 
 ### 5.7 Settings Page
 
@@ -1230,20 +1331,58 @@ This should be part of the PR detail view:
 - Consensus bar (e.g., "2 of 3 required approvals")
 - "Enshrined" badge when consensus is reached and the review is published
 
-**Missing Flow 3: Webhook setup guidance.**
-The webhook endpoint exists (`POST /webhook`) but there is no UI guidance for setting up the GitHub webhook. Users need to know:
-- The webhook URL to configure in GitHub
-- Which events to select
-- How to set a webhook secret
-- How to verify it's working
+**Missing Flow 3: Webhook setup guidance (addresses feedback #5).**
+The webhook endpoint exists (`POST /webhook`) but the UI shows "not configured" with no way to configure it and no explanation of what this means. This is confusing — users see a problem with no solution.
 
 **Improvement — Webhook Setup Helper (Settings page, per repo):**
-A "Webhook Setup" card with:
-- The webhook URL (copyable): `https://{node-host}/api/apps/github-collab/webhook`
-- Checklist of events to enable
-- Optional: webhook secret input (generates one or lets user paste one)
-- "Test Webhook" button that sends a ping event
-- Status indicator: "Webhook active" / "No webhook configured" / "Last webhook received: 5min ago"
+
+The webhook status indicator must NOT say "not configured" without providing actionable next steps. Replace with one of:
+
+**State 1: No webhook (default for new repos)**
+```
+┌─────────────────────────────────────────────────────┐
+│  Webhooks                                    [Setup] │
+│                                                      │
+│  Webhooks enable real-time sync — your graph updates │
+│  instantly when PRs are opened, commits pushed, etc. │
+│  Without webhooks, sync happens on your configured   │
+│  schedule (or manually via "Sync Now").               │
+│                                                      │
+│  Status: Not configured (optional)                   │
+│  Your repo will still sync on schedule.              │
+└─────────────────────────────────────────────────────┘
+```
+
+**State 2: Setup instructions (after clicking "Setup")**
+```
+┌─────────────────────────────────────────────────────┐
+│  Webhook Setup                                       │
+│                                                      │
+│  1. Go to your repo's Settings > Webhooks on GitHub  │
+│  2. Click "Add webhook"                              │
+│  3. Payload URL:                                     │
+│     [https://{node}/api/apps/github-collab/webhook]  │
+│     [Copy]                                           │
+│  4. Content type: application/json                   │
+│  5. Events to select:                                │
+│     ☑ Pull requests                                  │
+│     ☑ Pushes                                         │
+│     ☑ Issues                                         │
+│     ☑ Issue comments                                 │
+│     ☑ Pull request reviews                           │
+│  6. Click "Add webhook" on GitHub                    │
+│                                                      │
+│  [Test Connection]  [Done]                           │
+└─────────────────────────────────────────────────────┘
+```
+
+**State 3: Webhook active**
+```
+│  Status: Active — last event received 5 min ago     │
+│  [Reconfigure] [Remove]                              │
+```
+
+Key principle: "not configured" must always be accompanied by (a) what it means and (b) how to fix it or why it's okay to leave it.
 
 **Missing Flow 4: Error recovery and sync failure handling.**
 Section 11 defines error states, but the implementation has minimal error handling. The SettingsPage swallows errors silently (`catch(() => {})`). There is no retry mechanism for failed syncs.
@@ -1289,6 +1428,88 @@ Based on severity of gaps between spec and implementation:
 | **P2** | Review consensus UI (in PR detail view) | Medium |
 | **P2** | Webhook setup helper | Medium |
 | **P2** | Invitation send/receive flow | Large |
+| **P0** | Sync progress indicator ("Sync Now" feedback) | Medium |
+| **P0** | Fix SyncBadge to show actual privacy, not hardcoded "shared" | Small |
+| **P0** | Webhook status: actionable message, not bare "not configured" | Small |
+| **P0** | GitHub token: mark as optional for public repos | Small |
+| **P0** | Agents tab: rename to "Peers & Agents", add description | Small |
+| **P0** | Graph Explorer: add subtab purpose descriptions | Small |
+| **P0** | Branch selector in Graph Explorer (default to default branch) | Medium |
 | **P3** | Terminology glossary / contextual help | Small |
 | **P3** | Activity log (SPARQL-based event feed) | Medium |
 | **P3** | Cross-repo "All Repositories" view | Small |
+
+---
+
+## 14. Shared Mode Definition (addresses feedback #4, #6)
+
+This section defines exactly what "Shared" privacy mode means. This information must be surfaced in the UI wherever the privacy toggle appears (onboarding Step 3, Settings page, repo card badges).
+
+### 14.1 What "Shared" Means
+
+When a repository is imported with `paranet_shared` privacy:
+
+1. **Data is stored in a paranet workspace.** A paranet is a scoped knowledge space on the DKG. The workspace is the mutable staging area within that paranet.
+
+2. **Other DKG V9 nodes can be invited to subscribe.** The repo owner can invite specific peers by node ID. Only invited and subscribed nodes can see the data — it is NOT publicly visible on the network.
+
+3. **Only invited/subscribed nodes see the data.** This is a permissioned collaboration model, not public broadcasting. Think "shared Google Doc with specific people invited" rather than "posted on a public website."
+
+4. **The workspace is ephemeral (30-day TTL).** Workspace data expires after 30 days unless it is enshrined. This means open PR data, in-progress reviews, and draft analyses are temporary by design.
+
+5. **Enshrinement happens on PR merge (or manual trigger).** When a PR is merged, the review data and final state are enshrined — made permanent on-chain with a cryptographic proof. Enshrined data cannot be modified or deleted.
+
+### 14.2 UI Copy for Shared Mode
+
+When the user selects "Shared" in the privacy radio group, display this expanded explanation:
+
+> **Shared Paranet**
+> Your repository data will be stored in a paranet workspace. You can invite other DKG V9 nodes to subscribe and collaborate.
+>
+> - Only nodes you invite can see the data
+> - Workspace data expires after 30 days unless enshrined
+> - PR data is automatically enshrined when PRs are merged
+> - Enshrined data is permanent and cryptographically verifiable
+
+### 14.3 Privacy Badge Spec
+
+The privacy badge MUST appear in these locations:
+- **Repo selector dropdown** (each entry): lock icon + "Local" or globe icon + "Shared"
+- **Top bar** (selected repo): Same badge next to repo name
+- **Overview page repo card**: Badge in header area
+- **Settings page repo list**: Badge in each row
+
+Badge visual spec:
+```
+Local Only:  [🔒 Local]     — gray background, lock icon, muted text
+Shared:      [🌐 Shared]    — green border, globe icon, green text
+```
+
+### 14.4 What "Local Only" Means
+
+For completeness, the `workspace_only` mode:
+- Data stays entirely on this node
+- No paranet is created
+- No peers can see or query this data
+- Data persists as long as the node is running (no TTL)
+- Data is never enshrined (no on-chain footprint)
+
+---
+
+## 15. UX Feedback Changelog (2026-03-25)
+
+Changes made to this spec based on user testing feedback:
+
+| # | Feedback | Section Updated | Change Made |
+|---|----------|-----------------|-------------|
+| 1 | No sync progress indicator | 3.5 | Added detailed "Sync Now" interaction spec with 5 progress phases, error states, and empty-result handling |
+| 2 | Sync didn't produce results | 3.5 | Added timeout messaging and empty-result UX ("No changes since last sync") |
+| 3 | Default privacy is wrong | 3.1 Step 3 | Reinforced `workspace_only` as default with **IMPORTANT** callout |
+| 4 | Privacy not shown in repo card | 14.3 | Added privacy badge spec with exact locations and visual treatment |
+| 5 | Webhook says "not configured" | 13.6 | Redesigned webhook UX with 3 states: no webhook (with explanation), setup wizard, active |
+| 6 | Top-right badge shows "shared" | 5.1 | Added bug fix note: SyncBadge must read actual privacy from config, not hardcode |
+| 7 | Branch visualization unclear | 3.3 | Redesigned as branch selector dropdown defaulting to default branch, with "All branches" option and agent API |
+| 8 | GitHub token requirement unclear | 3.1 Step 2 | Added "optional for public repos" messaging with rate limit explanation and skip button |
+| 9 | Agents tab unclear | 3.6, 5.6 | Renamed to "Peers & Agents", added description clarifying these are DKG V9 network peers |
+| 10 | Graph Explorer subtabs | 5.3 | Added purpose descriptions for each subtab (Code Structure, Dependencies, Branch Diff, PR Impact) |
+| — | Shared mode undefined | 14 | Added full Section 14 defining Shared mode: paranet workspace, invitation-only, 30-day TTL, enshrinement |

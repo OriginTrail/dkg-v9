@@ -4,11 +4,20 @@ import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
 import { executeQuery } from '../api.js';
 import { ALL_VIEWS } from '../lib/view-configs.js';
 
+const VIEW_DESCRIPTIONS: Record<string, string> = {
+  'code-structure': 'Classes, functions, files and their relationships (imports, inheritance, calls)',
+  'dependency-flow': 'Package dependencies and module import chains',
+  'pr-impact': 'Pull request changes mapped to affected code entities',
+  'branch-diff': 'Visual diff of entities between two branches',
+  'agent-activity': 'Active agents, their tasks, and claimed code regions',
+};
+
 interface GraphCanvasProps {
   repo?: string;
+  branch?: string;
 }
 
-export function GraphCanvas({ repo }: GraphCanvasProps) {
+export function GraphCanvas({ repo, branch }: GraphCanvasProps) {
   const [viewKey, setViewKey] = useState('pr-impact');
   const [triples, setTriples] = useState<Array<{ subject: string; predicate: string; object: string }>>([]);
   const [loading, setLoading] = useState(false);
@@ -21,7 +30,14 @@ export function GraphCanvas({ repo }: GraphCanvasProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await executeQuery(view.defaultSparql, repo || undefined);
+      let sparql = view.defaultSparql;
+      // If a branch is selected, inject a branch filter into the query
+      if (branch) {
+        const branchFilter = `FILTER(EXISTS { ?s <https://ontology.dkg.io/ghcode#branch> "${branch}" } || !BOUND(?s))`;
+        // Insert branch filter before the closing brace and LIMIT
+        sparql = sparql.replace(/}\s*(LIMIT\s+\d+)/i, `${branchFilter}\n} $1`);
+      }
+      const result = await executeQuery(sparql, repo || undefined);
       const data = result?.result;
       if (data?.triples) {
         setTriples(data.triples);
@@ -37,7 +53,7 @@ export function GraphCanvas({ repo }: GraphCanvasProps) {
     } finally {
       setLoading(false);
     }
-  }, [repo]);
+  }, [repo, branch]);
 
   const handleViewChange = (key: string) => {
     setViewKey(key);
@@ -67,6 +83,10 @@ export function GraphCanvas({ repo }: GraphCanvasProps) {
           {loading ? 'Loading...' : 'Refresh'}
         </button>
       </div>
+
+      {VIEW_DESCRIPTIONS[viewKey] && (
+        <div className="view-description">{VIEW_DESCRIPTIONS[viewKey]}</div>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

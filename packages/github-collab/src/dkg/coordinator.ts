@@ -24,6 +24,12 @@ interface DKGAgent {
     onMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
+  createParanet(opts: {
+    id: string;
+    name: string;
+    description?: string;
+    private?: boolean;
+  }): Promise<void>;
   writeToWorkspace(paranetId: string, quads: Quad[], opts?: any): Promise<{ workspaceOperationId: string }>;
   enshrineFromWorkspace(
     paranetId: string,
@@ -121,6 +127,23 @@ export class GitHubCollabCoordinator {
     };
 
     this.repos.set(repoKey, repoConfig);
+
+    // Create the paranet in the local triple store
+    // For local repos: private paranet (no chain, no gossip)
+    // For shared repos: normal paranet
+    try {
+      await this.agent.createParanet({
+        id: pId,
+        name: `GitHub: ${config.owner}/${config.repo}`,
+        description: `Knowledge graph for github.com/${config.owner}/${config.repo}`,
+        private: privacy === 'local',
+      });
+    } catch (err: any) {
+      // Paranet might already exist from a previous session
+      if (!err.message?.includes('already exists')) {
+        throw err;
+      }
+    }
 
     // Set up sync engine if we have a token
     if (config.githubToken) {

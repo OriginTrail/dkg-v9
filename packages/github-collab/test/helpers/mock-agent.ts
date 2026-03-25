@@ -30,6 +30,8 @@ export function makeMockAgent(peerId = 'test-peer-1') {
       offMessage(_topic: string, _handler: Function) {},
     },
 
+    createParanet: async (_opts: { id: string; name: string; description?: string; private?: boolean }) => {},
+
     writeToWorkspace: async (_paranetId: string, quads: any[]) => {
       workspaceWrites.push(quads);
       return { workspaceOperationId: `ws-op-${workspaceWrites.length}` };

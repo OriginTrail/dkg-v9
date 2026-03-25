@@ -452,3 +452,23 @@ body {
 
 .badge-workspace { background: #78350f; color: #fbbf24; }
 .badge-enshrined { background: #14532d; color: #86efac; }
+
+/* --- Sync Progress --- */
+
+.sync-progress-section { margin-top: 8px; }
+
+.sync-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* --- View Descriptions --- */
+
+.view-description {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  margin-bottom: 12px;
+}

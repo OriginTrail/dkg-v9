@@ -1,5 +1,5 @@
-import React, { useState, useCallback } from 'react';
-import { executeQuery } from '../api.js';
+import React, { useState, useCallback, useEffect } from 'react';
+import { executeQuery, fetchBranches } from '../api.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { useRepo, repoKey } from '../context/RepoContext.js';
 
@@ -14,7 +14,29 @@ export function GraphExplorerPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Branch selector state
+  const [branches, setBranches] = useState<Array<{ name: string; protected: boolean }>>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string>('');
+  const [branchesLoading, setBranchesLoading] = useState(false);
+
   const scopedRepo = selectedRepo ? repoKey(selectedRepo) : undefined;
+
+  // Load branches when repo changes
+  useEffect(() => {
+    if (!selectedRepo) {
+      setBranches([]);
+      return;
+    }
+    setBranchesLoading(true);
+    fetchBranches(selectedRepo.owner, selectedRepo.repo)
+      .then(result => {
+        setBranches(result.branches ?? []);
+      })
+      .catch(() => {
+        setBranches([]);
+      })
+      .finally(() => setBranchesLoading(false));
+  }, [selectedRepo?.owner, selectedRepo?.repo]);
 
   const runQuery = useCallback(async () => {
     setLoading(true);
@@ -51,6 +73,30 @@ export function GraphExplorerPage() {
         </div>
       )}
 
+      {/* Branch Selector */}
+      {selectedRepo && (
+        <div className="input-row" style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 13, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+            Branch:
+          </label>
+          <select
+            className="repo-select"
+            style={{ minWidth: 200 }}
+            value={selectedBranch}
+            onChange={e => setSelectedBranch(e.target.value)}
+            disabled={branchesLoading}
+          >
+            <option value="">All branches</option>
+            {branches.map(b => (
+              <option key={b.name} value={b.name}>{b.name}</option>
+            ))}
+          </select>
+          <span className="text-muted" style={{ marginTop: 0 }}>
+            Select a branch to filter the knowledge graph to entities on that branch
+          </span>
+        </div>
+      )}
+
       <div className="explorer-tabs">
         <button
           className={`btn btn-small ${tab === 'visual' ? '' : 'btn-secondary'}`}
@@ -67,7 +113,7 @@ export function GraphExplorerPage() {
       </div>
 
       {tab === 'visual' && (
-        <GraphCanvas repo={scopedRepo} />
+        <GraphCanvas repo={scopedRepo} branch={selectedBranch || undefined} />
       )}
 
       {tab === 'sparql' && (

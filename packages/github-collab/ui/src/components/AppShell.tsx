@@ -45,7 +45,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {repos.map(r => {
                 const key = repoKey(r);
-                const privacy = r.paranetId ? 'shared' : 'local';
+                const privacy = r.privacyLevel ?? 'local';
                 return (
                   <option key={key} value={key}>
                     {key} {privacy === 'shared' ? '(shared)' : '(local)'}
@@ -55,8 +55,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             </select>
           )}
           {selectedRepo && (
-            <span className={`repo-privacy-badge repo-privacy-${selectedRepo.paranetId ? 'shared' : 'local'}`}>
-              {selectedRepo.paranetId ? 'Shared' : 'Local'}
+            <span className={`repo-privacy-badge repo-privacy-${selectedRepo.privacyLevel ?? 'local'}`}>
+              {(selectedRepo.privacyLevel ?? 'local') === 'shared' ? 'Shared' : 'Local'}
             </span>
           )}
           {selectedRepo && (

@@ -9,6 +9,7 @@ export interface RepoInfo {
   webhookSecret: string | null;
   pollIntervalMs: number;
   syncScope: string[];
+  privacyLevel?: 'local' | 'shared';
 }
 
 interface RepoContextValue {

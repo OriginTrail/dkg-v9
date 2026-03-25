@@ -1,6 +1,6 @@
 /**
  * Tests for the unified Visibility API on DKGAgent methods:
- * - writeToWorkspace: default private, visibility option, legacy localOnly
+ * - writeToWorkspace: default public (broadcast), visibility option, legacy localOnly
  * - writeConditionalToWorkspace: same visibility semantics
  * - createParanet: visibility option, legacy private flag
  * - enshrineFromWorkspace: default public
@@ -45,17 +45,17 @@ describe('writeToWorkspace — Visibility API', () => {
     (agent as any).gossip = { ...origGossip, publish: gossipSpy };
   }, 10000);
 
-  it('writeToWorkspace with no options → does NOT broadcast (private default)', async () => {
+  it('writeToWorkspace with no options → broadcasts (public default, backward compat)', async () => {
     const paranet = nextParanet();
     await agent.createParanet({ id: paranet, name: 'Test', visibility: 'private' });
 
     gossipSpy.mockClear();
     const entity = nextEntity();
     await agent.writeToWorkspace(paranet, [
-      { subject: entity, predicate: 'http://schema.org/name', object: '"Default Private"', graph: '' },
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Default Public"', graph: '' },
     ]);
 
-    expect(gossipSpy).not.toHaveBeenCalled();
+    expect(gossipSpy).toHaveBeenCalledTimes(1);
   }, 10000);
 
   it('writeToWorkspace with visibility: "public" → broadcasts', async () => {
@@ -84,7 +84,7 @@ describe('writeToWorkspace — Visibility API', () => {
     expect(gossipSpy).not.toHaveBeenCalled();
   }, 10000);
 
-  it('writeToWorkspace with visibility: { peers: ["X"] } → broadcasts', async () => {
+  it('writeToWorkspace with visibility: { peers: ["X"] } → does NOT broadcast (sync only)', async () => {
     const paranet = nextParanet();
     await agent.createParanet({ id: paranet, name: 'Test', visibility: 'private' });
 
@@ -94,7 +94,7 @@ describe('writeToWorkspace — Visibility API', () => {
       { subject: entity, predicate: 'http://schema.org/name', object: '"Allow List Write"', graph: '' },
     ], { visibility: { peers: ['12D3KooWPeerX'] } });
 
-    expect(gossipSpy).toHaveBeenCalledTimes(1);
+    expect(gossipSpy).not.toHaveBeenCalled();
   }, 10000);
 
   it('writeToWorkspace with legacy localOnly: true → does NOT broadcast (backward compat)', async () => {

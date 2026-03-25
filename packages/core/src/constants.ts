@@ -7,6 +7,7 @@ export const PROTOCOL_SYNC = '/dkg/10.0.0/sync';
 export const PROTOCOL_MESSAGE = '/dkg/10.0.0/message';
 export const PROTOCOL_ACCESS = '/dkg/10.0.0/private-access';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.0/query-remote';
+export const PROTOCOL_WORKSPACE_PUSH = '/dkg/10.0.0/workspace-push';
 
 export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.0/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';

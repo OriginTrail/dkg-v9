@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_WORKSPACE_PUSH,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
@@ -548,13 +548,23 @@ export class DKGAgent {
             }
           }
 
+          // Use UNION to fetch both non-expired operation metadata AND workspaceOwner
+          // triples. Owner triples have root entities as subjects (not operations) so
+          // they lack dkg:publishedAt and would be dropped by the TTL filter otherwise.
           const metaQuery = cutoff != null
             ? `SELECT ?s ?p ?o WHERE {
-                GRAPH <${wsMetaGraph}> { ?s ?p ?o }
-                FILTER EXISTS {
-                  GRAPH <${wsMetaGraph}> {
-                    ?s <${DKG_NS}publishedAt> ?ts .
-                    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                GRAPH <${wsMetaGraph}> {
+                  {
+                    ?s ?p ?o .
+                    FILTER EXISTS {
+                      ?s <${DKG_NS}publishedAt> ?ts .
+                      FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                    }
+                  }
+                  UNION
+                  {
+                    ?s <${DKG_NS}workspaceOwner> ?o .
+                    BIND(<${DKG_NS}workspaceOwner> AS ?p)
                   }
                 }
               } ORDER BY ?s ?p ?o`
@@ -609,6 +619,19 @@ export class DKGAgent {
       }
 
       return new TextEncoder().encode(nquads.join('\n'));
+    });
+
+    // Register workspace push handler: receives targeted workspace messages
+    // from peers who wrote allowList data intended for us. Processes the
+    // message the same way as a gossip workspace message.
+    this.router.register(PROTOCOL_WORKSPACE_PUSH, async (data, fromPeerId) => {
+      const wh = this.getOrCreateWorkspaceHandler();
+      try {
+        await wh.handle(data, fromPeerId.toString());
+      } catch (err) {
+        this.log.warn(createOperationContext('workspace'), `Failed to handle workspace push from ${fromPeerId.toString().slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return new Uint8Array(0); // ACK
     });
 
     // Subscribe to both system paranet GossipSub topics
@@ -1398,7 +1421,7 @@ export class DKGAgent {
     });
     // Only broadcast on GossipSub for public data. allowList data must NOT be
     // gossipped because any subscribed peer can read raw gossip messages before
-    // the sync-side filter runs. allowList data reaches peers via sync only.
+    // the sync-side filter runs. allowList data reaches peers via targeted push.
     if (resolved.accessPolicy === 'public') {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
@@ -1406,6 +1429,11 @@ export class DKGAgent {
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+    } else if (resolved.accessPolicy === 'allowList' && resolved.allowedPeers.length > 0) {
+      // Targeted push to authorized peers that are currently connected
+      this.pushWorkspaceToAllowedPeers(resolved.allowedPeers, message, ctx).catch((err) => {
+        this.log.warn(ctx, `Targeted push failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
     return { workspaceOperationId };
   }
@@ -1448,8 +1476,44 @@ export class DKGAgent {
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+    } else if (resolved.accessPolicy === 'allowList' && resolved.allowedPeers.length > 0) {
+      // Targeted push to authorized peers that are currently connected
+      this.pushWorkspaceToAllowedPeers(resolved.allowedPeers, message, ctx).catch((err) => {
+        this.log.warn(ctx, `Targeted push failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
     return { workspaceOperationId };
+  }
+
+  /**
+   * After an allowList workspace write, push the workspace message directly to
+   * each allowed peer that is currently connected. This ensures authorized peers
+   * receive the data immediately without waiting for a reconnect or manual sync.
+   * Failures are logged but do not propagate — delivery is best-effort.
+   */
+  private async pushWorkspaceToAllowedPeers(
+    allowedPeers: string[],
+    message: Uint8Array,
+    ctx: OperationContext,
+  ): Promise<void> {
+    // Build a map of connected peer ID strings for fast lookup
+    const connectedPeerIds = new Set(
+      this.node.libp2p.getConnections().map((conn) => conn.remotePeer.toString()),
+    );
+
+    const targets = allowedPeers.filter(p => connectedPeerIds.has(p));
+    if (targets.length === 0) return;
+
+    this.log.info(ctx, `Pushing workspace data to ${targets.length} connected allowed peer(s)`);
+    await Promise.allSettled(
+      targets.map(async (peerId) => {
+        try {
+          await this.router.send(peerId, PROTOCOL_WORKSPACE_PUSH, message);
+        } catch (err) {
+          this.log.warn(ctx, `Workspace push to ${peerId.slice(-8)} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }),
+    );
   }
 
   /**

@@ -1470,6 +1470,7 @@ export class DKGAgent {
       contextGraphSignatures: options?.contextGraphSignatures,
       accessPolicy: resolved.accessPolicy,
       allowedPeers: resolved.allowedPeers,
+      publisherPeerId: this.node.peerId.toString(),
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {

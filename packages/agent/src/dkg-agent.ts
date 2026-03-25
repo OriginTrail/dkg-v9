@@ -408,7 +408,7 @@ export class DKGAgent {
     //   or: "workspace:paranetId|offset|limit" for workspace graph sync
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
-    this.router.register(PROTOCOL_SYNC, async (data) => {
+    this.router.register(PROTOCOL_SYNC, async (data, fromPeerId) => {
       const text = new TextDecoder().decode(data).trim();
       const [paranetPart, offsetStr, limitStr] = text.split('|');
       const offset = parseInt(offsetStr, 10) || 0;
@@ -422,25 +422,106 @@ export class DKGAgent {
         const wsGraph = paranetWorkspaceGraphUri(paranetId);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
         const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+        const requestingPeerId = fromPeerId.toString();
+
+        // --- Access filtering ---
+        // Query workspace_meta for per-operation access policies so we only
+        // serve root entities the requesting peer is authorized to see.
+        // Operations without an accessPolicy triple (pre-migration data) are
+        // treated as public for backward compatibility.
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const PROV_NS = 'http://www.w3.org/ns/prov#';
+        const accessQuery = `SELECT ?op ?re ?policy ?publisher ?allowedPeer WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}rootEntity> ?re .
+    OPTIONAL { ?op <${DKG_NS}accessPolicy> ?policy }
+    OPTIONAL { ?op <${PROV_NS}wasAttributedTo> ?publisher }
+    OPTIONAL { ?op <${DKG_NS}allowedPeer> ?allowedPeer }
+  }
+}`;
+        const accessResult = await this.store.query(accessQuery);
+        const accessibleRoots = new Set<string>();
+        if (accessResult.type === 'bindings') {
+          // Group results by operation+rootEntity to handle multiple allowedPeer rows
+          const opRoots = new Map<string, { policy?: string; publisher?: string; peers: Set<string> }>();
+          for (const row of accessResult.bindings) {
+            const re = row['re'];
+            const op = row['op'];
+            if (!re || !op) continue;
+            const key = `${op}\0${re}`;
+            let entry = opRoots.get(key);
+            if (!entry) {
+              const rawPolicy = row['policy'];
+              const policy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
+              const rawPublisher = row['publisher'];
+              const publisher = rawPublisher ? stripLiteral(rawPublisher) : undefined;
+              entry = { policy, publisher, peers: new Set() };
+              opRoots.set(key, entry);
+            }
+            const rawPeer = row['allowedPeer'];
+            if (rawPeer) entry.peers.add(stripLiteral(rawPeer));
+          }
+
+          for (const [key, { policy, publisher, peers }] of opRoots) {
+            const re = key.split('\0')[1];
+            // No policy or explicit 'public' → accessible to everyone
+            if (!policy || policy === 'public') {
+              accessibleRoots.add(re);
+            } else if (policy === 'ownerOnly') {
+              if (publisher && requestingPeerId === publisher) {
+                accessibleRoots.add(re);
+              }
+            } else if (policy === 'allowList') {
+              if (peers.has(requestingPeerId)) {
+                accessibleRoots.add(re);
+              }
+            } else {
+              // Unknown policy — treat as public for forward compatibility
+              accessibleRoots.add(re);
+            }
+          }
+        }
+
+        // If no operations matched at all (empty workspace), return empty
+        if (accessResult.type === 'bindings' && accessResult.bindings.length > 0 && accessibleRoots.size === 0) {
+          return new TextEncoder().encode('');
+        }
 
         // Apply TTL/root-entity filter inside SPARQL before pagination so that
         // we return the first N non-expired triples. Only include exact root subject
         // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
         // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
+        // Additionally filter by accessible root entities for access control.
         const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
+        const rootValues = [...accessibleRoots].map(r => `<${r}>`).join(' ');
+        const hasAccessFilter = accessibleRoots.size > 0;
+        const accessFilterClause = hasAccessFilter ? `VALUES ?re { ${rootValues} }` : '';
+
         const wsQuery =
           cutoff != null
             ? `SELECT DISTINCT ?s ?p ?o WHERE {
   GRAPH <${wsMetaGraph}> {
-    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-    ?op <http://dkg.io/ontology/publishedAt> ?ts .
-    ?op <http://dkg.io/ontology/rootEntity> ?re .
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}publishedAt> ?ts .
+    ?op <${DKG_NS}rootEntity> ?re .
+    ${accessFilterClause}
     FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
   }
   GRAPH <${wsGraph}> { ?s ?p ?o }
   FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
 } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
+            : hasAccessFilter
+              ? `SELECT DISTINCT ?s ?p ?o WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}rootEntity> ?re .
+    ${accessFilterClause}
+  }
+  GRAPH <${wsGraph}> { ?s ?p ?o }
+  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
+} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
+              : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
         const wsResult = await this.store.query(wsQuery);
         if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
@@ -452,13 +533,23 @@ export class DKGAgent {
         }
 
         if (offset === 0) {
-          // Only send meta for non-expired operations; reuse same cutoff as data query to avoid boundary skew
+          // Only send meta for non-expired operations whose root entities are accessible.
+          // Build a set of accessible operation URIs from the access query results.
+          const accessibleOps = new Set<string>();
+          if (accessResult.type === 'bindings') {
+            for (const row of accessResult.bindings) {
+              const re = row['re'];
+              const op = row['op'];
+              if (re && op && accessibleRoots.has(re)) accessibleOps.add(op);
+            }
+          }
+
           const metaQuery = cutoff != null
             ? `SELECT ?s ?p ?o WHERE {
                 GRAPH <${wsMetaGraph}> { ?s ?p ?o }
                 FILTER EXISTS {
                   GRAPH <${wsMetaGraph}> {
-                    ?s <http://dkg.io/ontology/publishedAt> ?ts .
+                    ?s <${DKG_NS}publishedAt> ?ts .
                     FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                   }
                 }
@@ -468,6 +559,8 @@ export class DKGAgent {
           const metaResult = await this.store.query(metaQuery);
           if (metaResult.type === 'bindings') {
             for (const b of metaResult.bindings) {
+              // Filter metadata: only include triples whose subject is an accessible operation
+              if (accessibleOps.size > 0 && !accessibleOps.has(b['s'])) continue;
               const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
               nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
             }

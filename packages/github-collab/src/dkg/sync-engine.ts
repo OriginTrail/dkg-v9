@@ -335,9 +335,11 @@ export class SyncEngine {
     since?: string,
   ): Promise<void> {
     const { owner, repo, paranetId } = config;
+    const repoKey = `${owner}/${repo}`;
     // Use the paranet data graph URI — the workspace handler manages graph scoping internally.
     // Do NOT append /_workspace here; the DKG publisher validates quads against the paranet data graph.
     const graph = `did:dkg:paranet:${paranetId}`;
+    let totalQuadsWritten = 0;
 
     try {
       // Repository metadata
@@ -345,6 +347,7 @@ export class SyncEngine {
       const repoQuads = transformRepository(repoData, graph);
       if (repoQuads.length > 0) {
         await this.writeQuads(paranetId, repoQuads);
+        totalQuadsWritten += repoQuads.length;
       }
 
       // Branches
@@ -355,6 +358,7 @@ export class SyncEngine {
       }
       if (branchQuads.length > 0) {
         await this.writeQuads(paranetId, branchQuads);
+        totalQuadsWritten += branchQuads.length;
       }
 
       // Pull Requests
@@ -387,6 +391,7 @@ export class SyncEngine {
 
           if (quads.length > 0) {
             await this.writeQuads(paranetId, quads);
+            totalQuadsWritten += quads.length;
           }
           job.progress.pullRequests.synced++;
         }
@@ -413,8 +418,27 @@ export class SyncEngine {
 
           if (quads.length > 0) {
             await this.writeQuads(paranetId, quads);
+            totalQuadsWritten += quads.length;
           }
           job.progress.issues.synced++;
+        }
+      }
+
+      // Commits
+      if (scopes.includes('commits')) {
+        job.progress.commits = { total: 0, synced: 0 };
+        const commits = await client.fetchAllPages(
+          `/repos/${owner}/${repo}/commits?per_page=100${since ? `&since=${since}` : ''}`,
+        );
+        job.progress.commits.total = commits.length;
+
+        for (const commit of commits) {
+          const quads = transformCommit(commit, owner, repo, graph);
+          if (quads.length > 0) {
+            await this.writeQuads(paranetId, quads);
+            totalQuadsWritten += quads.length;
+          }
+          job.progress.commits.synced++;
         }
       }
 
@@ -429,6 +453,7 @@ export class SyncEngine {
         job.progress.codeStructure.total = treeResult.fileCount;
         if (treeResult.quads.length > 0) {
           await this.writeQuadsBatched(paranetId, treeResult.quads);
+          totalQuadsWritten += treeResult.quads.length;
         }
         job.progress.codeStructure.synced = treeResult.fileCount;
 
@@ -449,6 +474,7 @@ export class SyncEngine {
           job.progress.codeEntities.synced = entityResult.parsedFiles;
           if (entityResult.quads.length > 0) {
             await this.writeQuadsBatched(paranetId, entityResult.quads);
+            totalQuadsWritten += entityResult.quads.length;
           }
         } catch (err: any) {
           // Phase B+C failure should not fail the whole sync
@@ -458,6 +484,7 @@ export class SyncEngine {
 
       job.status = 'completed';
       job.completedAt = new Date().toISOString();
+      this.onSyncComplete?.(repoKey, scopes, totalQuadsWritten);
     } catch (err: any) {
       job.status = 'failed';
       job.errors.push(err.message);

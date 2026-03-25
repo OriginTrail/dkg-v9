@@ -408,10 +408,19 @@ export class GitHubCollabCoordinator {
   // --- Query ---
 
   async query(sparql: string, repoKey?: string, includeWorkspace = true): Promise<any> {
-    const opts: any = { includeWorkspace };
+    const opts: any = {};
     if (repoKey) {
       const config = this.repos.get(repoKey);
       if (config) opts.paranetId = config.paranetId;
+    }
+    if (includeWorkspace && opts.paranetId) {
+      // All synced data lives in the workspace graph — query it directly.
+      // Using graphSuffix scopes to the workspace named graph, which is where
+      // writeToWorkspace stores quads.  includeWorkspace would also run a
+      // redundant query against the empty data graph.
+      opts.graphSuffix = '_workspace';
+    } else if (includeWorkspace) {
+      opts.includeWorkspace = true;
     }
     return this.agent.query(sparql, opts);
   }
@@ -911,6 +920,7 @@ export class GitHubCollabCoordinator {
     if (!config) return;
 
     config.lastSyncAt = new Date().toISOString();
+    this.saveToDisk();
 
     this.broadcastMessage(config.paranetId, {
       app: APP_ID,

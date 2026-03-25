@@ -527,6 +527,22 @@ export class RdfGraphViz {
     // Inject CSS custom properties for demo/app UIs
     injectPaletteCssVars(this._container, palette);
 
+    // Bridge nodeTypes colors → StyleEngine classColors
+    if (config.nodeTypes) {
+      const classColors: Record<string, string> = {};
+      for (const [typeUri, typeConfig] of Object.entries(config.nodeTypes)) {
+        if (typeConfig.color) {
+          classColors[typeUri] = typeConfig.color;
+        }
+      }
+      this._styleEngine.setClassColors(classColors);
+    }
+
+    // Bridge circleTypes → HexagonPainter
+    if (config.circleTypes) {
+      this._hexPainter.setCircleTypes(config.circleTypes);
+    }
+
     // Configure trust visualization
     if (config.trust?.enabled) {
       this._hexPainter.setTrustStyle(config.trust.style ?? 'border');

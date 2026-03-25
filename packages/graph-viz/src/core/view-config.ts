@@ -421,10 +421,9 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
     }
   }
 
-  // 5. Node type icons (for types that specify an icon but aren't platform-based)
+  // 5. Node type icons and per-type sizeMultiplier
   if (config.nodeTypes) {
     for (const node of model.nodes.values()) {
-      if (node.imageUrl) continue;
       for (const type of node.types) {
         const shortType = type.split('/').pop()?.split('#').pop() ?? '';
         // Check both full URI and short forms
@@ -432,8 +431,15 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           || config.nodeTypes[`schema:${shortType}`]
           || config.nodeTypes[`vocab:${shortType}`]
           || config.nodeTypes[shortType];
-        if (typeConfig?.icon) {
-          node.imageUrl = typeConfig.icon;
+        if (typeConfig) {
+          // Apply icon if not already set
+          if (!node.imageUrl && typeConfig.icon) {
+            node.imageUrl = typeConfig.icon;
+          }
+          // Apply per-type sizeMultiplier if not already set by focal/highlight/sizeBy
+          if (!node.sizeMultiplier && typeConfig.sizeMultiplier) {
+            node.sizeMultiplier = typeConfig.sizeMultiplier;
+          }
           break;
         }
       }

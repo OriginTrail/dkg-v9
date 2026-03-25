@@ -60,7 +60,12 @@ export class HexagonPainter {
   /** Check if a node should render as a simple circle */
   isCircleNode(node: GraphNode): boolean {
     if (this._circleTypeSet.size === 0) return false;
-    return node.types.some((t) => this._circleTypeSet.has(t));
+    return node.types.some((t) => {
+      if (this._circleTypeSet.has(t)) return true;
+      // Also match short name (last segment after # or /) against the set
+      const shortName = t.split('/').pop()?.split('#').pop() ?? '';
+      return shortName !== '' && this._circleTypeSet.has(shortName);
+    });
   }
 
   /** Set callback to trigger repaint when images load */
@@ -81,6 +86,16 @@ export class HexagonPainter {
   /** Enable/disable provenance badges */
   setShowBadges(show: boolean): void {
     this._showBadges = show;
+  }
+
+  /** Replace the set of types rendered as circles (from ViewConfig.circleTypes) */
+  setCircleTypes(types: string[]): void {
+    this._circleTypeSet.clear();
+    for (const t of types) {
+      this._circleTypeSet.add(t);
+      // Also add with the full GH namespace for matching against full URIs
+      // The short name is matched against the last segment of the type URI in isCircleNode
+    }
   }
 
   /** Get the radius for a node (optionally scaled by degree, boosted if has image) */
@@ -225,9 +240,9 @@ export class HexagonPainter {
       this._paintBadges(ctx, node, x, y, radius, globalScale);
     }
 
-    // Label below hexagon — fade in/out with zoom
-    const fadeStart = 1.5;
-    const fadeFull = 2.5;
+    // Label below hexagon — fade in/out with zoom (earlier than before for readability)
+    const fadeStart = 0.8;
+    const fadeFull = 1.5;
     if (globalScale > fadeStart) {
       const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
       const fontSize = styleConfig.fontSize / globalScale;
@@ -319,23 +334,49 @@ export class HexagonPainter {
   }
 
   /**
-   * Fast path: paint a minimal filled circle.
-   * No gradient, no border, no image, no label — just a flat arc.
+   * Fast path: paint a filled circle with border and label.
+   * Simpler than hexagon but still shows type color and label.
    */
   private paintCircle(
     ctx: CanvasRenderingContext2D,
     node: GraphNode,
     x: number,
     y: number,
-    _globalScale: number
+    globalScale: number
   ): number {
     const radius = this.getRadius(node);
     const color = this._styleEngine.getNodeColor(node);
+    const palette = this._styleEngine.palette;
+    const styleConfig = this._styleEngine.config;
 
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, 2 * Math.PI);
     ctx.fillStyle = color;
     ctx.fill();
+
+    // Subtle border
+    ctx.strokeStyle = this._styleEngine.getBorderColor(color);
+    ctx.lineWidth = 1 / globalScale;
+    ctx.stroke();
+
+    // Label below circle — fade in with zoom
+    const fadeStart = 1.2;
+    const fadeFull = 2.0;
+    if (globalScale > fadeStart) {
+      const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
+      const fontSize = styleConfig.fontSize / globalScale;
+      ctx.font = `${fontSize}px ${styleConfig.fontFamily}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.globalAlpha = opacity;
+      ctx.fillStyle = palette.textPrimary;
+      ctx.fillText(
+        truncateLabel(node.label, 24),
+        x,
+        y + radius + 2 / globalScale
+      );
+      ctx.globalAlpha = 1;
+    }
 
     return radius;
   }

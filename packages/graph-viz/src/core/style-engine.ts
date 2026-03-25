@@ -62,6 +62,14 @@ export class StyleEngine {
     this._config.defaultEdgeColor = palette.edgeColor;
   }
 
+  /** Merge additional class colors (from ViewConfig nodeTypes) into the style config */
+  setClassColors(colors: Record<string, string>): void {
+    this._config = {
+      ...this._config,
+      classColors: { ...this._config.classColors, ...colors },
+    };
+  }
+
   get config(): Readonly<Required<StyleConfig>> {
     return this._config;
   }

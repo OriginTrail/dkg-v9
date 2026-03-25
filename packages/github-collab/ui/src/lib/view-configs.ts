@@ -1,24 +1,69 @@
 /**
  * ViewConfig definitions for the GitHub Collaboration graph views.
  * Each config controls how graph data is visually rendered.
+ *
+ * Design principles:
+ * - Distinct, high-contrast colors per entity type
+ * - Size hierarchy: central entities largest, supporting entities smallest
+ * - Labels visible at low zoom via early fade-in thresholds
+ * - Circles for leaf/supporting entities, hexagons for primary entities
+ * - Subtle edges that don't dominate the visual field
  */
 
 import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
 
 const GH = 'https://ontology.dkg.io/ghcode#';
 
+// ── Color palette ──
+// High-contrast colors chosen for dark backgrounds (midnight palette).
+// Each entity type has a unique hue to be distinguishable at a glance.
+const COLORS = {
+  repository: '#f59e0b', // amber/gold — central, important
+  pullRequest: '#a855f7', // violet/purple
+  issue: '#f97316',       // orange
+  commit: '#22c55e',      // green
+  branch: '#06b6d4',      // cyan
+  file: '#94a3b8',        // silver/gray
+  directory: '#64748b',   // slate/darker gray
+  class: '#3b82f6',       // blue
+  function: '#ec4899',    // pink/magenta
+  user: '#14b8a6',        // teal
+  review: '#c084fc',      // light purple/lavender
+  reviewComment: '#818cf8', // indigo
+  fileDiff: '#eab308',    // yellow
+  label: '#fb923c',       // light orange
+  milestone: '#22d3ee',   // light cyan
+  merge: '#8b5cf6',       // deep purple
+  agentSession: '#4ade80', // bright green
+  decision: '#fbbf24',    // warm yellow
+  codeClaim: '#f97316',   // orange
+  annotation: '#a78bfa',  // soft violet
+  import: '#fbbf24',      // yellow
+};
+
+// ── Shared palette overrides for better edge visibility ──
+const EDGE_OVERRIDES = {
+  edgeColor: 'rgba(100, 120, 180, 0.25)',
+  edgeLabel: '#7f8fa6',
+};
+
 export const REPO_OVERVIEW_VIEW: ViewConfig = {
   name: 'Overview',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}Repository`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 2.0 },
-    [`${GH}PullRequest`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 1.2 },
-    [`${GH}Issue`]: { color: '#f97316', shape: 'hexagon' },
-    [`${GH}User`]: { color: '#ec4899', shape: 'circle' },
-    [`${GH}Branch`]: { color: '#34d399', shape: 'circle' },
-    [`${GH}Commit`]: { color: '#6b7280', shape: 'circle' },
+    [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 2.5 },
+    [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 1.4 },
+    [`${GH}Issue`]: { color: COLORS.issue, shape: 'hexagon', sizeMultiplier: 1.2 },
+    [`${GH}User`]: { color: COLORS.user, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}Branch`]: { color: COLORS.branch, shape: 'circle', sizeMultiplier: 0.9 },
+    [`${GH}Commit`]: { color: COLORS.commit, shape: 'circle', sizeMultiplier: 0.7 },
   },
   circleTypes: ['User', 'Branch', 'Commit'],
+  tooltip: {
+    titleProperties: ['name', 'title', 'fullName'],
+    titleMaxLength: 50,
+  },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
   ?s a ?type ; ?p ?o .
@@ -32,13 +77,18 @@ WHERE {
 export const ISSUES_VIEW: ViewConfig = {
   name: 'Issues',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}Issue`]: { color: '#f97316', shape: 'hexagon', sizeMultiplier: 1.5 },
-    [`${GH}User`]: { color: '#ec4899', shape: 'circle' },
-    [`${GH}Label`]: { color: '#fbbf24', shape: 'circle' },
-    [`${GH}Milestone`]: { color: '#22d3ee', shape: 'hexagon' },
+    [`${GH}Issue`]: { color: COLORS.issue, shape: 'hexagon', sizeMultiplier: 1.6 },
+    [`${GH}User`]: { color: COLORS.user, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}Label`]: { color: COLORS.label, shape: 'circle', sizeMultiplier: 0.7 },
+    [`${GH}Milestone`]: { color: COLORS.milestone, shape: 'hexagon', sizeMultiplier: 1.2 },
   },
   circleTypes: ['User', 'Label'],
+  tooltip: {
+    titleProperties: ['title', 'name'],
+    titleMaxLength: 60,
+  },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
   ?s a <${GH}Issue> ; ?p ?o .
@@ -48,16 +98,23 @@ WHERE {
 export const PR_IMPACT_VIEW: ViewConfig = {
   name: 'PR Impact',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}PullRequest`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 1.8 },
-    [`${GH}Review`]: { color: '#a78bfa', shape: 'circle' },
-    [`${GH}ReviewComment`]: { color: '#818cf8', shape: 'circle' },
-    [`${GH}FileDiff`]: { color: '#fbbf24', shape: 'circle' },
-    [`${GH}Commit`]: { color: '#34d399', shape: 'hexagon' },
-    [`${GH}User`]: { color: '#ec4899', shape: 'circle' },
-    [`${GH}Label`]: { color: '#f97316', shape: 'circle' },
+    [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 1.8 },
+    [`${GH}Review`]: { color: COLORS.review, shape: 'circle', sizeMultiplier: 0.9 },
+    [`${GH}ReviewComment`]: { color: COLORS.reviewComment, shape: 'circle', sizeMultiplier: 0.6 },
+    [`${GH}FileDiff`]: { color: COLORS.fileDiff, shape: 'circle', sizeMultiplier: 0.7 },
+    [`${GH}Commit`]: { color: COLORS.commit, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}User`]: { color: COLORS.user, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}Label`]: { color: COLORS.label, shape: 'circle', sizeMultiplier: 0.6 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.7 },
   },
-  circleTypes: ['Review', 'ReviewComment', 'FileDiff', 'User', 'Label'],
+  circleTypes: ['Review', 'ReviewComment', 'FileDiff', 'User', 'Label', 'File', 'Commit'],
+  tooltip: {
+    titleProperties: ['title', 'name', 'path'],
+    titleMaxLength: 60,
+    subtitleTemplate: '{author} · {date}',
+  },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
   ?s a <${GH}PullRequest> ; ?p ?o .
@@ -67,18 +124,23 @@ WHERE {
 export const BRANCH_DIFF_VIEW: ViewConfig = {
   name: 'Branch Diff',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}Branch`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 1.5 },
-    [`${GH}Commit`]: { color: '#34d399', shape: 'hexagon' },
-    [`${GH}FileDiff`]: { color: '#fbbf24', shape: 'circle' },
-    [`${GH}Merge`]: { color: '#8b5cf6', shape: 'hexagon' },
+    [`${GH}Branch`]: { color: COLORS.branch, shape: 'hexagon', sizeMultiplier: 1.6 },
+    [`${GH}Commit`]: { color: COLORS.commit, shape: 'hexagon', sizeMultiplier: 1.0 },
+    [`${GH}FileDiff`]: { color: COLORS.fileDiff, shape: 'circle', sizeMultiplier: 0.7 },
+    [`${GH}Merge`]: { color: COLORS.merge, shape: 'hexagon', sizeMultiplier: 1.3 },
   },
   circleTypes: ['FileDiff'],
   animation: {
     linkParticles: true,
     linkParticleCount: 1,
     linkParticleSpeed: 0.003,
-    linkParticleColor: 'rgba(34, 211, 238, 0.4)',
+    linkParticleColor: 'rgba(6, 182, 212, 0.4)',
+  },
+  tooltip: {
+    titleProperties: ['name', 'message', 'path'],
+    titleMaxLength: 50,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
@@ -91,15 +153,20 @@ WHERE {
 export const AGENT_ACTIVITY_VIEW: ViewConfig = {
   name: 'Agent Activity',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}AgentSession`]: { color: '#4ade80', shape: 'hexagon', sizeMultiplier: 1.5 },
-    [`${GH}Decision`]: { color: '#fbbf24', shape: 'hexagon' },
-    [`${GH}CodeClaim`]: { color: '#f97316', shape: 'circle' },
-    [`${GH}File`]: { color: '#60a5fa', shape: 'circle' },
-    [`${GH}PullRequest`]: { color: '#8b5cf6', shape: 'hexagon' },
-    [`${GH}Annotation`]: { color: '#a78bfa', shape: 'circle', sizeMultiplier: 0.6 },
+    [`${GH}AgentSession`]: { color: COLORS.agentSession, shape: 'hexagon', sizeMultiplier: 1.6 },
+    [`${GH}Decision`]: { color: COLORS.decision, shape: 'hexagon', sizeMultiplier: 1.2 },
+    [`${GH}CodeClaim`]: { color: COLORS.codeClaim, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.7 },
+    [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 1.2 },
+    [`${GH}Annotation`]: { color: COLORS.annotation, shape: 'circle', sizeMultiplier: 0.5 },
   },
   circleTypes: ['CodeClaim', 'File', 'Annotation'],
+  tooltip: {
+    titleProperties: ['agentName', 'goal', 'decisionSummary', 'name'],
+    titleMaxLength: 60,
+  },
   defaultSparql: `CONSTRUCT {
   ?session a <${GH}AgentSession> ;
            <${GH}agentName> ?agent ;
@@ -142,12 +209,17 @@ WHERE {
 export const CODE_STRUCTURE_VIEW: ViewConfig = {
   name: 'Code Structure',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}File`]: { color: '#34d399', shape: 'circle' },
-    [`${GH}Directory`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 1.4 },
-    [`${GH}Repository`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 2.0 },
+    [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 2.5 },
+    [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 1.3 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.7 },
   },
   circleTypes: ['File'],
+  tooltip: {
+    titleProperties: ['name', 'path'],
+    titleMaxLength: 40,
+  },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
   { ?s a <${GH}File> ; ?p ?o }
@@ -159,11 +231,12 @@ WHERE {
 export const DEPENDENCY_FLOW_VIEW: ViewConfig = {
   name: 'Dependency Flow',
   palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}File`]: { color: '#34d399', shape: 'circle' },
-    [`${GH}Import`]: { color: '#fbbf24', shape: 'circle' },
-    [`${GH}Class`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 1.3 },
-    [`${GH}Function`]: { color: '#ec4899', shape: 'circle' },
+    [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 1.4 },
+    [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.8 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.7 },
+    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.6 },
   },
   circleTypes: ['File', 'Import', 'Function'],
   animation: {
@@ -171,6 +244,10 @@ export const DEPENDENCY_FLOW_VIEW: ViewConfig = {
     linkParticleCount: 1,
     linkParticleSpeed: 0.003,
     linkParticleColor: 'rgba(251, 191, 36, 0.4)',
+  },
+  tooltip: {
+    titleProperties: ['name', 'path'],
+    titleMaxLength: 40,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {

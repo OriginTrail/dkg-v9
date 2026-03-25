@@ -401,6 +401,8 @@ export class DKGPublisher implements Publisher {
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
       /** Allowed peer IDs when accessPolicy is 'allowList'. */
       allowedPeers?: string[];
+      /** Publisher peer ID for KC ownership metadata. Required when accessPolicy is not 'public'. */
+      publisherPeerId?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
@@ -459,6 +461,7 @@ export class DKGPublisher implements Publisher {
       onPhase: options?.onPhase,
       accessPolicy: options?.accessPolicy,
       allowedPeers: options?.allowedPeers,
+      publisherPeerId: options?.publisherPeerId,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {

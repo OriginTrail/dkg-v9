@@ -63,8 +63,15 @@ export function fileDiffUri(owner: string, repo: string, prNumber: number, path:
 
 // --- Graph URIs ---
 
-export function paranetId(owner: string, repo: string): string {
-  return `github-collab:${owner}/${repo}`;
+export function generateParanetSuffix(): string {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function paranetId(owner: string, repo: string, suffix?: string): string {
+  const base = `github-collab:${owner}/${repo}`;
+  return suffix ? `${base}:${suffix}` : base;
 }
 
 // --- Quad helpers ---

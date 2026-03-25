@@ -509,17 +509,23 @@ The "Sync Now" button MUST provide continuous feedback. A sync with no visible p
 │   │   │       │       ├── <LinkedPrs>
 │   │   │       │       └── <RelatedEntities>
 │   │   │       │
-│   │   │       ├── <AgentsPage>             # Peers & Agents — DKG V9 network peer coordination
-│   │   │       │   ├── <AgentRoster>        # Online agents + current tasks
-│   │   │       │   ├── <TaskBoard>          # Kanban: claimed/active/done
-│   │   │       │   ├── <FileClaimTable>     # Agent file locks
-│   │   │       │   └── <ActivityLog>        # Chronological agent actions
-│   │   │       │
-│   │   │       ├── <CollaborationPage>      # Multi-node collaboration
-│   │   │       │   ├── <ParanetInfo>        # Paranet details + stats
-│   │   │       │   ├── <CollaboratorList>   # Peer nodes with status
-│   │   │       │   ├── <InvitePeer>         # Send paranet invitation
-│   │   │       │   └── <SharedActivityFeed> # Cross-node activity stream
+│   │   │       ├── <CollaborationPage>       # Collaboration — invitation, peers, coordination (see Section 16)
+│   │   │       │   ├── <CollaborationHeader>    # Page title + subtitle
+│   │   │       │   ├── <NoRepoSelected>         # Prompt to select repo
+│   │   │       │   ├── <LocalOnlyBanner>        # State A: Local Only conversion prompt
+│   │   │       │   │   └── <ConversionDialog>   # Modal for Local → Shared
+│   │   │       │   ├── <SharedSpaceBanner>      # States B & C: paranet info + peer count
+│   │   │       │   │   └── <CopyableId>         # ID with copy-to-clipboard button
+│   │   │       │   ├── <InvitePeerSection>      # Peer ID input + invite button
+│   │   │       │   │   └── <PeerIdInput>        # Validated peer ID input
+│   │   │       │   ├── <CollaboratorList>        # Connected peers with status
+│   │   │       │   │   └── <CollaboratorRow>    # Name, online/offline, current task
+│   │   │       │   ├── <SentInvitationsList>    # Outgoing invitations with status
+│   │   │       │   │   └── <InvitationRow>      # Peer ID, status, revoke
+│   │   │       │   ├── <IncomingInvitationsList># Incoming invitations
+│   │   │       │   │   └── <IncomingInvitationRow> # Accept/decline actions
+│   │   │       │   └── <ActivityLog>            # Chronological event feed
+│   │   │       │       └── <ActivityRow>        # Timestamp, agent, action
 │   │   │       │
 │   │   │       └── <SettingsPage>           # Repository + app settings
 │   │   │           ├── <GitHubAuthSettings> # Token management
@@ -1513,3 +1519,663 @@ Changes made to this spec based on user testing feedback:
 | 9 | Agents tab unclear | 3.6, 5.6 | Renamed to "Peers & Agents", added description clarifying these are DKG V9 network peers |
 | 10 | Graph Explorer subtabs | 5.3 | Added purpose descriptions for each subtab (Code Structure, Dependencies, Branch Diff, PR Impact) |
 | — | Shared mode undefined | 14 | Added full Section 14 defining Shared mode: paranet workspace, invitation-only, 30-day TTL, enshrinement |
+| — | Agents & Collaboration tab redesign | 16 | Added full Section 16: invitation flow, collaboration states, peer management, API endpoints |
+
+---
+
+## 16. Agents & Collaboration Tab — Full Design (2026-03-25)
+
+This section replaces the placeholder `<AgentsPage>` with a complete collaboration hub. The tab is the single surface for managing peer invitations, viewing collaborators, and coordinating agent work across DKG V9 nodes.
+
+### 16.1 Tab Header & Identity
+
+**Tab label in navigation**: "Collaboration" (renamed from "Agents")
+
+**Rationale**: "Agents" suggests AI agents only. "Collaboration" correctly encompasses human operators, AI agents, and peer nodes. The tab subtitle provides the technical context.
+
+**Page header**:
+```
+Collaboration
+DKG V9 nodes subscribed to this repository's shared space (paranet).
+These peers can query the knowledge graph, participate in reviews, and coordinate work.
+```
+
+### 16.2 Repo Context Requirement
+
+The Collaboration tab is always scoped to the currently selected repo via `<RepoSelector>` in the AppShell header.
+
+**No repo selected**:
+```
+┌──────────────────────────────────────────────────────────┐
+│  Collaboration                                            │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │                                                    │    │
+│  │    Select a repository from the dropdown above    │    │
+│  │    to view collaboration settings.                │    │
+│  │                                                    │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 16.3 State A — Local Only Mode
+
+When the selected repo has `privacyLevel: 'local'`, collaboration features are unavailable. The tab shows a conversion prompt.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Collaboration                                            │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  LOCAL ONLY MODE                                   │    │
+│  │                                                    │    │
+│  │  This repository is in Local Only mode. Data       │    │
+│  │  stays on this node and is not shared with          │    │
+│  │  other DKG V9 nodes.                               │    │
+│  │                                                    │    │
+│  │  To collaborate with other nodes, convert to       │    │
+│  │  Shared mode. This will:                           │    │
+│  │                                                    │    │
+│  │  * Register a shared space (paranet) for this repo │    │
+│  │  * Allow you to invite other DKG V9 nodes          │    │
+│  │  * Enable collaborative reviews and coordination   │    │
+│  │  * Workspace data expires after 30 days unless     │    │
+│  │    enshrined (made permanent)                       │    │
+│  │                                                    │    │
+│  │  Your existing local data will remain accessible.  │    │
+│  │  Only new data written after conversion will be    │    │
+│  │  visible to invited collaborators.                 │    │
+│  │                                                    │    │
+│  │           [Share & Collaborate]                     │    │
+│  │                                                    │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+**"Share & Collaborate" button** triggers the Local-to-Shared conversion flow (Section 16.7).
+
+### 16.4 State B — Shared Mode, No Peers Yet
+
+When the repo is shared but no peers are connected and no invitations are pending.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Collaboration                                            │
+│  DKG V9 nodes subscribed to this repository's shared     │
+│  space. These peers can query the knowledge graph,       │
+│  participate in reviews, and coordinate work.            │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  SHARED SPACE                                      │    │
+│  │                                                    │    │
+│  │  Paranet ID:                                       │    │
+│  │  ┌─────────────────────────────────────────┐       │    │
+│  │  │ github-collab:owner/repo:a1b2c3d4       │ [Copy]│    │
+│  │  └─────────────────────────────────────────┘       │    │
+│  │                                                    │    │
+│  │  Your Peer ID:                                     │    │
+│  │  ┌─────────────────────────────────────────┐       │    │
+│  │  │ 12D3KooWABCDEF...                       │ [Copy]│    │
+│  │  └─────────────────────────────────────────┘       │    │
+│  │                                                    │    │
+│  │  Status: No peers connected                        │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  INVITE A PEER                                     │    │
+│  │                                                    │    │
+│  │  Enter a peer's DKG V9 node ID to invite them to  │    │
+│  │  collaborate on this repository.                   │    │
+│  │                                                    │    │
+│  │  Peer ID:                                          │    │
+│  │  [12D3KooW...                          ] [Invite]  │    │
+│  │                                                    │    │
+│  │  -- OR --                                          │    │
+│  │                                                    │    │
+│  │  Share your Paranet ID with collaborators so they  │    │
+│  │  can join manually from their own node.            │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  PENDING INVITATIONS (INCOMING)                    │    │
+│  │                                                    │    │
+│  │  No incoming invitations.                          │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  ACTIVITY                                          │    │
+│  │                                                    │    │
+│  │  No activity yet. Invite peers to get started.     │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 16.5 State C — Shared Mode, Active Collaboration
+
+When the repo is shared and peers are connected.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Collaboration                                            │
+│  DKG V9 nodes subscribed to this repository's shared     │
+│  space.                                                  │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  SHARED SPACE                     3 peers online   │    │
+│  │                                                    │    │
+│  │  Paranet: github-collab:owner/repo:a1b2c3d4 [Copy]│    │
+│  │  Your Peer ID: 12D3KooWABCDEF...            [Copy]│    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  COLLABORATORS (3)                    [Invite Peer]│    │
+│  │                                                    │    │
+│  │  ● alice-node        Online     Last: just now     │    │
+│  │    12D3KooW...abc    Reviewing PR #42              │    │
+│  │                                                    │    │
+│  │  ● bob-agent         Online     Last: 2 min ago    │    │
+│  │    12D3KooW...def    Idle                          │    │
+│  │                                                    │    │
+│  │  ○ carol-node        Offline    Last: 3 hours ago  │    │
+│  │    12D3KooW...ghi                                  │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  SENT INVITATIONS (1 pending)                      │    │
+│  │                                                    │    │
+│  │  12D3KooW...xyz     Pending     Sent 10 min ago   │    │
+│  │                                        [Revoke]    │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  PENDING INVITATIONS (INCOMING) (1)                │    │
+│  │                                                    │    │
+│  │  Node "dave-node" (12D3KooW...jkl) invited you    │    │
+│  │  to collaborate on dave/other-repo                 │    │
+│  │  Paranet: github-collab:dave/other-repo:f5e6d7c8  │    │
+│  │  Received: 5 min ago                              │    │
+│  │                                     [Accept] [X]   │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  ACTIVITY                                          │    │
+│  │                                                    │    │
+│  │  14:35  alice-node synced 42 triples               │    │
+│  │  14:33  bob-agent  joined collaboration            │    │
+│  │  14:30  alice-node submitted review on PR #42      │    │
+│  │  14:28  You        sent invitation to 12D3K...xyz  │    │
+│  │  14:15  carol-node went offline                    │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 16.6 Invitation Flow — Sending
+
+**Step 1**: User clicks "Invite Peer" or enters a peer ID in the invite input.
+
+**Step 2**: Validation:
+- Peer ID must match the DKG V9 peer ID format (`12D3KooW...`, base58-encoded libp2p peer ID)
+- Cannot invite yourself (compare against own peer ID from `GET /info`)
+- Cannot invite a peer who is already a collaborator or has a pending invitation
+
+**Step 3**: On "Invite" click:
+- UI shows inline spinner: "Sending invitation..."
+- Backend sends a GossipSub `invite:sent` message on the paranet's app topic
+- Additionally, if the peer is not yet subscribed to the topic, the invitation is also sent via a direct P2P message (unicast) using the peer ID
+- Backend stores the invitation in memory with status `pending`
+
+**Step 4**: UI updates:
+- Invitation appears in "Sent Invitations" section with status "Pending"
+- Toast notification: "Invitation sent to {peer ID}"
+
+**Step 5**: When the peer accepts:
+- A GossipSub `invite:accepted` message is received
+- The invitation status changes from "Pending" to "Accepted"
+- The peer appears in the "Collaborators" list
+- Activity log entry: "{peer name} accepted your invitation"
+
+**Step 6**: When the peer declines:
+- A GossipSub `invite:declined` message is received
+- The invitation status changes to "Declined"
+- Activity log entry: "{peer name} declined your invitation"
+- The invitation row is shown with muted styling and can be dismissed
+
+### 16.7 Local to Shared Conversion Flow
+
+When user clicks "Share & Collaborate" from the Local Only state:
+
+**Step 1**: Confirmation dialog:
+```
+┌──────────────────────────────────────────────────┐
+│  Convert to Shared Mode?                          │
+│                                                  │
+│  Repository: owner/repo                          │
+│                                                  │
+│  This will:                                      │
+│  * Generate a unique shared space ID (paranet)   │
+│  * Subscribe to the P2P collaboration network    │
+│  * Allow you to invite other DKG V9 nodes        │
+│                                                  │
+│  Your existing local data remains on this node.  │
+│  Only new data written after conversion will be  │
+│  visible to invited collaborators.               │
+│                                                  │
+│  Note: Workspace data in shared mode expires     │
+│  after 30 days unless enshrined (made permanent).│
+│                                                  │
+│              [Cancel]  [Convert to Shared]        │
+└──────────────────────────────────────────────────┘
+```
+
+**Step 2**: On confirmation:
+1. Generate 8-character random suffix (hex): `crypto.randomBytes(4).toString('hex')`
+2. New paranet ID: `github-collab:{owner}/{repo}:{suffix}`
+3. Call `POST /config/repo` with `privacyLevel: 'shared'` and the new `paranetId`
+4. Backend creates paranet, subscribes to GossipSub, broadcasts `node:joined`
+
+**Step 3**: Progress indicator:
+```
+Converting to Shared mode...
+[============================] Creating shared space
+[============================] Subscribing to network
+[============================] Ready!
+```
+
+**Step 4**: Success state:
+- Tab refreshes to State B (Shared, no peers)
+- Toast: "Repository is now in Shared mode"
+- Paranet ID displayed with Copy button
+- RepoSelector badge updates from "Local" to "Shared"
+
+### 16.8 Invitation Flow — Receiving
+
+**Where invitations appear**:
+1. **Tab badge**: The "Collaboration" tab in the nav bar shows a notification badge with the count of pending incoming invitations (e.g., "Collaboration (1)")
+2. **Within the tab**: The "Pending Invitations (Incoming)" section lists all incoming invitations
+
+**Invitation content**:
+Each incoming invitation shows:
+- Who invited: Node name + truncated peer ID
+- Which repo: `{owner}/{repo}` (the repo name from the invitation message)
+- Paranet ID: The full paranet ID for the shared space
+- When: Relative timestamp ("5 min ago")
+- Actions: [Accept] [Decline (X button)]
+
+**Accept flow**:
+1. User clicks "Accept"
+2. Button shows spinner: "Joining..."
+3. Backend:
+   a. Calls `POST /config/repo` with the paranet ID from the invitation, `privacyLevel: 'shared'`, and no `githubToken` (collaborator role)
+   b. Subscribes to GossipSub topic for that paranet
+   c. Broadcasts `invite:accepted` message
+   d. Begins syncing existing workspace data from peers
+4. UI updates:
+   - Invitation disappears from "Pending Invitations"
+   - The repo appears in the user's `<RepoSelector>` dropdown with a "Collaborator" role badge
+   - Tab badge count decrements
+   - Toast: "Joined collaboration on {owner}/{repo}"
+
+**Collaborator role**:
+After accepting, the collaborator:
+- Can browse the graph, view PRs/issues, and participate in reviews
+- Cannot trigger GitHub sync (no GitHub token configured)
+- Sees a "Collaborator" badge next to the repo name in the selector
+- Can leave the collaboration at any time (unsubscribe from paranet)
+
+**Decline flow**:
+1. User clicks the X (decline) button
+2. Backend sends `invite:declined` message
+3. Invitation is removed from the list
+4. No further action needed — declining is silent
+
+### 16.9 Peer Discovery
+
+**How does a user find another node's peer ID?**
+
+There is no automatic discovery in the MVP. Peers share their IDs through out-of-band channels (Slack, email, etc.). The UI facilitates this with:
+
+1. **"Your Peer ID" display with Copy button** — always visible in the Shared Space banner. Users copy this and share it with collaborators.
+
+2. **"Paranet ID" display with Copy button** — collaborators can use this to join manually without needing an explicit invitation.
+
+3. **Manual join** (future enhancement): A "Join Shared Space" input in the Collaboration tab where users can paste a paranet ID to subscribe directly. This bypasses the invitation flow — the user simply subscribes to the paranet. This is analogous to joining a Slack channel by URL.
+
+**No QR codes or shareable links in MVP** — these add complexity without sufficient value when the primary audience is developers who are comfortable copying peer IDs. QR codes can be considered for a future mobile companion app.
+
+### 16.10 Terminology
+
+The tab uses user-friendly terminology with technical terms in parentheses where needed:
+
+| User-facing term | Technical term | Used where |
+|---|---|---|
+| Shared Space | Paranet | Collaboration tab banner, conversion dialog |
+| Peer | DKG V9 Node | Collaborator list, invitation form |
+| Collaborator | Paranet subscriber | Collaborator list heading |
+| Shared Space ID | Paranet ID | Copy-able identifier |
+| Permanent record | Enshrined Knowledge Asset | Activity log (when data is enshrined) |
+
+### 16.11 Component Hierarchy
+
+```
+<AgentsPage>  (renamed to CollaborationPage internally)
+├── <CollaborationHeader>           # Page title + subtitle
+├── <NoRepoSelected>                # Shown when no repo selected
+├── <LocalOnlyBanner>               # State A: conversion prompt
+│   └── <ConversionDialog>          # Modal for Local → Shared
+├── <SharedSpaceBanner>             # States B & C: paranet info
+│   ├── <CopyableId>               # Paranet ID with copy button
+│   └── <CopyableId>               # Peer ID with copy button
+├── <InvitePeerSection>             # Peer ID input + invite button
+│   └── <PeerIdInput>              # Validated input for peer ID format
+├── <CollaboratorList>              # Connected peers
+│   └── <CollaboratorRow>          # Peer name, status, activity
+├── <SentInvitationsList>           # Outgoing invitations
+│   └── <InvitationRow>           # Peer ID, status, revoke action
+├── <IncomingInvitationsList>       # Incoming invitations
+│   └── <IncomingInvitationRow>    # Accept/decline actions
+└── <ActivityLog>                   # Chronological event feed
+    └── <ActivityRow>              # Timestamp, agent, action
+```
+
+### 16.12 API Endpoints for Invitation Flow
+
+These endpoints are added under `/api/apps/github-collab`.
+
+#### `GET /info`
+
+Already exists. Returns `peerId` and `nodeName`. Used by the UI to display "Your Peer ID".
+
+#### `POST /invite`
+
+Send a collaboration invitation to a peer.
+
+**Request:**
+```json
+{
+  "peerId": "12D3KooWABCDEF...",
+  "owner": "OriginTrail",
+  "repo": "dkg-v9"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "invitationId": "inv-a1b2c3d4",
+  "paranetId": "github-collab:OriginTrail/dkg-v9:e5f6g7h8",
+  "status": "pending"
+}
+```
+
+**Backend behavior:**
+1. Looks up the repo config to get the paranet ID
+2. Creates an invitation record in memory
+3. Sends a GossipSub `invite:sent` message on the paranet topic
+4. Sends a direct P2P message to the target peer ID (for peers not yet subscribed to the topic)
+
+#### `GET /invitations`
+
+List all invitations (sent and received).
+
+**Query params:** `?repo=owner/repo` (optional, filters by repo)
+
+**Response:**
+```json
+{
+  "sent": [
+    {
+      "invitationId": "inv-a1b2c3d4",
+      "peerId": "12D3KooW...",
+      "repo": "OriginTrail/dkg-v9",
+      "paranetId": "github-collab:OriginTrail/dkg-v9:e5f6g7h8",
+      "status": "pending",
+      "sentAt": 1711324800000
+    }
+  ],
+  "received": [
+    {
+      "invitationId": "inv-x9y8z7w6",
+      "fromPeerId": "12D3KooW...",
+      "fromNodeName": "dave-node",
+      "repo": "dave/other-repo",
+      "paranetId": "github-collab:dave/other-repo:f5e6d7c8",
+      "receivedAt": 1711325000000
+    }
+  ]
+}
+```
+
+#### `POST /invitations/:id/accept`
+
+Accept an incoming invitation.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "paranetId": "github-collab:dave/other-repo:f5e6d7c8",
+  "repo": "dave/other-repo",
+  "role": "collaborator"
+}
+```
+
+**Backend behavior:**
+1. Subscribes to the paranet's GossipSub topic
+2. Adds the repo to the coordinator with `privacyLevel: 'shared'` and no GitHub token
+3. Broadcasts `invite:accepted` message
+4. Begins syncing workspace data from peers
+
+#### `POST /invitations/:id/decline`
+
+Decline an incoming invitation.
+
+**Response:**
+```json
+{
+  "ok": true
+}
+```
+
+**Backend behavior:**
+1. Sends `invite:declined` GossipSub message
+2. Removes the invitation from memory
+
+#### `DELETE /invitations/:id`
+
+Revoke a sent invitation.
+
+**Response:**
+```json
+{
+  "ok": true
+}
+```
+
+#### `GET /collaborators`
+
+List peers subscribed to the selected repo's paranet. (Specified in architecture doc Section 4.5 but not yet implemented.)
+
+**Query params:** `?repo=owner/repo`
+
+**Response:**
+```json
+{
+  "collaborators": [
+    {
+      "peerId": "12D3KooW...",
+      "name": "alice-node",
+      "connected": true,
+      "lastSeen": 1711324800000,
+      "currentTask": "Reviewing PR #42",
+      "role": "owner"
+    },
+    {
+      "peerId": "12D3KooW...",
+      "name": "bob-agent",
+      "connected": true,
+      "lastSeen": 1711324780000,
+      "currentTask": null,
+      "role": "collaborator"
+    }
+  ]
+}
+```
+
+**Data source:** The coordinator tracks peer presence via GossipSub `ping` messages (already implemented on a 60-second interval). The `node:joined` and `node:left` messages update the collaborator list.
+
+#### `POST /convert-to-shared`
+
+Convert a Local Only repo to Shared mode.
+
+**Request:**
+```json
+{
+  "owner": "OriginTrail",
+  "repo": "dkg-v9"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "paranetId": "github-collab:OriginTrail/dkg-v9:a1b2c3d4",
+  "previousParanetId": "github-collab:OriginTrail/dkg-v9"
+}
+```
+
+**Backend behavior:**
+1. Generate random 8-char hex suffix
+2. Create new paranet with shared privacy
+3. Subscribe to GossipSub
+4. Broadcast `node:joined`
+5. Update the repo config's `privacyLevel` to `'shared'`
+6. Keep existing local data accessible (it remains in the old local paranet)
+
+### 16.13 GossipSub Message Types — Additions
+
+The following message types are added to `protocol.ts` for the invitation flow:
+
+```typescript
+export type MessageType =
+  | 'node:joined'
+  | 'node:left'
+  | 'invite:sent'       // NEW: Invitation broadcast
+  | 'invite:accepted'   // NEW: Invitation accepted
+  | 'invite:declined'   // NEW: Invitation declined
+  | 'review:requested'
+  | 'review:submitted'
+  | 'review:consensus'
+  | 'sync:announce'
+  | 'ping';
+
+export interface InviteSentMessage extends BaseMessage {
+  type: 'invite:sent';
+  repo: string;
+  targetPeerId: string;
+  invitationId: string;
+  nodeName?: string;     // Sender's node name for display
+}
+
+export interface InviteAcceptedMessage extends BaseMessage {
+  type: 'invite:accepted';
+  repo: string;
+  invitationId: string;
+  nodeName?: string;     // Acceptor's node name for display
+}
+
+export interface InviteDeclinedMessage extends BaseMessage {
+  type: 'invite:declined';
+  repo: string;
+  invitationId: string;
+}
+```
+
+### 16.14 Polling & Data Freshness
+
+| Section | Data Source | Poll Interval |
+|---------|-------------|---------------|
+| Shared Space banner | `GET /info` (peer ID, node name) | Once on mount |
+| Collaborator list | `GET /collaborators?repo=X` | 10 seconds |
+| Sent invitations | `GET /invitations?repo=X` | 15 seconds |
+| Incoming invitations | `GET /invitations` (no repo filter — incoming may be for any repo) | 10 seconds |
+| Activity log | SPARQL query for recent activities | 15 seconds |
+
+Incoming invitations poll at 10 seconds to ensure timely display of new invitations. The tab badge count is derived from this same poll.
+
+### 16.15 Tab Badge for Incoming Invitations
+
+The navigation tab "Collaboration" shows a badge count when there are pending incoming invitations.
+
+**Implementation**: The `<AppShell>` component polls `GET /invitations` on a 30-second interval. If `received.length > 0`, the tab label renders as:
+
+```tsx
+<NavLink to="/collaboration">
+  Collaboration {invitationCount > 0 && <span className="tab-badge">{invitationCount}</span>}
+</NavLink>
+```
+
+**Badge styling**: Small circle, `background: var(--green)`, white text, positioned top-right of the tab label. Matches the standard notification badge pattern.
+
+### 16.16 Edge Cases
+
+**Peer invites you for a repo you already have locally:**
+- The invitation shows the repo name. If you have the same `owner/repo` in Local Only mode, the Accept flow should offer: "You already have this repository in Local Only mode. Accept to join the shared collaboration space? Your local data will remain separate."
+- On accept, a second paranet is created for the shared version. The user now has both a local and a shared version in their repo selector.
+
+**Network partition (peer goes offline):**
+- Collaborator status updates to "Offline" after 2 missed ping cycles (2 minutes)
+- Invitations sent during a partition are not acknowledged until the peer reconnects
+- "Sent Invitations" shows "Pending" indefinitely — no timeout, but a muted hint after 10 minutes: "This peer may be offline."
+
+**Multiple shared spaces for the same repo:**
+- Different teams can create independent shared spaces for the same GitHub repo (different suffixes)
+- Each appears as a separate entry in the repo selector: `owner/repo (Shared: a1b2c3d4)` vs `owner/repo (Shared: x9y8z7w6)`
+- The collaborator list is per-paranet, not per-repo
+
+**Revoking access:**
+- An owner can remove a collaborator by unsubscribing them (future: `POST /collaborators/:peerId/remove`)
+- A collaborator can leave at any time by removing the repo from their node
+- When a collaborator leaves, they broadcast `node:left` and unsubscribe from GossipSub
+
+### 16.17 UI API Client Additions
+
+These functions are added to `ui/src/api.ts`:
+
+```typescript
+// --- Invitations ---
+
+export function sendInvitation(owner: string, repo: string, peerId: string) {
+  return apiFetch('/invite', { method: 'POST', body: JSON.stringify({ owner, repo, peerId }) });
+}
+
+export function fetchInvitations(repo?: string) {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  return apiFetch(`/invitations${params}`);
+}
+
+export function acceptInvitation(invitationId: string) {
+  return apiFetch(`/invitations/${invitationId}/accept`, { method: 'POST' });
+}
+
+export function declineInvitation(invitationId: string) {
+  return apiFetch(`/invitations/${invitationId}/decline`, { method: 'POST' });
+}
+
+export function revokeInvitation(invitationId: string) {
+  return apiFetch(`/invitations/${invitationId}`, { method: 'DELETE' });
+}
+
+// --- Collaborators ---
+
+export function fetchCollaborators(owner: string, repo: string) {
+  return apiFetch(`/collaborators?repo=${encodeURIComponent(`${owner}/${repo}`)}`);
+}
+
+// --- Conversion ---
+
+export function convertToShared(owner: string, repo: string) {
+  return apiFetch('/convert-to-shared', { method: 'POST', body: JSON.stringify({ owner, repo }) });
+}
+```

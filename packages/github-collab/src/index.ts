@@ -22,7 +22,7 @@ export {
   GH, RDF, XSD, PROV, RDFS,
   repoUri, userUri, prUri, issueUri, commitUri, branchUri,
   reviewUri, reviewCommentUri, issueCommentUri, labelUri, milestoneUri, fileDiffUri,
-  paranetId,
+  paranetId, generateParanetSuffix,
 } from './rdf/uri.js';
 export type { Quad } from './rdf/uri.js';
 
@@ -39,7 +39,7 @@ export type {
 
 // Coordinator
 export { GitHubCollabCoordinator } from './dkg/coordinator.js';
-export type { RepoConfig, ReviewSession } from './dkg/coordinator.js';
+export type { RepoConfig, ReviewSession, Invitation } from './dkg/coordinator.js';
 
 // Sync engine
 export { SyncEngine } from './dkg/sync-engine.js';

@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { SyncEngine, type RepoSyncConfig, type SyncScope, type SyncJob, type WebhookResult } from './sync-engine.js';
 import { APP_ID, encodeMessage, decodeMessage, type AppMessage, type MessageType } from './protocol.js';
-import { paranetId as makeParanetId, type Quad } from '../rdf/uri.js';
+import { paranetId as makeParanetId, generateParanetSuffix, type Quad } from '../rdf/uri.js';
 
 /** Minimal DKGAgent interface — only the methods the coordinator needs. */
 interface DKGAgent {
@@ -47,6 +47,7 @@ export interface RepoConfig {
   pollIntervalMs: number;
   syncScope: SyncScope[];
   paranetId: string;
+  suffix?: string;
   lastSyncAt?: string;
   privacyLevel: 'local' | 'shared';
 }
@@ -68,6 +69,17 @@ export interface ReviewSession {
   enshrined: boolean;
 }
 
+export interface Invitation {
+  invitationId: string;
+  repoKey: string;
+  paranetId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  status: 'pending' | 'accepted' | 'declined';
+  direction: 'sent' | 'received';
+  createdAt: number;
+}
+
 export class GitHubCollabCoordinator {
   readonly myPeerId: string;
   private readonly agent: DKGAgent;
@@ -75,6 +87,8 @@ export class GitHubCollabCoordinator {
   private readonly repos = new Map<string, RepoConfig>();
   private readonly syncEngine: SyncEngine;
   private readonly reviewSessions = new Map<string, ReviewSession>();
+  private readonly sentInvitations = new Map<string, Invitation>();
+  private readonly receivedInvitations = new Map<string, Invitation>();
   private readonly subscribedTopics = new Set<string>();
   private readonly gossipHandler: (topic: string, data: Uint8Array, from: string) => void;
   private readonly log: (msg: string) => void;
@@ -109,11 +123,14 @@ export class GitHubCollabCoordinator {
     pollIntervalMs?: number;
     syncScope?: SyncScope[];
     paranetId?: string;
+    suffix?: string;
     privacyLevel?: 'local' | 'shared';
   }): Promise<{ paranetId: string; repoKey: string }> {
     const repoKey = `${config.owner}/${config.repo}`;
-    const pId = config.paranetId ?? makeParanetId(config.owner, config.repo);
     const privacy = config.privacyLevel ?? 'local';
+    // For shared mode, generate a random suffix to make the paranet ID unique
+    const suffix = config.suffix ?? (privacy === 'shared' && !config.paranetId ? generateParanetSuffix() : undefined);
+    const pId = config.paranetId ?? makeParanetId(config.owner, config.repo, suffix);
 
     const repoConfig: RepoConfig = {
       owner: config.owner,
@@ -123,6 +140,7 @@ export class GitHubCollabCoordinator {
       pollIntervalMs: config.pollIntervalMs ?? 300_000,
       syncScope: config.syncScope ?? ['pull_requests', 'issues', 'reviews', 'commits'],
       paranetId: pId,
+      suffix,
       privacyLevel: privacy,
     };
 
@@ -195,6 +213,51 @@ export class GitHubCollabCoordinator {
     this.syncEngine.removeRepo(owner, repo);
     this.repos.delete(repoKey);
     this.log(`Removed repo ${repoKey}`);
+  }
+
+  async convertToShared(owner: string, repo: string): Promise<{ paranetId: string }> {
+    const repoKey = `${owner}/${repo}`;
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+    if (config.privacyLevel === 'shared') {
+      return { paranetId: config.paranetId };
+    }
+
+    const suffix = generateParanetSuffix();
+    const newParanetId = makeParanetId(owner, repo, suffix);
+
+    // Create new non-private paranet
+    await this.agent.createParanet({
+      id: newParanetId,
+      name: `GitHub: ${owner}/${repo}`,
+      description: `Knowledge graph for github.com/${owner}/${repo}`,
+      private: false,
+    });
+
+    // Subscribe to GossipSub
+    this.subscribeToParanet(newParanetId);
+
+    // Update config
+    config.paranetId = newParanetId;
+    config.suffix = suffix;
+    config.privacyLevel = 'shared';
+
+    // Update sync engine config
+    this.syncEngine.removeRepo(owner, repo);
+    this.syncEngine.addRepo({ ...config });
+
+    // Announce join
+    await this.broadcastMessage(newParanetId, {
+      app: APP_ID,
+      type: 'node:joined',
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      repo: repoKey,
+      nodeName: this.nodeName,
+    });
+
+    this.log(`Converted ${repoKey} to shared mode → paranet ${newParanetId}`);
+    return { paranetId: newParanetId };
   }
 
   getRepoConfig(owner: string, repo: string): RepoConfig | undefined {
@@ -410,6 +473,95 @@ export class GitHubCollabCoordinator {
     return this.reviewSessions.get(sessionId);
   }
 
+  // --- Invitations ---
+
+  async sendInvitation(repoKey: string, peerId: string): Promise<Invitation> {
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+    if (config.privacyLevel !== 'shared') {
+      throw new Error(`Repository ${repoKey} must be in shared mode to send invitations`);
+    }
+
+    const invitationId = `inv-${randomUUID().slice(0, 8)}`;
+    const invitation: Invitation = {
+      invitationId,
+      repoKey,
+      paranetId: config.paranetId,
+      fromPeerId: this.myPeerId,
+      toPeerId: peerId,
+      status: 'pending',
+      direction: 'sent',
+      createdAt: Date.now(),
+    };
+
+    this.sentInvitations.set(invitationId, invitation);
+
+    await this.broadcastMessage(config.paranetId, {
+      app: APP_ID,
+      type: 'invite:sent',
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      invitationId,
+      repo: repoKey,
+      paranetId: config.paranetId,
+      targetPeerId: peerId,
+    });
+
+    this.log(`Sent invitation ${invitationId} to ${peerId} for ${repoKey}`);
+    return invitation;
+  }
+
+  async acceptInvitation(invitationId: string): Promise<Invitation> {
+    const invitation = this.receivedInvitations.get(invitationId);
+    if (!invitation) throw new Error(`Invitation ${invitationId} not found`);
+    if (invitation.status !== 'pending') throw new Error(`Invitation ${invitationId} already ${invitation.status}`);
+
+    invitation.status = 'accepted';
+
+    // Subscribe to the paranet
+    this.subscribeToParanet(invitation.paranetId);
+
+    await this.broadcastMessage(invitation.paranetId, {
+      app: APP_ID,
+      type: 'invite:accepted',
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      invitationId,
+      repo: invitation.repoKey,
+      paranetId: invitation.paranetId,
+    });
+
+    this.log(`Accepted invitation ${invitationId} for ${invitation.repoKey}`);
+    return invitation;
+  }
+
+  async declineInvitation(invitationId: string): Promise<Invitation> {
+    const invitation = this.receivedInvitations.get(invitationId);
+    if (!invitation) throw new Error(`Invitation ${invitationId} not found`);
+    if (invitation.status !== 'pending') throw new Error(`Invitation ${invitationId} already ${invitation.status}`);
+
+    invitation.status = 'declined';
+
+    await this.broadcastMessage(invitation.paranetId, {
+      app: APP_ID,
+      type: 'invite:declined',
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      invitationId,
+      repo: invitation.repoKey,
+    });
+
+    this.log(`Declined invitation ${invitationId} for ${invitation.repoKey}`);
+    return invitation;
+  }
+
+  getInvitations(): { sent: Invitation[]; received: Invitation[] } {
+    return {
+      sent: [...this.sentInvitations.values()],
+      received: [...this.receivedInvitations.values()],
+    };
+  }
+
   // --- GossipSub ---
 
   private findRepoByParanetId(paranetId: string): RepoConfig | undefined {
@@ -493,6 +645,42 @@ export class GitHubCollabCoordinator {
       case 'sync:announce':
         this.log(`Node ${msg.peerId} synced ${msg.repo}: ${msg.quadsWritten} quads`);
         break;
+
+      case 'invite:sent': {
+        // Store as received invitation if we are the target
+        if (msg.targetPeerId === this.myPeerId && !this.receivedInvitations.has(msg.invitationId)) {
+          this.receivedInvitations.set(msg.invitationId, {
+            invitationId: msg.invitationId,
+            repoKey: msg.repo,
+            paranetId: msg.paranetId,
+            fromPeerId: msg.peerId,
+            toPeerId: this.myPeerId,
+            status: 'pending',
+            direction: 'received',
+            createdAt: msg.timestamp,
+          });
+          this.log(`Received invitation ${msg.invitationId} from ${msg.peerId} for ${msg.repo}`);
+        }
+        break;
+      }
+
+      case 'invite:accepted': {
+        const sent = this.sentInvitations.get(msg.invitationId);
+        if (sent) {
+          sent.status = 'accepted';
+          this.log(`Invitation ${msg.invitationId} accepted by ${msg.peerId}`);
+        }
+        break;
+      }
+
+      case 'invite:declined': {
+        const sent = this.sentInvitations.get(msg.invitationId);
+        if (sent) {
+          sent.status = 'declined';
+          this.log(`Invitation ${msg.invitationId} declined by ${msg.peerId}`);
+        }
+        break;
+      }
 
       case 'ping':
         // Presence tracking handled externally if needed

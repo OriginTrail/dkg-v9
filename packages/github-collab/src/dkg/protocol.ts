@@ -14,7 +14,10 @@ export type MessageType =
   | 'review:submitted'
   | 'review:consensus'
   | 'sync:announce'
-  | 'ping';
+  | 'ping'
+  | 'invite:sent'
+  | 'invite:accepted'
+  | 'invite:declined';
 
 export interface BaseMessage {
   app: typeof APP_ID;
@@ -73,6 +76,27 @@ export interface PingMessage extends BaseMessage {
   repos: string[];
 }
 
+export interface InviteSentMessage extends BaseMessage {
+  type: 'invite:sent';
+  invitationId: string;
+  repo: string;
+  paranetId: string;
+  targetPeerId: string;
+}
+
+export interface InviteAcceptedMessage extends BaseMessage {
+  type: 'invite:accepted';
+  invitationId: string;
+  repo: string;
+  paranetId: string;
+}
+
+export interface InviteDeclinedMessage extends BaseMessage {
+  type: 'invite:declined';
+  invitationId: string;
+  repo: string;
+}
+
 export type AppMessage =
   | NodeJoinedMessage
   | NodeLeftMessage
@@ -80,7 +104,10 @@ export type AppMessage =
   | ReviewSubmittedMessage
   | ReviewConsensusMessage
   | SyncAnnounceMessage
-  | PingMessage;
+  | PingMessage
+  | InviteSentMessage
+  | InviteAcceptedMessage
+  | InviteDeclinedMessage;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

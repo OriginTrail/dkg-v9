@@ -109,6 +109,30 @@ export function fetchPullRequest(owner: string, repo: string, number: number) {
   return apiFetch(`/repos/${owner}/${repo}/prs/${number}`);
 }
 
+// --- Sharing ---
+
+export function convertToShared(owner: string, repo: string) {
+  return apiFetch('/config/repo/share', { method: 'POST', body: JSON.stringify({ owner, repo }) });
+}
+
+// --- Invitations ---
+
+export function sendInvitation(owner: string, repo: string, peerId: string) {
+  return apiFetch('/invite', { method: 'POST', body: JSON.stringify({ owner, repo, peerId }) });
+}
+
+export function getInvitations() {
+  return apiFetch('/invitations');
+}
+
+export function acceptInvitation(invitationId: string) {
+  return apiFetch('/invite/accept', { method: 'POST', body: JSON.stringify({ invitationId }) });
+}
+
+export function declineInvitation(invitationId: string) {
+  return apiFetch('/invite/decline', { method: 'POST', body: JSON.stringify({ invitationId }) });
+}
+
 // --- Branches ---
 
 export function fetchBranches(owner: string, repo: string) {

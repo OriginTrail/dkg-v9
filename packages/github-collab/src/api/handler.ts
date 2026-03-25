@@ -120,6 +120,15 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         return json(res, 200, { ok: true, ...result });
       }
 
+      // --- POST /config/repo/share ---
+      if (req.method === 'POST' && subpath === '/config/repo/share') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.owner || !body.repo) return json(res, 400, { error: 'Missing owner or repo' });
+        const result = await coordinator.convertToShared(body.owner, body.repo);
+        return json(res, 200, { ok: true, ...result });
+      }
+
       // --- DELETE /config/repo ---
       if (req.method === 'DELETE' && subpath === '/config/repo') {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
@@ -226,6 +235,42 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         const session = coordinator.getReviewSession(sessionId);
         if (!session) return json(res, 404, { error: 'Review session not found' });
         return json(res, 200, session);
+      }
+
+      // --- POST /invite ---
+      if (req.method === 'POST' && subpath === '/invite') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.owner || !body.repo || !body.peerId) {
+          return json(res, 400, { error: 'Missing owner, repo, or peerId' });
+        }
+        const invitation = await coordinator.sendInvitation(`${body.owner}/${body.repo}`, body.peerId);
+        return json(res, 200, { ok: true, ...invitation });
+      }
+
+      // --- GET /invitations ---
+      if (req.method === 'GET' && subpath === '/invitations') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const invitations = coordinator.getInvitations();
+        return json(res, 200, invitations);
+      }
+
+      // --- POST /invite/accept ---
+      if (req.method === 'POST' && subpath === '/invite/accept') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.invitationId) return json(res, 400, { error: 'Missing invitationId' });
+        const invitation = await coordinator.acceptInvitation(body.invitationId);
+        return json(res, 200, { ok: true, ...invitation });
+      }
+
+      // --- POST /invite/decline ---
+      if (req.method === 'POST' && subpath === '/invite/decline') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.invitationId) return json(res, 400, { error: 'Missing invitationId' });
+        const invitation = await coordinator.declineInvitation(body.invitationId);
+        return json(res, 200, { ok: true, ...invitation });
       }
 
       // --- GET /repos/:owner/:repo/prs ---

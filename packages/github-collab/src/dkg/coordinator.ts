@@ -145,13 +145,11 @@ export class GitHubCollabCoordinator {
       }
     }
 
-    // Set up sync engine if we have a token
-    if (config.githubToken) {
-      this.syncEngine.addRepo({
-        ...repoConfig,
-        githubToken: config.githubToken,
-      } as RepoSyncConfig);
-    }
+    // Set up sync engine (works with or without token — public repos don't need one)
+    this.syncEngine.addRepo({
+      ...repoConfig,
+      githubToken: config.githubToken,
+    });
 
     if (privacy === 'shared') {
       // Subscribe to paranet gossip topics

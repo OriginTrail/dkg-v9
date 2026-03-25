@@ -23,7 +23,7 @@ import type { Quad } from '../rdf/uri.js';
 export interface RepoSyncConfig {
   owner: string;
   repo: string;
-  githubToken: string;
+  githubToken?: string;
   webhookSecret?: string;
   pollIntervalMs: number;
   syncScope: SyncScope[];

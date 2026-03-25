@@ -14,7 +14,7 @@ describe('GitHubCollabCoordinator', () => {
 
   beforeEach(() => {
     agent = makeMockAgent();
-    coordinator = new GitHubCollabCoordinator(agent as any, { name: 'test-node' }, noop);
+    coordinator = new GitHubCollabCoordinator(agent as any, { name: 'test-node', configPath: null }, noop);
   });
 
   afterEach(() => {

@@ -10,9 +10,20 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { SyncEngine, type RepoSyncConfig, type SyncScope, type SyncJob, type WebhookResult } from './sync-engine.js';
 import { APP_ID, encodeMessage, decodeMessage, type AppMessage, type MessageType } from './protocol.js';
 import { paranetId as makeParanetId, generateParanetSuffix, type Quad } from '../rdf/uri.js';
+
+/** Path to persistent config file. */
+function configFilePath(): string {
+  const dkgHome = process.env.DKG_HOME ?? join(homedir(), '.dkg');
+  const appDir = join(dkgHome, 'apps', 'github-collab');
+  if (!existsSync(appDir)) mkdirSync(appDir, { recursive: true });
+  return join(appDir, 'config.json');
+}
 
 /** Minimal DKGAgent interface — only the methods the coordinator needs. */
 interface DKGAgent {
@@ -102,13 +113,16 @@ export class GitHubCollabCoordinator {
   private readonly subscribedTopics = new Set<string>();
   private readonly gossipHandler: (topic: string, data: Uint8Array, from: string) => void;
   private readonly log: (msg: string) => void;
+  private readonly configPath: string | null;
   private pingTimer?: ReturnType<typeof setInterval>;
 
-  constructor(agent: DKGAgent, config?: { name?: string }, log?: (msg: string) => void) {
+  constructor(agent: DKGAgent, config?: { name?: string; configPath?: string | null }, log?: (msg: string) => void) {
     this.agent = agent;
     this.myPeerId = agent.peerId;
     this.nodeName = config?.name ?? agent.peerId.slice(0, 8);
     this.log = log ?? ((msg: string) => console.log(`[github-collab] ${msg}`));
+    // configPath: null = disable persistence (for tests), undefined = use default
+    this.configPath = config?.configPath === null ? null : (config?.configPath ?? configFilePath());
 
     this.syncEngine = new SyncEngine(
       (paranetId, quads) => this.writeToWorkspace(paranetId, quads),
@@ -121,6 +135,48 @@ export class GitHubCollabCoordinator {
 
     // Ping timer for presence tracking
     this.pingTimer = setInterval(() => this.broadcastPing(), 60_000);
+
+    // Restore saved repo configs from disk
+    this.restoreFromDisk();
+  }
+
+  /** Save repo configs to disk so they survive daemon restarts. */
+  private saveToDisk(): void {
+    if (!this.configPath) return; // persistence disabled (tests)
+    try {
+      const dir = this.configPath.replace(/[/\\][^/\\]+$/, '');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const data = {
+        repos: [...this.repos.values()],
+      };
+      writeFileSync(this.configPath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err: any) {
+      this.log(`Failed to save config: ${err.message}`);
+    }
+  }
+
+  /** Restore repo configs from disk on startup. */
+  private restoreFromDisk(): void {
+    if (!this.configPath) return; // persistence disabled (tests)
+    try {
+      if (!existsSync(this.configPath)) return;
+      const data = JSON.parse(readFileSync(this.configPath!, 'utf-8'));
+      if (!data.repos || !Array.isArray(data.repos)) return;
+
+      for (const saved of data.repos) {
+        const repoKey = `${saved.owner}/${saved.repo}`;
+        this.repos.set(repoKey, saved);
+        // Re-register with sync engine
+        this.syncEngine.addRepo({ ...saved });
+        // Re-subscribe to GossipSub for shared repos
+        if (saved.privacyLevel === 'shared') {
+          this.subscribeToParanet(saved.paranetId);
+        }
+        this.log(`Restored repo ${repoKey} (${saved.privacyLevel})`);
+      }
+    } catch (err: any) {
+      this.log(`Failed to restore config: ${err.message}`);
+    }
   }
 
   // --- Repo Configuration ---
@@ -148,6 +204,7 @@ export class GitHubCollabCoordinator {
       // Re-register with sync engine to pick up new token
       this.syncEngine.addRepo({ ...existing });
       this.log(`Updated repo ${repoKey}${config.githubToken ? ' (token added)' : ''}`);
+      this.saveToDisk();
       return { paranetId: existing.paranetId, repoKey };
     }
 
@@ -212,6 +269,7 @@ export class GitHubCollabCoordinator {
       this.log(`Added repo ${repoKey} in local-only mode (no P2P sharing)`);
     }
 
+    this.saveToDisk();
     return { paranetId: pId, repoKey };
   }
 
@@ -237,6 +295,7 @@ export class GitHubCollabCoordinator {
     this.syncEngine.removeRepo(owner, repo);
     this.repos.delete(repoKey);
     this.log(`Removed repo ${repoKey}`);
+    this.saveToDisk();
   }
 
   async convertToShared(owner: string, repo: string): Promise<{ paranetId: string }> {
@@ -281,6 +340,7 @@ export class GitHubCollabCoordinator {
     });
 
     this.log(`Converted ${repoKey} to shared mode → paranet ${newParanetId}`);
+    this.saveToDisk();
     return { paranetId: newParanetId };
   }
 

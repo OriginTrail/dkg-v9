@@ -52,7 +52,7 @@ describe('GitHub Collab API handler', () => {
 
   beforeEach(() => {
     agent = makeMockAgent();
-    handler = createHandler(agent, { name: 'test-node' });
+    handler = createHandler(agent, { name: 'test-node', configPath: null });
   });
 
   afterEach(() => {

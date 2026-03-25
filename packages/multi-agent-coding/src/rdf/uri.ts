@@ -21,6 +21,11 @@ export function userUri(login: string): string {
   return `urn:github:user/${encodeURIComponent(login)}`;
 }
 
+export function agentUri(agentName: string, peerId?: string): string {
+  const id = peerId ? `${encodeURIComponent(agentName)}@${peerId.slice(0, 16)}` : encodeURIComponent(agentName);
+  return `urn:dkg:agent/${id}`;
+}
+
 export function prUri(owner: string, repo: string, number: number): string {
   return `urn:github:${owner}/${repo}/pr/${number}`;
 }

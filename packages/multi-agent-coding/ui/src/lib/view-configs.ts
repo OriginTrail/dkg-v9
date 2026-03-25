@@ -154,6 +154,7 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
     [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
     [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 0.7 },
     [`${GH}Annotation`]: { color: COLORS.annotation, shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}Agent`]: { color: COLORS.user, shape: 'hexagon', sizeMultiplier: 1.0 },
   },
   circleTypes: ['ClaimedRegion', 'File', 'Annotation'],
   tooltip: {
@@ -165,7 +166,8 @@ WHERE {
   ?s a ?type ; ?p ?o .
   FILTER(?type IN (
     <${GH}AgentSession>, <${GH}Decision>,
-    <${GH}ClaimedRegion>, <${GH}Annotation>
+    <${GH}ClaimedRegion>, <${GH}Annotation>,
+    <${GH}Agent>
   ))
 } LIMIT 300`,
 };

@@ -630,8 +630,9 @@ describe('ActivityManager', () => {
       const quads = manager.generateSessionQuads(session, 'octocat', 'Hello-World', 'test-graph');
       expect(quads.length).toBeGreaterThan(0);
       const types = quads.filter(q => q.predicate.endsWith('#type'));
-      expect(types).toHaveLength(1);
-      expect(types[0].object).toContain('AgentSession');
+      expect(types).toHaveLength(2); // AgentSession + Agent entity
+      expect(types.some(t => t.object.includes('AgentSession'))).toBe(true);
+      expect(types.some(t => t.object.includes('Agent'))).toBe(true);
     });
 
     it('generateClaimQuads produces correct quads', () => {

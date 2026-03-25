@@ -9,7 +9,7 @@
 import {
   GH, RDF,
   type Quad,
-  repoUri, fileUri, directoryUri,
+  repoUri, fileUri, directoryUri, agentUri,
   sessionUri, decisionUri, claimUri, annotationUri,
   prUri, issueUri,
   tripleUri, tripleStr, tripleInt, tripleDateTime, tripleBool,
@@ -356,14 +356,20 @@ export function transformSession(
   graph: string,
 ): Quad[] {
   const uri = sessionUri(owner, repo, session.sessionId);
+  const agentId = agentUri(session.agentName, session.peerId);
   const quads: Quad[] = [
     tripleUri(uri, `${RDF}type`, `${GH}AgentSession`, graph),
     tripleStr(uri, `${GH}sessionId`, session.sessionId, graph),
     tripleStr(uri, `${GH}agentName`, session.agentName, graph),
     tripleStr(uri, `${GH}peerId`, session.peerId, graph),
+    tripleUri(uri, `${GH}agent`, agentId, graph),
     tripleDateTime(uri, `${GH}startedAt`, new Date(session.startedAt).toISOString(), graph),
     tripleStr(uri, `${GH}sessionStatus`, session.status, graph),
     tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
+    // Agent entity — first-class node in the graph
+    tripleUri(agentId, `${RDF}type`, `${GH}Agent`, graph),
+    tripleStr(agentId, `${GH}agentName`, session.agentName, graph),
+    tripleStr(agentId, `${GH}peerId`, session.peerId, graph),
   ];
 
   if (session.goal) {
@@ -408,6 +414,7 @@ export function transformClaim(
     tripleStr(uri, `${GH}claimedPath`, claim.filePath, graph),
     tripleStr(uri, `${GH}claimedBy`, claim.agentName, graph),
     tripleStr(uri, `${GH}peerId`, claim.peerId, graph),
+    tripleUri(uri, `${GH}agent`, agentUri(claim.agentName, claim.peerId), graph),
     tripleUri(uri, `${GH}claimSession`, sessionUri(owner, repo, claim.sessionId), graph),
     tripleStr(uri, `${GH}claimStatus`, 'active', graph),
     tripleDateTime(uri, `${GH}claimedAt`, new Date(claim.claimedAt).toISOString(), graph),
@@ -432,6 +439,7 @@ export function transformDecision(
     tripleStr(uri, `${GH}rationale`, decision.rationale, graph),
     tripleStr(uri, `${GH}madeBy`, decision.agentName, graph),
     tripleStr(uri, `${GH}peerId`, decision.peerId, graph),
+    tripleUri(uri, `${GH}agent`, agentUri(decision.agentName, decision.peerId), graph),
     tripleDateTime(uri, `${GH}madeAt`, new Date(decision.createdAt).toISOString(), graph),
     tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
   ];
@@ -467,6 +475,7 @@ export function transformAnnotation(
     tripleStr(uri, `${GH}annotationText`, annotation.content, graph),
     tripleStr(uri, `${GH}annotatedBy`, annotation.agentName, graph),
     tripleStr(uri, `${GH}peerId`, annotation.peerId, graph),
+    tripleUri(uri, `${GH}agent`, agentUri(annotation.agentName, annotation.peerId), graph),
     tripleDateTime(uri, `${GH}annotatedAt`, new Date(annotation.createdAt).toISOString(), graph),
     tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
   ];

@@ -26,3 +26,11 @@ export {
   sparqlInt,
   assertSafeRdfTerm,
 } from './sparql-safe.js';
+export {
+  dkgHomeDir,
+  readDaemonPid,
+  isProcessAlive,
+  readDkgApiPort,
+  loadAuthTokenSync,
+  loadAuthToken,
+} from './dkg-home.js';

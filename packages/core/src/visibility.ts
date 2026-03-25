@@ -33,9 +33,14 @@ export function resolveVisibility(
       return { accessPolicy: 'public', allowedPeers: [], broadcast: true };
     }
     if (typeof visibility === 'object' && 'peers' in visibility) {
+      // Validate peer list: trim whitespace, remove empty strings, deduplicate
+      const cleaned = [...new Set(visibility.peers.map(p => p.trim()).filter(p => p.length > 0))];
+      if (cleaned.length === 0) {
+        throw new Error('visibility { peers: [...] } requires at least one valid peer ID');
+      }
       // allowList must NOT broadcast on GossipSub — any subscribed peer can
       // read raw gossip messages. allowList data reaches peers via sync only.
-      return { accessPolicy: 'allowList', allowedPeers: visibility.peers, broadcast: false };
+      return { accessPolicy: 'allowList', allowedPeers: cleaned, broadcast: false };
     }
   }
 

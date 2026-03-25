@@ -31,13 +31,10 @@ describe('resolveVisibility()', () => {
       });
     });
 
-    it('visibility: { peers: [] } → allowList with empty peers, no broadcast (sync only)', () => {
-      const result = resolveVisibility({ peers: [] });
-      expect(result).toEqual<ResolvedVisibility>({
-        accessPolicy: 'allowList',
-        allowedPeers: [],
-        broadcast: false,
-      });
+    it('visibility: { peers: [] } → throws (empty peer list)', () => {
+      expect(() => resolveVisibility({ peers: [] })).toThrow(
+        'visibility { peers: [...] } requires at least one valid peer ID',
+      );
     });
   });
 
@@ -180,6 +177,42 @@ describe('resolveVisibility()', () => {
     it('legacy private + localOnly both true → ownerOnly', () => {
       const result = resolveVisibility(undefined, { private: true, localOnly: true });
       expect(result.accessPolicy).toBe('ownerOnly');
+      expect(result.broadcast).toBe(false);
+    });
+  });
+
+  describe('peer list validation', () => {
+    it('trims whitespace from peer IDs', () => {
+      const result = resolveVisibility({ peers: ['  peerA  ', ' peerB'] });
+      expect(result.allowedPeers).toEqual(['peerA', 'peerB']);
+    });
+
+    it('deduplicates peer IDs', () => {
+      const result = resolveVisibility({ peers: ['peerA', 'peerB', 'peerA'] });
+      expect(result.allowedPeers).toEqual(['peerA', 'peerB']);
+    });
+
+    it('deduplicates after trimming', () => {
+      const result = resolveVisibility({ peers: ['peerA', ' peerA ', 'peerB'] });
+      expect(result.allowedPeers).toEqual(['peerA', 'peerB']);
+    });
+
+    it('throws when all entries are empty strings', () => {
+      expect(() => resolveVisibility({ peers: ['', '  ', ''] })).toThrow(
+        'visibility { peers: [...] } requires at least one valid peer ID',
+      );
+    });
+
+    it('throws when peers array is empty', () => {
+      expect(() => resolveVisibility({ peers: [] })).toThrow(
+        'visibility { peers: [...] } requires at least one valid peer ID',
+      );
+    });
+
+    it('filters empty strings but keeps valid peers', () => {
+      const result = resolveVisibility({ peers: ['', 'peerA', '  ', 'peerB', ''] });
+      expect(result.allowedPeers).toEqual(['peerA', 'peerB']);
+      expect(result.accessPolicy).toBe('allowList');
       expect(result.broadcast).toBe(false);
     });
   });

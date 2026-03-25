@@ -115,6 +115,8 @@ export interface DKGAgentConfig {
   queryAccess?: QueryAccessConfig;
   /** Additional paranet IDs to sync on peer connect (beyond system paranets). */
   syncParanets?: string[];
+  /** Paranet IDs that have been explicitly unsubscribed. Prevents auto-re-subscribe by discovery/sync paths. */
+  unsubscribedParanets?: string[];
   /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   workspaceTtlMs?: number;
 }
@@ -157,6 +159,7 @@ export class DKGAgent {
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedParanets = new Map<string, ParanetSub>();
+  private readonly unsubscribedParanets = new Set<string>();
   private readonly gossipRegistered = new Set<string>();
   private readonly seenOnChainIds = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
@@ -186,6 +189,11 @@ export class DKGAgent {
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
     this.profileManager = new ProfileManager(publisher, store);
+
+    // Populate deny list from config so it's active before start()/discovery runs
+    for (const id of config.unsubscribedParanets ?? []) {
+      this.unsubscribedParanets.add(id);
+    }
   }
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
@@ -617,6 +625,9 @@ export class DKGAgent {
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
 
+    // Filter out deny-listed paranets before syncing
+    paranetIds = paranetIds.filter(id => !this.unsubscribedParanets.has(id));
+
     try {
       for (const pid of paranetIds) {
         const dataGraph = paranetDataGraphUri(pid);
@@ -873,6 +884,9 @@ export class DKGAgent {
     dataSynced: number;
     workspaceSynced: number;
   }> {
+    if (this.unsubscribedParanets.has(paranetId)) {
+      return { connectedPeers: 0, syncCapablePeers: 0, peersTried: 0, dataSynced: 0, workspaceSynced: 0 };
+    }
     const ctx = createOperationContext('sync');
     const includeWorkspace = options?.includeWorkspace ?? false;
 
@@ -1587,10 +1601,63 @@ export class DKGAgent {
   }
 
   /**
+   * Unsubscribe from a paranet: add to deny list, remove from sync scope,
+   * mark as unsubscribed, and tear down GossipSub topics if active.
+   * System paranets (agents, ontology) cannot be unsubscribed.
+   */
+  unsubscribeFromParanet(paranetId: string): void {
+    const systemParanets = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
+    if (systemParanets.has(paranetId)) {
+      throw new Error(`Cannot unsubscribe from system paranet "${paranetId}"`);
+    }
+
+    // Always: add to deny list
+    this.unsubscribedParanets.add(paranetId);
+
+    // Always: remove from sync scope
+    this.untrackSyncParanet(paranetId);
+
+    // Always: mark as unsubscribed in the registry
+    const existing = this.subscribedParanets.get(paranetId);
+    this.subscribedParanets.set(paranetId, {
+      ...existing,
+      subscribed: false,
+      synced: existing?.synced ?? false,
+    });
+
+    // Only if gossip handlers were active: tear down GossipSub topics
+    if (this.gossipRegistered.has(paranetId)) {
+      this.gossip.unsubscribe(paranetPublishTopic(paranetId));
+      this.gossip.unsubscribe(paranetWorkspaceTopic(paranetId));
+      this.gossip.unsubscribe(paranetAppTopic(paranetId));
+      this.gossip.unsubscribe(paranetUpdateTopic(paranetId));
+      this.gossip.unsubscribe(paranetFinalizationTopic(paranetId));
+      this.gossipRegistered.delete(paranetId);
+    }
+
+    this.log.info(
+      createOperationContext('system'),
+      `Unsubscribed from paranet "${paranetId}" — added to deny list`,
+    );
+  }
+
+  /** Remove a paranet from the deny list so it can be re-subscribed. */
+  clearUnsubscribed(paranetId: string): void {
+    this.unsubscribedParanets.delete(paranetId);
+  }
+
+  /** Returns true if the paranet is on the deny list. */
+  isUnsubscribed(paranetId: string): boolean {
+    return this.unsubscribedParanets.has(paranetId);
+  }
+
+  /**
    * Add a paranet to runtime sync scope so sync-on-connect includes it.
    * System paranets are already included by default and are skipped here.
    */
   private trackSyncParanet(paranetId: string): void {
+    if (this.unsubscribedParanets.has(paranetId)) return;
+
     const systemParanets = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
     if (systemParanets.has(paranetId)) return;
 
@@ -1598,6 +1665,12 @@ export class DKGAgent {
     if (syncSet.has(paranetId)) return;
     syncSet.add(paranetId);
     this.config.syncParanets = [...syncSet];
+  }
+
+  /** Remove a paranet from the runtime sync scope. */
+  private untrackSyncParanet(paranetId: string): void {
+    if (!this.config.syncParanets) return;
+    this.config.syncParanets = this.config.syncParanets.filter(id => id !== paranetId);
   }
 
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {
@@ -1610,6 +1683,7 @@ export class DKGAgent {
           paranetExists: (id) => this.paranetExists(id),
           subscribeToParanet: (id, options) => this.subscribeToParanet(id, options),
         },
+        this.unsubscribedParanets,
       );
     }
     return this.gossipPublishHandler;
@@ -1755,7 +1829,9 @@ export class DKGAgent {
     });
 
     if (!opts.private) {
-      // Auto-subscribe to the new paranet's GossipSub topic
+      // Explicit create is a deliberate action — clear deny list so
+      // subscribeToParanet and trackSyncParanet work correctly.
+      this.unsubscribedParanets.delete(opts.id);
       this.subscribeToParanet(opts.id);
 
       // Broadcast via the ontology paranet so other nodes learn about it
@@ -1805,6 +1881,16 @@ export class DKGAgent {
 
     const exists = await this.paranetExists(opts.id);
     if (exists) {
+      if (this.unsubscribedParanets.has(opts.id)) {
+        // Deny-listed — record locally but do not re-subscribe
+        this.subscribedParanets.set(opts.id, {
+          name: opts.name,
+          subscribed: false,
+          synced: true,
+          onChainId: this.subscribedParanets.get(opts.id)?.onChainId,
+        });
+        return;
+      }
       // Already synced locally — just make sure we're subscribed
       this.subscribeToParanet(opts.id);
       this.subscribedParanets.set(opts.id, {
@@ -1880,6 +1966,18 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
+    if (this.unsubscribedParanets.has(opts.id)) {
+      // Deny-listed — record locally but do not subscribe
+      this.subscribedParanets.set(opts.id, {
+        name: opts.name,
+        subscribed: false,
+        synced: true,
+        onChainId,
+      });
+      this.log.info(ctx, `Ensured paranet "${opts.id}" locally (deny-listed, not subscribing)`);
+      return;
+    }
+
     this.subscribeToParanet(opts.id);
     this.subscribedParanets.set(opts.id, {
       name: opts.name,
@@ -1948,6 +2046,8 @@ export class DKGAgent {
     isSystem: boolean;
     subscribed: boolean;
     synced: boolean;
+    /** True if the paranet was explicitly unsubscribed (on the deny list). */
+    denyListed: boolean;
   }>> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
@@ -1979,7 +2079,7 @@ export class DKGAgent {
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
       creator?: string; createdAt?: string; isSystem: boolean;
-      subscribed: boolean; synced: boolean;
+      subscribed: boolean; synced: boolean; denyListed: boolean;
     }>();
 
     if (result.type === 'bindings') {
@@ -1998,6 +2098,7 @@ export class DKGAgent {
           isSystem: !!row['isSystem'],
           subscribed: sub?.subscribed ?? false,
           synced: true,
+          denyListed: this.unsubscribedParanets.has(id),
         });
       }
     }
@@ -2014,6 +2115,7 @@ export class DKGAgent {
         isSystem: false,
         subscribed: sub.subscribed,
         synced: sub.synced,
+        denyListed: this.unsubscribedParanets.has(id),
       });
     }
 
@@ -2146,6 +2248,7 @@ export class DKGAgent {
       if (!id) continue;
 
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+      if (this.unsubscribedParanets.has(id)) continue;
 
       const existing = this.subscribedParanets.get(id);
       if (existing?.subscribed && existing?.synced) continue;
@@ -2203,6 +2306,7 @@ export class DKGAgent {
     let discovered = 0;
     for (const p of onChainParanets) {
       if (knownOnChainIds.has(p.paranetId)) continue;
+      if (p.name && this.unsubscribedParanets.has(p.name)) continue;
 
       if (!p.name) {
         // Hash-only entry (metadata not revealed) — record for dedup but don't

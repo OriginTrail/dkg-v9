@@ -890,9 +890,29 @@ program
         const paranets = new Set(config.paranets ?? []);
         paranets.add(paranet);
         config.paranets = [...paranets];
+        // Clear any unsubscribe tombstone so restart doesn't filter it out
+        config.unsubscribedParanets = (config.unsubscribedParanets ?? []).filter(p => p !== paranet);
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
       }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg unsubscribe <paranet> ──────────────────────────────────────
+
+program
+  .command('unsubscribe <paranet>')
+  .description('Unsubscribe from a paranet (stops receiving new data; synced data is preserved)')
+  .action(async (paranet: string) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.unsubscribe(paranet);
+      console.log(`Unsubscribed from paranet: ${paranet}`);
+      console.log('  Previously synced data is preserved.');
+      console.log('  Use "dkg subscribe" to re-subscribe.');
     } catch (err: any) {
       console.error(err.message);
       process.exit(1);
@@ -961,6 +981,8 @@ paranetCmd
         const paranets = new Set(config.paranets ?? []);
         paranets.add(id);
         config.paranets = [...paranets];
+        // Clear any unsubscribe tombstone so restart doesn't filter it out
+        config.unsubscribedParanets = (config.unsubscribedParanets ?? []).filter(p => p !== id);
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
@@ -986,16 +1008,17 @@ paranetCmd
       const idW = Math.max(4, ...paranets.map(p => p.id.length));
       const nameW = Math.max(4, ...paranets.map(p => p.name.length));
 
-      const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
+      const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Status         Creator`;
       console.log(header);
       console.log('  ' + '─'.repeat(header.length - 2));
 
       for (const p of paranets) {
         const type = p.isSystem ? 'system' : 'user';
+        const status = p.denyListed ? 'unsubscribed' : p.subscribed ? 'subscribed' : (p.synced === false ? 'not synced' : 'discovered');
         const creator = p.creator
           ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
           : '—';
-        console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
+        console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${status.padEnd(13)}  ${creator}`);
       }
       console.log(`\n  ${paranets.length} paranet(s)`);
     } catch (err: any) {

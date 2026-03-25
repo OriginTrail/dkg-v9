@@ -26,6 +26,7 @@ export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly subscribedParanets: Map<string, any>;
+  private readonly unsubscribedParanets: Set<string>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
 
@@ -34,10 +35,12 @@ export class GossipPublishHandler {
     chain: ChainAdapter | undefined,
     subscribedParanets: Map<string, any>,
     callbacks: GossipPublishHandlerCallbacks,
+    unsubscribedParanets?: Set<string>,
   ) {
     this.store = store;
     this.chain = chain;
     this.subscribedParanets = subscribedParanets;
+    this.unsubscribedParanets = unsubscribedParanets ?? new Set();
     this.callbacks = callbacks;
   }
 
@@ -96,7 +99,7 @@ export class GossipPublishHandler {
             if (!id) continue;
             if (await this.callbacks.paranetExists(id)) {
               duplicateUris.add(uri);
-            } else if (id !== SYSTEM_PARANETS.AGENTS && id !== SYSTEM_PARANETS.ONTOLOGY) {
+            } else if (id !== SYSTEM_PARANETS.AGENTS && id !== SYSTEM_PARANETS.ONTOLOGY && !this.unsubscribedParanets.has(id)) {
               newParanetIds.push(id);
             }
           }

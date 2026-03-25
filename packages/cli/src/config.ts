@@ -79,6 +79,8 @@ export interface DkgConfig {
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   paranets?: string[];
+  /** Paranet IDs that have been explicitly unsubscribed (deny list). */
+  unsubscribedParanets?: string[];
   autoUpdate?: AutoUpdateConfig;
   chain?: ChainConfig;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */

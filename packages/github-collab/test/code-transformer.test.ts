@@ -3,7 +3,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { transformCodeEntities, transformRelationships, transformFileTree, type ResolvedRelationship } from '../src/rdf/code-transformer.js';
+import {
+  transformCodeEntities, transformRelationships, transformFileTree,
+  transformClaim, transformSession, transformDecision, transformAnnotation,
+  type ResolvedRelationship, type AgentSessionData, type CodeClaimData, type DecisionData, type AnnotationData,
+} from '../src/rdf/code-transformer.js';
 import { GH, RDF } from '../src/rdf/uri.js';
 import type { Quad } from '../src/rdf/uri.js';
 import type { ParseResult } from '../src/code/parser.js';
@@ -229,5 +233,136 @@ describe('transformFileTree', () => {
     const langQuad = findQuad(quads, `${GH}language`);
     expect(langQuad).toBeDefined();
     expect(langQuad!.object).toContain('TypeScript');
+  });
+});
+
+describe('transformClaim', () => {
+  it('produces ClaimedRegion type (not CodeClaim)', () => {
+    const claim: CodeClaimData = {
+      claimId: 'clm-1',
+      filePath: 'src/auth.ts',
+      peerId: 'peer-abc',
+      agentName: 'claude-1',
+      sessionId: 'sess-1',
+      claimedAt: 1711234567000,
+    };
+
+    const quads = transformClaim(claim, OWNER, REPO, GRAPH);
+
+    const typeQuad = quads.find(q => q.predicate === `${RDF}type`);
+    expect(typeQuad).toBeDefined();
+    expect(typeQuad!.object).toBe(`${GH}ClaimedRegion`);
+    // Must NOT be CodeClaim
+    expect(typeQuad!.object).not.toContain('CodeClaim');
+  });
+
+  it('includes peerId quad', () => {
+    const claim: CodeClaimData = {
+      claimId: 'clm-2',
+      filePath: 'src/db.ts',
+      peerId: 'peer-xyz',
+      agentName: 'agent-2',
+      sessionId: 'sess-2',
+      claimedAt: 1711234567000,
+    };
+
+    const quads = transformClaim(claim, OWNER, REPO, GRAPH);
+
+    const peerQuad = findQuad(quads, `${GH}peerId`);
+    expect(peerQuad).toBeDefined();
+    expect(peerQuad!.object).toContain('peer-xyz');
+  });
+});
+
+describe('transformDecision', () => {
+  it('includes peerId quad', () => {
+    const decision: DecisionData = {
+      decisionId: 'dec-1',
+      summary: 'Use Redis for caching',
+      rationale: 'Lower latency than Postgres',
+      peerId: 'peer-dec',
+      agentName: 'claude-1',
+      affectedFiles: ['src/cache.ts'],
+      createdAt: 1711234567000,
+    };
+
+    const quads = transformDecision(decision, OWNER, REPO, GRAPH);
+
+    const peerQuad = findQuad(quads, `${GH}peerId`);
+    expect(peerQuad).toBeDefined();
+    expect(peerQuad!.object).toContain('peer-dec');
+  });
+});
+
+describe('transformAnnotation', () => {
+  it('includes peerId quad', () => {
+    const annotation: AnnotationData = {
+      annotationId: 'ann-1',
+      targetUri: 'urn:github:octocat/Hello-World/file/src%2Fauth.ts',
+      kind: 'warning',
+      content: 'Missing rate limiting',
+      peerId: 'peer-ann',
+      agentName: 'claude-1',
+      createdAt: 1711234567000,
+    };
+
+    const quads = transformAnnotation(annotation, OWNER, REPO, GRAPH);
+
+    const peerQuad = findQuad(quads, `${GH}peerId`);
+    expect(peerQuad).toBeDefined();
+    expect(peerQuad!.object).toContain('peer-ann');
+  });
+});
+
+describe('transformSession', () => {
+  it('includes lastHeartbeat when present', () => {
+    const session: AgentSessionData = {
+      sessionId: 'sess-hb',
+      agentName: 'claude-1',
+      peerId: 'peer-hb',
+      startedAt: 1711234567000,
+      lastHeartbeat: 1711234600000,
+      status: 'active',
+      modifiedFiles: [],
+    };
+
+    const quads = transformSession(session, OWNER, REPO, GRAPH);
+
+    const hbQuad = findQuad(quads, `${GH}lastHeartbeat`);
+    expect(hbQuad).toBeDefined();
+    expect(hbQuad!.object).toContain('2024-03-');
+  });
+
+  it('omits lastHeartbeat when absent', () => {
+    const session: AgentSessionData = {
+      sessionId: 'sess-nohb',
+      agentName: 'claude-1',
+      peerId: 'peer-nohb',
+      startedAt: 1711234567000,
+      status: 'active',
+      modifiedFiles: [],
+    };
+
+    const quads = transformSession(session, OWNER, REPO, GRAPH);
+
+    const hbQuad = findQuad(quads, `${GH}lastHeartbeat`);
+    expect(hbQuad).toBeUndefined();
+  });
+
+  it('includes peerId quad', () => {
+    const session: AgentSessionData = {
+      sessionId: 'sess-pid',
+      agentName: 'agent-x',
+      peerId: 'peer-session-123',
+      startedAt: 1711234567000,
+      status: 'active',
+      modifiedFiles: [],
+    };
+
+    const quads = transformSession(session, OWNER, REPO, GRAPH);
+
+    const peerQuad = findQuad(quads, `${GH}peerId`);
+    expect(peerQuad).toBeDefined();
+    expect(peerQuad!.object).toContain('peer-session-123');
   });
 });

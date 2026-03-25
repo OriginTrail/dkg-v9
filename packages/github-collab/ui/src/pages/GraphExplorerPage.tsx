@@ -107,6 +107,7 @@ export function GraphExplorerPage() {
   const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set(ENTITY_TYPES));
   const [searchText, setSearchText] = useState('');
   const [tripleCount, setTripleCount] = useState(0);
+  const [graphLimit, setGraphLimit] = useState(500);
 
   // Node detail state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -144,18 +145,18 @@ export function GraphExplorerPage() {
   const runQuery = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setTriples([]);
     try {
       const result = await executeQuery(sparql, scopedRepo, includeWorkspace);
-      const data = result?.result;
-      if (data?.triples) {
-        setTriples(data.triples);
-      } else if (data?.bindings) {
-        setTriples(data.bindings);
+      const data = result?.result ?? result;
+      const rows = data?.triples ?? data?.bindings ?? data?.quads ?? [];
+      if (Array.isArray(rows) && rows.length > 0) {
+        setTriples(rows);
       } else {
-        setTriples([]);
+        setError('Query returned no results.');
       }
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message ?? 'Query execution failed');
     } finally {
       setLoading(false);
     }
@@ -230,45 +231,58 @@ export function GraphExplorerPage() {
             <GraphCanvas
               repo={scopedRepo}
               branch={selectedBranch || undefined}
+              limit={graphLimit}
               onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
               onTripleCount={setTripleCount}
-            />
-
-            {/* Floating toolbar overlay on graph */}
-            <div className="graph-floating-toolbar">
-              <div className="graph-toolbar-pill">
-                <span className="graph-triple-count">{tripleCount} triples</span>
-              </div>
-              <div className="graph-toolbar-pill">
-                <input
-                  type="text"
-                  className="graph-search-input-inline"
-                  placeholder="Filter nodes..."
-                  value={searchText}
-                  onChange={e => setSearchText(e.target.value)}
-                />
-              </div>
-              <button
-                className="graph-toolbar-pill graph-toolbar-toggle"
-                onClick={() => setShowFilters(prev => !prev)}
-              >
-                Types {showFilters ? '\u25B4' : '\u25BE'}
-              </button>
-              {showFilters && (
-                <div className="graph-filter-dropdown">
-                  {ENTITY_TYPES.map(type => (
-                    <label key={type} className="checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={typeFilters.has(type)}
-                        onChange={() => toggleTypeFilter(type)}
-                      />
-                      {type}
-                    </label>
-                  ))}
+              toolbar={
+                <div className="graph-floating-toolbar">
+                  <div className="graph-toolbar-pill">
+                    <input
+                      type="number"
+                      className="graph-limit-input"
+                      value={graphLimit}
+                      min={1}
+                      max={10000}
+                      onChange={e => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v) && v > 0) setGraphLimit(v);
+                      }}
+                      style={{ width: 60, textAlign: 'right', marginRight: 4 }}
+                    />
+                    <span className="graph-triple-count">limit ({tripleCount} loaded)</span>
+                  </div>
+                  <div className="graph-toolbar-pill">
+                    <input
+                      type="text"
+                      className="graph-search-input-inline"
+                      placeholder="Filter nodes..."
+                      value={searchText}
+                      onChange={e => setSearchText(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    className="graph-toolbar-pill graph-toolbar-toggle"
+                    onClick={() => setShowFilters(prev => !prev)}
+                  >
+                    Types {showFilters ? '\u25B4' : '\u25BE'}
+                  </button>
+                  {showFilters && (
+                    <div className="graph-filter-dropdown">
+                      {ENTITY_TYPES.map(type => (
+                        <label key={type} className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            checked={typeFilters.has(type)}
+                            onChange={() => toggleTypeFilter(type)}
+                          />
+                          {type}
+                        </label>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              }
+            />
 
             {selectedNodeId && (
               <NodeDetailPanel

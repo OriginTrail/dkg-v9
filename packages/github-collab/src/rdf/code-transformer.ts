@@ -308,6 +308,7 @@ export interface AgentSessionData {
   relatedIssue?: number;
   startedAt: number;
   endedAt?: number;
+  lastHeartbeat?: number;
   status: 'active' | 'ended' | 'abandoned';
   modifiedFiles: string[];
   summary?: string;
@@ -371,6 +372,9 @@ export function transformSession(
   if (session.endedAt) {
     quads.push(tripleDateTime(uri, `${GH}endedAt`, new Date(session.endedAt).toISOString(), graph));
   }
+  if (session.lastHeartbeat) {
+    quads.push(tripleDateTime(uri, `${GH}lastHeartbeat`, new Date(session.lastHeartbeat).toISOString(), graph));
+  }
   if (session.summary) {
     quads.push(tripleStr(uri, `${GH}summary`, session.summary, graph));
   }
@@ -398,11 +402,12 @@ export function transformClaim(
 ): Quad[] {
   const uri = claimUri(owner, repo, claim.claimId);
   return [
-    tripleUri(uri, `${RDF}type`, `${GH}CodeClaim`, graph),
+    tripleUri(uri, `${RDF}type`, `${GH}ClaimedRegion`, graph),
     tripleStr(uri, `${GH}claimId`, claim.claimId, graph),
     tripleUri(uri, `${GH}claimedFile`, fileUri(owner, repo, claim.filePath), graph),
     tripleStr(uri, `${GH}claimedPath`, claim.filePath, graph),
     tripleStr(uri, `${GH}claimedBy`, claim.agentName, graph),
+    tripleStr(uri, `${GH}peerId`, claim.peerId, graph),
     tripleUri(uri, `${GH}claimSession`, sessionUri(owner, repo, claim.sessionId), graph),
     tripleStr(uri, `${GH}claimStatus`, 'active', graph),
     tripleDateTime(uri, `${GH}claimedAt`, new Date(claim.claimedAt).toISOString(), graph),
@@ -426,6 +431,7 @@ export function transformDecision(
     tripleStr(uri, `${GH}decisionSummary`, decision.summary, graph),
     tripleStr(uri, `${GH}rationale`, decision.rationale, graph),
     tripleStr(uri, `${GH}madeBy`, decision.agentName, graph),
+    tripleStr(uri, `${GH}peerId`, decision.peerId, graph),
     tripleDateTime(uri, `${GH}madeAt`, new Date(decision.createdAt).toISOString(), graph),
     tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
   ];
@@ -460,6 +466,7 @@ export function transformAnnotation(
     tripleStr(uri, `${GH}annotationType`, annotation.kind, graph),
     tripleStr(uri, `${GH}annotationText`, annotation.content, graph),
     tripleStr(uri, `${GH}annotatedBy`, annotation.agentName, graph),
+    tripleStr(uri, `${GH}peerId`, annotation.peerId, graph),
     tripleDateTime(uri, `${GH}annotatedAt`, new Date(annotation.createdAt).toISOString(), graph),
     tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
   ];

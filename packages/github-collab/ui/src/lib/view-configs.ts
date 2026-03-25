@@ -157,12 +157,12 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
   nodeTypes: {
     [`${GH}AgentSession`]: { color: COLORS.agentSession, shape: 'hexagon', sizeMultiplier: 0.9 },
     [`${GH}Decision`]: { color: COLORS.decision, shape: 'hexagon', sizeMultiplier: 0.7 },
-    [`${GH}CodeClaim`]: { color: COLORS.codeClaim, shape: 'circle', sizeMultiplier: 0.4 },
+    [`${GH}ClaimedRegion`]: { color: COLORS.codeClaim, shape: 'circle', sizeMultiplier: 0.4 },
     [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
     [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 0.7 },
     [`${GH}Annotation`]: { color: COLORS.annotation, shape: 'circle', sizeMultiplier: 0.3 },
   },
-  circleTypes: ['CodeClaim', 'File', 'Annotation'],
+  circleTypes: ['ClaimedRegion', 'File', 'Annotation'],
   tooltip: {
     titleProperties: ['agentName', 'goal', 'decisionSummary', 'name'],
     titleMaxLength: 60,
@@ -174,7 +174,7 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
            <${GH}startedAt> ?started ;
            <${GH}goal> ?goal .
   ?session <${GH}modifiedFile> ?file .
-  ?claim a <${GH}CodeClaim> ;
+  ?claim a <${GH}ClaimedRegion> ;
          <${GH}claimedFile> ?file ;
          <${GH}claimedBy> ?claimAgent .
   ?decision a <${GH}Decision> ;
@@ -193,7 +193,7 @@ WHERE {
     OPTIONAL { ?session <${GH}modifiedFile> ?file }
     OPTIONAL { ?session <${GH}relatedPR> ?pr }
   } UNION {
-    ?claim a <${GH}CodeClaim> ;
+    ?claim a <${GH}ClaimedRegion> ;
            <${GH}claimedFile> ?file ;
            <${GH}claimedBy> ?claimAgent ;
            <${GH}claimStatus> "active" .
@@ -214,18 +214,30 @@ export const CODE_STRUCTURE_VIEW: ViewConfig = {
     [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 1.2 },
     [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 0.7 },
     [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
+    [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 0.6 },
+    [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}Interface`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 0.5 },
+    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.25 },
   },
-  circleTypes: ['File'],
+  circleTypes: ['File', 'Function', 'Interface', 'Import'],
   tooltip: {
     titleProperties: ['name', 'path'],
     titleMaxLength: 40,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
+  { ?s a <${GH}Class> ; ?p ?o }
+  UNION
+  { ?s a <${GH}Function> ; ?p ?o }
+  UNION
+  { ?s a <${GH}Interface> ; ?p ?o }
+  UNION
+  { ?s a <${GH}Import> ; ?p ?o }
+  UNION
   { ?s a <${GH}File> ; ?p ?o }
   UNION
   { ?s a <${GH}Directory> ; ?p ?o }
-} LIMIT 500`,
+} LIMIT 2000`,
 };
 
 export const DEPENDENCY_FLOW_VIEW: ViewConfig = {

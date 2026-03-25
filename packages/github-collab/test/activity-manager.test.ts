@@ -640,7 +640,7 @@ describe('ActivityManager', () => {
       const quads = manager.generateClaimQuads(result.claimed[0], 'octocat', 'Hello-World', 'test-graph');
       expect(quads.length).toBeGreaterThan(0);
       const types = quads.filter(q => q.predicate.endsWith('#type'));
-      expect(types[0].object).toContain('CodeClaim');
+      expect(types[0].object).toContain('ClaimedRegion');
     });
 
     it('generateDecisionQuads produces correct quads', () => {

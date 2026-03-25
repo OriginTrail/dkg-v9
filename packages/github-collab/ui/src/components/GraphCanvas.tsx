@@ -36,11 +36,14 @@ const GRAPH_OPTIONS: RdfGraphVizConfig = {
 interface GraphCanvasProps {
   repo?: string;
   branch?: string;
+  limit?: number;
   onNodeClick?: (nodeId: string) => void;
   onTripleCount?: (count: number) => void;
+  /** Optional floating toolbar rendered inside the graph viewport */
+  toolbar?: React.ReactNode;
 }
 
-export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphCanvasProps) {
+export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCount, toolbar }: GraphCanvasProps) {
   const [viewKey, setViewKey] = useState('pr-impact');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +60,7 @@ export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphC
     setLoading(true);
     setError(null);
     try {
-      const sparql = view.defaultSparql;
+      const sparql = view.defaultSparql.replace(/LIMIT\s+\d+/i, `LIMIT ${limit}`);
       const result = await executeQuery(sparql, repo || undefined);
       const data = result?.result;
       let parsed: Array<{ subject: string; predicate: string; object: string }> = [];
@@ -81,7 +84,7 @@ export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphC
     } finally {
       setLoading(false);
     }
-  }, [repo, onTripleCount]);
+  }, [repo, limit, onTripleCount]);
 
   // Auto-load PR Impact view when repo becomes available
   React.useEffect(() => {
@@ -138,6 +141,7 @@ export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphC
       {error && <div className="error-banner">{error}</div>}
 
       <div className="graph-viewport">
+        {toolbar}
         {triples.length > 0 ? (
           <RdfGraph
             key={viewKey}

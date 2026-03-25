@@ -35,7 +35,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="app">
       <header className="app-header">
-        <h1 className="app-title">GitHub Collaboration</h1>
+        <h1 className="app-title">{'\u{1F916}'} Multi-agent Coding</h1>
         <nav className="tab-nav">
           {TABS.map(tab => (
             <NavLink

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchPullRequests, fetchPullRequest, fetchIssues, fetchCommits } from '../api.js';
+import { fetchPullRequests, fetchPullRequest, fetchIssues, fetchCommits, bv } from '../api.js';
 import { useRepo, repoKey } from '../context/RepoContext.js';
 
 type SubTab = 'prs' | 'issues' | 'commits';
@@ -24,11 +24,13 @@ function PrDetailPanel({ owner, repo, prNumber, onClose }: { owner: string; repo
   }, [owner, repo, prNumber]);
 
   const triples = detail?.triples ?? [];
-  // Extract properties from triples
+  // Extract properties from triples, cleaning N-Triples values via bv()
   const props: Record<string, string> = {};
   for (const t of triples) {
     const pred = String(t.p ?? t.predicate ?? '');
-    const obj = String(t.o ?? t.object ?? '');
+    let obj = bv(String(t.o ?? t.object ?? ''));
+    // Extract login from user URIs like urn:github:user/branarakic
+    if (obj.startsWith('urn:github:user/')) obj = obj.replace('urn:github:user/', '');
     const key = pred.split('#').pop() ?? pred.split('/').pop() ?? pred;
     if (!props[key]) props[key] = obj;
   }
@@ -49,7 +51,7 @@ function PrDetailPanel({ owner, repo, prNumber, onClose }: { owner: string; repo
             {props.state && (
               <div className="detail-item">
                 <span className="detail-label">State</span>
-                <span className="detail-value"><span className={`badge badge-${props.state}`}>{props.state}</span></span>
+                <span className="detail-value"><span className={`badge badge-${props.state.toLowerCase()}`}>{props.state.toLowerCase()}</span></span>
               </div>
             )}
             {props.author && (

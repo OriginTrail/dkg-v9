@@ -562,9 +562,17 @@ export class DKGAgent {
 
           const metaResult = await this.store.query(metaQuery);
           if (metaResult.type === 'bindings') {
+            const WORKSPACE_OWNER_PRED = `${DKG_NS}workspaceOwner`;
             for (const b of metaResult.bindings) {
-              // Filter metadata: only include triples whose subject is an accessible operation
-              if (accessibleOps.size > 0 && !accessibleOps.has(b['s'])) continue;
+              // Filter metadata: only include triples whose subject is an accessible operation.
+              // Also include dkg:workspaceOwner triples — these use the ROOT ENTITY as subject
+              // (e.g. <did:dkg:entity:X> dkg:workspaceOwner "peerId"), not the operation URI.
+              // Without them, reconstructWorkspaceOwnership() breaks on the receiving peer.
+              if (accessibleOps.size > 0) {
+                const isAccessibleOp = accessibleOps.has(b['s']);
+                const isOwnerTriple = b['p'] === WORKSPACE_OWNER_PRED && accessibleRoots.has(b['s']);
+                if (!isAccessibleOp && !isOwnerTriple) continue;
+              }
               const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
               nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
             }
@@ -1357,13 +1365,13 @@ export class DKGAgent {
    * Write quads to the paranet's workspace graph (no chain, no TRAC).
    *
    * Visibility controls both broadcast and access policy:
-   * - `'private'` — local-only, no broadcast, ownerOnly access (new default)
+   * - `'private'` — local-only, no broadcast, ownerOnly access
    * - `'public'` — broadcast to peers, public access
-   * - `{ peers: [...] }` — broadcast to peers, allowList access
+   * - `{ peers: [...] }` — sync-only to listed peers, allowList access (no gossip broadcast)
    *
    * The legacy `localOnly` option is still supported for backward compatibility.
-   * When neither `visibility` nor `localOnly` is specified, defaults to `'private'`
-   * (no broadcast) — a deliberate change from the previous broadcast-by-default.
+   * When neither `visibility` nor `localOnly` is specified, defaults to `'public'`
+   * (broadcast) — preserving pre-migration behavior for existing callers.
    */
   async writeToWorkspace(
     paranetId: string,
@@ -1375,18 +1383,23 @@ export class DKGAgent {
       operationCtx?: OperationContext;
     },
   ): Promise<{ workspaceOperationId: string }> {
-    // When neither visibility nor localOnly is specified, default to private
-    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly === false ? 'public' : undefined);
-    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly ?? true });
+    // Preserve backward compatibility: when neither visibility nor localOnly is
+    // specified, default to public/broadcast (matching pre-migration behavior).
+    // Only go private when the caller explicitly requests it.
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : 'public');
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
-    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId} (visibility=${typeof effectiveVisibility === 'object' ? 'peers' : effectiveVisibility ?? 'private'})`);
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId} (visibility=${typeof effectiveVisibility === 'object' ? 'peers' : effectiveVisibility ?? 'default'})`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       accessPolicy: resolved.accessPolicy,
       allowedPeers: resolved.allowedPeers,
     });
-    if (resolved.broadcast) {
+    // Only broadcast on GossipSub for public data. allowList data must NOT be
+    // gossipped because any subscribed peer can read raw gossip messages before
+    // the sync-side filter runs. allowList data reaches peers via sync only.
+    if (resolved.accessPolicy === 'public') {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);
@@ -1415,8 +1428,9 @@ export class DKGAgent {
       operationCtx?: OperationContext;
     },
   ): Promise<{ workspaceOperationId: string }> {
-    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly === false ? 'public' : undefined);
-    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly ?? true });
+    // Same backward-compat default as writeToWorkspace
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : 'public');
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
     const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
@@ -1426,7 +1440,8 @@ export class DKGAgent {
       accessPolicy: resolved.accessPolicy,
       allowedPeers: resolved.allowedPeers,
     });
-    if (resolved.broadcast) {
+    // Only broadcast on GossipSub for public data (see writeToWorkspace comment)
+    if (resolved.accessPolicy === 'public') {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);

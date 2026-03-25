@@ -22,21 +22,21 @@ describe('resolveVisibility()', () => {
       });
     });
 
-    it('visibility: { peers: ["A", "B"] } → allowList with peers, broadcast', () => {
+    it('visibility: { peers: ["A", "B"] } → allowList with peers, no broadcast (sync only)', () => {
       const result = resolveVisibility({ peers: ['A', 'B'] });
       expect(result).toEqual<ResolvedVisibility>({
         accessPolicy: 'allowList',
         allowedPeers: ['A', 'B'],
-        broadcast: true,
+        broadcast: false,
       });
     });
 
-    it('visibility: { peers: [] } → allowList with empty peers, broadcast', () => {
+    it('visibility: { peers: [] } → allowList with empty peers, no broadcast (sync only)', () => {
       const result = resolveVisibility({ peers: [] });
       expect(result).toEqual<ResolvedVisibility>({
         accessPolicy: 'allowList',
         allowedPeers: [],
-        broadcast: true,
+        broadcast: false,
       });
     });
   });
@@ -79,7 +79,7 @@ describe('resolveVisibility()', () => {
       expect(result.broadcast).toBe(false);
     });
 
-    it('accessPolicy: "allowList" with allowedPeers → allowList, broadcast', () => {
+    it('accessPolicy: "allowList" with allowedPeers → allowList, no broadcast (sync only)', () => {
       const result = resolveVisibility(undefined, {
         accessPolicy: 'allowList',
         allowedPeers: ['A'],
@@ -87,16 +87,16 @@ describe('resolveVisibility()', () => {
       expect(result).toEqual<ResolvedVisibility>({
         accessPolicy: 'allowList',
         allowedPeers: ['A'],
-        broadcast: true,
+        broadcast: false,
       });
     });
 
-    it('accessPolicy: "allowList" without peers → empty peers, broadcast', () => {
+    it('accessPolicy: "allowList" without peers → empty peers, no broadcast (sync only)', () => {
       const result = resolveVisibility(undefined, { accessPolicy: 'allowList' });
       expect(result).toEqual<ResolvedVisibility>({
         accessPolicy: 'allowList',
         allowedPeers: [],
-        broadcast: true,
+        broadcast: false,
       });
     });
 
@@ -131,7 +131,7 @@ describe('resolveVisibility()', () => {
       const result = resolveVisibility({ peers: ['X'] }, { accessPolicy: 'ownerOnly' });
       expect(result.accessPolicy).toBe('allowList');
       expect(result.allowedPeers).toEqual(['X']);
-      expect(result.broadcast).toBe(true);
+      expect(result.broadcast).toBe(false);
     });
   });
 

@@ -33,7 +33,9 @@ export function resolveVisibility(
       return { accessPolicy: 'public', allowedPeers: [], broadcast: true };
     }
     if (typeof visibility === 'object' && 'peers' in visibility) {
-      return { accessPolicy: 'allowList', allowedPeers: visibility.peers, broadcast: true };
+      // allowList must NOT broadcast on GossipSub — any subscribed peer can
+      // read raw gossip messages. allowList data reaches peers via sync only.
+      return { accessPolicy: 'allowList', allowedPeers: visibility.peers, broadcast: false };
     }
   }
 
@@ -45,7 +47,7 @@ export function resolveVisibility(
     return { accessPolicy: 'ownerOnly', allowedPeers: legacy.allowedPeers ?? [], broadcast: false };
   }
   if (legacy?.accessPolicy === 'allowList') {
-    return { accessPolicy: 'allowList', allowedPeers: legacy.allowedPeers ?? [], broadcast: true };
+    return { accessPolicy: 'allowList', allowedPeers: legacy.allowedPeers ?? [], broadcast: false };
   }
   if (legacy?.accessPolicy === 'public') {
     return { accessPolicy: 'public', allowedPeers: [], broadcast: true };

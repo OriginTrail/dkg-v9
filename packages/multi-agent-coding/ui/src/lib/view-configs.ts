@@ -252,7 +252,39 @@ WHERE {
 } LIMIT 300`,
 };
 
+export const EVERYTHING_VIEW: ViewConfig = {
+  name: 'Full Graph',
+  palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
+  nodeTypes: {
+    [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 1.2 },
+    [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 0.6 },
+    [`${GH}Issue`]: { color: COLORS.issue, shape: 'hexagon', sizeMultiplier: 0.5 },
+    [`${GH}Commit`]: { color: COLORS.commit, shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}Branch`]: { color: COLORS.branch, shape: 'circle', sizeMultiplier: 0.35 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.2 },
+    [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 0.3 },
+    [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 0.5 },
+    [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.25 },
+    [`${GH}Interface`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 0.4 },
+    [`${GH}User`]: { color: COLORS.user, shape: 'circle', sizeMultiplier: 0.35 },
+    [`${GH}Review`]: { color: COLORS.review, shape: 'circle', sizeMultiplier: 0.2 },
+    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.15 },
+    [`${GH}Method`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.2 },
+  },
+  circleTypes: ['Commit', 'Branch', 'File', 'Function', 'Method', 'User', 'Review', 'Import'],
+  tooltip: {
+    titleProperties: ['name', 'title', 'path', 'fullName'],
+    titleMaxLength: 40,
+  },
+  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+WHERE {
+  ?s ?p ?o .
+} LIMIT 5000`,
+};
+
 export const ALL_VIEWS: Record<string, ViewConfig> = {
+  'everything': EVERYTHING_VIEW,
   'pr-impact': PR_IMPACT_VIEW,
   'repo-overview': REPO_OVERVIEW_VIEW,
   'code-structure': CODE_STRUCTURE_VIEW,

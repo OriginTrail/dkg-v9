@@ -32,6 +32,8 @@ export interface AgentSession {
   status: 'active' | 'ended' | 'abandoned';
   modifiedFiles: string[];
   summary?: string;
+  remote?: boolean;
+  repoKey?: string;
 }
 
 export interface CodeClaim {
@@ -41,6 +43,7 @@ export interface CodeClaim {
   agentName: string;
   sessionId: string;
   claimedAt: number;
+  remote?: boolean;
 }
 
 export interface Decision {
@@ -53,6 +56,8 @@ export interface Decision {
   agentName: string;
   sessionId?: string;
   createdAt: number;
+  remote?: boolean;
+  repoKey?: string;
 }
 
 export interface Annotation {
@@ -64,6 +69,7 @@ export interface Annotation {
   agentName: string;
   sessionId?: string;
   createdAt: number;
+  remote?: boolean;
 }
 
 export interface ClaimResult {
@@ -279,6 +285,116 @@ export class ActivityManager {
     return annotation;
   }
 
+  // --- Remote mirroring (store remote activity without generating RDF) ---
+
+  mirrorRemoteSession(data: {
+    sessionId: string;
+    agentName: string;
+    peerId: string;
+    goal?: string;
+    startedAt: number;
+    repoKey?: string;
+  }): void {
+    if (this.sessions.has(data.sessionId)) return; // already mirrored
+    const session: AgentSession = {
+      sessionId: data.sessionId,
+      agentName: data.agentName,
+      peerId: data.peerId,
+      goal: data.goal,
+      startedAt: data.startedAt,
+      lastHeartbeat: data.startedAt,
+      status: 'active',
+      modifiedFiles: [],
+      remote: true,
+      repoKey: data.repoKey,
+    };
+    this.sessions.set(data.sessionId, session);
+    this.log(`Mirrored remote session: ${data.sessionId} by ${data.agentName}`);
+  }
+
+  mirrorRemoteSessionEnd(sessionId: string, summary?: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.status = 'ended';
+    session.summary = summary;
+    session.lastHeartbeat = Date.now();
+  }
+
+  mirrorRemoteHeartbeat(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.lastHeartbeat = Date.now();
+  }
+
+  mirrorRemoteClaim(
+    claimId: string,
+    filePath: string,
+    peerId: string,
+    agentName: string,
+    sessionId: string,
+  ): void {
+    if (this.claims.has(claimId)) return; // already mirrored
+    const claim: CodeClaim = {
+      claimId,
+      filePath,
+      peerId,
+      agentName,
+      sessionId,
+      claimedAt: Date.now(),
+      remote: true,
+    };
+    this.claims.set(claimId, claim);
+    this.fileClaimIndex.set(filePath, claimId);
+  }
+
+  mirrorRemoteClaimRelease(claimId: string): void {
+    const claim = this.claims.get(claimId);
+    if (!claim) return;
+    this.claims.delete(claimId);
+    if (this.fileClaimIndex.get(claim.filePath) === claimId) {
+      this.fileClaimIndex.delete(claim.filePath);
+    }
+  }
+
+  mirrorRemoteDecision(data: {
+    decisionId: string;
+    summary: string;
+    peerId: string;
+    agentName: string;
+    createdAt: number;
+    repoKey?: string;
+  }): void {
+    // Avoid duplicates
+    if (this.decisions.some(d => d.decisionId === data.decisionId)) return;
+    this.decisions.push({
+      decisionId: data.decisionId,
+      summary: data.summary,
+      rationale: '',
+      affectedFiles: [],
+      peerId: data.peerId,
+      agentName: data.agentName,
+      createdAt: data.createdAt,
+      remote: true,
+      repoKey: data.repoKey,
+    });
+  }
+
+  mirrorRemoteAnnotation(data: {
+    annotationId: string;
+    targetUri: string;
+    kind: 'finding' | 'suggestion' | 'warning' | 'note';
+    content: string;
+    peerId: string;
+    agentName: string;
+    createdAt: number;
+  }): void {
+    if (this.annotations.some(a => a.annotationId === data.annotationId)) return;
+    this.annotations.push({
+      ...data,
+      remote: true,
+    });
+  }
+
   // --- Queries ---
 
   getSessions(opts?: { status?: string }): AgentSession[] {
@@ -289,10 +405,11 @@ export class ActivityManager {
     return result;
   }
 
-  getActivity(limit = 50): ActivityEntry[] {
+  getActivity(limit = 50, repoKey?: string): ActivityEntry[] {
     const entries: ActivityEntry[] = [];
 
     for (const s of this.sessions.values()) {
+      if (repoKey && s.repoKey && s.repoKey !== repoKey) continue;
       entries.push({
         type: 'session:started',
         agent: s.agentName,
@@ -312,6 +429,11 @@ export class ActivityManager {
     }
 
     for (const c of this.claims.values()) {
+      // Claims are linked to sessions; filter via session's repoKey
+      if (repoKey) {
+        const session = this.sessions.get(c.sessionId);
+        if (session?.repoKey && session.repoKey !== repoKey) continue;
+      }
       entries.push({
         type: 'claim:created',
         agent: c.agentName,
@@ -322,6 +444,7 @@ export class ActivityManager {
     }
 
     for (const d of this.decisions) {
+      if (repoKey && d.repoKey && d.repoKey !== repoKey) continue;
       entries.push({
         type: 'decision:recorded',
         agent: d.agentName,

@@ -535,6 +535,155 @@ describe('GitHubCollabCoordinator', () => {
   });
 
   // =========================================================================
+  // Remote activity via gossip
+  // =========================================================================
+
+  describe('remote activity via gossip', () => {
+    async function setupSharedRepo() {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      return `dkg/paranet/${config.paranetId}/app`;
+    }
+
+    function inject(topic: string, msg: Record<string, any>) {
+      agent._injectMessage(topic, new TextEncoder().encode(JSON.stringify({ app: 'github-collab', ...msg })), 'remote-peer');
+    }
+
+    it('mirrors remote session:started into activity feed', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'session:started',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        sessionId: 'remote-sess-1',
+        agent: 'remote-agent',
+        goal: 'Fix bug',
+      });
+      const sessions = coordinator.getAgentSessions({ status: 'active' });
+      const remote = sessions.find(s => s.sessionId === 'remote-sess-1');
+      expect(remote).toBeDefined();
+      expect(remote!.remote).toBe(true);
+      expect(remote!.agentName).toBe('remote-agent');
+    });
+
+    it('mirrors remote session:ended', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'session:started',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        sessionId: 'remote-sess-2',
+        agent: 'remote-agent',
+      });
+      inject(topic, {
+        type: 'session:ended',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        sessionId: 'remote-sess-2',
+        agent: 'remote-agent',
+        summary: 'Done',
+        duration: 120,
+        filesModified: 3,
+      });
+      const sessions = coordinator.getAgentSessions({ status: 'ended' });
+      expect(sessions.some(s => s.sessionId === 'remote-sess-2')).toBe(true);
+    });
+
+    it('mirrors remote claim:created and enables cross-node conflict detection', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'claim:created',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        claimId: 'remote-clm-1',
+        file: 'src/shared.ts',
+        agent: 'remote-agent',
+      });
+      const claims = coordinator.getActiveClaims();
+      expect(claims.some(c => c.claimId === 'remote-clm-1')).toBe(true);
+
+      // Local claim on same file should conflict
+      await coordinator.startAgentSession('octocat/Hello-World', 'local-agent');
+      const localSession = coordinator.getAgentSessions({ status: 'active' }).find(s => s.agentName === 'local-agent')!;
+      const result = await coordinator.claimFiles('octocat/Hello-World', ['src/shared.ts'], localSession.sessionId, 'local-agent');
+      expect(result.conflicts).toHaveLength(1);
+    });
+
+    it('mirrors remote claim:released', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'claim:created',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        claimId: 'remote-clm-2',
+        file: 'src/released.ts',
+        agent: 'remote-agent',
+      });
+      expect(coordinator.getActiveClaims()).toHaveLength(1);
+
+      inject(topic, {
+        type: 'claim:released',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        claimId: 'remote-clm-2',
+        file: 'src/released.ts',
+      });
+      expect(coordinator.getActiveClaims()).toHaveLength(0);
+    });
+
+    it('mirrors remote decision:recorded into activity feed', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'decision:recorded',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        decisionId: 'remote-dec-1',
+        summary: 'Use WebSockets',
+        agent: 'remote-agent',
+      });
+      const decisions = coordinator.getDecisions();
+      expect(decisions.some(d => d.decisionId === 'remote-dec-1')).toBe(true);
+      expect(decisions.find(d => d.decisionId === 'remote-dec-1')!.remote).toBe(true);
+    });
+
+    it('mirrors remote annotation:added into activity feed', async () => {
+      const topic = await setupSharedRepo();
+      inject(topic, {
+        type: 'annotation:added',
+        peerId: 'remote-peer',
+        timestamp: Date.now(),
+        repo: 'octocat/Hello-World',
+        annotationId: 'remote-ann-1',
+        targetUri: 'urn:file:src/index.ts',
+        kind: 'finding',
+        content: 'Missing null check',
+        agent: 'remote-agent',
+      });
+      const activity = coordinator.getAgentActivity();
+      const annEntry = activity.find(a => a.type === 'annotation:added' && a.detail.includes('Missing null check'));
+      expect(annEntry).toBeDefined();
+    });
+
+    it('getAgentActivity filters by repoKey', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      await coordinator.addRepo({ owner: 'org', repo: 'other' });
+      await coordinator.startAgentSession('octocat/Hello-World', 'agent-a', { goal: 'Work A' });
+      await coordinator.startAgentSession('org/other', 'agent-b', { goal: 'Work B' });
+
+      const activityA = coordinator.getAgentActivity('octocat/Hello-World');
+      expect(activityA.some(a => a.detail.includes('Work A'))).toBe(true);
+      expect(activityA.some(a => a.detail.includes('Work B'))).toBe(false);
+    });
+  });
+
+  // =========================================================================
   // destroy
   // =========================================================================
 

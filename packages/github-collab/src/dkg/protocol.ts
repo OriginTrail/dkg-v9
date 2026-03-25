@@ -24,7 +24,8 @@ export type MessageType =
   | 'claim:created'
   | 'claim:released'
   | 'claim:conflict'
-  | 'decision:recorded';
+  | 'decision:recorded'
+  | 'annotation:added';
 
 export interface BaseMessage {
   app: typeof APP_ID;
@@ -137,6 +138,7 @@ export interface ClaimCreatedMessage extends BaseMessage {
   claimId: string;
   file: string;
   agent: string;
+  sessionId?: string;
 }
 
 export interface ClaimReleasedMessage extends BaseMessage {
@@ -162,6 +164,16 @@ export interface DecisionRecordedMessage extends BaseMessage {
   agent: string;
 }
 
+export interface AnnotationAddedMessage extends BaseMessage {
+  type: 'annotation:added';
+  repo: string;
+  annotationId: string;
+  targetUri: string;
+  kind: 'finding' | 'suggestion' | 'warning' | 'note';
+  content: string;
+  agent: string;
+}
+
 export type AppMessage =
   | NodeJoinedMessage
   | NodeLeftMessage
@@ -179,7 +191,8 @@ export type AppMessage =
   | ClaimCreatedMessage
   | ClaimReleasedMessage
   | ClaimConflictMessage
-  | DecisionRecordedMessage;
+  | DecisionRecordedMessage
+  | AnnotationAddedMessage;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

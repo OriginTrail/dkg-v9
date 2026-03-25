@@ -828,6 +828,69 @@ export class GitHubCollabCoordinator {
         this.peers.set(msg.peerId, peer);
         break;
       }
+
+      case 'session:started': {
+        this.activity.mirrorRemoteSession({
+          sessionId: msg.sessionId,
+          agentName: msg.agent,
+          peerId: msg.peerId,
+          goal: msg.goal,
+          startedAt: msg.timestamp,
+          repoKey: msg.repo,
+        });
+        this.log(`Remote session started: ${msg.agent} (${msg.peerId.slice(0, 8)})`);
+        break;
+      }
+
+      case 'session:ended': {
+        this.activity.mirrorRemoteSessionEnd(msg.sessionId, msg.summary);
+        break;
+      }
+
+      case 'session:heartbeat': {
+        this.activity.mirrorRemoteHeartbeat(msg.sessionId);
+        break;
+      }
+
+      case 'claim:created': {
+        this.activity.mirrorRemoteClaim(msg.claimId, msg.file, msg.peerId, msg.agent, msg.sessionId ?? '');
+        break;
+      }
+
+      case 'claim:released': {
+        this.activity.mirrorRemoteClaimRelease(msg.claimId);
+        break;
+      }
+
+      case 'decision:recorded': {
+        this.activity.mirrorRemoteDecision({
+          decisionId: msg.decisionId,
+          summary: msg.summary,
+          peerId: msg.peerId,
+          agentName: msg.agent,
+          createdAt: msg.timestamp,
+          repoKey: msg.repo,
+        });
+        break;
+      }
+
+      case 'claim:conflict': {
+        this.log(`Claim conflict: ${msg.file} (${msg.existingAgent} vs ${msg.claimingAgent})`);
+        break;
+      }
+
+      case 'annotation:added': {
+        this.activity.mirrorRemoteAnnotation({
+          annotationId: msg.annotationId,
+          targetUri: msg.targetUri,
+          kind: msg.kind,
+          content: msg.content,
+          peerId: msg.peerId,
+          agentName: msg.agent,
+          createdAt: msg.timestamp,
+        });
+        break;
+      }
     }
   }
 
@@ -871,6 +934,7 @@ export class GitHubCollabCoordinator {
     if (!config) throw new Error(`Repository ${repoKey} is not configured`);
 
     const session = this.activity.startSession(agentName, this.myPeerId, opts);
+    session.repoKey = repoKey;
 
     // Write RDF to workspace
     const quads = this.activity.generateSessionQuads(session, config.owner, config.repo, config.paranetId);
@@ -965,6 +1029,7 @@ export class GitHubCollabCoordinator {
           claimId: claim.claimId,
           file: claim.filePath,
           agent: agentName,
+          sessionId,
         });
       }
     }
@@ -1014,6 +1079,7 @@ export class GitHubCollabCoordinator {
       ...input,
       peerId: this.myPeerId,
     });
+    decision.repoKey = repoKey;
 
     // Write RDF
     const quads = this.activity.generateDecisionQuads(decision, config.owner, config.repo, config.paranetId);
@@ -1057,6 +1123,22 @@ export class GitHubCollabCoordinator {
     const quads = this.activity.generateAnnotationQuads(annotation, config.owner, config.repo, config.paranetId);
     await this.writeToWorkspace(config.paranetId, quads);
 
+    // Broadcast if shared
+    if (config.privacyLevel === 'shared') {
+      await this.broadcastMessage(config.paranetId, {
+        app: APP_ID,
+        type: 'annotation:added',
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        repo: repoKey,
+        annotationId: annotation.annotationId,
+        targetUri: annotation.targetUri,
+        kind: annotation.kind,
+        content: annotation.content,
+        agent: input.agentName,
+      });
+    }
+
     return annotation;
   }
 
@@ -1069,7 +1151,7 @@ export class GitHubCollabCoordinator {
   }
 
   getAgentActivity(repoKey?: string, limit?: number): ActivityEntry[] {
-    return this.activity.getActivity(limit);
+    return this.activity.getActivity(limit, repoKey);
   }
 
   // --- Cleanup ---

@@ -411,6 +411,216 @@ describe('ActivityManager', () => {
   });
 
   // =========================================================================
+  // Remote mirroring
+  // =========================================================================
+
+  describe('remote mirroring', () => {
+    it('mirrorRemoteSession stores a remote session with remote flag', () => {
+      manager.mirrorRemoteSession({
+        sessionId: 'remote-sess-1',
+        agentName: 'remote-agent',
+        peerId: 'remote-peer',
+        goal: 'Fix tests',
+        startedAt: Date.now(),
+        repoKey: 'org/repo',
+      });
+      const session = manager.getSession('remote-sess-1');
+      expect(session).toBeDefined();
+      expect(session!.remote).toBe(true);
+      expect(session!.agentName).toBe('remote-agent');
+      expect(session!.repoKey).toBe('org/repo');
+      expect(session!.status).toBe('active');
+    });
+
+    it('mirrorRemoteSession is idempotent', () => {
+      const data = {
+        sessionId: 'remote-sess-2',
+        agentName: 'remote-agent',
+        peerId: 'remote-peer',
+        startedAt: Date.now(),
+      };
+      manager.mirrorRemoteSession(data);
+      manager.mirrorRemoteSession(data);
+      expect(manager.getSessions().filter(s => s.sessionId === 'remote-sess-2')).toHaveLength(1);
+    });
+
+    it('mirrorRemoteSessionEnd transitions session to ended', () => {
+      manager.mirrorRemoteSession({
+        sessionId: 'remote-sess-3',
+        agentName: 'remote-agent',
+        peerId: 'remote-peer',
+        startedAt: Date.now(),
+      });
+      manager.mirrorRemoteSessionEnd('remote-sess-3', 'All done');
+      const session = manager.getSession('remote-sess-3');
+      expect(session!.status).toBe('ended');
+      expect(session!.summary).toBe('All done');
+    });
+
+    it('mirrorRemoteSessionEnd is safe for unknown session', () => {
+      expect(() => manager.mirrorRemoteSessionEnd('unknown', 'summary')).not.toThrow();
+    });
+
+    it('mirrorRemoteHeartbeat updates lastHeartbeat', () => {
+      const startedAt = Date.now() - 10000;
+      manager.mirrorRemoteSession({
+        sessionId: 'remote-sess-4',
+        agentName: 'remote-agent',
+        peerId: 'remote-peer',
+        startedAt,
+      });
+      manager.mirrorRemoteHeartbeat('remote-sess-4');
+      const session = manager.getSession('remote-sess-4');
+      expect(session!.lastHeartbeat).toBeGreaterThan(startedAt);
+    });
+
+    it('mirrorRemoteHeartbeat is safe for unknown session', () => {
+      expect(() => manager.mirrorRemoteHeartbeat('unknown')).not.toThrow();
+    });
+
+    it('mirrorRemoteClaim stores a remote claim and enables conflict detection', () => {
+      manager.mirrorRemoteClaim('remote-clm-1', 'src/foo.ts', 'remote-peer', 'remote-agent', 'remote-sess');
+      const claims = manager.getActiveClaims();
+      expect(claims).toHaveLength(1);
+      expect(claims[0].remote).toBe(true);
+      expect(claims[0].filePath).toBe('src/foo.ts');
+
+      // Local agent trying to claim same file should conflict
+      const localSession = manager.startSession('local-agent', 'local-peer');
+      const result = manager.claimFiles(['src/foo.ts'], localSession.sessionId, 'local-agent', 'local-peer');
+      expect(result.conflicts).toHaveLength(1);
+      expect(result.conflicts[0].existingClaim.agentName).toBe('remote-agent');
+    });
+
+    it('mirrorRemoteClaimRelease removes the remote claim', () => {
+      manager.mirrorRemoteClaim('remote-clm-2', 'src/bar.ts', 'remote-peer', 'remote-agent', 'remote-sess');
+      expect(manager.getActiveClaims()).toHaveLength(1);
+      manager.mirrorRemoteClaimRelease('remote-clm-2');
+      expect(manager.getActiveClaims()).toHaveLength(0);
+    });
+
+    it('mirrorRemoteClaimRelease is safe for unknown claim', () => {
+      expect(() => manager.mirrorRemoteClaimRelease('unknown')).not.toThrow();
+    });
+
+    it('mirrorRemoteDecision stores a remote decision', () => {
+      manager.mirrorRemoteDecision({
+        decisionId: 'remote-dec-1',
+        summary: 'Use gRPC',
+        peerId: 'remote-peer',
+        agentName: 'remote-agent',
+        createdAt: Date.now(),
+        repoKey: 'org/repo',
+      });
+      const decisions = manager.getDecisions();
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].remote).toBe(true);
+      expect(decisions[0].summary).toBe('Use gRPC');
+    });
+
+    it('mirrorRemoteDecision is idempotent', () => {
+      const data = {
+        decisionId: 'remote-dec-2',
+        summary: 'Use REST',
+        peerId: 'remote-peer',
+        agentName: 'remote-agent',
+        createdAt: Date.now(),
+      };
+      manager.mirrorRemoteDecision(data);
+      manager.mirrorRemoteDecision(data);
+      expect(manager.getDecisions()).toHaveLength(1);
+    });
+
+    it('mirrorRemoteAnnotation stores a remote annotation', () => {
+      manager.mirrorRemoteAnnotation({
+        annotationId: 'remote-ann-1',
+        targetUri: 'urn:test:file',
+        kind: 'warning',
+        content: 'Performance issue',
+        peerId: 'remote-peer',
+        agentName: 'remote-agent',
+        createdAt: Date.now(),
+      });
+      const activity = manager.getActivity();
+      const annEntry = activity.find(a => a.type === 'annotation:added' && a.detail.includes('Performance issue'));
+      expect(annEntry).toBeDefined();
+    });
+
+    it('remote sessions appear in activity feed', () => {
+      manager.mirrorRemoteSession({
+        sessionId: 'remote-feed-sess',
+        agentName: 'remote-agent',
+        peerId: 'remote-peer',
+        goal: 'Remote work',
+        startedAt: Date.now(),
+      });
+      const activity = manager.getActivity();
+      const remoteEntry = activity.find(a => a.agent === 'remote-agent');
+      expect(remoteEntry).toBeDefined();
+      expect(remoteEntry!.type).toBe('session:started');
+    });
+  });
+
+  // =========================================================================
+  // getActivity repoKey filter
+  // =========================================================================
+
+  describe('getActivity repoKey filter', () => {
+    it('filters sessions by repoKey', () => {
+      const s1 = manager.startSession('agent-1', 'peer-1', { goal: 'Work on repo A' });
+      s1.repoKey = 'org/repo-a';
+      const s2 = manager.startSession('agent-2', 'peer-2', { goal: 'Work on repo B' });
+      s2.repoKey = 'org/repo-b';
+
+      const activityA = manager.getActivity(50, 'org/repo-a');
+      expect(activityA.every(a => a.agent === 'agent-1' || !a.entityId)).toBe(true);
+      expect(activityA.some(a => a.agent === 'agent-2')).toBe(false);
+    });
+
+    it('filters decisions by repoKey', () => {
+      const d1 = manager.recordDecision({
+        summary: 'Decision A',
+        rationale: 'R',
+        affectedFiles: [],
+        peerId: 'p',
+        agentName: 'agent-1',
+      });
+      d1.repoKey = 'org/repo-a';
+      const d2 = manager.recordDecision({
+        summary: 'Decision B',
+        rationale: 'R',
+        affectedFiles: [],
+        peerId: 'p',
+        agentName: 'agent-2',
+      });
+      d2.repoKey = 'org/repo-b';
+
+      const activityA = manager.getActivity(50, 'org/repo-a');
+      const decisions = activityA.filter(a => a.type === 'decision:recorded');
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].detail).toContain('Decision A');
+    });
+
+    it('returns all when repoKey is omitted', () => {
+      const s1 = manager.startSession('agent-1', 'peer-1');
+      s1.repoKey = 'org/repo-a';
+      const s2 = manager.startSession('agent-2', 'peer-2');
+      s2.repoKey = 'org/repo-b';
+
+      const all = manager.getActivity();
+      expect(all.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('includes entries without repoKey when filtering', () => {
+      // Session without repoKey should still appear (it matches any filter since it has no repoKey)
+      manager.startSession('agent-1', 'peer-1', { goal: 'Unscoped' });
+      const activity = manager.getActivity(50, 'org/repo-a');
+      // Session has no repoKey set, so it should still appear (no repoKey = matches all)
+      expect(activity.some(a => a.detail.includes('Unscoped'))).toBe(true);
+    });
+  });
+
+  // =========================================================================
   // RDF generation
   // =========================================================================
 

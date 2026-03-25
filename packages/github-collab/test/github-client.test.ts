@@ -347,15 +347,57 @@ describe('GitHubClient', () => {
       expect(url).toContain('/user');
     });
 
-    it('returns valid: false on 401 unauthorized', async () => {
+    it('returns valid: false with error on 401 unauthorized', async () => {
       fetchSpy.mockResolvedValueOnce(makeErrorResponse(401, 'Bad credentials'));
       const result = await client.validateToken();
 
       expect(result.valid).toBe(false);
+      expect(result.error).toBe('Invalid token');
       expect(result.login).toBeUndefined();
     });
 
-    it('throws on non-401 errors', async () => {
+    it('falls back to /rate_limit on 403 (fine-grained PAT)', async () => {
+      // First call: GET /user returns 403 (no user scope)
+      fetchSpy.mockResolvedValueOnce(makeErrorResponse(403, 'Resource not accessible by personal access token'));
+      // Second call: GET /rate_limit returns authenticated rate (5000)
+      fetchSpy.mockResolvedValueOnce(makeResponse(
+        { rate: { limit: 5000, remaining: 4999, reset: 9999999999, used: 1 } },
+      ));
+
+      const result = await client.validateToken();
+
+      expect(result.valid).toBe(true);
+      expect(result.login).toBe('(fine-grained PAT)');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns valid: false when 403 and rate_limit shows unauthenticated', async () => {
+      // First call: GET /user returns 403
+      fetchSpy.mockResolvedValueOnce(makeErrorResponse(403, 'Resource not accessible'));
+      // Second call: GET /rate_limit returns unauthenticated rate (60)
+      fetchSpy.mockResolvedValueOnce(makeResponse(
+        { rate: { limit: 60, remaining: 59, reset: 9999999999, used: 1 } },
+      ));
+
+      const result = await client.validateToken();
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Token lacks required permissions');
+    });
+
+    it('returns valid: false when 403 and rate_limit also fails', async () => {
+      // First call: GET /user returns 403
+      fetchSpy.mockResolvedValueOnce(makeErrorResponse(403, 'Resource not accessible'));
+      // Second call: GET /rate_limit also fails
+      fetchSpy.mockResolvedValueOnce(makeErrorResponse(401, 'Bad credentials'));
+
+      const result = await client.validateToken();
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Token lacks required permissions');
+    });
+
+    it('throws on non-401/non-403 errors', async () => {
       fetchSpy.mockResolvedValueOnce(makeErrorResponse(500, 'Internal server error'));
 
       await expect(client.validateToken()).rejects.toThrow(GitHubApiError);

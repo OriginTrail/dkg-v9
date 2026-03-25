@@ -157,13 +157,24 @@ export class GitHubClient {
 
   // --- Token validation ---
 
-  async validateToken(): Promise<{ valid: boolean; login?: string; scopes?: string[] }> {
+  async validateToken(): Promise<{ valid: boolean; login?: string; scopes?: string[]; error?: string }> {
     try {
       const user = await this.get('/user');
       return { valid: true, login: user.login, scopes: this.lastScopes };
     } catch (err) {
       if (err instanceof GitHubApiError && err.isUnauthorized) {
-        return { valid: false };
+        return { valid: false, error: 'Invalid token' };
+      }
+      // 403 = token valid but lacks user scope (common with fine-grained PATs)
+      if (err instanceof GitHubApiError && err.status === 403) {
+        try {
+          const rateLimit = await this.get('/rate_limit');
+          const isAuthenticated = rateLimit?.rate?.limit > 60;
+          if (isAuthenticated) {
+            return { valid: true, login: '(fine-grained PAT)', scopes: this.lastScopes };
+          }
+        } catch { /* fall through */ }
+        return { valid: false, error: 'Token lacks required permissions' };
       }
       throw err;
     }

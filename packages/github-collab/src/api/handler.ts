@@ -89,6 +89,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
           webhookSecret: r.webhookSecret ? 'configured' : null,
           pollIntervalMs: r.pollIntervalMs,
           syncScope: r.syncScope,
+          privacyLevel: r.privacyLevel,
         }));
         return json(res, 200, { repos, githubTokenConfigured: repos.some(r => r.syncEnabled) });
       }
@@ -107,6 +108,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
           pollIntervalMs: body.pollIntervalMs,
           syncScope: body.syncScope,
           paranetId: body.paranetId,
+          privacyLevel: body.privacyLevel ?? 'local',
         });
 
         // Start polling if token provided

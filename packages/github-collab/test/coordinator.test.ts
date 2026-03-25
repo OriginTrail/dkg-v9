@@ -87,14 +87,26 @@ describe('GitHubCollabCoordinator', () => {
   // =========================================================================
 
   describe('GossipSub subscription', () => {
-    it('subscribes to paranet gossip topic on addRepo', async () => {
-      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+    it('subscribes to paranet gossip topic on addRepo with shared privacy', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
       expect(agent._subscriptions.size).toBeGreaterThan(0);
     });
 
-    it('registers gossip message handlers', async () => {
-      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+    it('registers gossip message handlers for shared repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
       expect(agent._messageHandlers.size).toBeGreaterThan(0);
+    });
+
+    it('does NOT subscribe to gossip for local-only repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      expect(agent._subscriptions.size).toBe(0);
+    });
+
+    it('defaults to local-only when privacyLevel is not specified', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World');
+      expect(config!.privacyLevel).toBe('local');
+      expect(agent._subscriptions.size).toBe(0);
     });
   });
 
@@ -125,6 +137,21 @@ describe('GitHubCollabCoordinator', () => {
       await coordinator.enshrineData('test-paranet', { rootEntities: ['urn:entity1'] }, { clearWorkspaceAfter: false });
       expect(agent._enshrined).toHaveLength(1);
       expect(agent._enshrined[0].selection).toEqual({ rootEntities: ['urn:entity1'] });
+    });
+
+    it('enshrineData skips enshrinement for local-only repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World');
+      const result = await coordinator.enshrineData(config!.paranetId, 'all');
+      expect(result).toEqual({ skipped: true, reason: 'local-only' });
+      expect(agent._enshrined).toHaveLength(0);
+    });
+
+    it('enshrineData proceeds for shared repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World');
+      await coordinator.enshrineData(config!.paranetId, 'all');
+      expect(agent._enshrined).toHaveLength(1);
     });
   });
 

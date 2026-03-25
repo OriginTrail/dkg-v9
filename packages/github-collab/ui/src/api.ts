@@ -51,6 +51,7 @@ export function addRepo(config: {
   webhookSecret?: string;
   pollIntervalMs?: number;
   syncScope?: string[];
+  privacyLevel?: 'local' | 'shared';
 }) {
   return apiFetch('/config/repo', { method: 'POST', body: JSON.stringify(config) });
 }

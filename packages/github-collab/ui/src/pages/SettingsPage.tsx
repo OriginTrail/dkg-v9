@@ -5,8 +5,23 @@ import { useRepo, repoKey as toRepoKey } from '../context/RepoContext.js';
 export function SettingsPage() {
   const { selectedRepo, refreshRepos } = useRepo();
   const [config, setConfig] = useState<any>(null);
-  const [owner, setOwner] = useState('');
-  const [repo, setRepo] = useState('');
+  const [repoInput, setRepoInput] = useState('');
+
+  /** Parse GitHub URL or owner/repo into { owner, repo } */
+  function parseRepoInput(input: string): { owner: string; repo: string } | null {
+    const trimmed = input.trim().replace(/\/$/, '');
+    // Full URL: https://github.com/owner/repo
+    const urlMatch = trimmed.match(/(?:https?:\/\/)?github\.com\/([^/]+)\/([^/]+)/i);
+    if (urlMatch) return { owner: urlMatch[1], repo: urlMatch[2] };
+    // owner/repo format
+    const slashMatch = trimmed.match(/^([^/]+)\/([^/]+)$/);
+    if (slashMatch) return { owner: slashMatch[1], repo: slashMatch[2] };
+    return null;
+  }
+
+  const parsedRepo = parseRepoInput(repoInput);
+  const owner = parsedRepo?.owner ?? '';
+  const repo = parsedRepo?.repo ?? '';
   const [privacy, setPrivacy] = useState<'shared' | 'local'>('shared');
   const [token, setToken] = useState('');
   const [tokenStatus, setTokenStatus] = useState<any>(null);
@@ -44,7 +59,7 @@ export function SettingsPage() {
     setError(null);
     setMessage(null);
     try {
-      await addRepo({ owner, repo, githubToken: token || undefined });
+      await addRepo({ owner, repo, githubToken: token || undefined, privacyLevel: privacy });
       setMessage(`Added ${owner}/${repo} (${privacy})`);
       loadConfig();
       await refreshRepos();
@@ -113,7 +128,7 @@ export function SettingsPage() {
           <button className="btn btn-secondary" onClick={handleTestToken}>Test Token</button>
         </div>
         {tokenStatus && !tokenStatus.valid && (
-          <p className="text-error">Invalid token</p>
+          <p className="text-error">{tokenStatus.error ?? 'Invalid token'}</p>
         )}
       </div>
 
@@ -124,21 +139,23 @@ export function SettingsPage() {
           <input
             type="text"
             className="input"
-            placeholder="Owner"
-            value={owner}
-            onChange={e => setOwner(e.target.value)}
+            style={{ flex: 2 }}
+            placeholder="GitHub URL or owner/repo (e.g. https://github.com/OriginTrail/dkg-v9)"
+            value={repoInput}
+            onChange={e => setRepoInput(e.target.value)}
           />
-          <input
-            type="text"
-            className="input"
-            placeholder="Repository"
-            value={repo}
-            onChange={e => setRepo(e.target.value)}
-          />
-          <button className="btn" onClick={handleAddRepo} disabled={saving}>
+          <button className="btn" onClick={handleAddRepo} disabled={saving || !parsedRepo}>
             {saving ? 'Adding...' : 'Add Repository'}
           </button>
         </div>
+        {repoInput && !parsedRepo && (
+          <p className="text-error" style={{ marginTop: 4 }}>Enter a GitHub URL or owner/repo format</p>
+        )}
+        {parsedRepo && (
+          <p style={{ marginTop: 4, color: 'var(--green)', fontSize: 13 }}>
+            {parsedRepo.owner}/{parsedRepo.repo}
+          </p>
+        )}
         <div className="privacy-radios">
           <label className="radio-label">
             <input

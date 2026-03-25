@@ -42,6 +42,7 @@ export interface RepoConfig {
   syncScope: SyncScope[];
   paranetId: string;
   lastSyncAt?: string;
+  privacyLevel: 'local' | 'shared';
 }
 
 export interface ReviewSession {
@@ -102,9 +103,11 @@ export class GitHubCollabCoordinator {
     pollIntervalMs?: number;
     syncScope?: SyncScope[];
     paranetId?: string;
+    privacyLevel?: 'local' | 'shared';
   }): Promise<{ paranetId: string; repoKey: string }> {
     const repoKey = `${config.owner}/${config.repo}`;
     const pId = config.paranetId ?? makeParanetId(config.owner, config.repo);
+    const privacy = config.privacyLevel ?? 'local';
 
     const repoConfig: RepoConfig = {
       owner: config.owner,
@@ -114,6 +117,7 @@ export class GitHubCollabCoordinator {
       pollIntervalMs: config.pollIntervalMs ?? 300_000,
       syncScope: config.syncScope ?? ['pull_requests', 'issues', 'reviews', 'commits'],
       paranetId: pId,
+      privacyLevel: privacy,
     };
 
     this.repos.set(repoKey, repoConfig);
@@ -126,20 +130,25 @@ export class GitHubCollabCoordinator {
       } as RepoSyncConfig);
     }
 
-    // Subscribe to paranet gossip topics
-    this.subscribeToParanet(pId);
+    if (privacy === 'shared') {
+      // Subscribe to paranet gossip topics
+      this.subscribeToParanet(pId);
 
-    // Announce join
-    await this.broadcastMessage(pId, {
-      app: APP_ID,
-      type: 'node:joined',
-      peerId: this.myPeerId,
-      timestamp: Date.now(),
-      repo: repoKey,
-      nodeName: this.nodeName,
-    });
+      // Announce join
+      await this.broadcastMessage(pId, {
+        app: APP_ID,
+        type: 'node:joined',
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        repo: repoKey,
+        nodeName: this.nodeName,
+      });
 
-    this.log(`Added repo ${repoKey} → paranet ${pId}`);
+      this.log(`Added repo ${repoKey} → paranet ${pId} (shared mode)`);
+    } else {
+      this.log(`Added repo ${repoKey} in local-only mode (no P2P sharing)`);
+    }
+
     return { paranetId: pId, repoKey };
   }
 
@@ -179,7 +188,9 @@ export class GitHubCollabCoordinator {
 
   async writeToWorkspace(paranetId: string, quads: Quad[]): Promise<void> {
     if (quads.length === 0) return;
-    await this.agent.writeToWorkspace(paranetId, quads as any[]);
+    const repoConfig = this.findRepoByParanetId(paranetId);
+    const isLocal = repoConfig?.privacyLevel === 'local';
+    await this.agent.writeToWorkspace(paranetId, quads as any[], isLocal ? { localOnly: true } : undefined);
   }
 
   async enshrineData(
@@ -187,6 +198,11 @@ export class GitHubCollabCoordinator {
     selection: 'all' | { rootEntities: string[] },
     options?: { clearWorkspaceAfter?: boolean },
   ): Promise<any> {
+    const repoConfig = this.findRepoByParanetId(paranetId);
+    if (repoConfig?.privacyLevel === 'local') {
+      this.log(`Skipping enshrinement for local-only repo (paranet ${paranetId})`);
+      return { skipped: true, reason: 'local-only' };
+    }
     return this.agent.enshrineFromWorkspace(paranetId, selection, options);
   }
 
@@ -374,6 +390,13 @@ export class GitHubCollabCoordinator {
   }
 
   // --- GossipSub ---
+
+  private findRepoByParanetId(paranetId: string): RepoConfig | undefined {
+    for (const config of this.repos.values()) {
+      if (config.paranetId === paranetId) return config;
+    }
+    return undefined;
+  }
 
   private subscribeToParanet(paranetId: string): void {
     const appTopic = `dkg/paranet/${paranetId}/app`;

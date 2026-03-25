@@ -44,6 +44,10 @@ export interface DKGPublisherConfig {
 export interface WriteToWorkspaceOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
+  /** Access policy for this workspace write. Default: 'public'. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Peer IDs permitted to read when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 export interface WriteToWorkspaceResult {
@@ -169,6 +173,25 @@ export class DKGPublisher implements Publisher {
     options: WriteToWorkspaceOptions & { conditions?: CASCondition[] },
   ): Promise<WriteToWorkspaceResult> {
     const ctx = options.operationCtx ?? createOperationContext('workspace');
+
+    // Validate access policy metadata (same invariants as publish())
+    const VALID_POLICIES = new Set<string | undefined>(['public', 'ownerOnly', 'allowList', undefined]);
+    if (!VALID_POLICIES.has(options.accessPolicy)) {
+      throw new Error(
+        `Workspace write rejected: invalid accessPolicy "${String(options.accessPolicy)}" (must be "public", "ownerOnly", or "allowList")`,
+      );
+    }
+    if (options.accessPolicy === 'allowList') {
+      if (!options.allowedPeers || options.allowedPeers.length === 0) {
+        throw new Error('Workspace write rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
+      }
+    }
+    if (options.accessPolicy !== 'allowList' && options.allowedPeers && options.allowedPeers.length > 0) {
+      // ownerOnly with allowedPeers is contradictory — strip silently (matches publish() intent)
+      this.log.warn(ctx, `Ignoring allowedPeers for accessPolicy "${options.accessPolicy ?? 'public'}" — only valid with "allowList"`);
+      options = { ...options, allowedPeers: undefined };
+    }
+
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
 
     await this.graphManager.ensureParanet(paranetId);
@@ -249,6 +272,8 @@ export class DKGPublisher implements Publisher {
       timestampMs: Date.now(),
       operationId: ctx.operationId,
       casConditions,
+      accessPolicy: options.accessPolicy,
+      allowedPeers: options.allowedPeers,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -279,6 +304,8 @@ export class DKGPublisher implements Publisher {
         rootEntities,
         publisherPeerId: options.publisherPeerId,
         timestamp: new Date(),
+        accessPolicy: options.accessPolicy,
+        allowedPeers: options.allowedPeers,
       },
       workspaceMetaGraph,
     );
@@ -389,6 +416,12 @@ export class DKGPublisher implements Publisher {
       onPhase?: PhaseCallback;
       contextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      /** Access policy for the enshrined KC. Default: 'public'. */
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      /** Allowed peer IDs when accessPolicy is 'allowList'. */
+      allowedPeers?: string[];
+      /** Publisher peer ID for KC ownership metadata. Required when accessPolicy is not 'public'. */
+      publisherPeerId?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
@@ -445,6 +478,9 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      accessPolicy: options?.accessPolicy,
+      allowedPeers: options?.allowedPeers,
+      publisherPeerId: options?.publisherPeerId,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {

@@ -1,4 +1,4 @@
-import type { StreamHandler, EventBus } from '@origintrail-official/dkg-core';
+import type { StreamHandler, EventBus, AccessPolicy } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   decodeAccessRequest,
@@ -12,7 +12,7 @@ import { computePrivateRoot } from './merkle.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
-export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+export type { AccessPolicy };
 
 interface KAMeta {
   rootEntity: string;

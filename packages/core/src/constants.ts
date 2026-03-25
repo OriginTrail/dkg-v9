@@ -5,6 +5,7 @@ export const PROTOCOL_SYNC = '/dkg/sync/1.0.0';
 export const PROTOCOL_MESSAGE = '/dkg/message/1.0.0';
 export const PROTOCOL_ACCESS = '/dkg/access/1.0.0';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/query/2.0.0';
+export const PROTOCOL_WORKSPACE_PUSH = '/dkg/workspace-push/1.0.0';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 

@@ -1,4 +1,5 @@
 export * from './types.js';
+export { resolveVisibility, type ResolvedVisibility } from './visibility.js';
 export * from './constants.js';
 export * from './event-bus.js';
 export { Logger, createOperationContext, type OperationContext, type OperationName, type LogSink } from './logger.js';

@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_WORKSPACE_PUSH,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
@@ -8,7 +8,8 @@ import {
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
-  type DKGNodeConfig, type OperationContext,
+  resolveVisibility,
+  type DKGNodeConfig, type OperationContext, type Visibility, type AccessPolicy,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -36,7 +37,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 interface PublishOpts {
   onPhase?: PhaseCallback;
   operationCtx?: OperationContext;
-  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  visibility?: Visibility;
+  /** @deprecated Use visibility instead */
+  accessPolicy?: AccessPolicy;
+  /** @deprecated Use visibility: { peers: [...] } instead */
   allowedPeers?: string[];
 }
 
@@ -71,6 +75,10 @@ export interface ParanetSub {
   synced: boolean;
   /** On-chain paranet ID (keccak256 hash), if known. */
   onChainId?: string;
+  /** Access policy stored at paranet creation time. Absent means public (default). */
+  accessPolicy?: AccessPolicy;
+  /** Allowed peer IDs when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 export interface DKGAgentConfig {
@@ -408,7 +416,7 @@ export class DKGAgent {
     //   or: "workspace:paranetId|offset|limit" for workspace graph sync
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
-    this.router.register(PROTOCOL_SYNC, async (data) => {
+    this.router.register(PROTOCOL_SYNC, async (data, fromPeerId) => {
       const text = new TextDecoder().decode(data).trim();
       const [paranetPart, offsetStr, limitStr] = text.split('|');
       const offset = parseInt(offsetStr, 10) || 0;
@@ -422,25 +430,106 @@ export class DKGAgent {
         const wsGraph = paranetWorkspaceGraphUri(paranetId);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
         const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+        const requestingPeerId = fromPeerId.toString();
+
+        // --- Access filtering ---
+        // Query workspace_meta for per-operation access policies so we only
+        // serve root entities the requesting peer is authorized to see.
+        // Operations without an accessPolicy triple (pre-migration data) are
+        // treated as public for backward compatibility.
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const PROV_NS = 'http://www.w3.org/ns/prov#';
+        const accessQuery = `SELECT ?op ?re ?policy ?publisher ?allowedPeer WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}rootEntity> ?re .
+    OPTIONAL { ?op <${DKG_NS}accessPolicy> ?policy }
+    OPTIONAL { ?op <${PROV_NS}wasAttributedTo> ?publisher }
+    OPTIONAL { ?op <${DKG_NS}allowedPeer> ?allowedPeer }
+  }
+}`;
+        const accessResult = await this.store.query(accessQuery);
+        const accessibleRoots = new Set<string>();
+        if (accessResult.type === 'bindings') {
+          // Group results by operation+rootEntity to handle multiple allowedPeer rows
+          const opRoots = new Map<string, { policy?: string; publisher?: string; peers: Set<string> }>();
+          for (const row of accessResult.bindings) {
+            const re = row['re'];
+            const op = row['op'];
+            if (!re || !op) continue;
+            const key = `${op}\0${re}`;
+            let entry = opRoots.get(key);
+            if (!entry) {
+              const rawPolicy = row['policy'];
+              const policy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
+              const rawPublisher = row['publisher'];
+              const publisher = rawPublisher ? stripLiteral(rawPublisher) : undefined;
+              entry = { policy, publisher, peers: new Set() };
+              opRoots.set(key, entry);
+            }
+            const rawPeer = row['allowedPeer'];
+            if (rawPeer) entry.peers.add(stripLiteral(rawPeer));
+          }
+
+          for (const [key, { policy, publisher, peers }] of opRoots) {
+            const re = key.split('\0')[1];
+            // No policy or explicit 'public' → accessible to everyone
+            if (!policy || policy === 'public') {
+              accessibleRoots.add(re);
+            } else if (policy === 'ownerOnly') {
+              if (publisher && requestingPeerId === publisher) {
+                accessibleRoots.add(re);
+              }
+            } else if (policy === 'allowList') {
+              if (peers.has(requestingPeerId)) {
+                accessibleRoots.add(re);
+              }
+            } else {
+              // Unknown policy — treat as public for forward compatibility
+              accessibleRoots.add(re);
+            }
+          }
+        }
+
+        // If no operations matched at all (empty workspace), return empty
+        if (accessResult.type === 'bindings' && accessResult.bindings.length > 0 && accessibleRoots.size === 0) {
+          return new TextEncoder().encode('');
+        }
 
         // Apply TTL/root-entity filter inside SPARQL before pagination so that
         // we return the first N non-expired triples. Only include exact root subject
         // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
         // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
+        // Additionally filter by accessible root entities for access control.
         const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
+        const rootValues = [...accessibleRoots].map(r => `<${r}>`).join(' ');
+        const hasAccessFilter = accessibleRoots.size > 0;
+        const accessFilterClause = hasAccessFilter ? `VALUES ?re { ${rootValues} }` : '';
+
         const wsQuery =
           cutoff != null
             ? `SELECT DISTINCT ?s ?p ?o WHERE {
   GRAPH <${wsMetaGraph}> {
-    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-    ?op <http://dkg.io/ontology/publishedAt> ?ts .
-    ?op <http://dkg.io/ontology/rootEntity> ?re .
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}publishedAt> ?ts .
+    ?op <${DKG_NS}rootEntity> ?re .
+    ${accessFilterClause}
     FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
   }
   GRAPH <${wsGraph}> { ?s ?p ?o }
   FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
 } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
+            : hasAccessFilter
+              ? `SELECT DISTINCT ?s ?p ?o WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> .
+    ?op <${DKG_NS}rootEntity> ?re .
+    ${accessFilterClause}
+  }
+  GRAPH <${wsGraph}> { ?s ?p ?o }
+  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
+} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
+              : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
         const wsResult = await this.store.query(wsQuery);
         if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
@@ -452,14 +541,34 @@ export class DKGAgent {
         }
 
         if (offset === 0) {
-          // Only send meta for non-expired operations; reuse same cutoff as data query to avoid boundary skew
+          // Only send meta for non-expired operations whose root entities are accessible.
+          // Build a set of accessible operation URIs from the access query results.
+          const accessibleOps = new Set<string>();
+          if (accessResult.type === 'bindings') {
+            for (const row of accessResult.bindings) {
+              const re = row['re'];
+              const op = row['op'];
+              if (re && op && accessibleRoots.has(re)) accessibleOps.add(op);
+            }
+          }
+
+          // Use UNION to fetch both non-expired operation metadata AND workspaceOwner
+          // triples. Owner triples have root entities as subjects (not operations) so
+          // they lack dkg:publishedAt and would be dropped by the TTL filter otherwise.
           const metaQuery = cutoff != null
             ? `SELECT ?s ?p ?o WHERE {
-                GRAPH <${wsMetaGraph}> { ?s ?p ?o }
-                FILTER EXISTS {
-                  GRAPH <${wsMetaGraph}> {
-                    ?s <http://dkg.io/ontology/publishedAt> ?ts .
-                    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                GRAPH <${wsMetaGraph}> {
+                  {
+                    ?s ?p ?o .
+                    FILTER EXISTS {
+                      ?s <${DKG_NS}publishedAt> ?ts .
+                      FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                    }
+                  }
+                  UNION
+                  {
+                    ?s <${DKG_NS}workspaceOwner> ?o .
+                    BIND(<${DKG_NS}workspaceOwner> AS ?p)
                   }
                 }
               } ORDER BY ?s ?p ?o`
@@ -467,7 +576,17 @@ export class DKGAgent {
 
           const metaResult = await this.store.query(metaQuery);
           if (metaResult.type === 'bindings') {
+            const WORKSPACE_OWNER_PRED = `${DKG_NS}workspaceOwner`;
             for (const b of metaResult.bindings) {
+              // Filter metadata: only include triples whose subject is an accessible operation.
+              // Also include dkg:workspaceOwner triples — these use the ROOT ENTITY as subject
+              // (e.g. <did:dkg:entity:X> dkg:workspaceOwner "peerId"), not the operation URI.
+              // Without them, reconstructWorkspaceOwnership() breaks on the receiving peer.
+              if (accessibleOps.size > 0) {
+                const isAccessibleOp = accessibleOps.has(b['s']);
+                const isOwnerTriple = b['p'] === WORKSPACE_OWNER_PRED && accessibleRoots.has(b['s']);
+                if (!isAccessibleOp && !isOwnerTriple) continue;
+              }
               const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
               nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
             }
@@ -504,6 +623,19 @@ export class DKGAgent {
       }
 
       return new TextEncoder().encode(nquads.join('\n'));
+    });
+
+    // Register workspace push handler: receives targeted workspace messages
+    // from peers who wrote allowList data intended for us. Processes the
+    // message the same way as a gossip workspace message.
+    this.router.register(PROTOCOL_WORKSPACE_PUSH, async (data, fromPeerId) => {
+      const wh = this.getOrCreateWorkspaceHandler();
+      try {
+        await wh.handle(data, fromPeerId.toString());
+      } catch (err) {
+        this.log.warn(createOperationContext('workspace'), `Failed to handle workspace push from ${fromPeerId.toString().slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return new Uint8Array(0); // ACK
     });
 
     // Subscribe to both system paranet GossipSub topics
@@ -1180,13 +1312,24 @@ export class DKGAgent {
         );
       }
     }
+    // NOTE: The inherited accessPolicy controls who can access `privateQuads` only.
+    // Public quads (the `quads` parameter) are always stored in the public data graph
+    // and served to any peer — regardless of accessPolicy. If ALL data should be
+    // access-controlled, the caller must put it in `privateQuads`.
+    //
+    // Inherit paranet default visibility when no explicit visibility/accessPolicy is given
+    const explicitVisibility = opts?.visibility ?? (opts?.accessPolicy ? undefined : this.getParanetDefaultVisibility(paranetId));
+    const resolved = resolveVisibility(explicitVisibility, {
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
+    });
     const result = await this.publisher.publish({
       paranetId,
       quads,
       privateQuads,
       publisherPeerId: this.peerId,
-      accessPolicy: opts?.accessPolicy,
-      allowedPeers: opts?.allowedPeers,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
       operationCtx: ctx,
       onPhase,
     });
@@ -1254,23 +1397,55 @@ export class DKGAgent {
 
   /**
    * Write quads to the paranet's workspace graph (no chain, no TRAC).
-   * When localOnly is false (default), replicates via GossipSub workspace topic.
-   * When localOnly is true, stores locally without broadcasting — use for private data.
+   *
+   * Visibility controls both broadcast and access policy:
+   * - `'private'` — local-only, no broadcast, ownerOnly access
+   * - `'public'` — broadcast to peers, public access
+   * - `{ peers: [...] }` — sync-only to listed peers, allowList access (no gossip broadcast)
+   *
+   * The legacy `localOnly` option is still supported for backward compatibility.
+   * When neither `visibility` nor `localOnly` is specified, defaults to `'public'`
+   * (broadcast) — preserving pre-migration behavior for existing callers.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ workspaceOperationId: string }> {
+  async writeToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    opts?: {
+      visibility?: Visibility;
+      /** @deprecated Use visibility: 'private' instead */
+      localOnly?: boolean;
+      operationCtx?: OperationContext;
+    },
+  ): Promise<{ workspaceOperationId: string }> {
+    // Inherit paranet default visibility when neither visibility nor localOnly is
+    // specified. Falls back to 'public' (broadcast) when no paranet-level policy
+    // exists — preserving pre-migration behavior for existing callers.
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : (paranetDefault ?? 'public'));
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
-    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId} (visibility=${typeof effectiveVisibility === 'object' ? 'peers' : effectiveVisibility ?? 'default'})`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
     });
-    if (!opts?.localOnly) {
+    // Only broadcast on GossipSub for public data. allowList data must NOT be
+    // gossipped because any subscribed peer can read raw gossip messages before
+    // the sync-side filter runs. allowList data reaches peers via targeted push.
+    if (resolved.accessPolicy === 'public') {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+    } else if (resolved.accessPolicy === 'allowList' && resolved.allowedPeers.length > 0) {
+      // Targeted push to authorized peers that are currently connected
+      this.pushWorkspaceToAllowedPeers(resolved.allowedPeers, message, ctx).catch((err) => {
+        this.log.warn(ctx, `Targeted push failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
     return { workspaceOperationId };
   }
@@ -1279,40 +1454,219 @@ export class DKGAgent {
    * Compare-and-swap workspace write. Verifies each condition against the
    * current workspace graph before applying the write atomically.
    * Throws StaleWriteError if any condition fails.
+   *
+   * Visibility semantics are identical to writeToWorkspace().
    */
   async writeConditionalToWorkspace(
     paranetId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+    opts?: {
+      visibility?: Visibility;
+      /** @deprecated Use visibility: 'private' instead */
+      localOnly?: boolean;
+      operationCtx?: OperationContext;
+    },
   ): Promise<{ workspaceOperationId: string }> {
+    // Inherit paranet default visibility (same logic as writeToWorkspace)
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : (paranetDefault ?? 'public'));
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
     const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
     });
-    if (!opts?.localOnly) {
+    // Only broadcast on GossipSub for public data (see writeToWorkspace comment)
+    if (resolved.accessPolicy === 'public') {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+    } else if (resolved.accessPolicy === 'allowList' && resolved.allowedPeers.length > 0) {
+      // Targeted push to authorized peers that are currently connected
+      this.pushWorkspaceToAllowedPeers(resolved.allowedPeers, message, ctx).catch((err) => {
+        this.log.warn(ctx, `Targeted push failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
     return { workspaceOperationId };
+  }
+
+  /**
+   * After an allowList workspace write, push the workspace message directly to
+   * each allowed peer that is currently connected. This ensures authorized peers
+   * receive the data immediately without waiting for a reconnect or manual sync.
+   * Failures are logged but do not propagate — delivery is best-effort.
+   */
+  private async pushWorkspaceToAllowedPeers(
+    allowedPeers: string[],
+    message: Uint8Array,
+    ctx: OperationContext,
+  ): Promise<void> {
+    // Build a map of connected peer ID strings for fast lookup
+    const connectedPeerIds = new Set(
+      this.node.libp2p.getConnections().map((conn) => conn.remotePeer.toString()),
+    );
+
+    const targets = allowedPeers.filter(p => connectedPeerIds.has(p));
+    if (targets.length === 0) return;
+
+    this.log.info(ctx, `Pushing workspace data to ${targets.length} connected allowed peer(s)`);
+    await Promise.allSettled(
+      targets.map(async (peerId) => {
+        try {
+          await this.router.send(peerId, PROTOCOL_WORKSPACE_PUSH, message);
+        } catch (err) {
+          this.log.warn(ctx, `Workspace push to ${peerId.slice(-8)} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }),
+    );
+  }
+
+  /**
+   * Look up the paranet's stored access policy from the in-memory subscribedParanets map.
+   * Returns undefined when no policy is stored (i.e. the paranet is public or pre-dates the
+   * privacy model). Callers use this to inherit the paranet's default when the user omits
+   * an explicit visibility parameter on a write/publish operation.
+   *
+   * If the in-memory map has no accessPolicy, falls back to a one-time store query
+   * (checking both the ontology graph and the paranet's _meta graph) and caches the result.
+   */
+  private getParanetDefaultVisibility(paranetId: string): Visibility | undefined {
+    const sub = this.subscribedParanets.get(paranetId);
+
+    // If the subscription entry is entirely absent, kick off a store lookup
+    // that may discover a non-public paranet from its _meta graph (e.g. after restart).
+    if (!sub) {
+      this._ensurePolicyLookup(paranetId);
+      return undefined;
+    }
+
+    // If accessPolicy is already populated, use it directly
+    if (sub.accessPolicy) {
+      if (sub.accessPolicy === 'public') return undefined;
+      if (sub.accessPolicy === 'ownerOnly') return 'private';
+      if (sub.accessPolicy === 'allowList' && sub.allowedPeers && sub.allowedPeers.length > 0) {
+        return { peers: sub.allowedPeers };
+      }
+      return undefined;
+    }
+
+    // Store-backed fallback: query once and cache the result.
+    // This is a synchronous method, so we kick off an async rehydration and
+    // return undefined for this call. The next call will see the cached value.
+    this._ensurePolicyLookup(paranetId, sub);
+
+    return undefined;
+  }
+
+  /**
+   * Fire-and-forget store lookup for a paranet's access policy.
+   * When `sub` is provided, populates its fields; when absent, creates a new
+   * subscription entry if the store contains a non-public definition in `_meta`.
+   */
+  private _ensurePolicyLookup(paranetId: string, sub?: ParanetSub): void {
+    // Use a sentinel on the subscription (or a module-level set for absent entries)
+    // to avoid repeated queries for the same paranet.
+    const sentinel = sub ?? (this as any);
+    const key = sub ? '_policyLookupPending' : `_policyLookup:${paranetId}`;
+    if ((sentinel as any)[key]) return;
+    (sentinel as any)[key] = true;
+
+    const pUri = `did:dkg:paranet:${paranetId}`;
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    this.store.query(`
+      SELECT ?policy ?peer ?name WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          }
+        } UNION {
+          GRAPH <${metaGraph}> {
+            <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          }
+        }
+        OPTIONAL {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+            }
+          }
+        }
+        OPTIONAL {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name .
+            }
+          }
+        }
+      }
+    `).then((result) => {
+      delete (sentinel as any)[key];
+      if (result.type !== 'bindings' || result.bindings.length === 0) return;
+      const rows = result.bindings as Record<string, string>[];
+      const policy = rows[0]['policy'] ? stripLiteral(rows[0]['policy']) : undefined;
+      if (!policy) return;
+
+      const peers: string[] = [];
+      for (const r of rows) {
+        if (r['peer']) {
+          const p = stripLiteral(r['peer']);
+          if (p && !peers.includes(p)) peers.push(p);
+        }
+      }
+      const name = rows[0]['name'] ? stripLiteral(rows[0]['name']) : undefined;
+
+      if (sub) {
+        // Update existing subscription entry
+        sub.accessPolicy = policy as AccessPolicy;
+        if (peers.length > 0) sub.allowedPeers = peers;
+      } else {
+        // Create a new subscription entry for a non-public paranet found in _meta
+        const existing = this.subscribedParanets.get(paranetId);
+        if (!existing) {
+          this.subscribedParanets.set(paranetId, {
+            name: name ?? paranetId,
+            subscribed: true,
+            synced: true,
+            accessPolicy: policy as AccessPolicy,
+            allowedPeers: peers.length > 0 ? peers : undefined,
+          });
+          this.subscribeToParanet(paranetId, { trackSyncScope: false });
+        }
+      }
+    }).catch(() => {
+      delete (sentinel as any)[key];
+    });
   }
 
   /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
+   *
+   * Default visibility is 'public' for enshrinement (it is the explicit "make permanent" action).
    */
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
+      visibility?: Visibility;
       clearWorkspaceAfter?: boolean;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
@@ -1323,12 +1677,28 @@ export class DKGAgent {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
 
+    // Default to public for enshrinement — this is the deliberate "make permanent" action.
+    // Warn if the paranet has a more restrictive policy and the caller is not explicitly
+    // setting visibility, so they don't accidentally widen access.
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    if (!options?.visibility && paranetDefault) {
+      const policyLabel = typeof paranetDefault === 'string' ? paranetDefault : 'peers';
+      this.log.warn(ctx,
+        `Enshrining with default visibility "public" but paranet "${paranetId}" has access policy "${policyLabel}". ` +
+        `Pass visibility explicitly to suppress this warning.`,
+      );
+    }
+    const resolved = resolveVisibility(options?.visibility ?? 'public');
+
     const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
       operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       onPhase: options?.onPhase,
       contextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
+      publisherPeerId: this.node.peerId.toString(),
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1665,7 +2035,8 @@ export class DKGAgent {
     replicationPolicy?: string;
     accessPolicy?: number;
     revealOnChain?: boolean;
-    /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
+    visibility?: Visibility;
+    /** @deprecated Use visibility: 'private' instead */
     private?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
@@ -1674,15 +2045,24 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
 
+    const resolved = resolveVisibility(opts.visibility, { private: opts.private });
+    // ownerOnly: fully local — no chain, no gossip, no subscription
+    const skipChain = resolved.accessPolicy === 'ownerOnly';
+    // Only public paranets broadcast their definition on the ontology topic;
+    // allowList paranets are registered on-chain for governance but their
+    // definition is NOT broadcast — allowed peers discover it directly.
+    const skipDefinitionBroadcast = resolved.accessPolicy !== 'public';
+
     const exists = await this.paranetExists(opts.id);
     if (exists) {
       throw new Error(`Paranet "${opts.id}" already exists`);
     }
 
     // Register on chain if a real chain adapter is configured.
-    // Private paranets skip on-chain registration and gossip entirely.
+    // ownerOnly paranets skip on-chain registration and gossip entirely.
+    // allowList paranets register on-chain (for governance/incentives).
     let onChainId: string | undefined;
-    if (opts.private) {
+    if (skipChain) {
       this.log.info(ctx, `Creating private paranet "${opts.id}" (local-only, no chain, no gossip)`);
     } else if (this.chain.chainId !== 'none') {
       try {
@@ -1705,13 +2085,18 @@ export class DKGAgent {
       }
     }
 
+    // Non-public paranets store their definition in the paranet's own _meta graph
+    // instead of the shared ontology graph, so that ontology sync doesn't leak their
+    // existence to other peers. Public paranets use the shared ontology graph as before.
+    const defGraph = skipDefinitionBroadcast ? paranetMetaGraphUri(opts.id) : ontologyGraph;
+
     const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
     ];
 
     if (onChainId) {
@@ -1719,7 +2104,7 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
         object: `"${onChainId}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
 
@@ -1728,17 +2113,38 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
+    }
+
+    // Store access policy in the paranet definition so sync/query can check it.
+    // Uses the same DKG ontology namespace as workspace/publish metadata.
+    if (resolved.accessPolicy !== 'public') {
+      quads.push({
+        subject: paranetUri,
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: `"${resolved.accessPolicy}"`,
+        graph: defGraph,
+      });
+    }
+    if (resolved.allowedPeers.length > 0) {
+      for (const peer of resolved.allowedPeers) {
+        quads.push({
+          subject: paranetUri,
+          predicate: 'http://dkg.io/ontology/allowedPeer',
+          object: `"${peer}"`,
+          graph: defGraph,
+        });
+      }
     }
 
     // Provenance activity
     const activityUri = `did:dkg:activity:create-paranet:${opts.id}:${Date.now()}`;
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: defGraph },
     );
 
     // Insert the definition triples
@@ -1749,15 +2155,23 @@ export class DKGAgent {
 
     this.subscribedParanets.set(opts.id, {
       name: opts.name,
-      subscribed: !opts.private,
+      subscribed: !skipChain,
       synced: true,
       onChainId: onChainId,
+      accessPolicy: resolved.accessPolicy !== 'public' ? resolved.accessPolicy : undefined,
+      allowedPeers: resolved.allowedPeers.length > 0 ? resolved.allowedPeers : undefined,
     });
 
-    if (!opts.private) {
-      // Auto-subscribe to the new paranet's GossipSub topic
+    // ownerOnly: fully isolated — no gossip topics, no broadcast
+    // allowList: subscribe to paranet-specific topics (so allowed peers can gossip
+    //            within the paranet), but do NOT broadcast definition publicly
+    // public: full gossip subscription + public definition broadcast
+    if (!skipChain) {
+      // Subscribe to paranet-specific GossipSub topics (publish, workspace, app, etc.)
       this.subscribeToParanet(opts.id);
+    }
 
+    if (!skipDefinitionBroadcast) {
       // Broadcast via the ontology paranet so other nodes learn about it
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const nquads = quads.map(q => {
@@ -2129,33 +2543,64 @@ export class DKGAgent {
     const prefix = 'did:dkg:paranet:';
     let discovered = 0;
 
+    // Only discover public paranets from the shared ontology graph.
+    // Non-public paranets store their definition in their own _meta graph
+    // and are NOT auto-discovered — they only appear if this node created them
+    // or was explicitly told about them.
+    // Also query accessPolicy and allowedPeer so we can rehydrate privacy
+    // settings on restart (a paranet may have multiple allowedPeer rows).
     const result = await this.store.query(`
-      SELECT ?paranet ?name WHERE {
+      SELECT ?paranet ?name ?policy ?peer WHERE {
         GRAPH <${ontologyGraph}> {
           ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
           OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/accessPolicy> ?policy }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/allowedPeer> ?peer }
         }
       }
     `);
 
     if (result.type !== 'bindings') return 0;
 
+    // Group rows by paranet URI to collect multiple allowedPeer values
+    const grouped = new Map<string, { name?: string; policy?: string; peers: string[] }>();
     for (const row of result.bindings as Record<string, string>[]) {
       const uri = row['paranet'] ?? '';
+      if (!grouped.has(uri)) {
+        grouped.set(uri, {
+          name: row['name'] ? stripLiteral(row['name']) : undefined,
+          policy: row['policy'] ? stripLiteral(row['policy']) : undefined,
+          peers: [],
+        });
+      }
+      const entry = grouped.get(uri)!;
+      if (row['peer']) {
+        const peer = stripLiteral(row['peer']);
+        if (peer && !entry.peers.includes(peer)) entry.peers.push(peer);
+      }
+    }
+
+    for (const [uri, info] of grouped) {
       const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
       if (!id) continue;
 
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
+      // Skip non-public paranets that leaked into the ontology graph (legacy data).
+      // They should not be auto-discovered by other peers.
+      if (info.policy && info.policy !== 'public') continue;
+
       const existing = this.subscribedParanets.get(id);
       if (existing?.subscribed && existing?.synced) continue;
 
-      const name = row['name'] ? stripLiteral(row['name']) : id;
+      const name = info.name ?? id;
       this.subscribedParanets.set(id, {
         name,
         subscribed: true,
         synced: true,
         onChainId: existing?.onChainId,
+        accessPolicy: info.policy as AccessPolicy | undefined,
+        allowedPeers: info.peers.length > 0 ? info.peers : undefined,
       });
 
       if (!existing?.subscribed) {
@@ -2169,7 +2614,149 @@ export class DKGAgent {
     if (discovered > 0) {
       this.log.info(ctx, `Auto-subscribed to ${discovered} new paranet(s) from store`);
     }
+
+    // Rehydrate access policy for paranets already in the subscription registry
+    // whose accessPolicy/allowedPeers are missing (e.g. after restart).
+    // Also rehydrate when accessPolicy is 'allowList' but allowedPeers is absent
+    // (e.g. chain-discovered entries that set the policy but couldn't get peers).
+    // Check both the ontology graph (public) and the paranet's own _meta graph (non-public).
+    for (const [id, sub] of this.subscribedParanets) {
+      const needsRehydration = sub.accessPolicy === undefined
+        || (sub.accessPolicy === 'allowList' && (!sub.allowedPeers || sub.allowedPeers.length === 0));
+      if (!needsRehydration) continue;
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+      const pUri = `did:dkg:paranet:${id}`;
+      const metaGraph = paranetMetaGraphUri(id);
+      const policyResult = await this.store.query(`
+        SELECT ?policy ?peer WHERE {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+            }
+          }
+          OPTIONAL {
+            {
+              GRAPH <${ontologyGraph}> {
+                <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+              }
+            } UNION {
+              GRAPH <${metaGraph}> {
+                <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+              }
+            }
+          }
+        }
+      `);
+
+      if (policyResult.type === 'bindings' && policyResult.bindings.length > 0) {
+        const rows = policyResult.bindings as Record<string, string>[];
+        const policy = rows[0]['policy'] ? stripLiteral(rows[0]['policy']) : undefined;
+        const peers: string[] = [];
+        for (const r of rows) {
+          if (r['peer']) {
+            const p = stripLiteral(r['peer']);
+            if (p && !peers.includes(p)) peers.push(p);
+          }
+        }
+        if (policy) {
+          sub.accessPolicy = policy as AccessPolicy;
+          if (peers.length > 0) sub.allowedPeers = peers;
+          this.log.info(ctx, `Rehydrated access policy for paranet "${id}": ${policy}` +
+            (peers.length > 0 ? ` (${peers.length} allowed peer(s))` : ''));
+        }
+      }
+    }
+
+    // Rebuild subscriptions for non-public paranets whose definitions live in
+    // their own _meta graphs (not in the shared ontology graph). After restart,
+    // these entries would be entirely absent from subscribedParanets.
+    discovered += await this.rebuildNonPublicParanets(ctx);
+
     return discovered;
+  }
+
+  /**
+   * Scan all paranet `_meta` graphs in the store for `dkg:accessPolicy` triples
+   * and rebuild subscription entries for non-public paranets that are missing
+   * from `subscribedParanets`. This catches ownerOnly and allowList paranets
+   * created by this node that were persisted in `_meta` graphs (per 328a401)
+   * and would otherwise be invisible after a restart.
+   */
+  private async rebuildNonPublicParanets(ctx: OperationContext): Promise<number> {
+    // Query across ALL graphs for accessPolicy triples whose subject matches
+    // the paranet URI pattern. The GRAPH variable lets us identify which _meta
+    // graph each triple came from.
+    const prefix = 'did:dkg:paranet:';
+    const metaSuffix = '/_meta';
+    const result = await this.store.query(`
+      SELECT ?g ?paranet ?name ?policy ?peer WHERE {
+        GRAPH ?g {
+          ?paranet <http://dkg.io/ontology/accessPolicy> ?policy .
+          OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/allowedPeer> ?peer }
+        }
+        FILTER(STRENDS(STR(?g), "/_meta"))
+      }
+    `);
+
+    if (result.type !== 'bindings') return 0;
+
+    // Group by paranet URI
+    const grouped = new Map<string, { name?: string; policy?: string; peers: string[] }>();
+    for (const row of result.bindings as Record<string, string>[]) {
+      const uri = row['paranet'] ?? '';
+      if (!uri.startsWith(prefix)) continue;
+      if (!grouped.has(uri)) {
+        grouped.set(uri, {
+          name: row['name'] ? stripLiteral(row['name']) : undefined,
+          policy: row['policy'] ? stripLiteral(row['policy']) : undefined,
+          peers: [],
+        });
+      }
+      const entry = grouped.get(uri)!;
+      if (row['peer']) {
+        const peer = stripLiteral(row['peer']);
+        if (peer && !entry.peers.includes(peer)) entry.peers.push(peer);
+      }
+    }
+
+    let rebuilt = 0;
+    for (const [uri, info] of grouped) {
+      const id = uri.slice(prefix.length);
+      if (!id || id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+      if (!info.policy || info.policy === 'public') continue;
+
+      const existing = this.subscribedParanets.get(id);
+      if (existing?.subscribed && existing?.synced) continue;
+
+      const name = info.name ?? id;
+      this.subscribedParanets.set(id, {
+        name,
+        subscribed: true,
+        synced: true,
+        onChainId: existing?.onChainId,
+        accessPolicy: info.policy as AccessPolicy,
+        allowedPeers: info.peers.length > 0 ? info.peers : undefined,
+      });
+
+      if (!existing?.subscribed) {
+        this.subscribeToParanet(id, { trackSyncScope: false });
+      }
+
+      this.log.info(ctx, `Rebuilt non-public paranet "${name}" (${id}) from _meta graph — policy=${info.policy}` +
+        (info.peers.length > 0 ? `, ${info.peers.length} peer(s)` : ''));
+      rebuilt++;
+    }
+
+    if (rebuilt > 0) {
+      this.log.info(ctx, `Rebuilt ${rebuilt} non-public paranet(s) from _meta graphs`);
+    }
+    return rebuilt;
   }
 
   /**
@@ -2212,14 +2799,19 @@ export class DKGAgent {
         continue;
       }
 
+      // Map on-chain accessPolicy number: 0 = public (undefined), 1 = permissioned (allowList).
+      // Allowed peers are not available on-chain, only from the store.
+      const chainPolicy: AccessPolicy | undefined = p.accessPolicy === 1 ? 'allowList' : undefined;
       this.subscribedParanets.set(p.name, {
         name: p.name,
         subscribed: true,
         synced: false,
         onChainId: p.paranetId,
+        accessPolicy: chainPolicy,
       });
       this.subscribeToParanet(p.name, { trackSyncScope: false });
-      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)` +
+        (chainPolicy ? `, accessPolicy=${chainPolicy}` : ''));
       discovered++;
     }
 

@@ -60,3 +60,24 @@ export interface ConnectionInfo {
 export interface StreamHandler {
   (data: Uint8Array, peerId: PeerId): Promise<Uint8Array>;
 }
+
+/**
+ * KC-level access policy controlling who can read private triples.
+ * - `public`: anyone can read
+ * - `ownerOnly`: only the publisher peer can read
+ * - `allowList`: only explicitly listed peers can read
+ */
+export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+/**
+ * Unified visibility control. Used consistently across paranet creation,
+ * workspace writes, and publishing.
+ *
+ * - `'private'` — Only this node (no broadcast, ownerOnly access)
+ * - `'public'` — Anyone can read (broadcast, public access)
+ * - `{ peers: string[] }` — Only listed peer IDs can read (broadcast, allowList access)
+ */
+export type Visibility =
+  | 'private'
+  | 'public'
+  | { peers: string[] };

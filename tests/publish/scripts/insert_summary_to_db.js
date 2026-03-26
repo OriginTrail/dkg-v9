@@ -40,6 +40,7 @@ for (const file of files) {
         password: process.env.DB_PASSWORD_PUBLISH,
         database: process.env.DB_NAME_PUBLISH,
         port: 5432,
+        ssl: { rejectUnauthorized: false },
     });
 
     try {

@@ -150,7 +150,7 @@ export class GitHubCollabCoordinator {
     this.pingTimer = setInterval(() => this.broadcastPing(), 60_000);
 
     // Cleanup timer for abandoned sessions (every 2 min)
-    this.cleanupTimer = setInterval(() => this.activity.cleanupAbandonedSessions(), 120_000);
+    this.cleanupTimer = setInterval(() => this.cleanupAbandonedSessions(), 120_000);
 
     // Restore saved repo configs from disk
     this.restoreFromDisk();
@@ -534,6 +534,11 @@ export class GitHubCollabCoordinator {
   ): Promise<ReviewSession> {
     const session = this.reviewSessions.get(sessionId);
     if (!session) throw new Error(`Review session ${sessionId} not found`);
+
+    // Only listed reviewers may submit reviews (prevents self-approval)
+    if (!session.reviewers.includes(this.myPeerId)) {
+      throw new Error(`Peer ${this.myPeerId} is not a reviewer for session ${sessionId}`);
+    }
 
     // Replace existing review from this peer, or append
     const existingIdx = session.reviews.findIndex(r => r.peerId === this.myPeerId);
@@ -933,6 +938,7 @@ export class GitHubCollabCoordinator {
           peerId: msg.peerId,
           agentName: msg.agent,
           createdAt: msg.timestamp,
+          repoKey: msg.repo,
         });
         break;
       }
@@ -941,12 +947,13 @@ export class GitHubCollabCoordinator {
 
   private async broadcastPing(): Promise<void> {
     for (const config of this.repos.values()) {
+      if (config.privacyLevel !== 'shared') continue;
       await this.broadcastMessage(config.paranetId, {
         app: APP_ID,
         type: 'ping',
         peerId: this.myPeerId,
         timestamp: Date.now(),
-        repos: [...this.repos.keys()],
+        repos: [`${config.owner}/${config.repo}`],
       });
     }
   }
@@ -1221,6 +1228,7 @@ export class GitHubCollabCoordinator {
     const annotation = this.activity.addAnnotation({
       ...input,
       peerId: this.myPeerId,
+      repoKey,
     });
 
     // Write RDF
@@ -1260,6 +1268,36 @@ export class GitHubCollabCoordinator {
   }
 
   // --- Cleanup ---
+
+  private cleanupAbandonedSessions(): void {
+    const abandonedResults = this.activity.cleanupAbandonedSessions();
+    for (const { sessionId, releasedClaims } of abandonedResults) {
+      const session = this.activity.getSession(sessionId);
+      if (!session?.repoKey) continue;
+      const config = this.repos.get(session.repoKey);
+      if (!config) continue;
+
+      // Write updated session RDF
+      const graph = `did:dkg:paranet:${config.paranetId}`;
+      const quads = this.activity.generateSessionQuads(session, config.owner, config.repo, graph);
+      this.writeToWorkspace(config.paranetId, quads).catch(() => {});
+
+      // Broadcast claim:released for each released claim
+      if (config.privacyLevel === 'shared') {
+        for (const claim of releasedClaims) {
+          this.broadcastMessage(config.paranetId, {
+            app: APP_ID,
+            type: 'claim:released',
+            peerId: this.myPeerId,
+            timestamp: Date.now(),
+            repo: session.repoKey,
+            claimId: claim.claimId,
+            file: claim.filePath,
+          }).catch(() => {});
+        }
+      }
+    }
+  }
 
   destroy(): void {
     if (this.pingTimer) {

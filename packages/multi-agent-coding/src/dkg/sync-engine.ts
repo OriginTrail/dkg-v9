@@ -158,6 +158,20 @@ export class SyncEngine {
       return { ok: false, event, action, quadsWritten: 0 };
     }
 
+    // Map webhook event types to syncScope values and skip if not in scope
+    const eventScopeMap: Record<string, SyncScope> = {
+      pull_request: 'pull_requests',
+      pull_request_review: 'reviews',
+      pull_request_review_comment: 'comments',
+      issues: 'issues',
+      issue_comment: 'comments',
+      push: 'commits',
+    };
+    const requiredScope = eventScopeMap[event];
+    if (requiredScope && !config.syncScope.includes(requiredScope)) {
+      return { ok: true, event, action, quadsWritten: 0 };
+    }
+
     const graph = `did:dkg:paranet:${config.paranetId}`;
     let quads: Quad[] = [];
 
@@ -230,6 +244,11 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Poll for incremental updates. Only PRs and issues are polled; reviews and
+   * commits are fetched as part of PR syncing during full sync, and code_structure
+   * doesn't change between full syncs.
+   */
   private async pollRepo(repoKey: string): Promise<void> {
     const config = this.configs.get(repoKey);
     const client = this.clients.get(repoKey);

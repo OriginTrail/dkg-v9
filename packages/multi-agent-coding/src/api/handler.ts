@@ -117,10 +117,8 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
           privacyLevel: body.privacyLevel ?? 'local',
         });
 
-        // Start polling if token provided
-        if (body.githubToken) {
-          coordinator.startPolling(`${body.owner}/${body.repo}`);
-        }
+        // Start polling — works for public repos even without a token
+        coordinator.startPolling(`${body.owner}/${body.repo}`);
 
         return json(res, 200, { ok: true, ...result });
       }

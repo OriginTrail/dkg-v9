@@ -211,7 +211,7 @@ describe('ActivityManager', () => {
       // Manually set lastHeartbeat to 10 minutes ago
       session.lastHeartbeat = Date.now() - 10 * 60 * 1000;
       const abandoned = manager.cleanupAbandonedSessions();
-      expect(abandoned).toContain(session.sessionId);
+      expect(abandoned.map(a => a.sessionId)).toContain(session.sessionId);
       expect(manager.getSession(session.sessionId)!.status).toBe('abandoned');
     });
 
@@ -319,7 +319,7 @@ describe('ActivityManager', () => {
       // Simulate timeout
       s1.lastHeartbeat = Date.now() - 10 * 60 * 1000;
       const abandoned = manager.cleanupAbandonedSessions();
-      expect(abandoned).toContain(s1.sessionId);
+      expect(abandoned.map(a => a.sessionId)).toContain(s1.sessionId);
       expect(manager.getSession(s1.sessionId)!.status).toBe('abandoned');
       expect(manager.getActiveClaims()).toHaveLength(0);
 

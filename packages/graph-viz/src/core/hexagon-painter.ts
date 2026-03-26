@@ -32,6 +32,7 @@ export class HexagonPainter {
   private _maxDegree = 1;
   /** Expanded circleTypes — full URIs resolved from compact forms */
   private _circleTypeSet: Set<string>;
+  private _prefixManager?: PrefixManager;
   /** Callback to trigger graph repaint when an image finishes loading */
   private _onImageLoad: (() => void) | null = null;
   /** Trust visualization style */
@@ -46,6 +47,7 @@ export class HexagonPainter {
   ) {
     this._config = { ...DEFAULT_HEXAGON, ...config };
     this._styleEngine = styleEngine;
+    this._prefixManager = prefixManager;
 
     // Build a set of full URIs for circle types (expand compact forms)
     this._circleTypeSet = new Set<string>();
@@ -93,8 +95,9 @@ export class HexagonPainter {
     this._circleTypeSet.clear();
     for (const t of types) {
       this._circleTypeSet.add(t);
-      // Also add with the full GH namespace for matching against full URIs
-      // The short name is matched against the last segment of the type URI in isCircleNode
+      if (this._prefixManager) {
+        this._circleTypeSet.add(this._prefixManager.expand(t));
+      }
     }
   }
 

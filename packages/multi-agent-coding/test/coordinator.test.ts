@@ -330,7 +330,7 @@ describe('GitHubCollabCoordinator', () => {
 
     it('submitReview records the decision', async () => {
       await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
-      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, [], 1);
+      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, ['test-peer-1'], 1);
       const updated = await coordinator.submitReview(session.sessionId, 'approve');
       expect(updated.reviews).toHaveLength(1);
       expect(updated.reviews[0].decision).toBe('approve');
@@ -339,14 +339,14 @@ describe('GitHubCollabCoordinator', () => {
 
     it('submitReview detects approval consensus', async () => {
       await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
-      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, [], 1);
+      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, ['test-peer-1'], 1);
       const updated = await coordinator.submitReview(session.sessionId, 'approve');
       expect(updated.status).toBe('approved');
     });
 
     it('submitReview detects changes_requested', async () => {
       await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
-      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, [], 2);
+      const session = await coordinator.createReviewSession('octocat', 'Hello-World', 42, ['test-peer-1'], 2);
       const updated = await coordinator.submitReview(session.sessionId, 'request_changes');
       expect(updated.status).toBe('changes_requested');
     });

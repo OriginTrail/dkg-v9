@@ -71,6 +71,7 @@ export interface Annotation {
   sessionId?: string;
   createdAt: number;
   remote?: boolean;
+  repoKey?: string;
 }
 
 export interface ClaimResult {
@@ -292,6 +293,7 @@ export class ActivityManager {
     peerId: string;
     agentName: string;
     sessionId?: string;
+    repoKey?: string;
   }): Annotation {
     const annotationId = `ann-${randomUUID().slice(0, 8)}`;
     const annotation: Annotation = {
@@ -408,6 +410,7 @@ export class ActivityManager {
     peerId: string;
     agentName: string;
     createdAt: number;
+    repoKey?: string;
   }): void {
     if (this.annotations.some(a => a.annotationId === data.annotationId)) return;
     this.annotations.push({
@@ -476,6 +479,7 @@ export class ActivityManager {
     }
 
     for (const a of this.annotations) {
+      if (repoKey && a.repoKey && a.repoKey !== repoKey) continue;
       entries.push({
         type: 'annotation:added',
         agent: a.agentName,
@@ -534,17 +538,19 @@ export class ActivityManager {
 
   /**
    * Abandon sessions that haven't sent a heartbeat within the timeout.
-   * Returns the list of abandoned session IDs.
+   * Returns per-session info including released claim details.
    */
-  cleanupAbandonedSessions(): string[] {
+  cleanupAbandonedSessions(): Array<{ sessionId: string; releasedClaims: CodeClaim[] }> {
     const now = Date.now();
-    const abandoned: string[] = [];
+    const abandoned: Array<{ sessionId: string; releasedClaims: CodeClaim[] }> = [];
 
     for (const session of this.sessions.values()) {
       if (session.status === 'active' && now - session.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
         session.status = 'abandoned';
+        // Snapshot claims before releasing so the caller can broadcast releases
+        const claimsBefore = [...this.claims.values()].filter(c => c.sessionId === session.sessionId);
         this.releaseClaimsForSession(session.sessionId);
-        abandoned.push(session.sessionId);
+        abandoned.push({ sessionId: session.sessionId, releasedClaims: claimsBefore });
         this.log(`Session abandoned: ${session.sessionId} (no heartbeat for >5 min)`);
       }
     }

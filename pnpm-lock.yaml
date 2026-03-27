@@ -26,6 +26,9 @@ importers:
 
   .:
     dependencies:
+      '@origintrail-official/dkg-app-multi-agent-coding':
+        specifier: workspace:*
+        version: link:packages/multi-agent-coding
       '@origintrail-official/dkg-app-origin-trail-game':
         specifier: workspace:*
         version: link:packages/origin-trail-game
@@ -479,6 +482,61 @@ importers:
       '@origintrail-official/dkg-adapter-autoresearch':
         specifier: workspace:*
         version: link:../adapter-autoresearch
+
+  packages/multi-agent-coding:
+    dependencies:
+      '@origintrail-official/dkg-agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
+      '@origintrail-official/dkg-graph-viz':
+        specifier: workspace:*
+        version: link:../graph-viz
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.11
+      '@types/react':
+        specifier: ^19.2.14
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.14)
+      '@vitejs/plugin-react':
+        specifier: ^4
+        version: 4.7.0(vite@6.4.1(@types/node@22.19.11)(tsx@4.21.0))
+      cross-env:
+        specifier: ^10.1.0
+        version: 10.1.0
+      react:
+        specifier: ^19
+        version: 19.2.4
+      react-dom:
+        specifier: ^19
+        version: 19.2.4(react@19.2.4)
+      react-router-dom:
+        specifier: ^7
+        version: 7.13.1(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      tree-sitter-wasms:
+        specifier: ^0.1.13
+        version: 0.1.13
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vite:
+        specifier: ^6
+        version: 6.4.1(@types/node@22.19.11)(tsx@4.21.0)
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0)
+      web-tree-sitter:
+        specifier: ^0.22.6
+        version: 0.22.6
 
   packages/network-sim:
     dependencies:
@@ -4602,6 +4660,9 @@ packages:
     resolution: {integrity: sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A==}
     hasBin: true
 
+  tree-sitter-wasms@0.1.13:
+    resolution: {integrity: sha512-wT+cR6DwaIz80/vho3AvSF0N4txuNx/5bcRKoXouOfClpxh/qqrF4URNLQXbbt8MaAxeksZcZd1j8gcGjc+QxQ==}
+
   treeify@1.1.0:
     resolution: {integrity: sha512-1m4RA7xVAJrSGrrXGs0L3YTwyvBs2S8PbRHaLZAkFw7JR8oIFwYtysxlBZhYIa7xSyiYJKZ3iGrrk55cGA3i9A==}
     engines: {node: '>=0.6'}
@@ -4960,6 +5021,9 @@ packages:
   web-streams-polyfill@3.3.3:
     resolution: {integrity: sha512-d2JWLCivmZYTSIoge9MsgFCZrt571BikcWGYkjC1khllbTeDlGqZ2D8vD8E/lJa8WGWbb7Plm8/XJYV7IJHZZw==}
     engines: {node: '>= 8'}
+
+  web-tree-sitter@0.22.6:
+    resolution: {integrity: sha512-hS87TH71Zd6mGAmYCvlgxeGDjqd9GTeqXNqTT+u0Gs51uIozNIaaq/kUAbV/Zf56jb2ZOyG8BxZs2GG9wbLi6Q==}
 
   web3-utils@1.10.4:
     resolution: {integrity: sha512-tsu8FiKJLk2PzhDl9fXbGUWTkkVXYhtTA+SmEFkKft+9BgwLxfCRpU96sWv7ICC8zixBNd3JURVoiR3dUXgP8A==}
@@ -9667,6 +9731,8 @@ snapshots:
 
   tree-kill@1.2.2: {}
 
+  tree-sitter-wasms@0.1.13: {}
+
   treeify@1.1.0: {}
 
   ts-command-line-args@2.5.1:
@@ -9981,6 +10047,8 @@ snapshots:
       supports-color: 10.2.2
 
   web-streams-polyfill@3.3.3: {}
+
+  web-tree-sitter@0.22.6: {}
 
   web3-utils@1.10.4:
     dependencies:

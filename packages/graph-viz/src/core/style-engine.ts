@@ -62,6 +62,19 @@ export class StyleEngine {
     this._config.defaultEdgeColor = palette.edgeColor;
   }
 
+  /** Clear all class colors (used when switching views to prevent bleed-through) */
+  resetClassColors(): void {
+    this._config = { ...this._config, classColors: {} };
+  }
+
+  /** Merge additional class colors (from ViewConfig nodeTypes) into the style config */
+  setClassColors(colors: Record<string, string>): void {
+    this._config = {
+      ...this._config,
+      classColors: { ...this._config.classColors, ...colors },
+    };
+  }
+
   get config(): Readonly<Required<StyleConfig>> {
     return this._config;
   }
@@ -76,6 +89,17 @@ export class StyleEngine {
       }
       if (this._config.classColors[type]) {
         return this._config.classColors[type];
+      }
+      // Also check short name (last segment after # or /) against classColors keys
+      // that are full URIs — match by short name suffix
+      const shortName = type.split('#').pop()?.split('/').pop() ?? '';
+      if (shortName) {
+        for (const [key, color] of Object.entries(this._config.classColors)) {
+          const keyShort = key.split('#').pop()?.split('/').pop() ?? '';
+          if (keyShort === shortName) {
+            return color;
+          }
+        }
       }
     }
 

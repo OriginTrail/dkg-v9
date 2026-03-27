@@ -520,12 +520,32 @@ export class RdfGraphViz {
    * ```
    */
   applyView(config: ViewConfig): void {
+    // Reset view-specific state to prevent previous view's styles from bleeding through
+    this._styleEngine.resetClassColors();
+    this._hexPainter.setCircleTypes([]);
+
     // Resolve and apply palette
     const palette = resolvePalette(config.palette, config.paletteOverrides);
     this._styleEngine.setPalette(palette);
 
     // Inject CSS custom properties for demo/app UIs
     injectPaletteCssVars(this._container, palette);
+
+    // Bridge nodeTypes colors → StyleEngine classColors
+    if (config.nodeTypes) {
+      const classColors: Record<string, string> = {};
+      for (const [typeUri, typeConfig] of Object.entries(config.nodeTypes)) {
+        if (typeConfig.color) {
+          classColors[typeUri] = typeConfig.color;
+        }
+      }
+      this._styleEngine.setClassColors(classColors);
+    }
+
+    // Bridge circleTypes → HexagonPainter
+    if (config.circleTypes) {
+      this._hexPainter.setCircleTypes(config.circleTypes);
+    }
 
     // Configure trust visualization
     if (config.trust?.enabled) {

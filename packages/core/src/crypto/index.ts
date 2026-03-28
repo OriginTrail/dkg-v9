@@ -8,7 +8,7 @@ export {
 
 export { sha256 } from './hashing.js';
 
-export { MerkleTree } from './merkle.js';
+export { MerkleTree, compareBytes } from './merkle.js';
 
 export { canonicalize, hashTriple } from './canonicalize.js';
 

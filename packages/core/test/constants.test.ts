@@ -34,6 +34,21 @@ describe('paranet topic helpers', () => {
   it('paranetFinalizationTopic returns correct format', () => {
     expect(paranetFinalizationTopic('testing')).toBe('dkg/paranet/testing/finalization');
   });
+
+  it('handles empty string paranet ID', () => {
+    expect(paranetPublishTopic('')).toBe('dkg/paranet//publish');
+    expect(paranetDataGraphUri('')).toBe('did:dkg:paranet:');
+  });
+
+  it('preserves paranet IDs with special characters', () => {
+    expect(paranetPublishTopic('my-paranet')).toBe('dkg/paranet/my-paranet/publish');
+    expect(paranetPublishTopic('paranet_v2')).toBe('dkg/paranet/paranet_v2/publish');
+  });
+
+  it('does not sanitize slashes in paranet IDs (caller responsibility)', () => {
+    const result = paranetPublishTopic('a/b');
+    expect(result).toBe('dkg/paranet/a/b/publish');
+  });
 });
 
 describe('createOperationContext', () => {

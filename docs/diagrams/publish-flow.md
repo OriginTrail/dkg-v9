@@ -218,7 +218,119 @@ sequenceDiagram
     EVM -->> RcvAgent: Event with matching merkleRoot
     RcvAgent ->> RcvStore: Promote tentative → committed
     Note right of RcvStore: Delete tentative status quad<br/>Insert confirmed status quad<br/>Clear expiry timeout
+
 ```
+
+## LiftJob sequence
+
+This sequence shows the explicit LiftJob state progression introduced for the
+async lift-and-publish flow described in the async publisher spec. Unlike the
+regular `publish()` path above, lift jobs start from data that is already in
+workspace, skip gossip, and submit directly to chain. The happy path is
+strictly linear, and every non-terminal state may transition to `failed` if
+its step cannot complete.
+
+### LiftJob states
+
+| State | Meaning |
+|------|------|
+| `accepted` | Job is stored in the control-plane queue and has not been picked up by a worker yet. |
+| `claimed` | A dedicated publisher wallet or worker has claimed the job for exclusive processing. |
+| `validated` | Workspace slice, namespace authority, and transition type checks have all passed. |
+| `broadcast` | The chain transaction has been submitted directly and the job now has a `txHash`. |
+| `included` | The transaction is included in a block but is not final yet. |
+| `finalized` | Chain finality is reached and the published canonical state is authoritative. |
+| `failed` | Processing stopped due to an error, and full failure details are persisted. |
+
+### Allowed transitions
+
+- `accepted -> claimed`
+- `claimed -> validated`
+- `validated -> broadcast`
+- `broadcast -> included`
+- `included -> finalized`
+- `accepted|claimed|validated|broadcast|included -> failed`
+- `finalized` and `failed` are terminal
+
+```mermaid
+sequenceDiagram
+    actor Caller
+    participant Queue as LiftJob Queue
+    participant Worker as Lift Worker
+    participant Workspace as Workspace Store
+    participant Validator as Validation Step
+    participant Publisher as Batch Publisher
+    participant Chain as Chain Watcher
+
+    Caller->>Queue: enqueue lift request
+    Queue-->>Worker: job accepted
+    Note over Queue,Worker: state = accepted
+
+    Worker->>Worker: claim exclusive work
+    Note over Worker: state = claimed
+
+    Worker->>Workspace: load workspace slice by roots
+    Workspace-->>Worker: candidate triples
+
+    Worker->>Validator: canonicalize URIs + validate authority
+    Validator-->>Worker: payload valid for lift
+    Note over Validator,Worker: state = validated
+
+    Worker->>Publisher: compute merkle + sign + submit batch
+    Publisher->>Chain: publishBatch()
+    Chain-->>Publisher: txHash accepted
+    Publisher-->>Worker: txHash recorded
+    Note over Publisher,Worker: state = broadcast
+
+    Chain-->>Worker: tx included in block
+    Note over Worker,Chain: state = included
+
+    Chain-->>Worker: finality reached
+    Note over Worker: state = finalized
+
+    alt error in any active step
+        Worker-->>Queue: persist failure details
+        Note over Queue,Worker: state = failed
+    end
+```
+
+### Finality-aware recovery
+
+The async publisher spec requires recovery to be chain-aware rather than
+blindly retrying interrupted jobs. On startup, the worker checks interrupted
+states and only requeues jobs when chain state proves they were not already
+published.
+
+```mermaid
+sequenceDiagram
+    participant Boot as Node Startup
+    participant Store as Job Store
+    participant Chain as Chain Adapter
+    participant Wallets as Wallet Locks
+
+    Boot->>Store: load jobs in claimed/validated/broadcast
+    loop for each interrupted job
+        alt job.state == broadcast
+            Boot->>Chain: lookup txHash / finality status
+            alt tx succeeded
+                Boot->>Store: mark finalized
+            else tx missing or not landed
+                Boot->>Store: reset to accepted
+            end
+        else job.state == claimed or validated
+            Boot->>Store: reset to accepted
+        end
+    end
+    Boot->>Wallets: release stale wallet locks
+```
+
+Recovery rules from the spec:
+
+- Inspect interrupted jobs in `claimed`, `validated`, and `broadcast`
+- For `broadcast`, check chain state by `txHash` before changing the job
+- Mark `finalized` when the transaction already succeeded on-chain
+- Reset non-final interrupted jobs to `accepted` for retry
+- Release stale wallet locks during recovery so workers can resume cleanly
 
 ## How tentative → committed is reflected in the graph
 

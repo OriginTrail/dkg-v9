@@ -16,6 +16,7 @@ import {
   LIFT_JOB_PROGRESS_METADATA_FIELDS,
   LIFT_REQUEST_IMMUTABLE_FIELDS,
   LIFT_TRANSITION_TYPES,
+  createLiftJobFailureMetadata,
 } from '../src/lift-job.js';
 
 describe('LiftJob request and record types', () => {
@@ -179,14 +180,14 @@ describe('LiftJob request and record types', () => {
         transitionType: 'CREATE',
       },
       broadcast: { txHash: '0x222', walletId: 'wallet-2' },
-      failure: {
+      failure: createLiftJobFailureMetadata({
         failedFromState: 'broadcast',
-        retryable: true,
+        code: 'rpc_unavailable',
         message: 'RPC submit timeout',
         errorPayloadRef: 'urn:dkg:publisher:error:job-4',
         stackTraceRef: 'urn:dkg:publisher:error:job-4:stack',
         rpcResponseRef: 'urn:dkg:publisher:error:job-4:rpc',
-      },
+      }),
       recovery: {
         recoveredFromStatus: 'broadcast',
         action: 'reset_to_accepted',
@@ -224,12 +225,17 @@ describe('LiftJob request and record types', () => {
       },
       broadcast: { txHash: '0x555', walletId: 'wallet-5' },
       inclusion: { txHash: '0x555', blockNumber: 15 },
-      failure: {
+      failure: createLiftJobFailureMetadata({
         failedFromState: 'included',
-        retryable: false,
+        code: 'finality_timeout',
         message: 'finality watcher interrupted',
         errorPayloadRef: 'urn:dkg:publisher:error:job-5',
-      },
+        timeout: {
+          timeoutMs: 60000,
+          timeoutAt: 4,
+          handling: 'check_chain_then_finalize_or_reset',
+        },
+      }),
       recovery: {
         recoveredFromStatus: 'included',
         action: 'finalized_from_chain',
@@ -276,7 +282,11 @@ describe('LiftJob request and record types', () => {
       broadcast: { txHash: '0xaaa', walletId: 'wallet-x' },
       failure: {
         failedFromState: 'broadcast',
+        phase: 'broadcast',
+        mode: 'retryable',
         retryable: true,
+        resolution: 'reset_to_accepted',
+        code: 'rpc_unavailable',
         message: 'oops',
         errorPayloadRef: 'urn:error:1',
       },
@@ -295,7 +305,11 @@ describe('LiftJob request and record types', () => {
       inclusion: { txHash: '0xbbb', blockNumber: 1 },
       failure: {
         failedFromState: 'included',
+        phase: 'confirmation',
+        mode: 'timeout',
         retryable: true,
+        resolution: 'check_chain_then_finalize_or_reset',
+        code: 'finality_timeout',
         message: 'oops',
         errorPayloadRef: 'urn:error:2',
       },
@@ -319,7 +333,11 @@ describe('LiftJob request and record types', () => {
       inclusion: { txHash: '0xccc', blockNumber: 1 },
       failure: {
         failedFromState: 'included',
+        phase: 'confirmation',
+        mode: 'timeout',
         retryable: false,
+        resolution: 'check_chain_then_finalize_or_reset',
+        code: 'finality_timeout',
         message: 'oops',
         errorPayloadRef: 'urn:error:3',
       },

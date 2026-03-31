@@ -52,3 +52,24 @@ await publisher.writeConditionalToWorkspace('urn:paranet:example', quads, {
 - `@origintrail-official/dkg-chain` — on-chain KC creation and finalization
 - `@origintrail-official/dkg-query` — entity resolution during publishing
 - `@origintrail-official/dkg-storage` — triple persistence
+
+## Async lift publisher control-plane
+
+The async lift publisher persists queue/recovery state in TripleStore control-plane
+graphs. This state is internal to the publisher implementation.
+
+| Graph | URI | Contents |
+|---|---|---|
+| Jobs | `urn:dkg:publisher:control-plane` | `LiftJob`, `LiftRequest`, state-machine progress, retries, timeouts, failures, recovery metadata |
+| Wallet locks | `urn:dkg:publisher:wallet-locks` | active wallet lease records used during claim and recovery |
+
+Key points:
+
+- `LiftJob` uses an explicit state machine: `accepted -> claimed -> validated -> broadcast -> included -> finalized`, with failure transitions to `failed`.
+- `LiftRequest` is stored separately from `LiftJob` and linked from the job record.
+- `jobId` is opaque. `jobSlug` is readable and derived from `paranet/scope/transition/workspaceOperationId/root-range`.
+- Wallet locks are operational leases, not shared workspace state. They are acquired on claim, renewed while jobs stay active, deleted on terminal/reset paths, and swept during recovery if expired or orphaned.
+- Control-plane data is distinct from workspace graphs and distinct from published graph state.
+
+See `../../docs/diagrams/publish-flow.md#liftjob-sequence` for the state diagram,
+control-plane layout, and recovery notes.

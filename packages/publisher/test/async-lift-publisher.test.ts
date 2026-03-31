@@ -11,6 +11,10 @@ import {
   CONTROL_ACCEPTED_AT,
   CONTROL_AUTHORITY_PROOF_REF,
   CONTROL_HAS_REQUEST,
+  CONTROL_LOCKED_JOB,
+  CONTROL_LOCK_EXPIRES_AT,
+  CONTROL_LOCK_STATUS,
+  CONTROL_WALLET_ID,
   CONTROL_PARANET_ID,
   CONTROL_PAYLOAD,
   CONTROL_REQUEST_TYPE,
@@ -18,8 +22,11 @@ import {
   CONTROL_SCOPE,
   CONTROL_STATUS,
   DEFAULT_CONTROL_GRAPH_URI,
+  DEFAULT_WALLET_LOCK_GRAPH_URI,
   requestSubject,
   jobSubject,
+  serializeWalletLock,
+  walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
@@ -50,6 +57,27 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       idGenerator: () => `job-${++ids}`,
       chainRecoveryResolver: recoveryResult === undefined ? undefined : async () => recoveryResult,
     });
+  }
+
+  async function readLockExpiresAt(walletId: string): Promise<number> {
+    const result = await store.query(`SELECT ?expiresAt WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt .
+      }
+    }`);
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') {
+      throw new Error('Expected bindings result for wallet lock expiry');
+    }
+
+    const value = result.bindings[0]?.['expiresAt'];
+    expect(value).toBeDefined();
+    const match = value?.match(/^"(-?\d+)"/);
+    if (!match) {
+      throw new Error(`Unexpected expiresAt literal: ${value}`);
+    }
+    return Number.parseInt(match[1] as string, 10);
   }
 
   it('creates accepted jobs and returns status', async () => {
@@ -120,6 +148,220 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(remaining[0]?.jobId).toBe('job-2');
   });
 
+  it('persists wallet locks in a separate control-plane graph and releases them on terminal states', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+
+    await publisher.claimNext('wallet-1');
+
+    const lockResult = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+
+    expect(lockResult.type).toBe('bindings');
+    if (lockResult.type !== 'bindings') return;
+    const lockTriples = new Map(lockResult.bindings.map((row) => [row['p'], row['o']]));
+    expect(lockTriples.get(CONTROL_WALLET_ID)).toBe('"wallet-1"');
+    expect(lockTriples.get(CONTROL_LOCKED_JOB)).toBe(jobSubject(jobId));
+    expect(lockTriples.get(CONTROL_LOCK_STATUS)).toBe('"active"');
+    expect(lockTriples.get(CONTROL_LOCK_EXPIRES_AT)).toBeDefined();
+
+    await publisher.update(jobId, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'claimed',
+        code: 'wallet_unavailable',
+        message: 'wallet offline',
+        errorPayloadRef: 'urn:error:wallet-offline',
+      }) as any,
+    });
+
+    const released = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+    expect(released.type).toBe('bindings');
+    if (released.type !== 'bindings') return;
+    expect(released.bindings).toHaveLength(0);
+  });
+
+  it('renews wallet lock leases while jobs remain active', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+    await publisher.lift({ ...request(), workspaceOperationId: 'op-2' });
+
+    await publisher.claimNext('wallet-1');
+    const originalExpiresAt = await readLockExpiresAt('wallet-1');
+    now += 5 * 60 * 1000 - 100;
+
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        workspaceQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    const renewedExpiresAt = await readLockExpiresAt('wallet-1');
+    expect(renewedExpiresAt).toBeGreaterThan(originalExpiresAt);
+
+    now = originalExpiresAt;
+    expect(await publisher.claimNext('wallet-1')).toBeNull();
+  });
+
+  it('releases stale wallet locks during recovery', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+
+    await publisher.claimNext('wallet-1');
+
+    now += 5 * 60 * 1000 + 10;
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+    const released = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+
+    expect(recovered).toBe(1);
+    expect(job?.status).toBe('accepted');
+    expect(released.type).toBe('bindings');
+    if (released.type !== 'bindings') return;
+    expect(released.bindings).toHaveLength(0);
+  });
+
+  it('clears orphan wallet locks for terminal jobs during recovery', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'claimed',
+        code: 'wallet_unavailable',
+        message: 'wallet offline',
+        errorPayloadRef: 'urn:error:wallet-offline',
+      }) as any,
+    });
+
+    await store.insert(
+      serializeWalletLock(
+        {
+          walletId: 'wallet-1',
+          jobId,
+          acquiredAt: now,
+          expiresAt: now + 60_000,
+          status: 'active',
+        },
+        DEFAULT_WALLET_LOCK_GRAPH_URI,
+      ),
+    );
+
+    await publisher.recover();
+
+    const released = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+    expect(released.type).toBe('bindings');
+    if (released.type !== 'bindings') return;
+    expect(released.bindings).toHaveLength(0);
+  });
+
+  it('does not delete a newer wallet lock when an older job releases late', async () => {
+    const publisher = createPublisher();
+    const jobA = await publisher.lift(request());
+    const jobB = await publisher.lift({ ...request(), workspaceOperationId: 'op-2' });
+
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobA, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        workspaceQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    await store.deleteByPattern({
+      subject: walletLockSubject('wallet-1'),
+      graph: DEFAULT_WALLET_LOCK_GRAPH_URI,
+    });
+    await store.insert(
+      serializeWalletLock(
+        {
+          walletId: 'wallet-1',
+          jobId: jobB,
+          acquiredAt: now,
+          expiresAt: now + 60_000,
+          status: 'active',
+          claimToken: 'wallet-1:replacement',
+        },
+        DEFAULT_WALLET_LOCK_GRAPH_URI,
+      ),
+    );
+
+    await publisher.update(jobA, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'validated',
+        code: 'authority_unavailable',
+        message: 'late failure',
+        errorPayloadRef: 'urn:error:late-failure',
+      }) as any,
+    });
+
+    const lock = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings[0]?.['job']).toBe(jobSubject(jobB));
+  });
+
+  it('serializes concurrent claims so only one wallet gets the job', async () => {
+    const publisher = createPublisher();
+    await publisher.lift(request());
+
+    const [first, second] = await Promise.all([
+      publisher.claimNext('wallet-1'),
+      publisher.claimNext('wallet-2'),
+    ]);
+
+    const claimed = [first, second].filter(Boolean);
+    const empty = [first, second].filter((job) => job === null);
+
+    expect(claimed).toHaveLength(1);
+    expect(empty).toHaveLength(1);
+    expect(claimed[0]?.status).toBe('claimed');
+  });
+
+  it('serializes claims across publisher instances in the same process', async () => {
+    const first = createPublisher();
+    const second = createPublisher();
+    await first.lift(request());
+
+    const [jobA, jobB] = await Promise.all([
+      first.claimNext('wallet-1'),
+      second.claimNext('wallet-2'),
+    ]);
+
+    const claimed = [jobA, jobB].filter(Boolean);
+    const empty = [jobA, jobB].filter((job) => job === null);
+
+    expect(claimed).toHaveLength(1);
+    expect(empty).toHaveLength(1);
+    expect(claimed[0]?.status).toBe('claimed');
+  });
+
   it('derives readable root-range slugs for multiple roots', async () => {
     const publisher = createPublisher();
 
@@ -181,7 +423,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         code: 'wallet_unavailable',
         message: 'wallet offline',
         errorPayloadRef: 'urn:error:wallet-offline',
-      }),
+      }) as any,
     });
 
     const failed = await publisher.list({ status: 'failed' });
@@ -248,6 +490,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.resume();
 
     await publisher.cancel(cancelId);
+    const cancelledRequest = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+        <${requestSubject(cancelId)}> ?p ?o .
+      }
+    }`);
+    expect(cancelledRequest.type).toBe('bindings');
+    if (cancelledRequest.type !== 'bindings') return;
+    expect(cancelledRequest.bindings).toHaveLength(0);
 
     await publisher.claimNext('wallet-2');
     await publisher.update(retryId, 'failed', {
@@ -256,7 +506,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         code: 'wallet_unavailable',
         message: 'wallet offline',
         errorPayloadRef: 'urn:error:retryable',
-      }),
+      }) as any,
     });
 
     await publisher.claimNext('wallet-3');
@@ -292,5 +542,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(await publisher.clear('finalized')).toBe(1);
     expect(await publisher.getStatus(clearId)).toBeNull();
     expect(await publisher.getStatus(cancelId)).toBeNull();
+
+    const clearedRequest = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+        <${requestSubject(clearId)}> ?p ?o .
+      }
+    }`);
+    expect(clearedRequest.type).toBe('bindings');
+    if (clearedRequest.type !== 'bindings') return;
+    expect(clearedRequest.bindings).toHaveLength(0);
   });
 });

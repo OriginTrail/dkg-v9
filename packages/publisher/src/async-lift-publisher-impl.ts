@@ -19,6 +19,12 @@ import type {
   AsyncLiftPublisherRecoveryResolver,
 } from './async-lift-publisher-types.js';
 import {
+  CONTROL_CLAIM_TOKEN,
+  CONTROL_LOCKED_JOB,
+  CONTROL_LOCK_EXPIRES_AT,
+  CONTROL_LOCK_STATUS,
+  CONTROL_WALLET_ID,
+  DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
@@ -29,14 +35,22 @@ import {
   isFailedJob,
   jobSubject,
   literal,
+  parseIntegerLiteral,
   parseLiteral,
+  requestSubject,
   serializeJob,
+  serializeWalletLock,
+  walletLockSubject,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
+  private static readonly claimQueues = new Map<string, Promise<void>>();
+
   private readonly graphUri: string;
+  private readonly walletLockGraphUri: string;
   private readonly maxRetries: number;
+  private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
@@ -48,7 +62,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     config: AsyncLiftPublisherConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
+    this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? 3;
+    this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
@@ -74,29 +90,41 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   async claimNext(walletId: string): Promise<LiftJob | null> {
-    await this.ensureGraph();
-    if (this.paused) return null;
+    return this.withClaimLock(async () => {
+      await this.ensureGraph();
+      if (this.paused) return null;
+      if (await this.hasActiveWalletLock(walletId)) return null;
 
-    const next = (await this.list({ status: 'accepted' })).sort(compareAcceptedJobs)[0];
-    if (!next) return null;
+      const next = (await this.list({ status: 'accepted' })).sort(compareAcceptedJobs)[0];
+      if (!next) return null;
 
-    const now = this.now();
-    const claimed = this.mergeJob(next, 'claimed', { claim: { walletId } });
-    const claimedJob = {
-      ...claimed,
-      timestamps: { ...claimed.timestamps, claimedAt: now, updatedAt: now },
-    } as LiftJob;
+      const now = this.now();
+      const claimToken = `${walletId}:${now}:${next.jobId}`;
+      const lockExpiresAt = now + this.lockLeaseMs;
+      const claimed = this.mergeJob(next, 'claimed', { claim: { walletId } });
+      const claimedJob = this.buildClaimedJob(claimed, walletId, claimToken, now, lockExpiresAt);
 
-    this.assertJobMatchesStatus(claimedJob);
-    await this.writeJob(claimedJob);
-    return claimedJob;
+      this.assertJobMatchesStatus(claimedJob);
+      await this.writeJob(claimedJob);
+      await this.writeWalletLock({
+        walletId,
+        jobId: claimedJob.jobId,
+        acquiredAt: now,
+        expiresAt: lockExpiresAt,
+        status: 'active',
+        claimToken,
+        lastHeartbeatAt: now,
+      });
+      return claimedJob;
+    });
   }
 
   async update(jobId: string, status: LiftJobState, data: Partial<LiftJob> = {}): Promise<void> {
     await this.ensureGraph();
-    const next = this.mergeJob(await this.getRequiredJob(jobId), status, data);
+    const next = this.refreshActiveLease(this.mergeJob(await this.getRequiredJob(jobId), status, data));
     this.assertJobMatchesStatus(next);
     await this.writeJob(next);
+    await this.syncWalletLockForJob(next);
   }
 
   async getStatus(jobId: string): Promise<LiftJob | null> {
@@ -123,6 +151,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   async recover(): Promise<number> {
     await this.ensureGraph();
+    await this.sweepStaleWalletLocks();
     const interrupted = (await this.list()).filter(
       (job) => job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included',
     );
@@ -131,6 +160,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     for (const job of interrupted) {
       if (job.status === 'claimed' || job.status === 'validated') {
+        await this.releaseWalletLockForJob(job);
         await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)));
         recovered += 1;
         continue;
@@ -139,6 +169,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if ((job.status === 'broadcast' || job.status === 'included') && this.chainRecoveryResolver) {
         const resolved = await this.chainRecoveryResolver(job);
         if (resolved) {
+          await this.releaseWalletLockForJob(job);
           await this.writeJob(this.finalizeRecoveredJob(job, resolved.inclusion, resolved.finalization));
           recovered += 1;
           continue;
@@ -146,6 +177,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
 
       if (job.status === 'broadcast') {
+        await this.releaseWalletLockForJob(job);
         await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
         recovered += 1;
       }
@@ -174,6 +206,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (job.status !== 'accepted') {
       throw new Error(`Only accepted LiftJobs can be cancelled. Current status: ${job.status}`);
     }
+    await this.releaseWalletLockForJob(job);
     await this.deleteJob(jobId);
   }
 
@@ -200,6 +233,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           updatedAt: retriedAt,
         },
       };
+      await this.releaseWalletLockForJob(job);
       await this.writeJob(retriedJob);
       retried += 1;
     }
@@ -209,13 +243,17 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   async clear(status: 'finalized' | 'failed'): Promise<number> {
     await this.ensureGraph();
     const jobs = await this.list({ status });
-    for (const job of jobs) await this.deleteJob(job.jobId);
+    for (const job of jobs) {
+      await this.releaseWalletLockForJob(job);
+      await this.deleteJob(job.jobId);
+    }
     return jobs.length;
   }
 
   private async ensureGraph(): Promise<void> {
     if (this.graphEnsured) return;
     await this.store.createGraph(this.graphUri);
+    await this.store.createGraph(this.walletLockGraphUri);
     this.graphEnsured = true;
   }
 
@@ -226,6 +264,127 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async deleteJob(jobId: string): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
+    await this.store.deleteByPattern({ subject: requestSubject(jobId), graph: this.graphUri });
+  }
+
+  private async writeWalletLock(lock: {
+    walletId: string;
+    jobId: string;
+    acquiredAt: number;
+    expiresAt: number;
+    status: 'active' | 'expired' | 'released';
+    claimToken?: string;
+    lastHeartbeatAt?: number;
+  }): Promise<void> {
+    await this.store.deleteByPattern({ subject: walletLockSubject(lock.walletId), graph: this.walletLockGraphUri });
+    await this.store.insert(serializeWalletLock(lock, this.walletLockGraphUri));
+  }
+
+  private async deleteWalletLock(walletId: string): Promise<void> {
+    await this.store.deleteByPattern({ subject: walletLockSubject(walletId), graph: this.walletLockGraphUri });
+  }
+
+  private async readWalletLock(walletId: string): Promise<{
+    walletId: string;
+    jobId: string;
+    claimToken?: string;
+    status: string;
+    expiresAt?: number;
+  } | null> {
+    const result = await this.store.query(
+      `SELECT ?job ?status ?expiresAt ?claimToken WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
+    );
+    const rows = expectBindings(result);
+    if (rows.length === 0) return null;
+    const row = rows[0] ?? {};
+    const jobId = this.jobIdFromRef(row['job'] ?? '');
+    const status = parseLiteral(row['status'] ?? '""');
+    if (!jobId || typeof status !== 'string') return null;
+    const claimToken = row['claimToken'] ? parseLiteral(row['claimToken']) : undefined;
+    return {
+      walletId,
+      jobId,
+      claimToken: typeof claimToken === 'string' ? claimToken : undefined,
+      status,
+      expiresAt: row['expiresAt'] ? parseIntegerLiteral(row['expiresAt']) : undefined,
+    };
+  }
+
+  private async hasActiveWalletLock(walletId: string): Promise<boolean> {
+    const now = this.now();
+    const result = await this.store.query(
+      `SELECT ?expiresAt WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . } }`,
+    );
+    const rows = expectBindings(result);
+    if (rows.length === 0) return false;
+    return parseIntegerLiteral(rows[0]?.['expiresAt'] ?? '"0"') > now;
+  }
+
+  private async sweepStaleWalletLocks(): Promise<string[]> {
+    const now = this.now();
+    const result = await this.store.query(
+      `SELECT ?wallet ?job ?expiresAt ?claimToken WHERE { GRAPH <${this.walletLockGraphUri}> { ?lock <${CONTROL_WALLET_ID}> ?wallet ; <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . OPTIONAL { ?lock <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
+    );
+    const expiredWallets: string[] = [];
+    for (const row of expectBindings(result)) {
+      const expiresAt = parseIntegerLiteral(row['expiresAt'] ?? '"0"');
+      const walletId = parseLiteral(row['wallet'] ?? '""');
+      if (typeof walletId !== 'string' || walletId.length === 0) continue;
+      const jobRef = row['job'] ?? '';
+      const jobId = this.jobIdFromRef(jobRef);
+      const job = jobId ? await this.getStatus(jobId) : null;
+
+      const stale =
+        expiresAt <= now ||
+        !job ||
+        job.status === 'accepted' ||
+        job.status === 'failed' ||
+        job.status === 'finalized' ||
+        job.claim?.walletId !== walletId;
+
+      if (!stale) continue;
+      expiredWallets.push(walletId);
+      await this.deleteWalletLock(walletId);
+    }
+    return expiredWallets;
+  }
+
+  private async releaseWalletLockForJob(job: LiftJob): Promise<void> {
+    const walletId = job.claim?.walletId;
+    if (!walletId) return;
+    const currentLock = await this.readWalletLock(walletId);
+    if (!currentLock) return;
+    if (!this.lockMatchesJob(currentLock, job)) return;
+    await this.deleteWalletLock(walletId);
+  }
+
+  private async syncWalletLockForJob(job: LiftJob): Promise<void> {
+    const walletId = job.claim?.walletId;
+    if (!walletId) return;
+
+    const currentLock = await this.readWalletLock(walletId);
+
+    if (job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') {
+      if (currentLock && !this.lockMatchesJob(currentLock, job)) {
+        return;
+      }
+      const acquiredAt = job.timestamps.claimedAt ?? this.now();
+      const refreshedExpiry = job.claim?.claimLeaseExpiresAt ?? acquiredAt + this.lockLeaseMs;
+      await this.writeWalletLock({
+        walletId,
+        jobId: job.jobId,
+        acquiredAt,
+        expiresAt: refreshedExpiry,
+        status: 'active',
+        claimToken: job.claim?.claimToken,
+        lastHeartbeatAt: this.now(),
+      });
+      return;
+    }
+
+    if (currentLock && this.lockMatchesJob(currentLock, job)) {
+      await this.deleteWalletLock(walletId);
+    }
   }
 
   private async getRequiredJob(jobId: string): Promise<LiftJob> {
@@ -239,6 +398,88 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const payload = parseLiteral(binding);
     if (typeof payload !== 'string') return null;
     return JSON.parse(payload) as LiftJob;
+  }
+
+  private buildClaimedJob(
+    job: LiftJob,
+    walletId: string,
+    claimToken: string,
+    now: number,
+    lockExpiresAt: number,
+  ): LiftJob {
+    return {
+      ...job,
+      claim: {
+        ...(job.claim ?? { walletId }),
+        walletId,
+        claimToken,
+        claimLeaseExpiresAt: lockExpiresAt,
+      },
+      controlPlane: {
+        ...job.controlPlane,
+        walletLockRef: walletLockSubject(walletId),
+      },
+      timestamps: {
+        ...job.timestamps,
+        claimedAt: now,
+        updatedAt: now,
+      },
+    } as LiftJob;
+  }
+
+  private refreshActiveLease(job: LiftJob): LiftJob {
+    if (!job.claim) return job;
+    if (job.status !== 'claimed' && job.status !== 'validated' && job.status !== 'broadcast' && job.status !== 'included') {
+      return job;
+    }
+
+    const now = this.now();
+    return {
+      ...job,
+      claim: {
+        ...job.claim,
+        claimLeaseExpiresAt: now + this.lockLeaseMs,
+      },
+      timestamps: {
+        ...job.timestamps,
+        updatedAt: now,
+      },
+    } as LiftJob;
+  }
+
+  private jobIdFromRef(jobRef: string): string | null {
+    const prefix = 'urn:dkg:publisher:lift-job:';
+    return jobRef.startsWith(prefix) ? jobRef.slice(prefix.length) : null;
+  }
+
+  private lockMatchesJob(
+    lock: { jobId: string; claimToken?: string },
+    job: LiftJob,
+  ): boolean {
+    if (lock.jobId !== job.jobId) return false;
+    if (job.claim?.claimToken && lock.claimToken) {
+      return lock.claimToken === job.claim.claimToken;
+    }
+    return true;
+  }
+
+  private async withClaimLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = TripleStoreAsyncLiftPublisher.claimQueues.get(this.graphUri) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    TripleStoreAsyncLiftPublisher.claimQueues.set(this.graphUri, next);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (TripleStoreAsyncLiftPublisher.claimQueues.get(this.graphUri) === next) {
+        TripleStoreAsyncLiftPublisher.claimQueues.delete(this.graphUri);
+      }
+    }
   }
 
   private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {

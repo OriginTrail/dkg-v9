@@ -73,6 +73,21 @@ export const CONTROL_TIMEOUT_AT = 'urn:dkg:publisher:timeoutAt';
 export const CONTROL_TIMEOUT_HANDLING = 'urn:dkg:publisher:timeoutHandling';
 export const CONTROL_JOB_REF = 'urn:dkg:publisher:jobRef';
 export const CONTROL_WALLET_LOCK_REF = 'urn:dkg:publisher:walletLockRef';
+export const CONTROL_LOCKED_JOB = 'urn:dkg:publisher:lockedJob';
+export const CONTROL_LOCK_STATUS = 'urn:dkg:publisher:lockStatus';
+export const CONTROL_LOCK_ACQUIRED_AT = 'urn:dkg:publisher:lockAcquiredAt';
+export const CONTROL_LOCK_EXPIRES_AT = 'urn:dkg:publisher:lockExpiresAt';
+export const CONTROL_LOCK_LAST_HEARTBEAT_AT = 'urn:dkg:publisher:lockLastHeartbeatAt';
+
+export interface WalletLockRecord {
+  readonly walletId: string;
+  readonly jobId: string;
+  readonly acquiredAt: number;
+  readonly expiresAt: number;
+  readonly status: 'active' | 'expired' | 'released';
+  readonly claimToken?: string;
+  readonly lastHeartbeatAt?: number;
+}
 
 export function jobSubject(jobId: string): string {
   return `urn:dkg:publisher:lift-job:${jobId}`;
@@ -84,6 +99,22 @@ export function requestSubject(jobId: string): string {
 
 export function walletLockSubject(walletId: string): string {
   return `urn:dkg:publisher:wallet-lock:${walletId}`;
+}
+
+export function serializeWalletLock(lock: WalletLockRecord, graphUri: string): Quad[] {
+  const subject = walletLockSubject(lock.walletId);
+  return [
+    quad(subject, RDF_TYPE_PREDICATE, iri(CONTROL_WALLET_LOCK_TYPE), graphUri),
+    quad(subject, CONTROL_WALLET_ID, literal(lock.walletId), graphUri),
+    quad(subject, CONTROL_LOCKED_JOB, iri(jobSubject(lock.jobId)), graphUri),
+    quad(subject, CONTROL_LOCK_STATUS, literal(lock.status), graphUri),
+    quad(subject, CONTROL_LOCK_ACQUIRED_AT, integer(lock.acquiredAt), graphUri),
+    quad(subject, CONTROL_LOCK_EXPIRES_AT, integer(lock.expiresAt), graphUri),
+    ...(lock.claimToken ? [quad(subject, CONTROL_CLAIM_TOKEN, literal(lock.claimToken), graphUri)] : []),
+    ...(lock.lastHeartbeatAt !== undefined
+      ? [quad(subject, CONTROL_LOCK_LAST_HEARTBEAT_AT, integer(lock.lastHeartbeatAt), graphUri)]
+      : []),
+  ];
 }
 
 export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
@@ -208,6 +239,14 @@ export function literal(value: string): string {
 
 export function parseLiteral(value: string): unknown {
   return JSON.parse(value);
+}
+
+export function parseIntegerLiteral(value: string): number {
+  const match = value.match(/^"(-?\d+)"(?:\^\^<[^>]+>)?$/);
+  if (!match) {
+    throw new Error(`Invalid integer literal: ${value}`);
+  }
+  return Number.parseInt(match[1] as string, 10);
 }
 
 export function createJobSlug(request: LiftRequest): string {

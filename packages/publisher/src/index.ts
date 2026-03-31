@@ -117,6 +117,11 @@ export {
   type LiftPublishMappingInput,
 } from './async-lift-publish-options.js';
 export {
+  validateLiftPublishPayload,
+  type LiftValidationInput,
+  type ValidatedLiftPublishPayload,
+} from './async-lift-validation.js';
+export {
   mapPublishResultToLiftJobSuccess,
   mapPublishExceptionToLiftJobFailure,
   type AsyncLiftPublishSuccess,

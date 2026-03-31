@@ -231,4 +231,26 @@ describe('mapLiftRequestToPublishOptions', () => {
     expect(prepared.publishOptions.accessPolicy).toBe('ownerOnly');
     expect(prepared.publishOptions.privateQuads).toEqual(input.resolved.privateQuads);
   });
+
+  it('accepts trimmed priorVersion consistently across validation and mapping semantics', () => {
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        transitionType: 'MUTATE',
+        priorVersion: '  did:dkg:mock:31337/0xabc/7  ',
+      },
+      validation: {
+        authorityProofRef: 'proof:owner:1',
+        priorVersion: 'did:dkg:mock:31337/0xabc/7',
+        transitionType: 'MUTATE',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.paranetId).toBe('music-social');
+  });
 });

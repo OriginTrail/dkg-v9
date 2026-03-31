@@ -78,7 +78,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     );
   }
 
-  const requestPriorVersion = input.request.priorVersion;
+  const requestPriorVersion = normalizePriorVersion(input.request.priorVersion);
   const validationPriorVersion = input.validation.priorVersion;
   if (requestPriorVersion !== validationPriorVersion) {
     throw new Error(
@@ -136,4 +136,9 @@ export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): Asyn
 
 function normalizeAuthorityProofRef(value: string): string {
   return value.trim();
+}
+
+function normalizePriorVersion(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }

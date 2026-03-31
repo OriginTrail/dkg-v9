@@ -6,7 +6,9 @@ import type {
   ReceiverSignatureProvider,
 } from './publisher.js';
 import type {
+  LiftAuthorityProof,
   LiftJobValidationMetadata,
+  LiftTransitionType,
   LiftRequest,
 } from './lift-job.js';
 
@@ -36,8 +38,26 @@ export interface LiftResolvedPublishSlice {
 
 export interface LiftPublishMappingInput {
   readonly request: LiftRequest;
-  readonly validation: Pick<LiftJobValidationMetadata, 'authorityProofRef' | 'priorVersion'>;
+  readonly validation: Pick<LiftJobValidationMetadata, 'authorityProofRef' | 'priorVersion' | 'transitionType'>;
   readonly resolved: LiftResolvedPublishSlice;
+}
+
+/**
+ * Internal handoff contract between async lift orchestration and canonical
+ * publish execution. This is intentionally not a second public protocol: it
+ * packages validated lift context together with the canonical PublishOptions
+ * needed to call shared publish logic.
+ */
+export interface AsyncPreparedPublishPayload {
+  readonly paranetId: string;
+  readonly scope: string;
+  readonly transitionType: LiftTransitionType;
+  readonly authority: LiftAuthorityProof;
+  readonly authorityProofRef: string;
+  readonly priorVersion?: string;
+  readonly quads: Quad[];
+  readonly privateQuads: Quad[];
+  readonly publishOptions: PublishOptions;
 }
 
 /**
@@ -47,9 +67,15 @@ export interface LiftPublishMappingInput {
  * fields on PublishOptions today.
  */
 export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): PublishOptions {
-  const authorityProofRef = input.validation.authorityProofRef.trim();
+  const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
   if (authorityProofRef.length === 0) {
     throw new Error('Lift publish mapping requires a non-empty authorityProofRef');
+  }
+
+  if (input.request.transitionType !== input.validation.transitionType) {
+    throw new Error(
+      `Lift publish mapping requires validation.transitionType to match request.transitionType. Request: ${input.request.transitionType}, validation: ${input.validation.transitionType}`,
+    );
   }
 
   const requestPriorVersion = input.request.priorVersion;
@@ -89,4 +115,25 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
   };
+}
+
+export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): AsyncPreparedPublishPayload {
+  const publishOptions = mapLiftRequestToPublishOptions(input);
+  const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
+
+  return {
+    paranetId: input.request.paranetId,
+    scope: input.request.scope,
+    transitionType: input.request.transitionType,
+    authority: input.request.authority,
+    authorityProofRef,
+    priorVersion: input.validation.priorVersion,
+    quads: [...publishOptions.quads],
+    privateQuads: [...(publishOptions.privateQuads ?? [])],
+    publishOptions,
+  };
+}
+
+function normalizeAuthorityProofRef(value: string): string {
+  return value.trim();
 }

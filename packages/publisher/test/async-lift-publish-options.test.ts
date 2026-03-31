@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapLiftRequestToPublishOptions, type LiftPublishMappingInput } from '../src/index.js';
+import { mapLiftRequestToPublishOptions, prepareAsyncPublishPayload, type LiftPublishMappingInput } from '../src/async-lift-publish-options.js';
 
 describe('mapLiftRequestToPublishOptions', () => {
   function baseInput(): LiftPublishMappingInput {
@@ -17,6 +17,7 @@ describe('mapLiftRequestToPublishOptions', () => {
       validation: {
         authorityProofRef: 'proof:owner:1',
         priorVersion: undefined,
+        transitionType: 'CREATE',
       },
       resolved: {
         quads: [
@@ -131,6 +132,7 @@ describe('mapLiftRequestToPublishOptions', () => {
         validation: {
           authorityProofRef: '   ',
           priorVersion: undefined,
+          transitionType: 'CREATE',
         },
       }),
     ).toThrow('Lift publish mapping requires a non-empty authorityProofRef');
@@ -147,8 +149,86 @@ describe('mapLiftRequestToPublishOptions', () => {
         validation: {
           authorityProofRef: 'proof:owner:1',
           priorVersion: 'did:dkg:mock:31337/0xdef/8',
+          transitionType: 'CREATE',
         },
       }),
     ).toThrow('Lift publish mapping requires validation.priorVersion to match request.priorVersion');
+  });
+
+  it('normalizes authorityProofRef before storing it in the prepared payload', () => {
+    const prepared = prepareAsyncPublishPayload({
+      ...baseInput(),
+      validation: {
+        authorityProofRef: '  proof:owner:1  ',
+        priorVersion: undefined,
+        transitionType: 'CREATE',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(prepared.authorityProofRef).toBe('proof:owner:1');
+  });
+
+  it('requires validation transitionType to match the request transitionType', () => {
+    expect(() =>
+      prepareAsyncPublishPayload({
+        ...baseInput(),
+        request: {
+          ...baseInput().request,
+          transitionType: 'MUTATE',
+        },
+        validation: {
+          authorityProofRef: 'proof:owner:1',
+          priorVersion: undefined,
+          transitionType: 'CREATE',
+        },
+      }),
+    ).toThrow('Lift publish mapping requires validation.transitionType to match request.transitionType');
+  });
+
+  it('packages the internal async-to-publish handoff contract', () => {
+    const input = {
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        transitionType: 'MUTATE',
+        priorVersion: 'did:dkg:mock:31337/0xabc/7',
+      },
+      validation: {
+        authorityProofRef: 'proof:owner:1',
+        priorVersion: 'did:dkg:mock:31337/0xabc/7',
+        transitionType: 'MUTATE',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+        privateQuads: [
+          {
+            subject: 'did:dkg:music-social:rihana',
+            predicate: 'http://schema.org/secret',
+            object: '"top-secret"',
+            graph: 'did:dkg:paranet:music-social/_private',
+          },
+        ],
+      },
+    } satisfies LiftPublishMappingInput;
+
+    const prepared = prepareAsyncPublishPayload(input);
+
+    expect(prepared.paranetId).toBe('music-social');
+    expect(prepared.scope).toBe('person-profile');
+    expect(prepared.transitionType).toBe('MUTATE');
+    expect(prepared.authority).toEqual({ type: 'owner', proofRef: 'proof:owner:1' });
+    expect(prepared.authorityProofRef).toBe('proof:owner:1');
+    expect(prepared.priorVersion).toBe('did:dkg:mock:31337/0xabc/7');
+    expect(prepared.quads).toEqual(input.resolved.quads);
+    expect(prepared.privateQuads).toEqual(input.resolved.privateQuads);
+    expect(prepared.publishOptions.paranetId).toBe('music-social');
+    expect(prepared.publishOptions.publisherPeerId).toBe('12D3KooWPublisher');
+    expect(prepared.publishOptions.accessPolicy).toBe('ownerOnly');
+    expect(prepared.publishOptions.privateQuads).toEqual(input.resolved.privateQuads);
   });
 });

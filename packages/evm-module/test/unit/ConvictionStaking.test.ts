@@ -357,6 +357,10 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       expect(pos.withdrawalAmount).to.equal(0);
     });
 
+    it('Should revert getPosition for nonexistent token', async () => {
+      await expect(ConvStaking.getPosition(999)).to.be.reverted;
+    });
+
     it('Should emit Staked event', async () => {
       const { identityId } = await createProfile();
       await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);

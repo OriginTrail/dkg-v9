@@ -189,6 +189,7 @@ contract ConvictionStaking is INamed, IVersioned, ContractStatus, IInitializable
      * @return position The position struct
      */
     function getPosition(uint256 tokenId) external view returns (Position memory) {
+        _requireOwned(tokenId);
         return positions[tokenId];
     }
 

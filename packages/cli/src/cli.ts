@@ -1232,6 +1232,122 @@ program
 
 // ─── dkg wallet ──────────────────────────────────────────────────────
 
+const publisherCmd = program
+  .command('publisher')
+  .description('Async publisher worker operations');
+
+const publisherWalletCmd = publisherCmd
+  .command('wallet')
+  .description('Manage async publisher wallets');
+
+publisherWalletCmd
+  .command('list')
+  .description('List async publisher wallet addresses')
+  .action(async () => {
+    try {
+      await ensureDkgDir();
+      const { loadPublisherWallets, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const config = await loadPublisherWallets(dkgDir());
+
+      if (!config.wallets.length) {
+        console.log('No publisher wallets configured.');
+        console.log('Use `dkg publisher wallet add <privateKey>` to add one.');
+        return;
+      }
+
+      console.log(`\nPublisher wallets (${config.wallets.length}):\n`);
+      for (const wallet of config.wallets) {
+        console.log(`  ${wallet.address}`);
+      }
+      console.log(`\n  File: ${publisherWalletsPath(dkgDir())}\n`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('add <privateKey>')
+  .description('Add an async publisher wallet private key')
+  .action(async (privateKey: string) => {
+    try {
+      await ensureDkgDir();
+      const { addPublisherWallet, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const updated = await addPublisherWallet(dkgDir(), privateKey);
+      const added = updated.wallets[updated.wallets.length - 1];
+      console.log('Publisher wallet added:');
+      console.log(`  Address: ${added?.address}`);
+      console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('remove <address>')
+  .description('Remove an async publisher wallet by address')
+  .action(async (address: string) => {
+    try {
+      await ensureDkgDir();
+      const { removePublisherWallet } = await import('./publisher-wallets.js');
+      await removePublisherWallet(dkgDir(), address);
+      console.log(`Removed publisher wallet ${address}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('start')
+  .description('Start the async publisher worker loop')
+  .option('--poll-interval <ms>', 'Idle poll interval in milliseconds', '1000')
+  .option('--error-backoff <ms>', 'Error backoff in milliseconds', '1000')
+  .action(async (opts: ActionOpts) => {
+    let runtime: { runner: { start(): Promise<void> }; stop(): Promise<void>; walletIds: string[] } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherRuntime, parsePositiveMsOption } = await import('./publisher-runner.js');
+      runtime = await createPublisherRuntime({
+        dataDir: dkgDir(),
+        config,
+        pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval), '--poll-interval'),
+        errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff), '--error-backoff'),
+      });
+
+      console.log('Starting async publisher worker...');
+      console.log(`  Wallets: ${runtime.walletIds.join(', ')}`);
+      console.log(`  Poll interval: ${opts.pollInterval}ms`);
+      console.log(`  Error backoff: ${opts.errorBackoff}ms`);
+
+      await runtime.runner.start();
+      console.log('Async publisher runner started. Press Ctrl+C to stop.');
+      await new Promise<void>((resolve) => {
+        let stopping = false;
+        const done = async () => {
+          if (stopping) return;
+          stopping = true;
+          process.off('SIGINT', done);
+          process.off('SIGTERM', done);
+          if (runtime) {
+            await runtime.stop();
+          }
+          resolve();
+        };
+        process.once('SIGINT', done);
+        process.once('SIGTERM', done);
+      });
+    } catch (err: any) {
+      if (runtime) {
+        await runtime.stop().catch(() => {});
+      }
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
 program
   .command('wallet')
   .description('Show operational wallet addresses and balances')

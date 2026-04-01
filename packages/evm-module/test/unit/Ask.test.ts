@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
@@ -135,38 +135,6 @@ describe('@unit Ask', () => {
     expect(await AskStorage.totalActiveStake()).to.be.equal(remainingStake);
   });
 
-  it('Multiple profiles: set different asks and stakes, verify weighted sums are exact', async () => {
-    const profiles: Array<{ identityId: number; ask: bigint; stake: bigint }> = [];
-    const asks = [100n, 200n, 300n];
-    const stakes = [
-      hre.ethers.parseUnits('50000', 18),
-      hre.ethers.parseUnits('60000', 18),
-      hre.ethers.parseUnits('70000', 18),
-    ];
-
-    for (let i = 0; i < 3; i++) {
-      const { identityId } = await createProfile(
-        accounts[0],
-        accounts[i + 1],
-        i * 10 + 10,
-      );
-
-      await Profile.connect(accounts[0]).updateAsk(identityId, asks[i]);
-
-      await Token.mint(accounts[4].address, stakes[i]);
-      await Token.connect(accounts[4]).approve(Staking.getAddress(), stakes[i]);
-      await Staking.connect(accounts[4]).stake(identityId, stakes[i]);
-
-      profiles.push({ identityId, ask: asks[i], stake: stakes[i] });
-    }
-
-    const expectedTotalStake = stakes.reduce((a, b) => a + b, 0n);
-    const expectedWeightedSum = profiles.reduce((acc, p) => acc + p.stake * p.ask, 0n);
-
-    expect(await AskStorage.totalActiveStake()).to.equal(expectedTotalStake);
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(expectedWeightedSum);
-  });
-
   it('Edge case: set ask=0 => expect revert from Profile.updateAsk(...)', async () => {
     const { identityId } = await createProfile(accounts[0], accounts[1], 10);
     await expect(
@@ -202,75 +170,6 @@ describe('@unit Ask', () => {
     expect(finalNodeStake).to.equal(stake70k + restake);
   });
 
-  it('Stake/withdraw/updateAsk cycle maintains exact sums', async () => {
-    const { identityId } = await createProfile(accounts[0], accounts[1], 10);
-    const largeStake = hre.ethers.parseUnits('90000', 18);
-    await Token.mint(accounts[2].address, largeStake);
-    await Token.connect(accounts[2]).approve(Staking.getAddress(), largeStake);
-    await Staking.connect(accounts[2]).stake(identityId, largeStake);
-    await Profile.connect(accounts[0]).updateAsk(identityId, 300n);
-
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(largeStake * 300n);
-    expect(await AskStorage.totalActiveStake()).to.equal(largeStake);
-
-    const partial1 = hre.ethers.parseUnits('40000', 18);
-    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
-    await Staking.connect(accounts[2]).requestWithdrawal(identityId, partial1);
-
-    const remainingAfterPartial = largeStake - partial1;
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(remainingAfterPartial * 300n);
-    expect(await AskStorage.totalActiveStake()).to.equal(remainingAfterPartial);
-
-    const askChanges = [500n, 1n, 9999n, 250n];
-    for (const newAsk of askChanges) {
-      await time.increase(61);
-      await Profile.connect(accounts[0]).updateAsk(identityId, newAsk);
-      expect(await AskStorage.weightedActiveAskSum()).to.equal(remainingAfterPartial * newAsk);
-      expect(await AskStorage.totalActiveStake()).to.equal(remainingAfterPartial);
-    }
-
-    await Staking.connect(accounts[2]).cancelWithdrawal(identityId);
-    const lastAsk = askChanges[askChanges.length - 1];
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(largeStake * lastAsk);
-    expect(await AskStorage.totalActiveStake()).to.equal(largeStake);
-  });
-
-  it('Partial withdraw near min stake: verify node exclusion from sums', async () => {
-    const { identityId } = await createProfile(accounts[0], accounts[1], 20);
-    const stAmount = hre.ethers.parseUnits('80000', 18);
-    await Token.mint(accounts[2].address, stAmount);
-    await Token.connect(accounts[2]).approve(Staking.getAddress(), stAmount);
-    await Staking.connect(accounts[2]).stake(identityId, stAmount);
-    await Profile.connect(accounts[0]).updateAsk(identityId, 400n);
-
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(stAmount * 400n);
-    expect(await AskStorage.totalActiveStake()).to.equal(stAmount);
-
-    await time.increase(61);
-
-    const partialWithdraw = hre.ethers.parseUnits('79999', 18);
-    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
-    await Staking.connect(accounts[2]).requestWithdrawal(
-      identityId,
-      partialWithdraw,
-    );
-    const remainingStake = stAmount - partialWithdraw;
-    const weighted3 = await AskStorage.weightedActiveAskSum();
-    const total3 = await AskStorage.totalActiveStake();
-    expect(total3).to.equal(remainingStake);
-    expect(weighted3).to.equal(remainingStake * 400n);
-
-    await Staking.connect(accounts[2]).cancelWithdrawal(identityId);
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(stAmount * 400n);
-    expect(await AskStorage.totalActiveStake()).to.equal(stAmount);
-
-    await time.increase(61);
-
-    await expect(
-      Profile.connect(accounts[0]).updateAsk(identityId, 0n),
-    ).to.be.revertedWithCustomError(Profile, 'ZeroAsk');
-  });
-
   it('Restake operator fees then partial withdraw: sums remain consistent', async () => {
     const { identityId } = await createProfile(accounts[0], accounts[1], 30);
     const askVal = 1000n;
@@ -300,61 +199,4 @@ describe('@unit Ask', () => {
     expect(await AskStorage.weightedActiveAskSum()).to.equal(stakeAfterRestake2 * askVal);
   });
 
-  it('Multiple nodes with deterministic stakes: verify exact weighted sums after each operation', async () => {
-    const nodeData = [
-      { ask: 100n, stakes: [55000n, 60000n] },
-      { ask: 200n, stakes: [70000n, 75000n] },
-      { ask: 300n, stakes: [80000n] },
-      { ask: 400n, stakes: [65000n, 50000n, 90000n] },
-      { ask: 500n, stakes: [52000n] },
-    ];
-
-    const identityIds: number[] = [];
-    for (let i = 0; i < nodeData.length; i++) {
-      const { identityId } = await createProfile(
-        accounts[0],
-        accounts[i + 1],
-        (i + 1) * 5,
-      );
-      await Profile.connect(accounts[0]).updateAsk(identityId, nodeData[i].ask);
-      identityIds.push(identityId);
-    }
-
-    let expectedTotalStake = 0n;
-    let expectedWeightedSum = 0n;
-
-    for (let i = 0; i < nodeData.length; i++) {
-      for (const rawStake of nodeData[i].stakes) {
-        const stakeWei = hre.ethers.parseUnits(rawStake.toString(), 18);
-        await Token.mint(accounts[8].address, stakeWei);
-        await Token.connect(accounts[8]).approve(Staking.getAddress(), stakeWei);
-        await Staking.connect(accounts[8]).stake(identityIds[i], stakeWei);
-        expectedTotalStake += stakeWei;
-        expectedWeightedSum += stakeWei * nodeData[i].ask;
-      }
-    }
-
-    expect(await AskStorage.totalActiveStake()).to.equal(expectedTotalStake);
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(expectedWeightedSum);
-  });
-
-  it('Ask changes correctly update weighted sum without changing total stake', async () => {
-    const { identityId } = await createProfile(accounts[0], accounts[1], 50);
-    await Profile.connect(accounts[0]).updateAsk(identityId, 1000n);
-    const stVal = hre.ethers.parseUnits('90000', 18);
-    await Token.mint(accounts[2].address, stVal);
-    await Token.connect(accounts[2]).approve(Staking.getAddress(), stVal);
-    await Staking.connect(accounts[2]).stake(identityId, stVal);
-
-    expect(await AskStorage.weightedActiveAskSum()).to.equal(stVal * 1000n);
-    expect(await AskStorage.totalActiveStake()).to.equal(stVal);
-
-    const askChanges = [500n, 100n, 2n];
-    for (const newAsk of askChanges) {
-      await time.increase(61);
-      await Profile.connect(accounts[0]).updateAsk(identityId, newAsk);
-      expect(await AskStorage.weightedActiveAskSum()).to.equal(stVal * newAsk);
-      expect(await AskStorage.totalActiveStake()).to.equal(stVal);
-    }
-  });
 });

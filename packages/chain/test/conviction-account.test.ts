@@ -66,7 +66,7 @@ describe('Publishing Conviction Account (MockChainAdapter)', () => {
     expect(after!.initialCommitment).toBe(initial);
   });
 
-  it('closes account after lock expired and balances zero', async () => {
+  it('cannot close account during lock or with non-zero balances', async () => {
     const adapter = new MockChainAdapter();
     await adapter.createConvictionAccount(100_000n * 10n ** 18n);
 
@@ -78,6 +78,21 @@ describe('Publishing Conviction Account (MockChainAdapter)', () => {
     adapter.setMockEpoch(14n);
     const failResult2 = await adapter.closeConvictionAccount(1n);
     expect(failResult2.success).toBe(false);
+  });
+
+  it('closes account after lock expired and balances drained', async () => {
+    const adapter = new MockChainAdapter();
+    await adapter.createConvictionAccount(100_000n * 10n ** 18n);
+
+    adapter.setMockEpoch(14n);
+    adapter.__test_drainConvictionBalances(1n);
+
+    const result = await adapter.closeConvictionAccount(1n);
+    expect(result.success).toBe(true);
+
+    // Account should be gone
+    const info = await adapter.getConvictionAccountInfo(1n);
+    expect(info).toBeNull();
   });
 
   it('returns null for nonexistent account', async () => {

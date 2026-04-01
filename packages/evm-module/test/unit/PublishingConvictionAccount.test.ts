@@ -42,18 +42,25 @@ describe('@unit PublishingConvictionAccount contract', function () {
       const token = await hre.ethers.getContract('Token');
       const amount = hre.ethers.parseEther('100000');
 
+      // Advance time so Chronos returns epoch > 1. This proves createAccount
+      // reads from Chronos rather than hardcoding epoch 1.
+      const epochLength = await ChronosContract.EPOCH_LENGTH();
+      await time.increase(epochLength * 3n);
+
+      const expectedEpoch = await ChronosContract.getCurrentEpoch();
+      expect(expectedEpoch).to.be.greaterThan(1n);
+
       await token.approve(await PCA.getAddress(), amount);
       const tx = await PCA.createAccount(amount);
       await tx.wait();
 
-      const currentEpoch = await ChronosContract.getCurrentEpoch();
       const info = await PCA.getAccountInfo(1);
 
       expect(info.admin).to.equal(accounts[0].address);
       expect(info.lockedBalance).to.equal(amount);
       expect(info.topUpBalance).to.equal(0);
       expect(info.initialCommitment).to.equal(amount);
-      expect(info.createdAtEpoch).to.equal(currentEpoch);
+      expect(info.createdAtEpoch).to.equal(expectedEpoch);
       // conviction = amount * 12
       expect(info.conviction).to.equal(amount * 12n);
     });
@@ -174,9 +181,30 @@ describe('@unit PublishingConvictionAccount contract', function () {
       expect(await PCA.getDiscount(1)).to.equal(7500);
     });
 
-    it('returns tier below when between thresholds (e.g. 49,999 = 10%)', async () => {
-      await createAccountWithAmount(hre.ethers.parseEther('49999'));
-      expect(await PCA.getDiscount(1)).to.equal(1000);
+    it('returns tier below when between thresholds', async () => {
+      // Test just-below each threshold to catch off-by-one in tier boundaries
+      const betweenCases: Array<[string, number]> = [
+        ['49999', 1000],   // just below 50K -> 10%
+        ['99999', 2000],   // just below 100K -> 20%
+        ['249999', 3000],  // just below 250K -> 30%
+        ['499999', 4000],  // just below 500K -> 40%
+        ['999999', 5000],  // just below 1M -> 50%
+      ];
+
+      for (const [amount, expectedBps] of betweenCases) {
+        // Each iteration needs a fresh account from a different admin
+        const idx = betweenCases.indexOf(betweenCases.find(c => c[0] === amount)!);
+        const signer = accounts[idx + 1]; // offset by 1, accounts[0] is deployer
+        const token = await hre.ethers.getContract('Token');
+        const parsedAmount = hre.ethers.parseEther(amount);
+
+        await token.transfer(signer.address, parsedAmount);
+        await token.connect(signer).approve(await PCA.getAddress(), parsedAmount);
+        await PCA.connect(signer).createAccount(parsedAmount);
+
+        const accountId = await PCA.adminToAccountId(signer.address);
+        expect(await PCA.getDiscount(accountId)).to.equal(expectedBps);
+      }
     });
   });
 

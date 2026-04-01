@@ -460,6 +460,15 @@ export class MockChainAdapter implements ChainAdapter {
     this.mockCurrentEpoch = epoch;
   }
 
+  /** Test helper: zero out balances on an account (simulates coverPublishingCost drain). */
+  __test_drainConvictionBalances(accountId: bigint): void {
+    const acct = this.convictionAccounts.get(accountId);
+    if (acct) {
+      acct.lockedBalance = 0n;
+      acct.topUpBalance = 0n;
+    }
+  }
+
   // --- FairSwap Judge ---
 
   private fairSwapPurchases = new Map<bigint, {

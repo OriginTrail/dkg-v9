@@ -228,6 +228,20 @@ describe('ConvictionStaking - Tracer Bullet', function () {
     it('Should support ERC-721 Enumerable interface', async () => {
       expect(await ConvStaking.supportsInterface('0x780e9d63')).to.equal(true);
     });
+
+    it('Should be soulbound (block transfers)', async () => {
+      const { identityId } = await createProfile();
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      await expect(
+        ConvStaking.transferFrom(
+          accounts[0].address,
+          accounts[5].address,
+          0,
+        ),
+      ).to.be.revertedWith('ConvictionStaking: position is soulbound');
+    });
   });
 
   // -------------------------------------------------------------------------

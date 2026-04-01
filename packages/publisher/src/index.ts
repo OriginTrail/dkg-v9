@@ -112,6 +112,10 @@ export {
   type AsyncLiftPublisherRecoveryResolver,
 } from './async-lift-publisher.js';
 export {
+  AsyncLiftRunner,
+  type AsyncLiftRunnerConfig,
+} from './async-lift-runner.js';
+export {
   mapLiftRequestToPublishOptions,
   type LiftResolvedPublishSlice,
   type LiftPublishMappingInput,

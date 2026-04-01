@@ -1,8 +1,10 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
+  createLiftJobFailureMetadata,
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
@@ -24,6 +26,9 @@ import {
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
+import { prepareAsyncPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import { validateLiftPublishPayload } from './async-lift-validation.js';
+import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -60,6 +65,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
+  private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
 
@@ -74,6 +82,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
+    this.publishExecutor = config.publishExecutor;
+    this.resolvedSliceOverrides = config.resolvedSliceOverrides;
+    this.graphManager = new GraphManager(store);
   }
 
   async lift(request: LiftRequest): Promise<string> {
@@ -153,6 +164,52 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null)
       .sort(compareAcceptedJobs);
+  }
+
+  async processNext(walletId: string): Promise<LiftJob | null> {
+    if (!this.publishExecutor) {
+      throw new Error('Async lift publisher processNext requires a configured publishExecutor');
+    }
+
+    const claimed = await this.claimNext(walletId);
+    if (!claimed) {
+      return null;
+    }
+
+    let failureState: LiftJobState = claimed.status;
+    try {
+      const resolved = await resolveLiftWorkspaceSlice({
+        store: this.store,
+        graphManager: this.graphManager,
+        request: claimed.request,
+      });
+      const validated = validateLiftPublishPayload({
+        request: claimed.request,
+        resolved: {
+          ...resolved,
+          ...this.resolvedSliceOverrides,
+        },
+      });
+
+      await this.update(claimed.jobId, 'validated', {
+        validation: validated.validation,
+      });
+      failureState = 'validated';
+
+      const prepared = prepareAsyncPublishPayload({
+        request: claimed.request,
+        validation: validated.validation,
+        resolved: validated.resolved,
+      });
+
+      failureState = 'broadcast';
+      const publishResult = await this.publishExecutor(prepared.publishOptions);
+      return await this.recordPublishResult(claimed.jobId, publishResult, {
+        publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
+      });
+    } catch (error) {
+      return await this.recordExecutionFailure(claimed.jobId, failureState, error);
+    }
   }
 
   async recordPublishResult(
@@ -468,6 +525,50 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     return job;
   }
 
+  private async recordExecutionFailure(jobId: string, failedFromState: LiftJobState, error: unknown): Promise<LiftJob> {
+    const current = await this.getRequiredJob(jobId);
+
+    if (failedFromState === 'claimed' || failedFromState === 'validated') {
+      const message = error instanceof Error ? error.message : String(error);
+      const lower = message.toLowerCase();
+      const code =
+        lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
+          ? 'workspace_unavailable'
+          : lower.includes('authority')
+          ? 'authority_forbidden'
+          : lower.includes('workspace') || lower.includes('root')
+            ? 'workspace_slice_not_found'
+            : 'canonicalization_failed';
+      const failure = createLiftJobFailureMetadata({
+        failedFromState,
+        code,
+        message,
+        errorPayloadRef: `urn:dkg:publisher:error:${jobId}`,
+      });
+      const failed = this.mergeJob(current, 'failed', { failure: failure as any });
+      this.assertJobMatchesStatus(failed);
+      await this.writeJob(failed);
+      await this.syncWalletLockForJob(failed);
+      return failed;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    return await this.recordPublishFailure(jobId, {
+      error,
+      failedFromState: failedFromState === 'included' ? 'included' : 'broadcast',
+      errorPayloadRef: `urn:dkg:publisher:error:${jobId}`,
+      timeout:
+        lower.includes('timeout') || lower.includes('timed out')
+          ? {
+              timeoutMs: 0,
+              timeoutAt: this.now(),
+              handling: failedFromState === 'included' ? 'check_chain_then_finalize_or_reset' : 'check_chain_then_finalize_or_reset',
+            }
+          : undefined,
+    });
+  }
+
   private parseJobPayload(binding?: string): LiftJob | null {
     if (!binding) return null;
     const payload = parseLiteral(binding);
@@ -652,6 +753,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         updatedAt: now,
       },
     } as LiftJob;
+  }
+
+  private computePublicByteSize(quads: readonly { subject: string; predicate: string; object: string; graph: string }[]): number {
+    const nquads = quads
+      .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
+      .join('\n');
+    return new TextEncoder().encode(nquads).length;
   }
 
   private assertJobMatchesStatus(job: LiftJob): void {

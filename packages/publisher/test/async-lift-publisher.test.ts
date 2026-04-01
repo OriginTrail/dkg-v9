@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
 import {
+  DKGPublisher,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
+  type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
 } from '../src/index.js';
@@ -51,11 +56,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     ids = 0;
   });
 
-  function createPublisher(recoveryResult?: AsyncLiftPublisherRecoveryResult | null) {
+  function createPublisher(
+    options: {
+      recoveryResult?: AsyncLiftPublisherRecoveryResult | null;
+      config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
+    } = {},
+  ) {
     return new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
-      chainRecoveryResolver: recoveryResult === undefined ? undefined : async () => recoveryResult,
+      chainRecoveryResolver:
+        options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
+      ...options.config,
     });
   }
 
@@ -503,6 +515,154 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(failed.failure?.timeout?.timeoutMs).toBe(30_000);
   });
 
+  it('processes the next job through workspace resolution, validation, and canonical publish', async () => {
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async (options) => {
+          expect(options.paranetId).toBe('music-social');
+          expect(options.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
+          return {
+            kcId: 1n,
+            ual: 'did:dkg:mock:31337/0xabc/1',
+            merkleRoot: new Uint8Array([0xab, 0xcd]),
+            kaManifest: [],
+            status: 'confirmed',
+            onChainResult: {
+              batchId: 7n,
+              startKAId: 1n,
+              endKAId: 1n,
+              txHash: '0xabc',
+              blockNumber: 10,
+              blockTimestamp: 1700000000,
+              publisherAddress: '0x1111111111111111111111111111111111111111',
+            },
+          };
+        },
+      },
+    });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.lift({
+      ...request(),
+      workspaceOperationId: write.workspaceOperationId,
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.validation?.authorityProofRef).toBe('proof:owner:1');
+    expect(processed?.finalization?.ual).toBe('did:dkg:mock:31337/0xabc/1');
+  });
+
+  it('records validation/publish execution failures during processNext', async () => {
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async () => {
+          throw new Error('RPC submit timed out after 30s');
+        },
+      },
+    });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    await publisher.lift({
+      ...request(),
+      workspaceOperationId: write.workspaceOperationId,
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('tx_submit_timeout');
+  });
+
+  it('keeps prepare-stage mapping/config failures on the validation side', async () => {
+    const publisher = createPublisher({
+      config: {
+        resolvedSliceOverrides: {
+          accessPolicy: 'ownerOnly',
+          publisherPeerId: '',
+        },
+        publishExecutor: async () => {
+          throw new Error('should not be called');
+        },
+      },
+    });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    await publisher.lift({
+      ...request(),
+      workspaceOperationId: write.workspaceOperationId,
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('canonicalization_failed');
+  });
+
+  it('classifies transient workspace-resolution failures as retryable validation failures', async () => {
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async () => {
+          throw new Error('should not be called');
+        },
+      },
+    });
+    await publisher.lift({
+      ...request(),
+      workspaceOperationId: 'op-1',
+    });
+
+    const originalQuery = store.query.bind(store);
+    store.query = async (sparql: string) => {
+      if (sparql.includes('_workspace_meta')) {
+        throw new Error('workspace store timeout');
+      }
+      return originalQuery(sparql);
+    };
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('workspace_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+  });
+
   it('lists and counts jobs by status', async () => {
     const publisher = createPublisher();
     const acceptedId = await publisher.lift(request());
@@ -531,14 +691,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('recovers interrupted jobs and finalizes broadcast jobs through the resolver', async () => {
     const publisher = createPublisher({
-      inclusion: { txHash: '0xbbb', blockNumber: 7 },
-      finalization: {
-        txHash: '0xbbb',
-        ual: 'did:dkg:mock:31337/0xbbb/7',
-        batchId: '7',
-        startKAId: '7',
-        endKAId: '7',
-        publisherAddress: '0x1111111111111111111111111111111111111111',
+      recoveryResult: {
+        inclusion: { txHash: '0xbbb', blockNumber: 7 },
+        finalization: {
+          txHash: '0xbbb',
+          ual: 'did:dkg:mock:31337/0xbbb/7',
+          batchId: '7',
+          startKAId: '7',
+          endKAId: '7',
+          publisherAddress: '0x1111111111111111111111111111111111111111',
+        },
       },
     });
 

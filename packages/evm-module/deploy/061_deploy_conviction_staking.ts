@@ -14,6 +14,8 @@ func.dependencies = [
   'Token',
   'StakingStorage',
   'ConvictionStakeStorage',
+  'RandomSamplingStorage',
+  'DelegatorsInfo',
   'ParametersStorage',
   'ProfileStorage',
   'IdentityStorage',

@@ -19,6 +19,7 @@ import {
   RandomSamplingStorage,
   RandomSampling,
   EpochStorage,
+  DelegatorsInfo,
   ConvictionStaking,
   ConvictionStakeStorage,
 } from '../../typechain';
@@ -40,6 +41,7 @@ type Fixture = {
   RandomSamplingStorage: RandomSamplingStorage;
   RandomSampling: RandomSampling;
   EpochStorage: EpochStorage;
+  DelegatorsInfo: DelegatorsInfo;
 };
 
 async function deployFixture(): Promise<Fixture> {
@@ -51,6 +53,7 @@ async function deployFixture(): Promise<Fixture> {
     'EpochStorage',
     'Chronos',
     'RandomSamplingStorage',
+    'DelegatorsInfo',
   ]);
 
   const accounts = await hre.ethers.getSigners();
@@ -83,6 +86,8 @@ async function deployFixture(): Promise<Fixture> {
     await hre.ethers.getContract<RandomSampling>('RandomSampling');
   const EpochStorage =
     await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+  const DelegatorsInfo =
+    await hre.ethers.getContract<DelegatorsInfo>('DelegatorsInfo');
 
   await Hub.setContractAddress('HubOwner', accounts[0].address);
 
@@ -103,6 +108,7 @@ async function deployFixture(): Promise<Fixture> {
     RandomSamplingStorage,
     RandomSampling,
     EpochStorage,
+    DelegatorsInfo,
   };
 }
 
@@ -114,10 +120,12 @@ describe('ConvictionStaking - Tracer Bullet', function () {
   let ConvStakeStorage: ConvictionStakeStorage;
   let StkStorage: StakingStorage;
   let ParametersStor: ParametersStorage;
+  let ShardingTableStor: ShardingTableStorage;
   let Hub_: Hub;
   let Chronos_: Chronos;
   let RandSampling: RandomSampling;
   let RandSamplingStorage: RandomSamplingStorage;
+  let DelInfo: DelegatorsInfo;
 
   const STAKE_AMOUNT = hre.ethers.parseUnits('50000', 18); // 50K TRAC
 
@@ -150,10 +158,12 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       ConvictionStakeStorage: ConvStakeStorage,
       StakingStorage: StkStorage,
       ParametersStorage: ParametersStor,
+      ShardingTableStorage: ShardingTableStor,
       Hub: Hub_,
       Chronos: Chronos_,
       RandomSampling: RandSampling,
       RandomSamplingStorage: RandSamplingStorage,
+      DelegatorsInfo: DelInfo,
     } = await loadFixture(deployFixture));
   });
 
@@ -167,7 +177,6 @@ describe('ConvictionStaking - Tracer Bullet', function () {
     });
 
     it('Should allow hub-registered contracts to set effectiveNodeStake', async () => {
-      // Hub owner can call onlyContracts functions
       await ConvStakeStorage.setEffectiveNodeStake(1, 1000n);
       expect(await ConvStakeStorage.getEffectiveNodeStake(1)).to.equal(1000n);
     });
@@ -213,12 +222,10 @@ describe('ConvictionStaking - Tracer Bullet', function () {
     });
 
     it('Should support ERC-721 interface', async () => {
-      // ERC-721 interface ID: 0x80ac58cd
       expect(await ConvStaking.supportsInterface('0x80ac58cd')).to.equal(true);
     });
 
     it('Should support ERC-721 Enumerable interface', async () => {
-      // ERC-721 Enumerable interface ID: 0x780e9d63
       expect(await ConvStaking.supportsInterface('0x780e9d63')).to.equal(true);
     });
   });
@@ -305,20 +312,17 @@ describe('ConvictionStaking - Tracer Bullet', function () {
     it('Should update ConvictionStakeStorage.effectiveNodeStake (1x for tier 0)', async () => {
       const { identityId } = await createProfile();
       await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
-
       await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
 
       const effectiveStake = await ConvStakeStorage.getEffectiveNodeStake(
         identityId,
       );
-      // Tier 0 = 1x multiplier, so effective == raw
       expect(effectiveStake).to.equal(STAKE_AMOUNT);
     });
 
     it('Should update ConvictionStakeStorage.effectiveTotalStake', async () => {
       const { identityId } = await createProfile();
       await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
-
       await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
 
       expect(await ConvStakeStorage.getEffectiveTotalStake()).to.equal(
@@ -346,6 +350,57 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       await expect(ConvStaking.stake(identityId, STAKE_AMOUNT, 0))
         .to.emit(ConvStaking, 'Staked')
         .withArgs(0, accounts[0].address, identityId, STAKE_AMOUNT, 0);
+    });
+
+    it('Should write delegator stakeBase to StakingStorage', async () => {
+      const { identityId } = await createProfile();
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      const delegatorKey = hre.ethers.keccak256(
+        hre.ethers.solidityPacked(['address'], [accounts[0].address]),
+      );
+      const stakeBase = await StkStorage.getDelegatorStakeBase(
+        identityId,
+        delegatorKey,
+      );
+      expect(stakeBase).to.equal(STAKE_AMOUNT);
+    });
+
+    it('Should register delegator in DelegatorsInfo', async () => {
+      const { identityId } = await createProfile();
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      expect(
+        await DelInfo.isNodeDelegator(identityId, accounts[0].address),
+      ).to.equal(true);
+      expect(
+        await DelInfo.hasEverDelegatedToNode(identityId, accounts[0].address),
+      ).to.equal(true);
+    });
+
+    it('Should only insert node in sharding table when stake >= minimumStake', async () => {
+      const { identityId } = await createProfile();
+      const minStake = await ParametersStor.minimumStake();
+
+      // Stake below minimum
+      const belowMin = minStake - 1n;
+      await Token.approve(await ConvStaking.getAddress(), belowMin);
+      await ConvStaking.stake(identityId, belowMin, 0);
+
+      // Node should NOT be in sharding table
+      expect(await ShardingTableStor.nodeExists(identityId)).to.equal(false);
+    });
+
+    it('Should insert node in sharding table when stake >= minimumStake', async () => {
+      const { identityId } = await createProfile();
+
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      // Node should be in sharding table (50K > minimumStake)
+      expect(await ShardingTableStor.nodeExists(identityId)).to.equal(true);
     });
 
     it('Should mint sequential NFT IDs for multiple stakes', async () => {
@@ -376,6 +431,23 @@ describe('ConvictionStaking - Tracer Bullet', function () {
         await ConvStakeStorage.getEffectiveNodeStake(identityId),
       ).to.equal(amount * 3n);
     });
+
+    it('Should accumulate delegator stakeBase for multiple stakes on same node', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseUnits('10000', 18);
+      await Token.approve(await ConvStaking.getAddress(), amount * 3n);
+
+      await ConvStaking.stake(identityId, amount, 0);
+      await ConvStaking.stake(identityId, amount, 0);
+      await ConvStaking.stake(identityId, amount, 0);
+
+      const delegatorKey = hre.ethers.keccak256(
+        hre.ethers.solidityPacked(['address'], [accounts[0].address]),
+      );
+      expect(
+        await StkStorage.getDelegatorStakeBase(identityId, delegatorKey),
+      ).to.equal(amount * 3n);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -387,36 +459,14 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
       await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
 
-      // calculateNodeScore should return a non-zero value since node is staked
       const score = await RandSampling.calculateNodeScore(identityId);
       expect(score).to.be.gt(0);
     });
 
     it('Should return 0 score for unstaked node', async () => {
       const { identityId } = await createProfile();
-
-      // Node has no stake and no effectiveNodeStake → score should be 0
       const score = await RandSampling.calculateNodeScore(identityId);
       expect(score).to.equal(0);
-    });
-
-    it('Should produce same score via effectiveNodeStake as raw stake would for tier 0', async () => {
-      // With tier 0, effectiveNodeStake == raw nodeStake
-      // Score should be consistent: sqrt(stake/cap) * baseline
-      const { identityId } = await createProfile();
-      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
-      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
-
-      const score = await RandSampling.calculateNodeScore(identityId);
-
-      // Manual calculation: S(t) = sqrt(50K/2M) * 0.002 = sqrt(0.025) * 0.002
-      // sqrt(0.025) ≈ 0.158, * 0.002 ≈ 0.000316
-      // Exact: stakeCap = 2M (default), stakeRatio18 = (50K * 1e18) / 2M = 25e15
-      // stakeFactor18 = sqrt(25e15 * 1e18) = sqrt(25e33) = 5e16 = 158113883...
-      // baselineComponent18 = 2e15
-      // innerScore18 = 2e15 (no publishing/ask)
-      // finalScore18 = stakeFactor18 * 2e15 / 1e18
-      expect(score).to.be.gt(0);
     });
   });
 });

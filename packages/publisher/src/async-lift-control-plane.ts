@@ -51,6 +51,7 @@ export const CONTROL_BLOCK_NUMBER = 'urn:dkg:publisher:blockNumber';
 export const CONTROL_BLOCK_HASH = 'urn:dkg:publisher:blockHash';
 export const CONTROL_BLOCK_TIMESTAMP = 'urn:dkg:publisher:blockTimestamp';
 export const CONTROL_UAL = 'urn:dkg:publisher:ual';
+export const CONTROL_FINALIZATION_MODE = 'urn:dkg:publisher:finalizationMode';
 export const CONTROL_BATCH_ID = 'urn:dkg:publisher:batchId';
 export const CONTROL_START_KA_ID = 'urn:dkg:publisher:startKAId';
 export const CONTROL_END_KA_ID = 'urn:dkg:publisher:endKAId';
@@ -172,6 +173,7 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
   }
 
   if ('finalization' in job && job.finalization) {
+    pushOptional(quads, jobRef, CONTROL_FINALIZATION_MODE, job.finalization.mode, graphUri, literal);
     pushOptional(quads, jobRef, CONTROL_UAL, job.finalization.ual, graphUri, literal);
     pushOptional(quads, jobRef, CONTROL_BATCH_ID, job.finalization.batchId, graphUri, literal);
     pushOptional(quads, jobRef, CONTROL_START_KA_ID, job.finalization.startKAId, graphUri, literal);

@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {
   DKGPublisher,
@@ -90,6 +90,15 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       throw new Error(`Unexpected expiresAt literal: ${value}`);
     }
     return Number.parseInt(match[1] as string, 10);
+  }
+
+  function canonicalRoot(root: string): string {
+    const digest = sha256(new TextEncoder().encode(root));
+    const suffix = Array.from(digest)
+      .slice(0, 6)
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    return `dkg:music-social:aloha:person-profile/rihana-${suffix}`;
   }
 
   it('creates accepted jobs and returns status', async () => {
@@ -597,6 +606,106 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(processed?.status).toBe('failed');
     expect(processed?.failure?.code).toBe('tx_submit_timeout');
+  });
+
+  it('publishes only the unmatched CREATE remainder against finalized authoritative state', async () => {
+    const publishExecutor = vi.fn(async ({ publishOptions }) => {
+      expect(publishOptions.quads).toHaveLength(1);
+      expect(publishOptions.quads[0]?.predicate).toBe('http://schema.org/genre');
+      return {
+        kcId: 1n,
+        ual: 'did:dkg:mock:31337/0xabc/1',
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+        kaManifest: [],
+        status: 'confirmed' as const,
+        onChainResult: {
+          batchId: 7n,
+          startKAId: 1n,
+          endKAId: 1n,
+          txHash: '0xabc',
+          blockNumber: 10,
+          blockTimestamp: 1700000000,
+          publisherAddress: '0x1111111111111111111111111111111111111111',
+        },
+      };
+    });
+    const publisher = createPublisher({ config: { publishExecutor } });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const canonical = canonicalRoot('urn:local:/rihana');
+    await dkgPublisher.publish({
+      paranetId: 'music-social',
+      quads: [
+        { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+      ],
+      publisherPeerId: 'peer-1',
+    });
+
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/genre', object: '"Pop"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    await publisher.lift({
+      ...request(),
+      workspaceOperationId: write.workspaceOperationId,
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(publishExecutor).toHaveBeenCalledTimes(1);
+    expect(processed?.status).toBe('finalized');
+  });
+
+  it('finalizes CREATE as a no-op when all canonical quads are already authoritative', async () => {
+    const publishExecutor = vi.fn(async () => {
+      throw new Error('should not be called');
+    });
+    const publisher = createPublisher({ config: { publishExecutor } });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const canonical = canonicalRoot('urn:local:/rihana');
+    await dkgPublisher.publish({
+      paranetId: 'music-social',
+      quads: [
+        { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+      ],
+      publisherPeerId: 'peer-1',
+    });
+
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    await publisher.lift({
+      ...request(),
+      workspaceOperationId: write.workspaceOperationId,
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+    const reloaded = await publisher.getStatus(processed!.jobId);
+
+    expect(publishExecutor).not.toHaveBeenCalled();
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.finalization?.mode).toBe('noop');
+    expect(reloaded?.status).toBe('finalized');
+    expect(reloaded?.finalization?.mode).toBe('noop');
   });
 
   it('keeps prepare-stage mapping/config failures on the validation side', async () => {

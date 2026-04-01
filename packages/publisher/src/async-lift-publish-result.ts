@@ -12,7 +12,7 @@ export interface AsyncLiftPublishSuccess {
   readonly status: 'included' | 'finalized';
   readonly broadcast: LiftJobBroadcastMetadata;
   readonly inclusion: LiftJobInclusionMetadata;
-  readonly finalization?: LiftJobFinalizationMetadata;
+  readonly finalization?: LiftJobFinalizationMetadata & { readonly mode?: 'published' };
 }
 
 export interface AsyncLiftPublishFailureInput {
@@ -66,6 +66,7 @@ export function mapPublishResultToLiftJobSuccess(params: {
         broadcast,
         inclusion,
         finalization: {
+          mode: 'published',
           txHash,
           ual: publishResult.ual,
           batchId: onChain.batchId.toString() as `${bigint}`,

@@ -28,6 +28,7 @@ import {
 } from './async-lift-publish-result.js';
 import { prepareAsyncPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
+import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
   CONTROL_CLAIM_TOKEN,
@@ -196,10 +197,22 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       });
       failureState = 'validated';
 
-      const prepared = prepareAsyncPublishPayload({
+      const subtracted = await subtractFinalizedExactQuads({
+        store: this.store,
+        graphManager: this.graphManager,
         request: claimed.request,
         validation: validated.validation,
         resolved: validated.resolved,
+      });
+
+      if (subtracted.resolved.quads.length === 0 && (subtracted.resolved.privateQuads?.length ?? 0) === 0) {
+        return await this.finalizeNoopPublish(claimed.jobId);
+      }
+
+      const prepared = prepareAsyncPublishPayload({
+        request: claimed.request,
+        validation: validated.validation,
+        resolved: subtracted.resolved,
       });
 
       failureState = 'broadcast';
@@ -758,6 +771,19 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } as LiftJob;
   }
 
+  private async finalizeNoopPublish(jobId: string): Promise<LiftJob> {
+    const current = await this.getRequiredJob(jobId);
+    const finalized = this.mergeJob(current, 'finalized', {
+      finalization: {
+        mode: 'noop',
+      },
+    });
+    this.assertJobMatchesStatus(finalized);
+    await this.writeJob(finalized);
+    await this.syncWalletLockForJob(finalized);
+    return finalized;
+  }
+
   private computePublicByteSize(quads: readonly { subject: string; predicate: string; object: string; graph: string }[]): number {
     const nquads = quads
       .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
@@ -782,8 +808,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         if (!job.claim || !job.validation || !job.broadcast || !job.inclusion) throw new Error('Included LiftJob requires claim, validation, broadcast, and inclusion metadata');
         return;
       case 'finalized':
-        if (!job.claim || !job.validation || !job.broadcast || !job.inclusion || !job.finalization) {
-          throw new Error('Finalized LiftJob requires claim, validation, broadcast, inclusion, and finalization metadata');
+        if (!job.claim || !job.validation || !job.finalization) {
+          throw new Error('Finalized LiftJob requires claim, validation, and finalization metadata');
+        }
+        if (job.finalization.mode !== 'noop' && (!job.broadcast || !job.inclusion)) {
+          throw new Error('Published finalized LiftJob requires broadcast and inclusion metadata');
         }
         return;
       case 'failed':

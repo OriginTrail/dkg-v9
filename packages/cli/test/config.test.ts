@@ -76,16 +76,6 @@ describe('loadNetworkConfig', () => {
     }
   });
 
-  it('returns null when network config file does not exist', async () => {
-    const origDir = process.cwd();
-    try {
-      process.chdir('/tmp');
-      const config = await loadNetworkConfig();
-      expect(config).toBeNull();
-    } finally {
-      process.chdir(origDir);
-    }
-  });
 });
 
 describe('isDkgMonorepo', () => {

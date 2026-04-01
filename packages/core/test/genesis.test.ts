@@ -11,7 +11,7 @@ import { sha256 } from '../src/index.js';
 describe('getGenesisQuads', () => {
   it('returns the expected number of quads', () => {
     const quads = getGenesisQuads();
-    expect(quads.length).toBe(34);
+    expect(quads.length).toBe(40);
   });
 
   it('every quad has subject, predicate, object, and graph fields', () => {

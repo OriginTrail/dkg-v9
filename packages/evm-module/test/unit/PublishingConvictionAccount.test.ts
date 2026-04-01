@@ -111,6 +111,13 @@ describe('@unit PublishingConvictionAccount contract', function () {
     });
 
     it('has no lockEpochs parameter (enforced 12-month term)', async () => {
+      // Verify the ABI only has createAccount(uint256), not createAccount(uint256,uint40)
+      const createFuncs = PCA.interface.fragments
+        .filter((f): f is import('ethers').FunctionFragment => f.type === 'function' && f.name === 'createAccount');
+      expect(createFuncs).to.have.lengthOf(1);
+      expect(createFuncs[0].inputs).to.have.lengthOf(1);
+      expect(createFuncs[0].inputs[0].type).to.equal('uint256');
+
       const lockDuration = await PCA.LOCK_DURATION_EPOCHS();
       expect(lockDuration).to.equal(12);
     });
@@ -304,6 +311,50 @@ describe('@unit PublishingConvictionAccount contract', function () {
 
       // Still has lockedBalance > 0
       await expect(PCA.closeAccount(1)).to.be.revertedWithCustomError(PCA, 'BalanceNotZero');
+    });
+
+    it('reverts at epoch createdAtEpoch + 11 (one epoch before unlock)', async () => {
+      const hubAddress = await Hub.getAddress();
+      const HarnessFactory = await hre.ethers.getContractFactory('PCATestHarness');
+      const harness = await HarnessFactory.deploy(hubAddress);
+      await harness.waitForDeployment();
+      await Hub.setContractAddress('PCATestHarness', await harness.getAddress());
+      await harness.initialize();
+
+      const token = await hre.ethers.getContract('Token');
+      const amount = hre.ethers.parseEther('100000');
+      await token.approve(await harness.getAddress(), amount);
+      await harness.createAccount(amount);
+      await harness.__test_drainBalances(1);
+
+      // Advance to exactly 11 epochs (one before unlock)
+      const epochLength = await ChronosContract.EPOCH_LENGTH();
+      await time.increase(epochLength * 11n);
+
+      await expect(harness.closeAccount(1)).to.be.revertedWithCustomError(harness, 'LockNotExpired');
+    });
+
+    it('succeeds at exactly epoch createdAtEpoch + 12 (first valid unlock epoch)', async () => {
+      const hubAddress = await Hub.getAddress();
+      const HarnessFactory = await hre.ethers.getContractFactory('PCATestHarness');
+      const harness = await HarnessFactory.deploy(hubAddress);
+      await harness.waitForDeployment();
+      await Hub.setContractAddress('PCATestHarness', await harness.getAddress());
+      await harness.initialize();
+
+      const token = await hre.ethers.getContract('Token');
+      const amount = hre.ethers.parseEther('100000');
+      await token.approve(await harness.getAddress(), amount);
+      await harness.createAccount(amount);
+      await harness.__test_drainBalances(1);
+
+      // Advance to exactly 12 epochs (the unlock boundary)
+      const epochLength = await ChronosContract.EPOCH_LENGTH();
+      await time.increase(epochLength * 12n);
+
+      await expect(harness.closeAccount(1))
+        .to.emit(harness, 'AccountClosed')
+        .withArgs(1, accounts[0].address);
     });
 
     it('reverts when called by non-admin', async () => {

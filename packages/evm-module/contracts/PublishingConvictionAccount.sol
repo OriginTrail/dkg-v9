@@ -60,6 +60,12 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
     event TopUp(uint256 indexed accountId, uint256 amount, uint256 newTopUpBalance);
     event AuthorizedKeyAdded(uint256 indexed accountId, address indexed key);
     event AuthorizedKeyRemoved(uint256 indexed accountId, address indexed key);
+    event PublishingCostCovered(
+        uint256 indexed accountId,
+        address indexed publisher,
+        uint256 baseCost,
+        uint256 actualDeducted
+    );
 
     // Errors
     error AccountNotFound(uint256 accountId);
@@ -69,6 +75,9 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
     error LockNotExpired(uint256 accountId, uint256 expiresAtEpoch, uint256 currentEpoch);
     error BalanceNotZero(uint256 accountId, uint256 lockedBalance, uint256 topUpBalance);
     error CannotRemoveOwnKey(uint256 accountId, address admin);
+    error OnlyKnowledgeAssets(address caller);
+    error NotAuthorizedKey(uint256 accountId, address key);
+    error InsufficientBalance(uint256 accountId, uint256 required, uint256 available);
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -76,6 +85,11 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
         tokenContract = IERC20(hub.getContractAddress("Token"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         if (nextAccountId == 0) nextAccountId = 1;
+
+        // Approve KnowledgeAssets to pull tokens for coverPublishingCost flows
+        if (hub.isContract("KnowledgeAssets")) {
+            tokenContract.forceApprove(hub.getContractAddress("KnowledgeAssets"), type(uint256).max);
+        }
     }
 
     function name() public pure virtual returns (string memory) {
@@ -163,6 +177,73 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
 
         authorizedKeys[accountId][key] = false;
         emit AuthorizedKeyRemoved(accountId, key);
+    }
+
+    // ========================================================================
+    // Publishing Cost Coverage (called by KnowledgeAssets only)
+    // ========================================================================
+
+    /**
+     * @notice Deducts publishing cost from a conviction account.
+     * @dev Only callable by KnowledgeAssets contract. Deducts from lockedBalance
+     *      at the discounted rate first, then from topUpBalance at full rate.
+     *      Does NOT transfer tokens or do epoch accounting — KA handles that.
+     * @param accountId The PCA account to deduct from
+     * @param baseCost  The full-rate publishing cost (before discount)
+     * @param publisher The original caller (must be an authorized key on the account)
+     * @return totalDeducted The actual TRAC amount deducted from the account
+     */
+    function coverPublishingCost(
+        uint256 accountId,
+        uint256 baseCost,
+        address publisher
+    ) external returns (uint256 totalDeducted) {
+        if (msg.sender != hub.getContractAddress("KnowledgeAssets")) {
+            revert OnlyKnowledgeAssets(msg.sender);
+        }
+
+        Account storage acct = _requireAccount(accountId);
+
+        if (!authorizedKeys[accountId][publisher]) {
+            revert NotAuthorizedKey(accountId, publisher);
+        }
+
+        if (baseCost == 0) return 0;
+
+        uint256 discountBps = _computeDiscount(acct.initialCommitment);
+        uint256 discountedRate = BPS_DENOMINATOR - discountBps;
+        uint256 discountedCost = (baseCost * discountedRate) / BPS_DENOMINATOR;
+
+        if (acct.lockedBalance >= discountedCost) {
+            // Fully covered by locked balance at discounted rate
+            acct.lockedBalance -= discountedCost;
+            totalDeducted = discountedCost;
+        } else {
+            // Partial locked + topUp fallback
+            uint256 lockedUsed = acct.lockedBalance;
+            acct.lockedBalance = 0;
+
+            // How much baseCost did locked cover?
+            uint256 coveredBaseCost = discountedRate > 0
+                ? (lockedUsed * BPS_DENOMINATOR) / discountedRate
+                : baseCost;
+
+            if (coveredBaseCost > baseCost) {
+                coveredBaseCost = baseCost;
+            }
+
+            uint256 remainingBaseCost = baseCost - coveredBaseCost;
+
+            // TopUp at full rate (no discount)
+            if (acct.topUpBalance < remainingBaseCost) {
+                revert InsufficientBalance(accountId, remainingBaseCost, acct.topUpBalance);
+            }
+
+            acct.topUpBalance -= remainingBaseCost;
+            totalDeducted = lockedUsed + remainingBaseCost;
+        }
+
+        emit PublishingCostCovered(accountId, publisher, baseCost, totalDeducted);
     }
 
     // ========================================================================

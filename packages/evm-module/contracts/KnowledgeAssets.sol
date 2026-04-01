@@ -22,6 +22,7 @@ import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
+import {PublishingConvictionAccount} from "./PublishingConvictionAccount.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
@@ -136,7 +137,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 publisherNodeVS,
         uint72[] calldata identityIds,
         bytes32[] calldata r,
-        bytes32[] calldata vs
+        bytes32[] calldata vs,
+        uint256 convictionAccountId
     ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
         (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
 
@@ -155,7 +157,7 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         params.r = r;
         params.vs = vs;
 
-        batchId = _mintBatch(params);
+        batchId = _mintBatch(params, convictionAccountId);
     }
 
     // ========================================================================
@@ -185,7 +187,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 contextGraphId,
         uint72[] calldata participantIdentityIds,
         bytes32[] calldata participantRs,
-        bytes32[] calldata participantVSs
+        bytes32[] calldata participantVSs,
+        uint256 convictionAccountId
     ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
         (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
 
@@ -204,7 +207,7 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         params.r = r;
         params.vs = vs;
 
-        batchId = _mintBatch(params);
+        batchId = _mintBatch(params, convictionAccountId);
 
         contextGraphs.addBatchToContextGraph(
             contextGraphId,
@@ -251,7 +254,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 publisherNodeVS,
         uint72[] calldata identityIds,
         bytes32[] calldata r,
-        bytes32[] calldata vs
+        bytes32[] calldata vs,
+        uint256 convictionAccountId
     ) external returns (uint256 batchId) {
         if (startKAId > endKAId) {
             revert KnowledgeAssetsLib.InvalidKARange(startKAId, endKAId);
@@ -272,7 +276,7 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         params.r = r;
         params.vs = vs;
 
-        return _mintBatch(params);
+        return _mintBatch(params, convictionAccountId);
     }
 
     // ========================================================================
@@ -288,7 +292,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     function updateKnowledgeAssets(
         uint256 batchId,
         bytes32 newMerkleRoot,
-        uint64 newPublicByteSize
+        uint64 newPublicByteSize,
+        uint256 convictionAccountId
     ) external {
         KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
         KnowledgeAssetsLib.KnowledgeBatch memory batch = kas.getBatch(batchId);
@@ -327,16 +332,17 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
 
         kas.updateKnowledgeBatch(batchId, newMerkleRoot, newPublicByteSize, updateCost);
 
-        if (updateCost > 0 && remainingEpochs > 0) {
-            epochStorage.addTokensToEpochRange(
-                1,
-                uint40(currentEpoch),
-                batch.endEpoch,
-                updateCost
-            );
+        if (convictionAccountId > 0) {
+            uint96 actualPayment = _handlePCAPayment(convictionAccountId, updateCost);
+            if (actualPayment > 0 && remainingEpochs > 0) {
+                epochStorage.addTokensToEpochRange(1, uint40(currentEpoch), batch.endEpoch, actualPayment);
+            }
+        } else {
+            if (updateCost > 0 && remainingEpochs > 0) {
+                epochStorage.addTokensToEpochRange(1, uint40(currentEpoch), batch.endEpoch, updateCost);
+            }
+            _addTokens(updateCost, address(0));
         }
-
-        _addTokens(updateCost, address(0));
     }
 
     // ========================================================================
@@ -347,7 +353,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 batchId,
         uint40 additionalEpochs,
         uint96 tokenAmount,
-        address paymaster
+        address paymaster,
+        uint256 convictionAccountId
     ) external {
         KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
         KnowledgeAssetsLib.KnowledgeBatch memory batch = kas.getBatch(batchId);
@@ -365,14 +372,13 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
 
         kas.extendBatchStorage(batchId, additionalEpochs, tokenAmount);
 
-        epochStorage.addTokensToEpochRange(
-            1,
-            batch.endEpoch,
-            batch.endEpoch + additionalEpochs,
-            tokenAmount
-        );
-
-        _addTokens(tokenAmount, paymaster);
+        if (convictionAccountId > 0) {
+            uint96 actualPayment = _handlePCAPayment(convictionAccountId, tokenAmount);
+            epochStorage.addTokensToEpochRange(1, batch.endEpoch, batch.endEpoch + additionalEpochs, actualPayment);
+        } else {
+            epochStorage.addTokensToEpochRange(1, batch.endEpoch, batch.endEpoch + additionalEpochs, tokenAmount);
+            _addTokens(tokenAmount, paymaster);
+        }
     }
 
     // ========================================================================
@@ -398,7 +404,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 publisherNodeVS,
         uint72[] calldata identityIds,
         bytes32[] calldata r,
-        bytes32[] calldata vs
+        bytes32[] calldata vs,
+        uint256 convictionAccountId
     ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
         (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
 
@@ -443,16 +450,15 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             true // isPermanent
         );
 
-        // Distribute with geometric decay across ENDOWMENT_EPOCHS
-        _distributeEndowment(tokenAmount, currentEpoch);
-
-        epochStorage.addEpochProducedKnowledgeValue(
-            publisherNodeIdentityId,
-            currentEpoch,
-            tokenAmount
-        );
-
-        _addTokens(tokenAmount, address(0));
+        if (convictionAccountId > 0) {
+            uint96 actualPayment = _handlePCAPayment(convictionAccountId, tokenAmount);
+            _distributeEndowment(actualPayment, currentEpoch);
+            epochStorage.addEpochProducedKnowledgeValue(publisherNodeIdentityId, currentEpoch, actualPayment);
+        } else {
+            _distributeEndowment(tokenAmount, currentEpoch);
+            epochStorage.addEpochProducedKnowledgeValue(publisherNodeIdentityId, currentEpoch, tokenAmount);
+            _addTokens(tokenAmount, address(0));
+        }
     }
 
     /**
@@ -514,7 +520,8 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
 
     function _mintBatch(
-        KnowledgeAssetsLib.PublishParams memory params
+        KnowledgeAssetsLib.PublishParams memory params,
+        uint256 convictionAccountId
     ) internal returns (uint256 batchId) {
         _verifySignature(
             params.publisherNodeIdentityId,
@@ -562,15 +569,43 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             false
         );
 
-        _distributeTokens(params.tokenAmount, params.epochs, currentEpoch);
+        if (convictionAccountId > 0) {
+            uint96 actualPayment = _handlePCAPayment(convictionAccountId, params.tokenAmount);
+            _distributeTokens(actualPayment, params.epochs, currentEpoch);
+            epochStorage.addEpochProducedKnowledgeValue(params.publisherNodeIdentityId, currentEpoch, actualPayment);
+        } else {
+            _distributeTokens(params.tokenAmount, params.epochs, currentEpoch);
+            epochStorage.addEpochProducedKnowledgeValue(
+                params.publisherNodeIdentityId,
+                currentEpoch,
+                params.tokenAmount
+            );
+            _addTokens(params.tokenAmount, params.paymaster);
+        }
+    }
 
-        epochStorage.addEpochProducedKnowledgeValue(
-            params.publisherNodeIdentityId,
-            currentEpoch,
-            params.tokenAmount
+    /**
+     * @dev Handles PCA payment: deducts from conviction account, transfers tokens
+     *      from PCA to StakingStorage. Returns the actual TRAC amount paid (discounted).
+     */
+    function _handlePCAPayment(
+        uint256 convictionAccountId,
+        uint96 baseCost
+    ) internal returns (uint96) {
+        PublishingConvictionAccount pca = PublishingConvictionAccount(
+            hub.getContractAddress("PublishingConvictionAccount")
         );
+        uint256 deducted = pca.coverPublishingCost(convictionAccountId, baseCost, msg.sender);
+        uint96 actualPayment = uint96(deducted);
 
-        _addTokens(params.tokenAmount, params.paymaster);
+        if (actualPayment > 0) {
+            address stakingStorage = hub.getContractAddress("StakingStorage");
+            if (!tokenContract.transferFrom(address(pca), stakingStorage, actualPayment)) {
+                revert TokenLib.TransferFailed();
+            }
+        }
+
+        return actualPayment;
     }
 
     function _verifyReceiverSignatures(

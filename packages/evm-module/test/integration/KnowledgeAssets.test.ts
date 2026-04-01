@@ -266,7 +266,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, byteSize, epochs, tokenAmount,
-      ethers.ZeroAddress, pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+      ethers.ZeroAddress, pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
     );
 
     const batchId = await KnowledgeAssetsStorage.getLatestBatchId();
@@ -322,6 +322,7 @@ describe('@integration KnowledgeAssets V9', () => {
       receiverIds,
       receiverRs,
       receiverVSs,
+      0,
     );
     await tx.wait();
 
@@ -365,7 +366,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, publicByteSize, 2, 0, ethers.ZeroAddress,
-        pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+        pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
       ),
     ).to.be.revertedWithCustomError(KnowledgeAssets, 'ZeroTokenAmount');
   });
@@ -417,6 +418,7 @@ describe('@integration KnowledgeAssets V9', () => {
       receiverIds,
       receiverRs,
       receiverVSs,
+      0,
     );
 
     const balanceAfter = await Token.balanceOf(kcCreator.address);
@@ -459,7 +461,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
-      pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+      pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
     );
 
     // Second mint with overlapping IDs should fail
@@ -470,7 +472,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot2, 1, 5, publicByteSize, epochs, tokenAmount2, ethers.ZeroAddress,
-        sigs2.pubR, sigs2.pubVS, receiverIds, sigs2.receiverRs, sigs2.receiverVSs,
+        sigs2.pubR, sigs2.pubVS, receiverIds, sigs2.receiverRs, sigs2.receiverVSs, 0,
       )
     ).to.be.reverted;
   });
@@ -506,7 +508,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
       pubId, v9MerkleRoot, 1, 3, v9ByteSize, v9Epochs, v9TokenAmount, ethers.ZeroAddress,
-      v9Sigs.pubR, v9Sigs.pubVS, receiverIds, v9Sigs.receiverRs, v9Sigs.receiverVSs,
+      v9Sigs.pubR, v9Sigs.pubVS, receiverIds, v9Sigs.receiverRs, v9Sigs.receiverVSs, 0,
     );
 
     // --- V8 publish (legacy flow) ---
@@ -570,7 +572,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const newByteSize = ctx.byteSize;
 
     await KnowledgeAssets.connect(ctx.kcCreator).updateKnowledgeAssets(
-      ctx.batchId, newMerkleRoot, newByteSize,
+      ctx.batchId, newMerkleRoot, newByteSize, 0,
     );
 
     const batch = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
@@ -588,7 +590,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const batchBefore = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
 
     await KnowledgeAssets.connect(ctx.kcCreator).updateKnowledgeAssets(
-      ctx.batchId, newMerkleRoot, newByteSize,
+      ctx.batchId, newMerkleRoot, newByteSize, 0,
     );
 
     const batchAfter = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
@@ -607,6 +609,7 @@ describe('@integration KnowledgeAssets V9', () => {
         ctx.batchId,
         ethers.keccak256(ethers.toUtf8Bytes('evil-root')),
         1000,
+        0,
       )
     ).to.be.reverted;
   });
@@ -619,6 +622,7 @@ describe('@integration KnowledgeAssets V9', () => {
         999,
         ethers.keccak256(ethers.toUtf8Bytes('ghost')),
         1000,
+        0,
       )
     ).to.be.reverted;
   });
@@ -636,7 +640,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const extensionCost = (ask * BigInt(ctx.byteSize) * BigInt(additionalEpochs)) / 1024n;
 
     await KnowledgeAssets.connect(ctx.kcCreator).extendStorage(
-      ctx.batchId, additionalEpochs, extensionCost, ethers.ZeroAddress,
+      ctx.batchId, additionalEpochs, extensionCost, ethers.ZeroAddress, 0,
     );
 
     const batchAfter = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
@@ -652,7 +656,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await expect(
       KnowledgeAssets.connect(ctx.kcCreator).extendStorage(
-        ctx.batchId, 5, insufficientAmount, ethers.ZeroAddress,
+        ctx.batchId, 5, insufficientAmount, ethers.ZeroAddress, 0,
       )
     ).to.be.reverted;
   });
@@ -662,7 +666,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await expect(
       KnowledgeAssets.connect(kcCreator).extendStorage(
-        999, 5, 0, ethers.ZeroAddress,
+        999, 5, 0, ethers.ZeroAddress, 0,
       )
     ).to.be.reverted;
   });
@@ -714,7 +718,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
-        badR, badVS, receiverIds, receiverRs, receiverVSs,
+        badR, badVS, receiverIds, receiverRs, receiverVSs, 0,
       )
     ).to.be.reverted;
   });
@@ -760,7 +764,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
-        pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+        pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
       )
     ).to.be.reverted;
   });
@@ -797,7 +801,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, byteSize, epochs, lowTokenAmount, ethers.ZeroAddress,
-        pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+        pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
       )
     ).to.be.reverted;
   });
@@ -840,7 +844,7 @@ describe('@integration KnowledgeAssets V9', () => {
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount,
         ethers.ZeroAddress, pubR, pubVS,
-        dupReceiverIds, dupReceiverRs, dupReceiverVSs,
+        dupReceiverIds, dupReceiverRs, dupReceiverVSs, 0,
       ),
     ).to.be.revertedWith('Insufficient unique receiver identities');
   });
@@ -882,7 +886,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const tx = await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount,
       ethers.ZeroAddress, pubR, pubVS,
-      mixedReceiverIds, mixedReceiverRs, mixedReceiverVSs,
+      mixedReceiverIds, mixedReceiverRs, mixedReceiverVSs, 0,
     );
     await tx.wait();
 
@@ -903,7 +907,7 @@ describe('@integration KnowledgeAssets V9', () => {
     // Update: new merkle root, same size
     const newRoot = ethers.keccak256(ethers.toUtf8Bytes('lifecycle-update'));
     await KnowledgeAssets.connect(ctx.kcCreator).updateKnowledgeAssets(
-      ctx.batchId, newRoot, ctx.byteSize,
+      ctx.batchId, newRoot, ctx.byteSize, 0,
     );
 
     const batchAfterUpdate = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
@@ -914,7 +918,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const ask = await AskStorage.getStakeWeightedAverageAsk();
     const extensionCost = (ask * BigInt(ctx.byteSize) * 3n) / 1024n;
     await KnowledgeAssets.connect(ctx.kcCreator).extendStorage(
-      ctx.batchId, 3, extensionCost, ethers.ZeroAddress,
+      ctx.batchId, 3, extensionCost, ethers.ZeroAddress, 0,
     );
 
     const batchAfterExtend = await KnowledgeAssetsStorage.getBatch(ctx.batchId);
@@ -936,7 +940,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const ta2 = (ask2 * 2048n * 2n) / 1024n;
     await KnowledgeAssets.connect(ctx.kcCreator).batchMintKnowledgeAssets(
       ctx.pubId, root2, 6, 10, 2048, 2, ta2, ethers.ZeroAddress,
-      sigs2.pubR, sigs2.pubVS, ctx.receiverIds, sigs2.receiverRs, sigs2.receiverVSs,
+      sigs2.pubR, sigs2.pubVS, ctx.receiverIds, sigs2.receiverRs, sigs2.receiverVSs, 0,
     );
 
     expect(await KnowledgeAssetsStorage.getLatestBatchId()).to.equal(2);
@@ -986,6 +990,7 @@ describe('@integration KnowledgeAssets V9', () => {
       receiverIds,
       receiverRs,
       receiverVSs,
+      0,
     );
     const receipt = await tx.wait();
 
@@ -1054,7 +1059,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await KnowledgeAssets.connect(accountA).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, byteSize, epochs, tokenAmount,
-      ethers.ZeroAddress, sigs.pubR, sigs.pubVS, receiverIds, sigs.receiverRs, sigs.receiverVSs,
+      ethers.ZeroAddress, sigs.pubR, sigs.pubVS, receiverIds, sigs.receiverRs, sigs.receiverVSs, 0,
     );
 
     const batchId = await KnowledgeAssetsStorage.getLatestBatchId();
@@ -1069,7 +1074,7 @@ describe('@integration KnowledgeAssets V9', () => {
     // B can update
     const newRoot = ethers.keccak256(ethers.toUtf8Bytes('post-transfer-update'));
     await KnowledgeAssets.connect(accountB).updateKnowledgeAssets(
-      batchId, newRoot, byteSize,
+      batchId, newRoot, byteSize, 0,
     );
     const batchAfterUpdate = await KnowledgeAssetsStorage.getBatch(batchId);
     expect(batchAfterUpdate.merkleRoot).to.equal(newRoot);
@@ -1077,7 +1082,7 @@ describe('@integration KnowledgeAssets V9', () => {
     // B can extend
     const extensionCost = (ask * BigInt(byteSize) * 3n) / 1024n;
     await KnowledgeAssets.connect(accountB).extendStorage(
-      batchId, 3, extensionCost, ethers.ZeroAddress,
+      batchId, 3, extensionCost, ethers.ZeroAddress, 0,
     );
     const batchAfterExtend = await KnowledgeAssetsStorage.getBatch(batchId);
     expect(batchAfterExtend.endEpoch).to.equal(batchAfterUpdate.endEpoch + 3n);
@@ -1088,6 +1093,7 @@ describe('@integration KnowledgeAssets V9', () => {
         batchId,
         ethers.keccak256(ethers.toUtf8Bytes('old-owner-attempt')),
         byteSize,
+        0,
       )
     ).to.be.reverted;
   });
@@ -1129,7 +1135,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     await KnowledgeAssets.connect(noProfileWallet).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
-      pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+      pubR, pubVS, receiverIds, receiverRs, receiverVSs, 0,
     );
 
     const batchId = await KnowledgeAssetsStorage.getLatestBatchId();

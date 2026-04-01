@@ -387,6 +387,11 @@
         "internalType": "bytes32[]",
         "name": "vs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "batchMintKnowledgeAssets",
@@ -451,6 +456,11 @@
         "internalType": "bytes32[]",
         "name": "vs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "batchMintKnowledgeAssetsPermanent",
@@ -534,6 +544,11 @@
         "internalType": "address",
         "name": "paymaster",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "extendStorage",
@@ -726,6 +741,11 @@
         "internalType": "bytes32[]",
         "name": "vs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "publishKnowledgeAssets",
@@ -830,6 +850,11 @@
         "internalType": "bytes32[]",
         "name": "participantVSs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "publishToContextGraph",
@@ -958,6 +983,11 @@
         "internalType": "uint64",
         "name": "newPublicByteSize",
         "type": "uint64"
+      },
+      {
+        "internalType": "uint256",
+        "name": "convictionAccountId",
+        "type": "uint256"
       }
     ],
     "name": "updateKnowledgeAssets",

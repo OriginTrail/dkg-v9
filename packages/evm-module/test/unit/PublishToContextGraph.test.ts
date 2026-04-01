@@ -448,6 +448,7 @@ describe('@unit PublishToContextGraph', () => {
         [publisherId],
         participantRs,
         participantVSs,
+        0,
       );
       const receipt = await tx.wait();
       expect(receipt).to.not.be.null;
@@ -521,6 +522,7 @@ describe('@unit PublishToContextGraph', () => {
           [publisherId],
           participantRs,
           participantVSs,
+          0,
         ),
       ).to.be.revertedWithCustomError(KnowledgeAssetsContract, 'MinSignaturesRequirementNotMet');
     });
@@ -589,6 +591,7 @@ describe('@unit PublishToContextGraph', () => {
           [publisherId],
           participantRs,
           participantVSs,
+          0,
         ),
       ).to.be.revertedWith('Not enough signatures');
     });
@@ -648,6 +651,7 @@ describe('@unit PublishToContextGraph', () => {
         [publisherId],
         participantRs,
         participantVSs,
+        0,
       );
 
       await expect(tx).to.emit(ContextGraphStorageContract, 'ContextGraphExpanded');
@@ -834,6 +838,7 @@ describe('@unit PublishToContextGraph', () => {
           [receiverIdentityIds[0]],
           oneRs,
           oneVSs,
+          0,
         ),
       ).to.be.revertedWithCustomError(KnowledgeAssetsContract, 'MinSignaturesRequirementNotMet');
 
@@ -857,6 +862,7 @@ describe('@unit PublishToContextGraph', () => {
         receiverIdentityIds,
         twoRs,
         twoVSs,
+        0,
       );
       const receipt = await tx.wait();
       expect(receipt).to.not.be.null;

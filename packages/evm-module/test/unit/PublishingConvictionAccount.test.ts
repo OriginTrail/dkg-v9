@@ -504,7 +504,7 @@ describe('@unit PublishingConvictionAccount contract', function () {
       expect(functionNames).to.not.include('withdraw');
     });
 
-    it('does not have a coverPublishingCost function (subtask 9)', async () => {
+    it('has coverPublishingCost function (added in subtask 9)', async () => {
       const pcaInterface = PCA.interface;
       const functionNames = Object.keys(pcaInterface.fragments)
         .map((key) => {
@@ -513,7 +513,7 @@ describe('@unit PublishingConvictionAccount contract', function () {
         })
         .filter(Boolean);
 
-      expect(functionNames).to.not.include('coverPublishingCost');
+      expect(functionNames).to.include('coverPublishingCost');
     });
   });
 

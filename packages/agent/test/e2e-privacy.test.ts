@@ -86,7 +86,7 @@ describe('Private data isolation (2 nodes)', () => {
     // Verify data exists on node A
     const onA = await nodeA.query(
       `SELECT ?text WHERE { <${PRIVATE_ENTITY}> <http://schema.org/text> ?text }`,
-      { paranetId: PRIVATE_PARANET, graphSuffix: '_workspace' },
+      { paranetId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(onA.bindings[0]['text']).toBe('"This is my secret chat message"');
@@ -97,7 +97,7 @@ describe('Private data isolation (2 nodes)', () => {
     // Node B should NOT have the data — it doesn't even know the paranet
     const onB = await nodeB.query(
       `SELECT ?text WHERE { <${PRIVATE_ENTITY}> <http://schema.org/text> ?text }`,
-      { paranetId: PRIVATE_PARANET, graphSuffix: '_workspace' },
+      { paranetId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onB.bindings.length).toBe(0);
 
@@ -131,14 +131,14 @@ describe('Private data isolation (2 nodes)', () => {
     // Node A should have it
     const onA = await nodeA.query(
       `SELECT ?name WHERE { <${PUBLIC_ENTITY}> <http://schema.org/name> ?name }`,
-      { paranetId: PUBLIC_PARANET, graphSuffix: '_workspace' },
+      { paranetId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
 
     // Node B should also have it (replicated via gossip)
     const onB = await nodeB.query(
       `SELECT ?name WHERE { <${PUBLIC_ENTITY}> <http://schema.org/name> ?name }`,
-      { paranetId: PUBLIC_PARANET, graphSuffix: '_workspace' },
+      { paranetId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
     );
     // GossipSub mesh may not form in time, so we check but don't hard-fail
     if (onB.bindings.length > 0) {

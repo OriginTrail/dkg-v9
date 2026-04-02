@@ -1,6 +1,6 @@
 import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import type { TripleStore, Quad } from './triple-store.js';
-import type { GraphManager } from './graph-manager.js';
+import type { ContextGraphManager } from './graph-manager.js';
 
 /**
  * Manages private (publisher-only) triples. These live in the same paranet
@@ -10,11 +10,11 @@ import type { GraphManager } from './graph-manager.js';
  */
 export class PrivateContentStore {
   private readonly store: TripleStore;
-  private readonly graphManager: GraphManager;
+  private readonly graphManager: ContextGraphManager;
   /** Tracks which rootEntities have private triples on this node. */
   private readonly privateEntities = new Map<string, Set<string>>();
 
-  constructor(store: TripleStore, graphManager: GraphManager) {
+  constructor(store: TripleStore, graphManager: ContextGraphManager) {
     this.store = store;
     this.graphManager = graphManager;
   }

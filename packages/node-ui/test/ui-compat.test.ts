@@ -248,7 +248,7 @@ describe('SPARQL helper cards', () => {
   });
 
   it('includes agents template as direct SPO query on agents paranet graph', () => {
-    expect(explorer).toContain('GRAPH <did:dkg:paranet:agents>');
+    expect(explorer).toContain('GRAPH <did:dkg:context-graph:agents>');
     expect(explorer).toContain('SELECT ?s ?p ?o WHERE');
   });
 
@@ -299,8 +299,8 @@ describe('SPARQL helper cards', () => {
     expect(explorer).toContain('GRAPH ?metaGraph');
   });
 
-  it('uses _workspace suffix when deriving companion meta graphs', () => {
-    expect(explorer).toContain("g.endsWith('/_workspace')");
+  it('uses _shared_memory suffix when deriving companion meta graphs', () => {
+    expect(explorer).toContain("g.endsWith('/_shared_memory')");
     expect(explorer).not.toContain("g.endsWith('/workspace')");
   });
 

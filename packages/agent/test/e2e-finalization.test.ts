@@ -269,7 +269,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
       await sleep(500);
@@ -345,7 +345,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const wsResult = await nodeB.query(
       `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsResult.bindings.length).toBe(0);
   }, 5000);
@@ -363,7 +363,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const ws2 = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(ws2.bindings.length).toBe(1);
 
@@ -394,7 +394,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const wsBefore = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsBefore.bindings.length).toBe(1);
 
@@ -407,7 +407,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     // Workspace should be cleaned
     const wsAfter = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsAfter.bindings.length).toBe(0);
 

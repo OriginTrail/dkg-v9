@@ -15,7 +15,7 @@ export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
 export { SparqlHttpStore, type SparqlHttpStoreOptions } from './adapters/sparql-http.js';
-export { GraphManager } from './graph-manager.js';
+export { ContextGraphManager, GraphManager } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 
 // Side-effect: register built-in adapters

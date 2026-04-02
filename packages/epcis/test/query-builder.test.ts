@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from '../src/query-builder.js';
 
 const PARANET_ID = 'test-paranet';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET_ID}`;
+const DATA_GRAPH = `did:dkg:context-graph:${PARANET_ID}`;
 const META_GRAPH = `${DATA_GRAPH}/_meta`;
 
 describe('buildEpcisQuery', () => {

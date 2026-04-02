@@ -76,7 +76,7 @@ describe('Workspace E2E (2 nodes)', () => {
 
     const onA = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
@@ -84,7 +84,7 @@ describe('Workspace E2E (2 nodes)', () => {
     // Node B may receive via GossipSub (depends on mesh formation timing)
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     if (onB.bindings.length > 0) {
       expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);

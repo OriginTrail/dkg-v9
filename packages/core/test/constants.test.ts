@@ -9,30 +9,30 @@ import {
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
 
-describe('paranet topic helpers', () => {
-  it('paranetPublishTopic returns correct format', () => {
-    expect(paranetPublishTopic('testing')).toBe('dkg/paranet/testing/publish');
+describe('paranet topic helpers (V10 — deprecated aliases use context-graph prefix)', () => {
+  it('paranetPublishTopic returns V10 finalization topic', () => {
+    expect(paranetPublishTopic('testing')).toBe('dkg/context-graph/testing/finalization');
   });
 
-  it('paranetWorkspaceTopic returns correct format', () => {
-    expect(paranetWorkspaceTopic('testing')).toBe('dkg/paranet/testing/workspace');
+  it('paranetWorkspaceTopic returns V10 workspace topic', () => {
+    expect(paranetWorkspaceTopic('testing')).toBe('dkg/context-graph/testing/workspace');
   });
 
-  it('paranetAppTopic returns correct format', () => {
-    expect(paranetAppTopic('origin-trail-game')).toBe('dkg/paranet/origin-trail-game/app');
-    expect(paranetAppTopic('testing')).toBe('dkg/paranet/testing/app');
+  it('paranetAppTopic returns V10 app topic', () => {
+    expect(paranetAppTopic('origin-trail-game')).toBe('dkg/context-graph/origin-trail-game/app');
+    expect(paranetAppTopic('testing')).toBe('dkg/context-graph/testing/app');
   });
 
-  it('paranetDataGraphUri returns correct format', () => {
-    expect(paranetDataGraphUri('agents')).toBe('did:dkg:paranet:agents');
+  it('paranetDataGraphUri returns V10 data URI', () => {
+    expect(paranetDataGraphUri('agents')).toBe('did:dkg:context-graph:agents');
   });
 
-  it('paranetSessionsTopic returns correct format', () => {
-    expect(paranetSessionsTopic('testing')).toBe('dkg/paranet/testing/sessions');
+  it('paranetSessionsTopic returns V10 sessions topic', () => {
+    expect(paranetSessionsTopic('testing')).toBe('dkg/context-graph/testing/sessions');
   });
 
-  it('paranetFinalizationTopic returns correct format', () => {
-    expect(paranetFinalizationTopic('testing')).toBe('dkg/paranet/testing/finalization');
+  it('paranetFinalizationTopic returns V10 finalization topic', () => {
+    expect(paranetFinalizationTopic('testing')).toBe('dkg/context-graph/testing/finalization');
   });
 });
 

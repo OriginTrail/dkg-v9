@@ -349,12 +349,12 @@ describe('DkgDaemonClient', () => {
 
   it('createParanet should POST to /api/paranet/create', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:paranet:my-research' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
     const result = await client.createParanet('my-research', 'My Research', 'A research paranet');
     expect(result.created).toBe('my-research');
-    expect(result.uri).toBe('did:dkg:paranet:my-research');
+    expect(result.uri).toBe('did:dkg:context-graph:my-research');
 
     const [url, opts] = fetchSpy.mock.calls[0];
     expect(url).toBe('http://localhost:9200/api/paranet/create');

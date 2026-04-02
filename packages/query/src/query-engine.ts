@@ -9,7 +9,7 @@ export interface QueryOptions {
   paranetId?: string;
   timeout?: number;
   /** When set to '_workspace', query runs over the paranet's workspace graph only. */
-  graphSuffix?: '_workspace';
+  graphSuffix?: '_shared_memory';
   /** When true and paranetId is set, query runs over both data and workspace graphs (union). */
   includeWorkspace?: boolean;
 }

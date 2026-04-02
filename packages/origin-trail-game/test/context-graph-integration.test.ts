@@ -460,7 +460,7 @@ describe('Context Graph Integration', () => {
 
       // All quads in workspace writes must use the workspace graph
       expect(agent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
-      const wsGraph = 'did:dkg:paranet:origin-trail-game';
+      const wsGraph = 'did:dkg:context-graph:origin-trail-game';
       for (const writeCall of agent._workspaceWrites) {
         for (const quad of writeCall) {
           expect(quad.graph).toBe(wsGraph);
@@ -512,7 +512,7 @@ describe('Context Graph Integration', () => {
       expect(freshAgent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
       const launchWrite = freshAgent._workspaceWrites[0];
       for (const quad of launchWrite) {
-        expect(quad.graph).toBe('did:dkg:paranet:origin-trail-game');
+        expect(quad.graph).toBe('did:dkg:context-graph:origin-trail-game');
       }
 
       coord.destroy();

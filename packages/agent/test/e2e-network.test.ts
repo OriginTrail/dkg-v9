@@ -244,7 +244,7 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(qrC.bindings.length).toBe(1);
 
     // Assert broadcast PublishRequest used the chain adapter's chainId (not hardcoded mock:31337)
-    const metaGraph = 'did:dkg:paranet:memes/_meta';
+    const metaGraph = 'did:dkg:context-graph:memes/_meta';
     const ualResult = await nodeB.store.query(
       `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );

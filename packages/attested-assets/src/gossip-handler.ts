@@ -3,11 +3,11 @@ import type { AKAEvent } from './types.js';
 import { decodeAKAEvent } from './proto/aka-events.js';
 
 export function paranetSessionsTopic(paranetId: string): string {
-  return `dkg/paranet/${paranetId}/sessions`;
+  return `dkg/context-graph/${paranetId}/sessions`;
 }
 
 export function sessionTopic(paranetId: string, sessionId: string): string {
-  return `dkg/paranet/${paranetId}/sessions/${sessionId}`;
+  return `dkg/context-graph/${paranetId}/sessions/${sessionId}`;
 }
 
 export type AKAEventHandler = (event: AKAEvent, from: string) => void;

@@ -682,7 +682,7 @@ program
     try {
       const client = await ApiClient.connect();
       const rdfParser = await import('./rdf-parser.js');
-      const defaultGraph = `did:dkg:paranet:${paranet}`;
+      const defaultGraph = `did:dkg:context-graph:${paranet}`;
 
       let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 

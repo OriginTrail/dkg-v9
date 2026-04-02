@@ -214,7 +214,7 @@ describe('OriginTrail Game API handler', () => {
   });
 
   it('coordinator subscribes to the dedicated game paranet app topic', () => {
-    expect(agent._subscriptions.has('dkg/paranet/origin-trail-game/app')).toBe(true);
+    expect(agent._subscriptions.has('dkg/context-graph/origin-trail-game/app')).toBe(true);
   });
 
   it('gossipsub messages include app discriminator', async () => {
@@ -281,7 +281,7 @@ describe('OriginTrail Game API handler', () => {
     expect(launchedAtQuad?.object).toContain('1700000000000');
 
     expect(quads[0].subject).toBe('urn:dkg:expedition:swarm-1:launched');
-    expect(quads.every((q: any) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.every((q: any) => q.graph === 'did:dkg:context-graph:test-paranet')).toBe(true);
   });
 
   it('launchExpedition writes game state to workspace (C3)', async () => {
@@ -292,10 +292,10 @@ describe('OriginTrail Game API handler', () => {
     const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-launch' });
 
     const swarm = await coordinator.createSwarm('Leader', 'Launch Test');
-    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-launch/app');
+    const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-launch/app');
     const handle = handlers![0];
     for (const [pid, name] of [['p2', 'P2'], ['p3', 'P3']]) {
-      handle('dkg/paranet/test-launch/app', encode({
+      handle('dkg/context-graph/test-launch/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -326,10 +326,10 @@ describe('OriginTrail Game API handler', () => {
     const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-launch' });
 
     const swarm = await coordinator.createSwarm('Leader', 'CAS Launch Test');
-    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-cas-launch/app');
+    const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-cas-launch/app');
     const handle = handlers![0];
     for (const [pid, name] of [['cas-p2', 'P2'], ['cas-p3', 'P3']]) {
-      handle('dkg/paranet/test-cas-launch/app', encode({
+      handle('dkg/context-graph/test-cas-launch/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -372,10 +372,10 @@ describe('OriginTrail Game API handler', () => {
 
     const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-abort' });
     const swarm = await coordinator.createSwarm('Leader', 'Abort Test');
-    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-cas-abort/app');
+    const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-cas-abort/app');
     const handle = handlers![0];
     for (const [pid, name] of [['abort-p2', 'P2'], ['abort-p3', 'P3']]) {
-      handle('dkg/paranet/test-cas-abort/app', encode({
+      handle('dkg/context-graph/test-cas-abort/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -399,10 +399,10 @@ describe('OriginTrail Game API handler', () => {
     followerAgent.query = async () => ({ bindings: [] });
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch' });
 
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch/app');
     const handle = handlers![0];
 
-    handle('dkg/paranet/test-remote-launch/app', encode({
+    handle('dkg/context-graph/test-remote-launch/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-c3',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Remote Test', playerName: 'Leader', maxPlayers: 3,
     }), leaderPeerId);
@@ -417,7 +417,7 @@ describe('OriginTrail Game API handler', () => {
     });
 
     const beforeWrites = followerAgent._workspaceWrites.length;
-    handle('dkg/paranet/test-remote-launch/app', launchMsg, leaderPeerId);
+    handle('dkg/context-graph/test-remote-launch/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
     // Follower should NOT write to workspace (Rule 4: leader owns swarm root);
@@ -444,11 +444,11 @@ describe('OriginTrail Game API handler', () => {
     followerAgent.query = async () => ({ bindings: [] });
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-backfill' });
 
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch-backfill/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch-backfill/app');
     const handle = handlers![0];
 
     // Follower only sees swarm:created; join gossip is intentionally missing.
-    handle('dkg/paranet/test-remote-launch-backfill/app', encode({
+    handle('dkg/context-graph/test-remote-launch-backfill/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-backfill',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Backfill Test', playerName: 'Leader', maxPlayers: 3,
     }), leaderPeerId);
@@ -464,7 +464,7 @@ describe('OriginTrail Game API handler', () => {
     });
 
     const beforeWrites = followerAgent._workspaceWrites.length;
-    handle('dkg/paranet/test-remote-launch-backfill/app', launchMsg, leaderPeerId);
+    handle('dkg/context-graph/test-remote-launch-backfill/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
     expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
@@ -487,15 +487,15 @@ describe('OriginTrail Game API handler', () => {
     followerAgent.query = async () => ({ bindings: [] });
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-malformed' });
 
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch-malformed/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch-malformed/app');
     const handle = handlers![0];
 
     // Local node knows leader + p2 from gossip before launch.
-    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+    handle('dkg/context-graph/test-remote-launch-malformed/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-malformed',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Malformed PartyOrder', playerName: 'Leader', maxPlayers: 3,
     }), leaderPeerId);
-    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+    handle('dkg/context-graph/test-remote-launch-malformed/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-malformed',
       peerId: 'p2-known', timestamp: Date.now(), playerName: 'P2',
     }), 'p2-known');
@@ -511,7 +511,7 @@ describe('OriginTrail Game API handler', () => {
       partyOrder: [leaderPeerId, 'intruder-peer'],
     });
 
-    handle('dkg/paranet/test-remote-launch-malformed/app', launchMsg, leaderPeerId);
+    handle('dkg/context-graph/test-remote-launch-malformed/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
     const swarm = coordinator.getSwarm('swarm-malformed');
@@ -564,10 +564,10 @@ describe('OriginTrail Game API handler', () => {
     const swarm = await coordinator.createSwarm('Leader', 'Fmt Swarm');
 
     // Simulate two remote players joining via gossip
-    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-fmt/app');
+    const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-fmt/app');
     const handle = handlers![0];
     for (const [pid, name] of [['remote-p2', 'P2'], ['remote-p3', 'P3']]) {
-      handle('dkg/paranet/test-fmt/app', encode({
+      handle('dkg/context-graph/test-fmt/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -750,7 +750,7 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeUndefined();
-    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.every((q) => q.graph === 'did:dkg:context-graph:test-paranet')).toBe(true);
     expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
@@ -811,10 +811,10 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvenanceSwarm', 4);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-test/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/prov-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [['prov-p2', 'P2'], ['prov-p3', 'P3']] as const) {
-      handle('dkg/paranet/prov-test/app', encode({
+      handle('dkg/context-graph/prov-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -844,7 +844,7 @@ describe('Chain provenance in turn results (C4)', () => {
     // Workspace graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
-    expect([...wsGraphs][0]).toBe('did:dkg:paranet:prov-test');
+    expect([...wsGraphs][0]).toBe('did:dkg:context-graph:prov-test');
 
     // Provenance root entity is distinct from the published turn entity
     const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
@@ -883,10 +883,10 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'NoProvSwarm', 4);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-test2/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/prov-test2/app');
     const handle = handlers![0];
     for (const [pid, name] of [['noprov-p2', 'P2'], ['noprov-p3', 'P3']] as const) {
-      handle('dkg/paranet/prov-test2/app', encode({
+      handle('dkg/context-graph/prov-test2/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -931,10 +931,10 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm', 3);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/consensus-prov/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/consensus-prov/app');
     const handle = handlers![0];
     for (const [pid, name] of [['cons-p2', 'P2'], ['cons-p3', 'P3']] as const) {
-      handle('dkg/paranet/consensus-prov/app', encode({
+      handle('dkg/context-graph/consensus-prov/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -944,11 +944,11 @@ describe('Chain provenance in turn results (C4)', () => {
     await coordinator.launchExpedition(swarm.id);
 
     // Remote peers vote, then leader votes — triggers proposeTurnResolution
-    handle('dkg/paranet/consensus-prov/app', encode({
+    handle('dkg/context-graph/consensus-prov/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
       peerId: 'cons-p2', timestamp: Date.now(), turn: 1, action: 'advance',
     }), 'cons-p2');
-    handle('dkg/paranet/consensus-prov/app', encode({
+    handle('dkg/context-graph/consensus-prov/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
       peerId: 'cons-p3', timestamp: Date.now(), turn: 1, action: 'advance',
     }), 'cons-p3');
@@ -962,7 +962,7 @@ describe('Chain provenance in turn results (C4)', () => {
     const proposalBroadcast = broadcasts.find((b: any) => b.type === 'turn:proposal');
     expect(proposalBroadcast).toBeDefined();
 
-    handle('dkg/paranet/consensus-prov/app', encode({
+    handle('dkg/context-graph/consensus-prov/app', encode({
       app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
       peerId: 'cons-p2', timestamp: Date.now(), turn: 1,
       proposalHash: proposalBroadcast.proposalHash,
@@ -987,7 +987,7 @@ describe('Chain provenance in turn results (C4)', () => {
     // Workspace graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
-    expect([...wsGraphs][0]).toBe('did:dkg:paranet:consensus-prov');
+    expect([...wsGraphs][0]).toBe('did:dkg:context-graph:consensus-prov');
 
     // Provenance root entity is distinct from the turn entity
     const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
@@ -1032,10 +1032,10 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'NoBlockSwarm', 3);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/consensus-noblock/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/consensus-noblock/app');
     const handle = handlers![0];
     for (const [pid, name] of [['nb-p2', 'P2'], ['nb-p3', 'P3']] as const) {
-      handle('dkg/paranet/consensus-noblock/app', encode({
+      handle('dkg/context-graph/consensus-noblock/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1044,11 +1044,11 @@ describe('Chain provenance in turn results (C4)', () => {
 
     await coordinator.launchExpedition(swarm.id);
 
-    handle('dkg/paranet/consensus-noblock/app', encode({
+    handle('dkg/context-graph/consensus-noblock/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
       peerId: 'nb-p2', timestamp: Date.now(), turn: 1, action: 'advance',
     }), 'nb-p2');
-    handle('dkg/paranet/consensus-noblock/app', encode({
+    handle('dkg/context-graph/consensus-noblock/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
       peerId: 'nb-p3', timestamp: Date.now(), turn: 1, action: 'advance',
     }), 'nb-p3');
@@ -1061,7 +1061,7 @@ describe('Chain provenance in turn results (C4)', () => {
     const proposalBroadcast = broadcasts.find((b: any) => b.type === 'turn:proposal');
     expect(proposalBroadcast).toBeDefined();
 
-    handle('dkg/paranet/consensus-noblock/app', encode({
+    handle('dkg/context-graph/consensus-noblock/app', encode({
       app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
       peerId: 'nb-p2', timestamp: Date.now(), turn: 1,
       proposalHash: proposalBroadcast.proposalHash,
@@ -1137,7 +1137,7 @@ describe('Consensus attestation triples (V1)', () => {
     }
 
     // Graph must stay publish-compatible (no context suffix).
-    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.every((q) => q.graph === 'did:dkg:context-graph:test-paranet')).toBe(true);
     expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
@@ -1159,10 +1159,10 @@ describe('Consensus attestation triples (V1)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'AttestSwarm', 4);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/att-test/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/att-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [['att-p2', 'P2'], ['att-p3', 'P3']] as const) {
-      handle('dkg/paranet/att-test/app', encode({
+      handle('dkg/context-graph/att-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1213,10 +1213,10 @@ describe('Consensus attestation triples (V1)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm');
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/cons-test/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/cons-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
-      handle('dkg/paranet/cons-test/app', encode({
+      handle('dkg/context-graph/cons-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1230,7 +1230,7 @@ describe('Consensus attestation triples (V1)', () => {
 
     // Remote peers vote via gossip — third vote triggers proposeTurnResolution
     for (const pid of [followerPeerId, thirdPeerId]) {
-      handle('dkg/paranet/cons-test/app', encode({
+      handle('dkg/context-graph/cons-test/app', encode({
         app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
       }), pid);
@@ -1241,7 +1241,7 @@ describe('Consensus attestation triples (V1)', () => {
     const proposal = swarm.pendingProposal;
     expect(proposal).not.toBeNull();
 
-    handle('dkg/paranet/cons-test/app', encode({
+    handle('dkg/context-graph/cons-test/app', encode({
       app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
       peerId: followerPeerId, timestamp: 999, turn: 1,
       proposalHash: proposal!.hash,
@@ -1404,10 +1404,10 @@ describe('Publish provenance chain (V2)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvChainSwarm', 4);
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-chain-test/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/prov-chain-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [['prov-chain-p2', 'P2'], ['prov-chain-p3', 'P3']] as const) {
-      handle('dkg/paranet/prov-chain-test/app', encode({
+      handle('dkg/context-graph/prov-chain-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1451,10 +1451,10 @@ describe('Publish provenance chain (V2)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvConsSwarm');
 
-    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-cons-test/app');
+    const handlers = leaderAgent._messageHandlers.get('dkg/context-graph/prov-cons-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
-      handle('dkg/paranet/prov-cons-test/app', encode({
+      handle('dkg/context-graph/prov-cons-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1465,7 +1465,7 @@ describe('Publish provenance chain (V2)', () => {
     await coordinator.castVote(swarm.id, 'advance');
 
     for (const pid of [followerPeerId, thirdPeerId]) {
-      handle('dkg/paranet/prov-cons-test/app', encode({
+      handle('dkg/context-graph/prov-cons-test/app', encode({
         app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
       }), pid);
@@ -1475,7 +1475,7 @@ describe('Publish provenance chain (V2)', () => {
     const proposal = swarm.pendingProposal;
     expect(proposal).not.toBeNull();
 
-    handle('dkg/paranet/prov-cons-test/app', encode({
+    handle('dkg/context-graph/prov-cons-test/app', encode({
       app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
       peerId: followerPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: proposal!.hash,
@@ -1505,7 +1505,7 @@ describe('Player profile RDF quads', () => {
     expect(quads[0].subject).toBe('did:dkg:game:player:peer-abc');
     expect(quads[0].predicate).toContain('rdf-syntax-ns#type');
     expect(quads[0].object).toContain('Player');
-    expect(quads[0].graph).toBe('did:dkg:paranet:origin-trail-game');
+    expect(quads[0].graph).toBe('did:dkg:context-graph:origin-trail-game');
 
     expect(quads[1].predicate).toContain('schema.org/name');
     expect(quads[1].object).toContain('TestAgent');
@@ -1993,7 +1993,7 @@ describe('Network topology hints (V3)', () => {
     const snapshotQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type') && q.object.includes('NetworkSnapshot'));
     expect(snapshotQuad).toBeDefined();
     expect(snapshotQuad!.subject).toContain('topology/snapshot-writer-1');
-    expect(snapshotQuad!.graph).toBe('did:dkg:paranet:test-paranet');
+    expect(snapshotQuad!.graph).toBe('did:dkg:context-graph:test-paranet');
 
     const capturedAt = quads.find(q => q.predicate.includes('capturedAt'));
     expect(capturedAt).toBeDefined();
@@ -2053,10 +2053,10 @@ describe('Network topology hints (V3)', () => {
 
     const swarm = await coordinator.createSwarm('Leader', 'TopoSwarm');
 
-    const handlers = topoAgent._messageHandlers.get('dkg/paranet/topo-test/app');
+    const handlers = topoAgent._messageHandlers.get('dkg/context-graph/topo-test/app');
     const handle = handlers![0];
     for (const [pid, name] of [['topo-p2', 'P2'], ['topo-p3', 'P3']]) {
-      handle('dkg/paranet/topo-test/app', encode({
+      handle('dkg/context-graph/topo-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined',
         swarmId: swarm.id,
         peerId: pid,
@@ -2088,7 +2088,7 @@ describe('Workspace lineage quads', () => {
     expect(quads[0].subject).toContain('lineage/op-123');
     expect(quads[0].predicate).toContain('rdf-syntax-ns#type');
     expect(quads[0].object).toContain('WorkspaceLineage');
-    expect(quads[0].graph).toBe('did:dkg:paranet:origin-trail-game');
+    expect(quads[0].graph).toBe('did:dkg:context-graph:origin-trail-game');
 
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
     expect(statusQuad?.object).toContain('published');
@@ -2158,11 +2158,11 @@ describe.skip('Workspace lineage tracking', () => {
     const swarm = await coordinator.createSwarm('Leader', 'Lineage Swarm');
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = lineageAgent._messageHandlers.get('dkg/paranet/lineage-test/app');
+    const handlers = lineageAgent._messageHandlers.get('dkg/context-graph/lineage-test/app');
     const handle = handlers![0];
 
     for (const [pid, name] of [['lineage-p2', 'P2'], ['lineage-p3', 'P3']]) {
-      handle('dkg/paranet/lineage-test/app', encode({
+      handle('dkg/context-graph/lineage-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2236,11 +2236,11 @@ describe.skip('Workspace lineage tracking', () => {
     const swarm = await coordinator.createSwarm('Leader', 'Consensus Swarm');
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = consensusAgent._messageHandlers.get('dkg/paranet/consensus-test/app');
+    const handlers = consensusAgent._messageHandlers.get('dkg/context-graph/consensus-test/app');
     const handle = handlers![0];
 
     for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
-      handle('dkg/paranet/consensus-test/app', encode({
+      handle('dkg/context-graph/consensus-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2251,7 +2251,7 @@ describe.skip('Workspace lineage tracking', () => {
 
     // Remote peers vote first
     for (const pid of [p2, p3]) {
-      handle('dkg/paranet/consensus-test/app', encode({
+      handle('dkg/context-graph/consensus-test/app', encode({
         app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
       }), pid);
@@ -2267,7 +2267,7 @@ describe.skip('Workspace lineage tracking', () => {
     // Simulate remote peer approving the proposal to reach threshold
     const pendingProposal = swarm.pendingProposal;
     expect(pendingProposal).not.toBeNull();
-    handle('dkg/paranet/consensus-test/app', encode({
+    handle('dkg/context-graph/consensus-test/app', encode({
       app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
       peerId: p2, timestamp: Date.now(), turn: 1,
       proposalHash: pendingProposal!.hash,
@@ -2307,11 +2307,11 @@ describe.skip('Workspace lineage tracking', () => {
     const swarm = await coordinator.createSwarm('Leader', 'No-UAL Swarm');
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = noUalAgent._messageHandlers.get('dkg/paranet/lineage-noul/app');
+    const handlers = noUalAgent._messageHandlers.get('dkg/context-graph/lineage-noul/app');
     const handle = handlers![0];
 
     for (const [pid, name] of [['noul-p2', 'P2'], ['noul-p3', 'P3']]) {
-      handle('dkg/paranet/lineage-noul/app', encode({
+      handle('dkg/context-graph/lineage-noul/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2357,10 +2357,10 @@ describe.skip('Workspace lineage tracking', () => {
     const coordinator = new OriginTrailGameCoordinator(failAgent as any, { paranetId: 'lineage-fail' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 4);
-    const handlers = failAgent._messageHandlers.get('dkg/paranet/lineage-fail/app');
+    const handlers = failAgent._messageHandlers.get('dkg/context-graph/lineage-fail/app');
     const handle = handlers![0];
     for (const [pid, name] of [['fail-p2', 'P2'], ['fail-p3', 'P3']]) {
-      handle('dkg/paranet/lineage-fail/app', encode({
+      handle('dkg/context-graph/lineage-fail/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2429,11 +2429,11 @@ describe('Turn proposal accepts non-deterministic state', () => {
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Test', playerName: 'Leader', maxPlayers: 4,
     });
     // Trigger handleMessage from the leader
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test/app');
     expect(handlers).toBeDefined();
     const handle = handlers![0];
 
-    handle('dkg/paranet/test/app', createMsg, leaderPeerId);
+    handle('dkg/context-graph/test/app', createMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 50));
 
     // Follower joins
@@ -2441,14 +2441,14 @@ describe('Turn proposal accepts non-deterministic state', () => {
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test',
       peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
     });
-    handle('dkg/paranet/test/app', joinMsg, followerPeerId);
+    handle('dkg/context-graph/test/app', joinMsg, followerPeerId);
 
     // Third player joins
     const join3Msg = encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test',
       peerId: thirdPeerId, timestamp: Date.now(), playerName: 'Third',
     });
-    handle('dkg/paranet/test/app', join3Msg, thirdPeerId);
+    handle('dkg/context-graph/test/app', join3Msg, thirdPeerId);
     await new Promise(r => setTimeout(r, 50));
 
     // Leader launches the expedition with a known game state
@@ -2461,7 +2461,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-test',
       peerId: leaderPeerId, timestamp: Date.now(), gameStateJson,
     });
-    handle('dkg/paranet/test/app', launchMsg, leaderPeerId);
+    handle('dkg/context-graph/test/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 50));
 
     // Verify swarm transitioned to traveling after remote launch
@@ -2476,13 +2476,13 @@ describe('Turn proposal accepts non-deterministic state', () => {
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test',
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
     });
-    handle('dkg/paranet/test/app', voteLeader, leaderPeerId);
+    handle('dkg/context-graph/test/app', voteLeader, leaderPeerId);
 
     const voteThird = encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test',
       peerId: thirdPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
     });
-    handle('dkg/paranet/test/app', voteThird, thirdPeerId);
+    handle('dkg/context-graph/test/app', voteThird, thirdPeerId);
     await new Promise(r => setTimeout(r, 50));
 
     // Leader proposes a result — the state will differ from what the
@@ -2503,7 +2503,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
       votes: [{ peerId: leaderPeerId, action: 'advance' }],
       resolution: 'consensus', deaths: [],
     });
-    handle('dkg/paranet/test/app', proposalMsg, leaderPeerId);
+    handle('dkg/context-graph/test/app', proposalMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
     // The proposal should NOT be rejected with "Proposal state mismatch"
@@ -2527,17 +2527,17 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test2' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test2/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test2/app');
     const handle = handlers![0];
 
     // Create swarm with 4 players
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-test2',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Test2', playerName: 'Leader', maxPlayers: 5,
     }), leaderPeerId);
 
     for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third'], [fourthPeerId, 'Fourth']] as const) {
-      handle('dkg/paranet/test2/app', encode({
+      handle('dkg/context-graph/test2/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-test2',
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2549,7 +2549,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const engine = new GameEngine();
     const gameState = engine.createGame(['Leader', 'Follower', 'Third', 'Fourth'], leaderPeerId);
 
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-test2',
       peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
     }), leaderPeerId);
@@ -2558,17 +2558,17 @@ describe('Turn proposal accepts non-deterministic state', () => {
     // Leader votes 'advance'; third and fourth vote 'rest'
     // (follower's own gossip is skipped by handleMessage, so follower
     // sees 1 advance vs 2 rest → 'rest' wins the tally)
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1, action: 'advance',
     }), leaderPeerId);
 
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
       peerId: thirdPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
     }), thirdPeerId);
 
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test2',
       peerId: fourthPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
     }), fourthPeerId);
@@ -2580,7 +2580,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const { createHash } = await import('node:crypto');
     const hash = createHash('sha256').update(`swarm-test2:1:${stateJson}`).digest('hex');
 
-    handle('dkg/paranet/test2/app', encode({
+    handle('dkg/context-graph/test2/app', encode({
       app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-test2',
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
@@ -2605,15 +2605,15 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/force-test/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/force-test/app');
     const handle = handlers![0];
 
-    handle('dkg/paranet/force-test/app', encode({
+    handle('dkg/context-graph/force-test/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-force',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'ForceTest', playerName: 'Leader', maxPlayers: 5,
     }), leaderPeerId);
 
-    handle('dkg/paranet/force-test/app', encode({
+    handle('dkg/context-graph/force-test/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force',
       peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
     }), followerPeerId);
@@ -2623,7 +2623,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const engine = new GameEngine();
     const gameState = engine.createGame(['Leader', 'Follower'], leaderPeerId);
 
-    handle('dkg/paranet/force-test/app', encode({
+    handle('dkg/context-graph/force-test/app', encode({
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-force',
       peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
     }), leaderPeerId);
@@ -2631,7 +2631,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
 
     // Follower votes 'rest', but leader force-resolves with 'advance'.
     // Without the fix, the follower's local tally ('rest') would cause rejection.
-    handle('dkg/paranet/force-test/app', encode({
+    handle('dkg/context-graph/force-test/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-force',
       peerId: followerPeerId, timestamp: Date.now(), turn: 1, action: 'rest',
     }), followerPeerId);
@@ -2642,7 +2642,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const { createHash } = await import('node:crypto');
     const hash = createHash('sha256').update(`swarm-force:1:${stateJson}`).digest('hex');
 
-    handle('dkg/paranet/force-test/app', encode({
+    handle('dkg/context-graph/force-test/app', encode({
       app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-force',
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
@@ -2668,20 +2668,20 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test2' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
-    const handlers = followerAgent._messageHandlers.get('dkg/paranet/force-test2/app');
+    const handlers = followerAgent._messageHandlers.get('dkg/context-graph/force-test2/app');
     const handle = handlers![0];
 
-    handle('dkg/paranet/force-test2/app', encode({
+    handle('dkg/context-graph/force-test2/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-force2',
       peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'ForceTest2', playerName: 'Leader', maxPlayers: 5,
     }), leaderPeerId);
 
-    handle('dkg/paranet/force-test2/app', encode({
+    handle('dkg/context-graph/force-test2/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force2',
       peerId: nonLeaderPeerId, timestamp: Date.now(), playerName: 'NonLeader',
     }), nonLeaderPeerId);
 
-    handle('dkg/paranet/force-test2/app', encode({
+    handle('dkg/context-graph/force-test2/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-force2',
       peerId: 'observer-force-2', timestamp: Date.now(), playerName: 'Observer',
     }), 'observer-force-2');
@@ -2691,7 +2691,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const engine = new GameEngine();
     const gameState = engine.createGame(['Leader', 'NonLeader', 'Observer'], leaderPeerId);
 
-    handle('dkg/paranet/force-test2/app', encode({
+    handle('dkg/context-graph/force-test2/app', encode({
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-force2',
       peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
     }), leaderPeerId);
@@ -2703,7 +2703,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const hash = createHash('sha256').update(`swarm-force2:1:${stateJson}`).digest('hex');
 
     // Non-leader sends force-resolved — should NOT be immediately applied
-    handle('dkg/paranet/force-test2/app', encode({
+    handle('dkg/context-graph/force-test2/app', encode({
       app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-force2',
       peerId: nonLeaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
@@ -2782,11 +2782,11 @@ describe('V5: Strategy computation from turn history', () => {
     const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'strat-test' });
 
     const swarm = await coordinator.createSwarm('Leader', 'StratSwarm');
-    const handlers = agent._messageHandlers.get('dkg/paranet/strat-test/app');
+    const handlers = agent._messageHandlers.get('dkg/context-graph/strat-test/app');
     const handle = handlers![0];
 
     for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
-      handle('dkg/paranet/strat-test/app', encode({
+      handle('dkg/context-graph/strat-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2801,11 +2801,11 @@ describe('V5: Strategy computation from turn history', () => {
 
       // Leader casts vote; remote votes come via gossip
       await coordinator.castVote(swarm.id, 'advance');
-      handle('dkg/paranet/strat-test/app', encode({
+      handle('dkg/context-graph/strat-test/app', encode({
         app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
         peerId: p2, timestamp: Date.now(), turn: swarm.currentTurn, action: 'syncMemory',
       }), p2);
-      handle('dkg/paranet/strat-test/app', encode({
+      handle('dkg/context-graph/strat-test/app', encode({
         app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
         peerId: p3, timestamp: Date.now(), turn: swarm.currentTurn, action: 'advance',
       }), p3);
@@ -2853,11 +2853,11 @@ describe('V5: Strategy patterns published when game finishes', () => {
     const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'finish-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'FinishSwarm');
-    const handlers = agent._messageHandlers.get('dkg/paranet/finish-test/app');
+    const handlers = agent._messageHandlers.get('dkg/context-graph/finish-test/app');
     const handle = handlers![0];
 
     for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
-      handle('dkg/paranet/finish-test/app', encode({
+      handle('dkg/context-graph/finish-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -2990,10 +2990,10 @@ describe('Sync Memory via DKG', () => {
 
     // Create swarm + add remote players to satisfy MIN_PLAYERS
     const swarm = await coordinator.createSwarm('Leader', 'SyncSwarm', 5);
-    const handle = syncAgent._messageHandlers.get('dkg/paranet/sync-test/app')![0];
+    const handle = syncAgent._messageHandlers.get('dkg/context-graph/sync-test/app')![0];
 
     for (const pid of ['follower-1', 'follower-2']) {
-      handle('dkg/paranet/sync-test/app', encode({
+      handle('dkg/context-graph/sync-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: `Player-${pid}`,
       }), pid);
@@ -3021,10 +3021,10 @@ describe('Sync Memory via DKG', () => {
     const coordinator = new OriginTrailGameCoordinator(failAgent, { paranetId: 'sync-fail-test' });
 
     const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 5);
-    const handle = failAgent._messageHandlers.get('dkg/paranet/sync-fail-test/app')![0];
+    const handle = failAgent._messageHandlers.get('dkg/context-graph/sync-fail-test/app')![0];
 
     for (const pid of ['fail-follower-1', 'fail-follower-2']) {
-      handle('dkg/paranet/sync-fail-test/app', encode({
+      handle('dkg/context-graph/sync-fail-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: `Player-${pid}`,
       }), pid);
@@ -3082,9 +3082,9 @@ describe('Notifications', () => {
     const nAgent = makeMockAgent(localPeer);
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test' });
     const swarm = await coordinator.createSwarm('Leader', 'TestSwarm');
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test/app')![0];
 
-    handle('dkg/paranet/notif-test/app', encode({
+    handle('dkg/context-graph/notif-test/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
       peerId: 'remote-peer', timestamp: Date.now(), playerName: 'Alice',
     }), 'remote-peer');
@@ -3104,9 +3104,9 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-2');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test2' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test2/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test2/app')![0];
 
-    handle('dkg/paranet/notif-test2/app', encode({
+    handle('dkg/context-graph/notif-test2/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'remote-swarm-1',
       peerId: 'remote-leader', timestamp: Date.now(), swarmName: 'RemoteSwarm',
       playerName: 'RemoteLeader', maxPlayers: 5,
@@ -3126,9 +3126,9 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-3');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test3' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test3/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test3/app')![0];
 
-    handle('dkg/paranet/notif-test3/app', encode({
+    handle('dkg/context-graph/notif-test3/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'expedition-swarm',
       peerId: 'leader-x', timestamp: Date.now(), swarmName: 'ExpSwarm',
       playerName: 'Leader', maxPlayers: 3,
@@ -3138,7 +3138,7 @@ describe('Notifications', () => {
     const engine = new GameEngine();
     const gameState = engine.createGame(['Leader', 'Local'], 'leader-x');
 
-    handle('dkg/paranet/notif-test3/app', encode({
+    handle('dkg/context-graph/notif-test3/app', encode({
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'expedition-swarm',
       peerId: 'leader-x', timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
     }), 'leader-x');
@@ -3157,15 +3157,15 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-4');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test4' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test4/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test4/app')![0];
 
-    handle('dkg/paranet/notif-test4/app', encode({
+    handle('dkg/context-graph/notif-test4/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'vote-swarm',
       peerId: 'leader-v', timestamp: Date.now(), swarmName: 'VoteSwarm',
       playerName: 'Leader', maxPlayers: 3,
     }), 'leader-v');
 
-    handle('dkg/paranet/notif-test4/app', encode({
+    handle('dkg/context-graph/notif-test4/app', encode({
       app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'vote-swarm',
       peerId: 'local-4', timestamp: Date.now(), playerName: 'Local',
     }), 'local-4');
@@ -3174,13 +3174,13 @@ describe('Notifications', () => {
     const engine = new GameEngine();
     const gameState = engine.createGame(['Leader', 'Local'], 'leader-v');
 
-    handle('dkg/paranet/notif-test4/app', encode({
+    handle('dkg/context-graph/notif-test4/app', encode({
       app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'vote-swarm',
       peerId: 'leader-v', timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
     }), 'leader-v');
     await new Promise(r => setTimeout(r, 50));
 
-    handle('dkg/paranet/notif-test4/app', encode({
+    handle('dkg/context-graph/notif-test4/app', encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'vote-swarm',
       peerId: 'leader-v', timestamp: Date.now(), turn: 1, action: 'advance',
     }), 'leader-v');
@@ -3199,9 +3199,9 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-mark');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-mark' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-mark/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-mark/app')![0];
 
-    handle('dkg/paranet/notif-mark/app', encode({
+    handle('dkg/context-graph/notif-mark/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'mark-swarm',
       peerId: 'remote-m', timestamp: Date.now(), swarmName: 'MarkSwarm',
       playerName: 'Bob', maxPlayers: 3,
@@ -3222,10 +3222,10 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-partial');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-partial' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-partial/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-partial/app')![0];
 
     for (let i = 0; i < 3; i++) {
-      handle('dkg/paranet/notif-partial/app', encode({
+      handle('dkg/context-graph/notif-partial/app', encode({
         app: 'origin-trail-game', type: 'swarm:created', swarmId: `partial-${i}`,
         peerId: `remote-${i}`, timestamp: Date.now(), swarmName: `Swarm${i}`,
         playerName: `Player${i}`, maxPlayers: 3,
@@ -3247,8 +3247,8 @@ describe('Notifications', () => {
     const nAgent = makeMockAgent('api-notif');
     const nHandler = createHandler(nAgent, { paranets: ['test'] });
 
-    const handle = nAgent._messageHandlers.get('dkg/paranet/origin-trail-game/app')![0];
-    handle('dkg/paranet/origin-trail-game/app', encode({
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/origin-trail-game/app')![0];
+    handle('dkg/context-graph/origin-trail-game/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'api-swarm',
       peerId: 'remote-api', timestamp: Date.now(), swarmName: 'APISwarm',
       playerName: 'APIUser', maxPlayers: 3,
@@ -3270,8 +3270,8 @@ describe('Notifications', () => {
     const nAgent = makeMockAgent('api-read');
     const nHandler = createHandler(nAgent, { paranets: ['test'] });
 
-    const handle = nAgent._messageHandlers.get('dkg/paranet/origin-trail-game/app')![0];
-    handle('dkg/paranet/origin-trail-game/app', encode({
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/origin-trail-game/app')![0];
+    handle('dkg/context-graph/origin-trail-game/app', encode({
       app: 'origin-trail-game', type: 'swarm:created', swarmId: 'read-swarm',
       peerId: 'remote-r', timestamp: Date.now(), swarmName: 'ReadSwarm',
       playerName: 'Reader', maxPlayers: 3,
@@ -3297,10 +3297,10 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-order');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-order' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-order/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-order/app')![0];
 
     for (let i = 0; i < 3; i++) {
-      handle('dkg/paranet/notif-order/app', encode({
+      handle('dkg/context-graph/notif-order/app', encode({
         app: 'origin-trail-game', type: 'swarm:created', swarmId: `order-${i}`,
         peerId: `r-${i}`, timestamp: 1000 + i, swarmName: `S${i}`,
         playerName: `P${i}`, maxPlayers: 3,
@@ -3320,10 +3320,10 @@ describe('Notifications', () => {
 
     const nAgent = makeMockAgent('local-cap');
     const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-cap' });
-    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-cap/app')![0];
+    const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-cap/app')![0];
 
     for (let i = 0; i < 210; i++) {
-      handle('dkg/paranet/notif-cap/app', encode({
+      handle('dkg/context-graph/notif-cap/app', encode({
         app: 'origin-trail-game', type: 'swarm:created', swarmId: `cap-${i}`,
         peerId: `c-${i}`, timestamp: Date.now() + i, swarmName: `C${i}`,
         playerName: `P${i}`, maxPlayers: 3,
@@ -3472,8 +3472,8 @@ describe('Lobby chat', () => {
     expect(messages.length).toBe(1);
     expect(messages[0].message).toBe('Hello world');
 
-    const handle = agent._messageHandlers.get('dkg/paranet/chat-test/app')![0];
-    handle('dkg/paranet/chat-test/app', encode({
+    const handle = agent._messageHandlers.get('dkg/context-graph/chat-test/app')![0];
+    handle('dkg/context-graph/chat-test/app', encode({
       app: 'origin-trail-game',
       type: 'chat:message',
       swarmId: 'lobby',
@@ -3501,15 +3501,15 @@ describe('Lobby chat', () => {
     const agent = makeMockAgent('chat-val-peer');
     const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-val-test' });
 
-    const handle = agent._messageHandlers.get('dkg/paranet/chat-val-test/app')![0];
+    const handle = agent._messageHandlers.get('dkg/context-graph/chat-val-test/app')![0];
 
-    handle('dkg/paranet/chat-val-test/app', encode({
+    handle('dkg/context-graph/chat-val-test/app', encode({
       app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
       peerId: 'bad-peer', timestamp: Date.now(),
       id: '', displayName: 'X', message: 'no id',
     } as any), 'bad-peer');
 
-    handle('dkg/paranet/chat-val-test/app', encode({
+    handle('dkg/context-graph/chat-val-test/app', encode({
       app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
       peerId: 'bad-peer', timestamp: Date.now(),
       id: 'msg-2', displayName: 'X', message: '   ',
@@ -3526,10 +3526,10 @@ describe('Lobby chat', () => {
     const agent = makeMockAgent('chat-trunc-peer');
     const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-trunc-test' });
 
-    const handle = agent._messageHandlers.get('dkg/paranet/chat-trunc-test/app')![0];
+    const handle = agent._messageHandlers.get('dkg/context-graph/chat-trunc-test/app')![0];
     const longMsg = 'a'.repeat(500);
     const longName = 'b'.repeat(100);
-    handle('dkg/paranet/chat-trunc-test/app', encode({
+    handle('dkg/context-graph/chat-trunc-test/app', encode({
       app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
       peerId: 'trunc-peer', timestamp: Date.now(),
       id: 'trunc-1', displayName: longName, message: longMsg,

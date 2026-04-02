@@ -53,7 +53,7 @@ export class FinalizationHandler {
       // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller)
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(paranetId, ctxGraphId)
-        : `did:dkg:paranet:${paranetId}/_meta`;
+        : `did:dkg:context-graph:${paranetId}/_meta`;
       const alreadyPromoted = await this.isAlreadyConfirmed(msg.ual, targetMetaGraph);
       if (alreadyPromoted) {
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'paranet'}, skipping`);
@@ -360,7 +360,7 @@ export class FinalizationHandler {
 
     let metaQuads = generateConfirmedFullMetadata(kcMeta, kaMetadata, provenance);
     if (ctxGraphId) {
-      const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
+      const defaultMeta = `did:dkg:context-graph:${paranetId}/_meta`;
       const targetMeta = contextGraphMetaUri(paranetId, ctxGraphId);
       metaQuads = metaQuads.map((q) =>
         q.graph === defaultMeta ? { ...q, graph: targetMeta } : q,

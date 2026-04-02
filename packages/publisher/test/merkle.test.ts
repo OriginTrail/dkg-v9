@@ -36,7 +36,7 @@ import {
 } from '../src/merkle.js';
 import { ProofIndex } from '../src/proof-index.js';
 
-const GRAPH = 'did:dkg:paranet:test';
+const GRAPH = 'did:dkg:context-graph:test';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };

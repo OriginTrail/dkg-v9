@@ -535,7 +535,7 @@ function WorkspaceTab() {
   const doWrite = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:paranet:${paranet}`;
+    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:context-graph:${paranet}`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
     const opId = addBroadcast('workspace', state.selectedNode, 'workspace write');
     try {
@@ -556,7 +556,7 @@ function WorkspaceTab() {
     const sparql = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 50`;
     try {
       const res = await api.queryNode(state.selectedNode, sparql, paranet, {
-        graphSuffix: '_workspace',
+        graphSuffix: '_shared_memory',
       });
       setWsContents(JSON.stringify(res.result, null, 2));
     } catch (e: any) {
@@ -657,7 +657,7 @@ function PublishTab() {
   const doPublish = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:paranet:${paranet}`;
+    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:context-graph:${paranet}`;
     const fmtObj = (v: string) =>
       v.startsWith('http') || v.startsWith('did:') || v.startsWith('urn:') ? v : `"${v}"`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
@@ -742,7 +742,7 @@ function QueryTab() {
     const opId = addOperation('query', state.selectedNode, `query (${targetLabel})`);
     try {
       const opts = graphTarget === 'workspace'
-        ? { graphSuffix: '_workspace' as const }
+        ? { graphSuffix: '_shared_memory' as const }
         : graphTarget === 'both'
           ? { includeWorkspace: true }
           : undefined;

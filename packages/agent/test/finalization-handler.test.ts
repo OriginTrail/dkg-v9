@@ -156,7 +156,7 @@ describe('FinalizationHandler', () => {
 
     // Metadata should be confirmed
     const metaResult = await store.query(
-      `SELECT ?status WHERE { GRAPH <did:dkg:paranet:${PARANET}/_meta> { <did:dkg:base:31337/0xPub/1> <http://dkg.io/ontology/status> ?status } }`,
+      `SELECT ?status WHERE { GRAPH <did:dkg:context-graph:${PARANET}/_meta> { <did:dkg:base:31337/0xPub/1> <http://dkg.io/ontology/status> ?status } }`,
     );
     expect(metaResult.type).toBe('bindings');
     const metaBindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
@@ -397,7 +397,7 @@ describe('FinalizationHandler', () => {
     // Metadata should exist: the handler derived roots from autoPartition (sorted),
     // not from the gossip message's reversed order
     const metaResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}/_meta> { ?s <http://dkg.io/ontology/status> ?st . FILTER(CONTAINS(?st, "confirmed")) } }`,
+      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}/_meta> { ?s <http://dkg.io/ontology/status> ?st . FILTER(CONTAINS(?st, "confirmed")) } }`,
     );
     expect(metaResult.type).toBe('bindings');
     const bindings = metaResult.type === 'bindings' ? metaResult.bindings : [];

@@ -65,7 +65,7 @@ describe('handleEventsQuery', () => {
     // Verify the query engine was called with paranetId
     expect(engine.query).toHaveBeenCalledOnce();
     const [sparql, opts] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('GRAPH <did:dkg:paranet:test-paranet>');
+    expect(sparql).toContain('GRAPH <did:dkg:context-graph:test-paranet>');
     expect(opts).toEqual({ paranetId: PARANET_ID });
   });
 

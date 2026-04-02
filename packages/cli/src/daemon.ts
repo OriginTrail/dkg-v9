@@ -620,7 +620,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   });
 
   const agentToolsContext = {
-    query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
+    query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
     writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.writeToWorkspace(paranetId, quads, opts),
     enshrineFromWorkspace: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.enshrineFromWorkspace(paranetId, selection, opts),
     createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createParanet(opts),
@@ -2044,7 +2044,7 @@ async function handleRequest(
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     await agent.createParanet({ id, name, description });
-    return jsonResponse(res, 200, { created: id, uri: `did:dkg:paranet:${id}` });
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
   // GET /api/paranet/list

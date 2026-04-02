@@ -14,7 +14,7 @@ import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dk
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const PARANET = 'test-paranet';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 
 function q(s: string, p: string, o: string): Quad {
   return { subject: s, predicate: p, object: o, graph: GRAPH };
@@ -104,7 +104,7 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
         q('did:dkg:agent:LocalBot', 'http://schema.org/name', '"LocalBot"'),
       ]);
       await storeB.insert([
-        { subject: 'did:dkg:agent:RemoteBot', predicate: 'http://schema.org/name', object: '"RemoteBot"', graph: 'did:dkg:paranet:other' },
+        { subject: 'did:dkg:agent:RemoteBot', predicate: 'http://schema.org/name', object: '"RemoteBot"', graph: 'did:dkg:context-graph:other' },
       ]);
 
       const result = await engineA.queryAllParanets(

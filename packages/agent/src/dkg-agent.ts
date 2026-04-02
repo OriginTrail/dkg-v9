@@ -1218,7 +1218,7 @@ export class DKGAgent {
     onPhase?.('broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
-        const dataGraph = `did:dkg:paranet:${paranetId}`;
+        const dataGraph = `did:dkg:context-graph:${paranetId}`;
         const nquadsStr = result.publicQuads
           .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
           .join('\n');
@@ -1442,7 +1442,7 @@ export class DKGAgent {
 
   async query(
     sparql: string,
-    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean; operationCtx?: OperationContext },
+    options?: string | { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean; operationCtx?: OperationContext },
   ) {
     const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
     const ctx = opts.operationCtx ?? createOperationContext('query');
@@ -1766,7 +1766,7 @@ export class DKGAgent {
       }).join('\n');
 
       const msg = encodePublishRequest({
-        ual: `did:dkg:paranet:${opts.id}`,
+        ual: `did:dkg:context-graph:${opts.id}`,
         nquads: new TextEncoder().encode(nquads),
         paranetId: SYSTEM_PARANETS.ONTOLOGY,
         kas: [],
@@ -1898,7 +1898,7 @@ export class DKGAgent {
     }).join('\n');
 
     const msg = encodePublishRequest({
-      ual: `did:dkg:paranet:${opts.id}`,
+      ual: `did:dkg:context-graph:${opts.id}`,
       nquads: new TextEncoder().encode(nquads),
       paranetId: SYSTEM_PARANETS.ONTOLOGY,
       kas: [],
@@ -1975,7 +1975,7 @@ export class DKGAgent {
       }
     `);
 
-    const prefix = 'did:dkg:paranet:';
+    const prefix = 'did:dkg:context-graph:';
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
       creator?: string; createdAt?: string; isSystem: boolean;
@@ -2126,7 +2126,7 @@ export class DKGAgent {
   async discoverParanetsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const prefix = 'did:dkg:paranet:';
+    const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
     const result = await this.store.query(`

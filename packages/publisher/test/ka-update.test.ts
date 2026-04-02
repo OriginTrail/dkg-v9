@@ -9,7 +9,7 @@ import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-update';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
+const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY_A = 'urn:test:entity:a';
 const ENTITY_B = 'urn:test:entity:b';
 
@@ -51,7 +51,7 @@ function buildGossipMessage(opts: {
   return encodeKAUpdateRequest({
     paranetId: opts.paranetId,
     batchId: opts.batchId,
-    nquads: quadsToNQuads(opts.quads, `did:dkg:paranet:${opts.paranetId}`),
+    nquads: quadsToNQuads(opts.quads, `did:dkg:context-graph:${opts.paranetId}`),
     manifest: opts.manifest,
     publisherPeerId: opts.publisherPeerId,
     publisherAddress: opts.publisherAddress,
@@ -646,7 +646,7 @@ describe('UpdateHandler', () => {
     await handler.handle(crossParanetMsg, '12D3KooWPeerA');
 
     // The other paranet's graph should be empty
-    const otherGraph = 'did:dkg:paranet:other-paranet';
+    const otherGraph = 'did:dkg:context-graph:other-paranet';
     const result = await store.query(
       `ASK { GRAPH <${otherGraph}> { <${ENTITY_A}> ?p ?o } }`,
     );
@@ -668,7 +668,7 @@ describe('UpdateHandler', () => {
   });
 
   it('publisher.update() updates the merkle root in _meta graph', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
@@ -710,7 +710,7 @@ describe('UpdateHandler', () => {
   });
 
   it('UpdateHandler.handle() updates the merkle root in _meta graph on gossip receiver', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
@@ -774,7 +774,7 @@ describe('UpdateHandler', () => {
 
   it('updateMetaMerkleRoot fails loudly for unsafe paranetId values', async () => {
     const DKG = 'http://dkg.io/ontology/';
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
 
     const original = await publisher.publish({
       paranetId: PARANET,
@@ -803,7 +803,7 @@ describe('UpdateHandler', () => {
   });
 
   it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
 

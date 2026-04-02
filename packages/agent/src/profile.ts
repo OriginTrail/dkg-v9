@@ -9,7 +9,7 @@ const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
 export const AGENT_REGISTRY_PARANET = SYSTEM_PARANETS.AGENTS;
-export const AGENT_REGISTRY_GRAPH = `did:dkg:paranet:${AGENT_REGISTRY_PARANET}`;
+export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_PARANET}`;
 
 export interface SkillOfferingConfig {
   skillType: string;

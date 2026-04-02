@@ -38,8 +38,8 @@ describe('getGenesisQuads', () => {
   it('includes system paranets (agents and ontology)', () => {
     const quads = getGenesisQuads();
     const subjects = new Set(quads.map(q => q.subject));
-    expect(subjects.has('did:dkg:paranet:agents')).toBe(true);
-    expect(subjects.has('did:dkg:paranet:ontology')).toBe(true);
+    expect(subjects.has('did:dkg:context-graph:agents')).toBe(true);
+    expect(subjects.has('did:dkg:context-graph:ontology')).toBe(true);
   });
 
   it('includes ontology class definitions', () => {

@@ -7,7 +7,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const ENTITY2 = 'did:dkg:agent:QmTextBot';
 const TEST_WALLET = ethers.Wallet.createRandom();
@@ -55,7 +55,7 @@ describe('DKGPublisher', () => {
     const count = await store.countQuads(GRAPH);
     expect(count).toBe(2);
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     const metaCount = await store.countQuads(metaGraph);
     expect(metaCount).toBeGreaterThan(0);
   });
@@ -189,7 +189,7 @@ describe('DKGPublisher', () => {
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     const metaResult = await store.query(
       `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeCollection> } }`,
     );
@@ -221,7 +221,7 @@ describe('DKGPublisher', () => {
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     const statusResult = await store.query(
       `SELECT ?status WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );

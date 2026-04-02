@@ -45,7 +45,7 @@ describe('Workspace TTL', () => {
 
     const before = await node.query(
       'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(before.bindings.length).toBe(1);
   }, 10000);
@@ -67,7 +67,7 @@ describe('Workspace TTL', () => {
   it('stale entity is gone, fresh entity remains', async () => {
     const result = await node.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
 
     const subjects = result.bindings.map((b: any) => b['s']);
@@ -174,7 +174,7 @@ describe('Workspace TTL sync filtering', () => {
 
     const result = await nodeB.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: 'ttl-sync-test', graphSuffix: '_workspace' },
+      { paranetId: 'ttl-sync-test', graphSuffix: '_shared_memory' },
     );
 
     const subjects = result.bindings.map((b: any) => b['s']);

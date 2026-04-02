@@ -118,7 +118,7 @@ SELECT ?s WHERE {
         s: 's1',
         p: 'p1',
         o: 'o1',
-        g: 'did:dkg:paranet:agents/workspace',
+        g: 'did:dkg:context-graph:agents/workspace',
         graphType: 'workspace',
         paranet: 'agents',
         source: '12D3abc',
@@ -130,7 +130,7 @@ SELECT ?s WHERE {
         s: 's1',
         p: 'p1',
         o: 'o1',
-        g: 'did:dkg:paranet:agents/data',
+        g: 'did:dkg:context-graph:agents/data',
         graphType: 'data',
         paranet: 'agents',
         source: '12D3abc',
@@ -142,8 +142,8 @@ SELECT ?s WHERE {
     const expanded = buildTripleRowsWithProvenance(triples, rows);
     expect(expanded).toHaveLength(2);
     expect(expanded.map((row) => row.g).sort()).toEqual([
-      'did:dkg:paranet:agents/data',
-      'did:dkg:paranet:agents/workspace',
+      'did:dkg:context-graph:agents/data',
+      'did:dkg:context-graph:agents/workspace',
     ]);
   });
 

@@ -56,7 +56,7 @@ describe('GossipPublishHandler', () => {
     await handler.handlePublishMessage(data, PARANET);
 
     const result = await store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
     );
     expect(result.type).toBe('bindings');
     const bindings = result.type === 'bindings' ? result.bindings : [];
@@ -120,7 +120,7 @@ describe('GossipPublishHandler', () => {
     await handler.handlePublishMessage(data, PARANET);
 
     const firstResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s <http://schema.org/name> ?o } }`,
+      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s <http://schema.org/name> ?o } }`,
     );
     const firstBindings = firstResult.type === 'bindings' ? firstResult.bindings : [];
     expect(firstBindings.length).toBeGreaterThan(0);
@@ -142,7 +142,7 @@ describe('GossipPublishHandler', () => {
     await handler.handlePublishMessage(data, PARANET);
 
     const result = await store.query(
-      `SELECT ?s WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings.length).toBeGreaterThan(0);

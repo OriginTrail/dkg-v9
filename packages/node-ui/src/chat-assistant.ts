@@ -64,7 +64,7 @@ const DKG_TOOLS: OpenAITool[] = [
   {
     type: 'function',
     function: {
-      name: 'dkg_write_to_workspace',
+      name: 'dkg_write_to_shared_memory',
       description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. For literal values use plain strings (e.g. "Tesla"). For URIs use full URIs (e.g. "http://example.org/Tesla").',
       parameters: {
         type: 'object',
@@ -172,7 +172,7 @@ Otherwise, just answer in plain language. Keep any queries read-only (SELECT, CO
     if (this.agentTools) {
       p += `
 
-You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
+You have DKG tools: dkg_query (read graph), dkg_write_to_shared_memory (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_shared_memory with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
 
 The user may have imported memories from other AI assistants (Claude, ChatGPT, Gemini). These are stored in the "agent-memory" paranet. To query them, ALWAYS use dkg_query with paranetId "agent-memory". The data model:
 - Import batches: type <http://dkg.io/ontology/MemoryImport>, with predicates <http://dkg.io/ontology/importSource> (e.g. "claude"), <http://schema.org/dateCreated>, <http://dkg.io/ontology/itemCount>
@@ -200,7 +200,7 @@ When the user asks about their memories, imported memories, preferences, or what
           const bindings = res?.result?.bindings ?? res?.bindings ?? [];
           return { result: bindings, summary: `Query returned ${bindings.length} result(s).` };
         }
-        case 'dkg_write_to_workspace': {
+        case 'dkg_write_to_shared_memory': {
           const paranetId = String(args.paranetId ?? '');
           let raw: unknown = args.quads;
           if (typeof raw === 'string') {

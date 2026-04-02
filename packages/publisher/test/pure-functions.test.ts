@@ -16,7 +16,7 @@ import {
 import type { ValidationOptions } from '../src/validation.js';
 
 const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {

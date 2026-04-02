@@ -116,7 +116,7 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
 
   it('workspace writes use normalized paranet graph URI', async () => {
     const leaderLog = readNodeLog(nodes[0]);
-    // The old bug: quads had graph "did:dkg:paranet:origin-trail-game/context/swarm-..."
+    // The old bug: quads had graph "did:dkg:context-graph:origin-trail-game/context/swarm-..."
     // which caused "Workspace validation failed: Rule 1"
     expect(leaderLog).not.toContain('Workspace validation failed');
     expect(leaderLog).not.toContain('Quad graph');

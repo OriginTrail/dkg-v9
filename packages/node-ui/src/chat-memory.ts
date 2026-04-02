@@ -3,7 +3,7 @@ import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
-  query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => Promise<any>;
+  query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => Promise<any>;
   writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ workspaceOperationId: string }>;
   enshrineFromWorkspace: (
     paranetId: string,
@@ -990,7 +990,7 @@ export class ChatMemoryManager {
     }`;
     const workspaceCountResult = await this.tools.query(countQuery, {
       paranetId: MEMORY_PARANET,
-      graphSuffix: '_workspace',
+      graphSuffix: '_shared_memory',
     });
     const dataCountResult = await this.tools.query(countQuery, {
       paranetId: MEMORY_PARANET,
@@ -998,7 +998,7 @@ export class ChatMemoryManager {
 
     const rootEntityResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+      { paranetId: MEMORY_PARANET, graphSuffix: '_shared_memory' },
     );
 
     const workspaceTripleCount = sumBindingValues(workspaceCountResult.bindings, 'c');
@@ -1030,7 +1030,7 @@ export class ChatMemoryManager {
     const rootPattern = buildSessionRootPattern(sessionUri);
     const result = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+      { paranetId: MEMORY_PARANET, graphSuffix: '_shared_memory' },
     );
 
     const roots = new Set<string>();

@@ -20,12 +20,12 @@ const GENESIS_TRIG = `\
     schema:name "DKG V9 Testnet" ;
     dkg:genesisVersion "1"^^xsd:integer ;
     dkg:createdAt "2026-02-24T00:00:00Z"^^xsd:dateTime ;
-    dkg:systemParanets <did:dkg:paranet:agents> ;
-    dkg:systemParanets <did:dkg:paranet:ontology> .
+    dkg:systemParanets <did:dkg:context-graph:agents> ;
+    dkg:systemParanets <did:dkg:context-graph:ontology> .
 `;
 
-const GENESIS_AGENTS_GRAPH = 'did:dkg:paranet:agents';
-const GENESIS_ONTOLOGY_GRAPH = 'did:dkg:paranet:ontology';
+const GENESIS_AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+const GENESIS_ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 
 export interface GenesisQuad {
   subject: string;
@@ -57,24 +57,24 @@ function buildGenesisQuads(): GenesisQuad[] {
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${SCHEMA}name`, '"DKG V9 Testnet"'));
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}genesisVersion`, '"1"'));
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}createdAt`, '"2026-02-24T00:00:00Z"'));
-  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:paranet:agents`));
-  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:paranet:ontology`));
+  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:context-graph:agents`));
+  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:context-graph:ontology`));
 
   // --- Agents paranet definition ---
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${RDF}type`, `${DKG}Paranet`));
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${RDF}type`, `${DKG}SystemParanet`));
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${SCHEMA}name`, '"Agent Registry"'));
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${SCHEMA}description`, '"System paranet for agent discovery and profiles"'));
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${DKG}gossipTopic`, '"dkg/paranet/agents/publish"'));
-  quads.push(q(AG, 'did:dkg:paranet:agents', `${DKG}replicationPolicy`, '"full"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}Paranet`));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}SystemParanet`));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${SCHEMA}name`, '"Agent Registry"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${SCHEMA}description`, '"System paranet for agent discovery and profiles"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${DKG}gossipTopic`, '"dkg/paranet/agents/publish"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${DKG}replicationPolicy`, '"full"'));
 
   // --- Ontology paranet definition ---
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${RDF}type`, `${DKG}Paranet`));
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${RDF}type`, `${DKG}SystemParanet`));
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${SCHEMA}name`, '"Ontology Registry"'));
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${SCHEMA}description`, '"System paranet for shared ontology and paranet definitions"'));
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${DKG}gossipTopic`, '"dkg/paranet/ontology/publish"'));
-  quads.push(q(OG, 'did:dkg:paranet:ontology', `${DKG}replicationPolicy`, '"full"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}Paranet`));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}SystemParanet`));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${SCHEMA}name`, '"Ontology Registry"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${SCHEMA}description`, '"System paranet for shared ontology and paranet definitions"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${DKG}gossipTopic`, '"dkg/paranet/ontology/publish"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${DKG}replicationPolicy`, '"full"'));
 
   // --- Ontology class definitions ---
   quads.push(q(OG, `${DKG}Network`,              `${RDF}type`, `${RDFS}Class`));

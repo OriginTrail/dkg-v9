@@ -196,7 +196,7 @@ export class AccessHandler {
     const row = result.bindings[0];
     const rootEntity = row['rootEntity'];
     const paranetUri = row['paranet'];
-    const paranetId = paranetUri.replace('did:dkg:paranet:', '');
+    const paranetId = paranetUri.replace('did:dkg:context-graph:', '');
     const kcUal = row['kc'];
 
     let privateMerkleRoot: Uint8Array | undefined;
@@ -227,7 +227,7 @@ export class AccessHandler {
         ? stripLiteral(row['attributedTo'])
         : undefined;
 
-    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
     const allowedPeerRes = await this.store.query(
       `SELECT ?allowedPeer WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> {

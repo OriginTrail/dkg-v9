@@ -878,7 +878,7 @@ export class DKGPublisher implements Publisher {
           },
         );
         if (options.targetMetaGraphUri) {
-          const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
+          const defaultMeta = `did:dkg:context-graph:${paranetId}/_meta`;
           confirmedQuads = confirmedQuads.map((q) =>
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
@@ -913,7 +913,7 @@ export class DKGPublisher implements Publisher {
         kaMetadata,
       );
       if (options.targetMetaGraphUri) {
-        const defaultMeta = `did:dkg:paranet:${paranetId}/_meta`;
+        const defaultMeta = `did:dkg:context-graph:${paranetId}/_meta`;
         tentativeQuads = tentativeQuads.map((q) =>
           q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
         );

@@ -670,7 +670,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     });
 
     const queryResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${PARANET}> { <urn:test:localstore:1> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { <urn:test:localstore:1> <http://schema.org/name> ?o } }`,
     );
     expect(queryResult.type).toBe('bindings');
     if (queryResult.type === 'bindings') {

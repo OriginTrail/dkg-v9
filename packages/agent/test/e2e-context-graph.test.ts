@@ -87,7 +87,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
       await sleep(500);
@@ -106,7 +106,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     expect(result.status).toBe('confirmed');
     expect(result.ual).toBeDefined();
 
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
 
     const aData = await nodeA.query(
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
@@ -123,7 +123,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   }, 30_000);
 
   it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
 
     const deadline = Date.now() + 20_000;
     let bData: any;
@@ -140,7 +140,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   }, 30_000);
 
   it('B has confirmed metadata in context graph meta', async () => {
-    const ctxMetaGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}/_meta`;
+    const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}/_meta`;
 
     const metaResult = await nodeB.query(
       `SELECT ?status WHERE { GRAPH <${ctxMetaGraph}> { ?kc <http://dkg.io/ontology/status> ?status } }`,
@@ -161,7 +161,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   it('B workspace is cleaned up after promotion', async () => {
     const wsResult = await nodeB.query(
       `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsResult.bindings.length).toBe(0);
   }, 5_000);
@@ -176,7 +176,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     while (Date.now() < wsDeadline) {
       const ws = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (ws.bindings.length > 0) break;
       await sleep(500);
@@ -189,7 +189,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     );
     expect(result.status).toBe('confirmed');
 
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
 
     // Both entities in context graph on A
     const data = await nodeA.query(
@@ -202,7 +202,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     // A's workspace cleaned
     const ws = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(ws.bindings.length).toBe(0);
 

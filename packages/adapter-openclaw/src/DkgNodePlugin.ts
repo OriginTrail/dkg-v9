@@ -324,7 +324,7 @@ export class DkgNodePlugin {
         description:
           'Create a new paranet on the DKG node. A paranet is a scoped knowledge domain ' +
           'that organizes published knowledge. Use dkg_list_paranets first to check if the ' +
-          'paranet already exists. Returns the paranet ID and URI (did:dkg:paranet:<id>). ' +
+          'paranet already exists. Returns the paranet ID and URI (did:dkg:context-graph:<id>). ' +
           'The ID is auto-generated from the name if not provided.',
         parameters: {
           type: 'object',

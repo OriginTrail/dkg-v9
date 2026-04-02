@@ -5,7 +5,7 @@ import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
 const PARANET = 'test-paranet';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY_A = 'did:dkg:entity:alice';
 const ENTITY_B = 'did:dkg:entity:bob';
 const SCHEMA_NAME = 'https://schema.org/name';

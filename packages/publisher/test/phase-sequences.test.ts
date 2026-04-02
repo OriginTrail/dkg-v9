@@ -23,7 +23,7 @@ import type { PhaseCallback } from '../src/publisher.js';
 const PARANET = 'test-phase-seq';
 const ENTITY = 'did:dkg:agent:QmPhaseSeq';
 
-function q(s: string, p: string, o: string, g = `did:dkg:paranet:${PARANET}`): Quad {
+function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${PARANET}`): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 

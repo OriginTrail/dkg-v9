@@ -25,7 +25,7 @@ export function validatePublishRequest(
   options?: ValidationOptions,
 ): ValidationResult {
   const errors: string[] = [];
-  const paranetGraph = `did:dkg:paranet:${paranetId}`;
+  const paranetGraph = `did:dkg:context-graph:${paranetId}`;
   const rootEntities = new Set(manifest.map((m) => m.rootEntity));
 
   // Rule 1: Every quad's named graph MUST be the target paranet URI.

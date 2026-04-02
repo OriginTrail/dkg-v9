@@ -106,7 +106,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const bBindings = await pollUntil(
       () => nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -116,7 +116,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const cBindings = await pollUntil(
       () => nodeC.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -279,7 +279,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     expect(result.ual).toBeDefined();
 
     // A has data in context graph data graph
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
     const aData = await nodeA.query(
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
     );
@@ -287,7 +287,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
   }, 40_000);
 
   it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
 
     const bBindings = await pollUntil(
       () => nodeB.query(
@@ -584,7 +584,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
 
     expect(result.status).toBe('confirmed');
 
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
     const data = await coreNode.query(
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_1}> <http://schema.org/name> ?name } }`,
     );

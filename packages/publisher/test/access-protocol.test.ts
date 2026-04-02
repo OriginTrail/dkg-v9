@@ -15,7 +15,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-access';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:TestBot';
 const TEST_WALLET = ethers.Wallet.createRandom();
 
@@ -169,7 +169,7 @@ describe('Access Protocol', () => {
     const onChain = result.onChainResult!;
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
     const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
 
     await storeA.insert([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
@@ -198,7 +198,7 @@ describe('Access Protocol', () => {
 
     const onChain = result.onChainResult!;
     const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
@@ -239,7 +239,7 @@ describe('Access Protocol', () => {
 
     const onChain = result.onChainResult!;
     const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
       { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },

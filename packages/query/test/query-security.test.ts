@@ -15,8 +15,8 @@ import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
 const PARANET = 'test-security';
 const OTHER_PARANET = 'other-secret';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
-const OTHER_GRAPH = `did:dkg:paranet:${OTHER_PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
+const OTHER_GRAPH = `did:dkg:context-graph:${OTHER_PARANET}`;
 const ENTITY_A = 'did:dkg:entity:alice';
 const ENTITY_SECRET = 'did:dkg:entity:secret-data';
 const SCHEMA_NAME = 'https://schema.org/name';

@@ -24,7 +24,7 @@ import { autoPartition } from '../src/auto-partition.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 
 const PARANET = 'agent-skills';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const TEST_WALLET = ethers.Wallet.createRandom();
 const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
@@ -444,7 +444,7 @@ describe('Publisher wallet signature verification', () => {
 
     await handler.handler(reqBytes, 'test-peer' as any);
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     let statusResult = await store.query(
       `SELECT ?status WHERE { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> ?status } }`,
     );

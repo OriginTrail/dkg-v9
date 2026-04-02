@@ -40,12 +40,12 @@ export function normalizeBizStep(value: string): string {
  * Build a composite SPARQL query for EPCIS events.
  *
  * Adapted for v9's flat data graph model:
- * - Data lives in GRAPH <did:dkg:paranet:{id}>
- * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:paranet:{id}/_meta>
+ * - Data lives in GRAPH <did:dkg:context-graph:{id}>
+ * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:context-graph:{id}/_meta>
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): string {
-  const dataGraph = `did:dkg:paranet:${paranetId}`;
+  const dataGraph = `did:dkg:context-graph:${paranetId}`;
   const metaGraph = `${dataGraph}/_meta`;
 
   const wherePatterns: string[] = [];

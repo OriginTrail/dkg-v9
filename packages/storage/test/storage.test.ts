@@ -270,28 +270,28 @@ describe('GraphManager', () => {
     gm = new GraphManager(store);
   });
 
-  it('generates correct graph URIs', () => {
-    expect(gm.dataGraphUri('agent-registry')).toBe('did:dkg:paranet:agent-registry');
-    expect(gm.metaGraphUri('agent-registry')).toBe('did:dkg:paranet:agent-registry/_meta');
+  it('generates correct graph URIs (V10 context-graph prefix)', () => {
+    expect(gm.dataGraphUri('agent-registry')).toBe('did:dkg:context-graph:agent-registry');
+    expect(gm.metaGraphUri('agent-registry')).toBe('did:dkg:context-graph:agent-registry/_meta');
   });
 
-  it('lists paranets', async () => {
+  it('lists context graphs', async () => {
     await store.insert([
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:paranet:test1' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:paranet:test1/_meta' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:paranet:test2' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:test1' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:test1/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:context-graph:test2' },
     ]);
-    const paranets = await gm.listParanets();
-    expect(paranets.sort()).toEqual(['test1', 'test2']);
+    const cgs = await gm.listContextGraphs();
+    expect(cgs.sort()).toEqual(['test1', 'test2']);
   });
 
-  it('drops paranet', async () => {
+  it('drops context graph', async () => {
     await store.insert([
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:paranet:x' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:paranet:x/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:x' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:x/_meta' },
     ]);
-    await gm.dropParanet('x');
-    expect(await gm.hasParanet('x')).toBe(false);
+    await gm.dropContextGraph('x');
+    expect(await gm.hasContextGraph('x')).toBe(false);
   });
 });
 

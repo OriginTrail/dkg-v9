@@ -52,11 +52,11 @@ export function literal(value: string | number | boolean): string {
 }
 
 export function workspaceGraph(paranetId: string): string {
-  return `did:dkg:paranet:${paranetId}`;
+  return `did:dkg:context-graph:${paranetId}`;
 }
 
 export function contextGraph(paranetId: string, swarmId: string): string {
-  return `did:dkg:paranet:${paranetId}/context/${swarmId}`;
+  return `did:dkg:context-graph:${paranetId}/context/${swarmId}`;
 }
 
 export const SWARM_STATUS_PREDICATE = otUri('status');
@@ -244,7 +244,7 @@ export function publishProvenanceChainQuads(paranetId: string, provenance: Publi
 
 
 export function playerProfileQuads(paranetId: string, peerId: string, displayName: string): Quad[] {
-  const g = `did:dkg:paranet:${paranetId}`;
+  const g = `did:dkg:context-graph:${paranetId}`;
   const entity = `did:dkg:game:player:${peerId}`;
   return [
     quad(entity, `${RDF}type`, otUri('Player'), g),

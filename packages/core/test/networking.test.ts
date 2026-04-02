@@ -251,7 +251,7 @@ describe('GossipSubManager', () => {
     const gossip1 = new GossipSubManager(node1, bus1);
     const gossip2 = new GossipSubManager(node2, bus2);
 
-    const topic = 'dkg/paranet/test/publish';
+    const topic = 'dkg/context-graph/test/publish';
     gossip1.subscribe(topic);
     gossip2.subscribe(topic);
 

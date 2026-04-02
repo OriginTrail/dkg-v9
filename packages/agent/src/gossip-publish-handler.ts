@@ -82,7 +82,7 @@ export class GossipPublishHandler {
       // during simultaneous startup.
       // Also auto-subscribe to any newly discovered paranets.
       if (request.paranetId === SYSTEM_PARANETS.ONTOLOGY) {
-        const paranetPrefix = 'did:dkg:paranet:';
+        const paranetPrefix = 'did:dkg:context-graph:';
         const incomingParanetUris = new Set(
           normalized
             .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_PARANET)

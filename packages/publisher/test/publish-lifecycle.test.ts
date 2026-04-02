@@ -27,7 +27,7 @@ import { computeTripleHash } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-lifecycle';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmLifecycle';
 const TEST_WALLET = ethers.Wallet.createRandom();
 

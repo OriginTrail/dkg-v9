@@ -39,7 +39,7 @@ describe('supportedExtensions', () => {
 });
 
 describe('parseRdf', () => {
-  const DEFAULT_GRAPH = 'did:dkg:paranet:test';
+  const DEFAULT_GRAPH = 'did:dkg:context-graph:test';
 
   describe('json format', () => {
     it('parses an array of quads', async () => {

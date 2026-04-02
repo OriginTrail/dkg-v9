@@ -229,13 +229,13 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/name',
         object: '"Alice"',
-        graph: `did:dkg:paranet:${paranetId}`,
+        graph: `did:dkg:context-graph:${paranetId}`,
       },
       {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/knows',
         object: 'did:dkg:test:Bob',
-        graph: `did:dkg:paranet:${paranetId}`,
+        graph: `did:dkg:context-graph:${paranetId}`,
       },
     ];
 

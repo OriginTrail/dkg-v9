@@ -64,7 +64,7 @@ export function generateKCMetadata(
   meta: KCMetadata,
   kaEntries: KAMetadata[],
 ): Quad[] {
-  const metaGraph = `did:dkg:paranet:${meta.paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${meta.paranetId}/_meta`;
   const quads: Quad[] = [];
 
   // KC metadata
@@ -86,7 +86,7 @@ export function generateKCMetadata(
       dateLit(meta.timestamp),
       metaGraph,
     ),
-    mq(meta.ual, `${DKG}paranet`, `did:dkg:paranet:${meta.paranetId}`, metaGraph),
+    mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.paranetId}`, metaGraph),
   );
 
   if (meta.allowedPeers?.length) {
@@ -147,7 +147,7 @@ export function generateTentativeMetadata(
   kaEntries: KAMetadata[],
 ): Quad[] {
   const quads = generateKCMetadata(meta, kaEntries);
-  const metaGraph = `did:dkg:paranet:${meta.paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${meta.paranetId}/_meta`;
   quads.push(
     mq(meta.ual, `${DKG}status`, lit('tentative'), metaGraph),
   );
@@ -159,7 +159,7 @@ export function generateTentativeMetadata(
  * Used when promoting to confirmed: delete this quad before inserting confirmed metadata.
  */
 export function getTentativeStatusQuad(ual: string, paranetId: string): Quad {
-  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
   return mq(ual, `${DKG}status`, lit('tentative'), metaGraph);
 }
 
@@ -168,7 +168,7 @@ export function getTentativeStatusQuad(ual: string, paranetId: string): Quad {
  * Used by receivers when promoting tentative → confirmed after seeing the chain event.
  */
 export function getConfirmedStatusQuad(ual: string, paranetId: string): Quad {
-  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
   return mq(ual, `${DKG}status`, lit('confirmed'), metaGraph);
 }
 
@@ -181,7 +181,7 @@ export function generateConfirmedMetadata(
   paranetId: string,
   provenance: OnChainProvenance,
 ): Quad[] {
-  const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
   const quads: Quad[] = [
     mq(ual, `${DKG}status`, lit('confirmed'), metaGraph),
     mq(ual, `${DKG}transactionHash`, lit(provenance.txHash), metaGraph),

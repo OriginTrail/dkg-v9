@@ -17,7 +17,7 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG = 'http://dkg.io/ontology/';
 
 const PARANET = 'agent-registry';
-const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
 const UAL = 'did:dkg:kc:test-kc-001';
 
 function makeMeta(overrides?: Partial<KCMetadata>): KCMetadata {
@@ -186,7 +186,7 @@ describe('generateWorkspaceMetadata', () => {
     publisherPeerId: '12D3KooWTestPeer',
     timestamp: new Date('2026-03-01T00:00:00Z'),
   };
-  const wsGraph = `did:dkg:paranet:${PARANET}/_workspace_meta`;
+  const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
 
   it('generates correct workspace operation quads', () => {
     const quads = generateWorkspaceMetadata(wsMeta, wsGraph);

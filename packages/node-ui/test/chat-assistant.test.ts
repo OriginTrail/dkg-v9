@@ -393,7 +393,7 @@ describe('ChatAssistant', () => {
                 id: 'call_1',
                 type: 'function',
                 function: {
-                  name: 'dkg_write_to_workspace',
+                  name: 'dkg_write_to_shared_memory',
                   arguments: JSON.stringify({
                     paranetId: 'testing',
                     quads: [
@@ -421,7 +421,7 @@ describe('ChatAssistant', () => {
       ]);
       expect(res.reply).toContain('Tesla');
       expect(res.toolCalls).toHaveLength(1);
-      expect(res.toolCalls![0].name).toBe('dkg_write_to_workspace');
+      expect(res.toolCalls![0].name).toBe('dkg_write_to_shared_memory');
       expect(res.toolCalls![0].result).toHaveProperty('tripleCount', 2);
 
       fetchSpy.mockRestore();
@@ -545,7 +545,7 @@ describe('ChatAssistant', () => {
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_write_to_workspace', arguments: JSON.stringify({
+            function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
               paranetId: 'testing',
               quads: [{ subject: 'http://x', predicate: 'http://y', object: 'z', graph: '' }],
             }) },
@@ -566,7 +566,7 @@ describe('ChatAssistant', () => {
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_write_to_workspace', arguments: JSON.stringify({
+            function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
               paranetId: 'agent-memo',
               quads: '[{"subject":"http://example.org/A","predicate":"http://schema.org/name","object":"Alpha","graph":""}]',
             }) },
@@ -589,7 +589,7 @@ describe('ChatAssistant', () => {
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_write_to_workspace', arguments: JSON.stringify({
+            function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
               paranetId: 'testing',
               quads: 'this is not valid json at all',
             }) },
@@ -615,7 +615,7 @@ describe('ChatAssistant', () => {
             },
             {
               id: 'c2', type: 'function',
-              function: { name: 'dkg_write_to_workspace', arguments: JSON.stringify({
+              function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
                 paranetId: 'new-data',
                 quads: [{ subject: 'http://example.org/X', predicate: 'http://schema.org/name', object: 'X', graph: '' }],
               }) },

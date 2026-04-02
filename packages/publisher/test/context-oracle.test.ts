@@ -8,7 +8,7 @@ import { ProofIndex } from '../src/proof-index.js';
 const PARANET = 'testnet-alpha';
 const CG_ID = '42';
 const BATCH_ID = '7';
-const GRAPH_URI = `did:dkg:paranet:${PARANET}/context/${CG_ID}`;
+const GRAPH_URI = `did:dkg:context-graph:${PARANET}/context/${CG_ID}`;
 
 function q(s: string, p: string, o: string, g = GRAPH_URI): Quad {
   return { subject: s, predicate: p, object: o, graph: g };

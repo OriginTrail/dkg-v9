@@ -37,7 +37,7 @@ export class DKGQueryEngine implements QueryEngine {
         const wsResult = await this.store.query(workspaceSparql);
         return mergeWorkspaceAndDataResults(dataResult, wsResult);
       }
-      if (options.graphSuffix === '_workspace') {
+      if (options.graphSuffix === '_shared_memory') {
         effectiveSparql = wrapWithGraph(sparql, workspaceGraph);
       } else {
         effectiveSparql = wrapWithGraph(sparql, dataGraph);
@@ -85,7 +85,7 @@ export class DKGQueryEngine implements QueryEngine {
 
     const rootEntity = metaResult.bindings[0]['rootEntity'];
     const paranetUri = metaResult.bindings[0]['paranet'];
-    const paranetId = paranetUri.replace('did:dkg:paranet:', '');
+    const paranetId = paranetUri.replace('did:dkg:context-graph:', '');
     const dataGraph = paranetDataGraphUri(paranetId);
 
     // Fetch all triples for this entity

@@ -136,7 +136,7 @@ export function registerTools(
         const client = await getClient();
         const ts = new Date().toISOString();
         const id = `urn:autoresearch:exp:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const graph = `did:dkg:paranet:${paranetId}`;
+        const graph = `did:dkg:context-graph:${paranetId}`;
 
         const statusUri = params.status === 'keep' ? Status.Keep
           : params.status === 'discard' ? Status.Discard

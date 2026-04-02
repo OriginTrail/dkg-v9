@@ -19,9 +19,9 @@ import {
 import { ethers } from 'ethers';
 
 const PARANET = 'test-security';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
-const WORKSPACE_GRAPH = `did:dkg:paranet:${PARANET}/_workspace`;
-const WORKSPACE_META_GRAPH = `did:dkg:paranet:${PARANET}/_workspace_meta`;
+const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+const WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+const WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -774,7 +774,7 @@ describe('Cross-paranet binding (trusted source)', () => {
     const attackMsg = encodeKAUpdateRequest({
       paranetId: 'attacker-paranet',
       batchId: original.kcId,
-      nquads: quadsToNQuads(updateQuads, 'did:dkg:paranet:attacker-paranet'),
+      nquads: quadsToNQuads(updateQuads, 'did:dkg:context-graph:attacker-paranet'),
       manifest: [{ rootEntity: 'urn:trusted:bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWAttacker',
       publisherAddress: wallet.address,
@@ -1003,7 +1003,7 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     const msg = encodeKAUpdateRequest({
       paranetId: evilParanet,
       batchId: original.kcId,
-      nquads: quadsToNQuads(q2, `did:dkg:paranet:${evilParanet}`),
+      nquads: quadsToNQuads(q2, `did:dkg:context-graph:${evilParanet}`),
       manifest: [{ rootEntity: 'urn:xpara-lookup', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       publisherAddress: wallet.address,
@@ -1016,7 +1016,7 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
 
     // Evil paranet graph should be empty — update was rejected
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:xpara-lookup> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${evilParanet}> { <urn:xpara-lookup> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -1122,7 +1122,7 @@ describe('Gossip-only batch→paranet binding rejected', () => {
     const msg2 = encodeKAUpdateRequest({
       paranetId: evilParanet,
       batchId: original.kcId,
-      nquads: quadsToNQuads(q3, `did:dkg:paranet:${evilParanet}`),
+      nquads: quadsToNQuads(q3, `did:dkg:context-graph:${evilParanet}`),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       publisherAddress: wallet.address,
@@ -1135,7 +1135,7 @@ describe('Gossip-only batch→paranet binding rejected', () => {
 
     // Evil paranet graph should be empty — binding discovered from metadata prevents cross-paranet
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:gossip-bind> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${evilParanet}> { <urn:gossip-bind> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {

@@ -172,7 +172,7 @@ export const fetchCatchupStatus = (paranetId: string) =>
   get<CatchupStatusResponse>(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
 
 // --- Query ---
-export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_workspace') =>
+export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_shared_memory') =>
   post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace, graphSuffix });
 
 // --- Publish ---

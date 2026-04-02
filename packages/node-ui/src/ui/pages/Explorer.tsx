@@ -712,7 +712,7 @@ const QUERY_HELPERS: Array<{ title: string; description: string; query: string }
     title: 'Agent Registry Snapshot',
     description: 'Raw triples from the agents paranet graph.',
     query: `SELECT ?s ?p ?o WHERE {
-  GRAPH <did:dkg:paranet:agents> {
+  GRAPH <did:dkg:context-graph:agents> {
     ?s ?p ?o
   }
 } LIMIT 100`,
@@ -898,14 +898,14 @@ ${values}
         setProvenanceRows(rows.map((r: any) => {
           const g = String(r.g ?? '');
           const meta = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
-          const paranet = g.startsWith('did:dkg:paranet:') ? g.replace('did:dkg:paranet:', '').split('/')[0] : 'unknown';
+          const paranet = g.startsWith('did:dkg:context-graph:') ? g.replace('did:dkg:context-graph:', '').split('/')[0] : 'unknown';
           const source = meta.source || 'unknown';
           return {
             s: String(r.s ?? ''),
             p: String(r.p ?? ''),
             o: String(r.o ?? ''),
             g,
-            graphType: g.endsWith('/_workspace') || g.includes('_workspace') ? 'workspace' : 'data',
+            graphType: g.endsWith('/_shared_memory') || g.includes('_shared_memory') ? 'workspace' : 'data',
             paranet,
             source,
             ual: meta.ual,
@@ -1272,13 +1272,13 @@ function metaGraphsForDataGraph(graphUri: string): string[] {
   const g = (graphUri || '').trim();
   if (!g) return [];
   const out = new Set<string>();
-  if (g.endsWith('/_workspace')) {
-    const base = g.slice(0, -'/_workspace'.length);
-    out.add(`${base}/_workspace_meta`);
+  if (g.endsWith('/_shared_memory')) {
+    const base = g.slice(0, -'/_shared_memory'.length);
+    out.add(`${base}/_shared_memory_meta`);
     out.add(`${base}/_meta`);
   } else {
     out.add(`${g}/_meta`);
-    out.add(`${g}/_workspace_meta`);
+    out.add(`${g}/_shared_memory_meta`);
   }
   return Array.from(out);
 }

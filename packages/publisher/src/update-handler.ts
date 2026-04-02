@@ -226,7 +226,7 @@ export class UpdateHandler {
     const metaSuffix = '/_meta';
     if (graphUri.endsWith(metaSuffix)) {
       const base = graphUri.slice(0, -metaSuffix.length);
-      const prefix = 'did:dkg:paranet:';
+      const prefix = 'did:dkg:context-graph:';
       if (base.startsWith(prefix)) return base.slice(prefix.length);
     }
     return undefined;

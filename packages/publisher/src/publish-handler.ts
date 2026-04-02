@@ -526,7 +526,7 @@ export class PublishHandler {
   }
 
   private async isPublishConfirmed(ual: string, paranetId: string): Promise<boolean> {
-    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
     const DKG_STATUS = 'http://dkg.io/ontology/status';
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <${DKG_STATUS}> ?status } } LIMIT 1`,

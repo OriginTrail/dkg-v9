@@ -14,9 +14,9 @@ import {
 import { ethers } from 'ethers';
 
 const PARANET = 'test-workspace';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
-const WORKSPACE_GRAPH = `did:dkg:paranet:${PARANET}/_workspace`;
-const WORKSPACE_META_GRAPH = `did:dkg:paranet:${PARANET}/_workspace_meta`;
+const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+const WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+const WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
 
 function q(s: string, p: string, o: string, g = ''): Quad {
@@ -252,8 +252,8 @@ describe('Workspace: enshrineFromWorkspace', () => {
 
   it('enshrineFromWorkspace with contextGraphId remaps quads to context graph URIs', async () => {
     const ctxId = '1';
-    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${ctxId}`;
-    const ctxMetaGraph = `did:dkg:paranet:${PARANET}/context/${ctxId}/_meta`;
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}`;
+    const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}/_meta`;
 
     await chain.createContextGraph!({
       participantIdentityIds: [1n],

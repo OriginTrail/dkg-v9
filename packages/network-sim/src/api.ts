@@ -79,7 +79,7 @@ export async function queryNode(
   nodeId: number,
   sparql: string,
   paranetId?: string,
-  opts?: { graphSuffix?: '_workspace'; includeWorkspace?: boolean },
+  opts?: { graphSuffix?: '_shared_memory'; includeWorkspace?: boolean },
 ) {
   return post<{ result: unknown }>(`${nodeBase(nodeId)}/api/query`, {
     sparql,

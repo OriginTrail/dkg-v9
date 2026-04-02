@@ -15,7 +15,7 @@ export const APP_ID = 'origin-trail-game';
  * subscribes to in subscribeToParanet(), so all paranet nodes relay it.
  */
 export function appTopic(paranetId: string): string {
-  return `dkg/paranet/${paranetId}/app`;
+  return `dkg/context-graph/${paranetId}/app`;
 }
 
 export type MessageType =

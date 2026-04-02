@@ -523,7 +523,7 @@ describe('GossipSub KC/KA metadata replication', () => {
     // Check that the replicated KC has correct paranet reference
     const result = await agentB.query(
       `SELECT ?kc WHERE {
-        GRAPH ?g { ?kc <http://dkg.io/ontology/paranet> <did:dkg:paranet:pararef-test> }
+        GRAPH ?g { ?kc <http://dkg.io/ontology/paranet> <did:dkg:context-graph:pararef-test> }
       }`,
     );
     expect(result.bindings.length).toBeGreaterThanOrEqual(1);

@@ -243,7 +243,7 @@ async function execPublish(
   signal: AbortSignal,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const graph = `did:dkg:paranet:${config.paranet}`;
+  const graph = `did:dkg:context-graph:${config.paranet}`;
   const quads = Array.from({ length: config.kasPerPublish }, () => {
     const entity = `did:dkg:entity:sim-${rndId()}`;
     return {
@@ -337,7 +337,7 @@ async function execWorkspace(
   signal: AbortSignal,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const graph = `did:dkg:paranet:${config.paranet}`;
+  const graph = `did:dkg:context-graph:${config.paranet}`;
   const entity = `did:dkg:entity:sim-ws-${rndId()}`;
   const quads = [
     {

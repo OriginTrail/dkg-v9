@@ -55,7 +55,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
 
     const result = await nodeA.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(result.bindings.length).toBe(2);
   }, 15000);
@@ -83,7 +83,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     while (Date.now() < deadline) {
       result = await nodeC.query(
         'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-        { paranetId: PARANET, graphSuffix: '_workspace' },
+        { paranetId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (result.bindings.length >= 2) break;
       await sleep(500);
@@ -104,7 +104,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     expect(synced).toBeGreaterThan(0);
     const result = await nodeC.query(
       'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { paranetId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(result.bindings.length).toBeGreaterThanOrEqual(2);
   }, 10000);
@@ -170,7 +170,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     // B should have A's data
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:ws-3node:fromA> <http://schema.org/name> ?name }',
-      { paranetId: PARANET_3, graphSuffix: '_workspace' },
+      { paranetId: PARANET_3, graphSuffix: '_shared_memory' },
     );
     expect(onB.bindings.length).toBe(1);
 
@@ -196,7 +196,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
 
     const onC = await nodeC.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET_3, graphSuffix: '_workspace' },
+      { paranetId: PARANET_3, graphSuffix: '_shared_memory' },
     );
     expect(onC.bindings.length).toBe(2);
 

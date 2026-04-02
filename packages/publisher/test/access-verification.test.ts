@@ -22,8 +22,8 @@ import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dk
 import { AccessHandler } from '../src/access-handler.js';
 
 const PARANET = 'test-access-verify';
-const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
-const PRIVATE_GRAPH = `did:dkg:paranet:${PARANET}/_private`;
+const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+const PRIVATE_GRAPH = `did:dkg:context-graph:${PARANET}/_private`;
 const DKG = 'http://dkg.io/ontology/';
 const ENTITY = 'did:dkg:agent:TestEntity';
 const KC_UAL = 'did:dkg:mock:31337/0x1/1';
@@ -50,7 +50,7 @@ async function setupStoreWithPolicy(
   await store.insert([
     mq(KA_UAL, `${DKG}rootEntity`, ENTITY, META_GRAPH),
     mq(KA_UAL, `${DKG}partOf`, KC_UAL, META_GRAPH),
-    mq(KC_UAL, `${DKG}paranet`, `did:dkg:paranet:${PARANET}`, META_GRAPH),
+    mq(KC_UAL, `${DKG}paranet`, `did:dkg:context-graph:${PARANET}`, META_GRAPH),
     mq(KC_UAL, `${DKG}accessPolicy`, lit(policy), META_GRAPH),
     mq(KC_UAL, `${DKG}status`, lit('confirmed'), META_GRAPH),
   ]);
@@ -317,7 +317,7 @@ describe('I-005: Access handler signature verification', () => {
 
     // Attempt graph poisoning: write allow-list entry into non-meta graph.
     await store.insert([
-      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:paranet:${PARANET}`),
+      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:context-graph:${PARANET}`),
     ]);
 
     const paymentProof = new Uint8Array(0);

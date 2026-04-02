@@ -348,7 +348,7 @@ describe('dkg_paranet_create tool', () => {
 
   it('creates a paranet with explicit id', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:paranet:my-research' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_paranet_create');
@@ -356,7 +356,7 @@ describe('dkg_paranet_create tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.created).toBe('my-research');
-    expect(parsed.uri).toBe('did:dkg:paranet:my-research');
+    expect(parsed.uri).toBe('did:dkg:context-graph:my-research');
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.id).toBe('my-research');
@@ -366,7 +366,7 @@ describe('dkg_paranet_create tool', () => {
 
   it('auto-generates id from name when id is omitted', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'my-research-paranet', uri: 'did:dkg:paranet:my-research-paranet' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'my-research-paranet', uri: 'did:dkg:context-graph:my-research-paranet' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_paranet_create');
@@ -382,7 +382,7 @@ describe('dkg_paranet_create tool', () => {
 
   it('strips special characters when auto-generating id', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'alice-s-data-2024', uri: 'did:dkg:paranet:alice-s-data-2024' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'alice-s-data-2024', uri: 'did:dkg:context-graph:alice-s-data-2024' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_paranet_create');
@@ -410,7 +410,7 @@ describe('dkg_paranet_create tool', () => {
 
   it('falls back to auto-generate when explicit id is whitespace-only', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'test', uri: 'did:dkg:paranet:test' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'test', uri: 'did:dkg:context-graph:test' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_paranet_create');
@@ -440,7 +440,7 @@ describe('dkg_paranet_create tool', () => {
 
   it('accepts single-character explicit ID', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ created: 'x', uri: 'did:dkg:paranet:x' }), { status: 200 }),
+      new Response(JSON.stringify({ created: 'x', uri: 'did:dkg:context-graph:x' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_paranet_create');

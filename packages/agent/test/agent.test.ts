@@ -158,7 +158,7 @@ describe('Profile Builder', () => {
     });
 
     for (const q of quads) {
-      expect(q.graph).toBe('did:dkg:paranet:agents');
+      expect(q.graph).toBe('did:dkg:context-graph:agents');
     }
   });
 
@@ -242,7 +242,7 @@ describe('ProfileManager', () => {
     });
 
     // Verify OldName is stored in the data graph
-    const graph = 'did:dkg:paranet:agents';
+    const graph = 'did:dkg:context-graph:agents';
     const oldCount = await store.countQuads(graph);
     expect(oldCount).toBeGreaterThan(0);
 
@@ -564,10 +564,10 @@ describe('Genesis Knowledge', () => {
     const networkDef = quads.filter(q => q.subject === 'did:dkg:network:v9-testnet');
     expect(networkDef.length).toBeGreaterThan(0);
 
-    const agentsParanet = quads.filter(q => q.graph === 'did:dkg:paranet:agents');
+    const agentsParanet = quads.filter(q => q.graph === 'did:dkg:context-graph:agents');
     expect(agentsParanet.length).toBeGreaterThan(0);
 
-    const ontology = quads.filter(q => q.graph === 'did:dkg:paranet:ontology');
+    const ontology = quads.filter(q => q.graph === 'did:dkg:context-graph:ontology');
     expect(ontology.length).toBeGreaterThan(0);
   });
 
@@ -595,7 +595,7 @@ describe('Genesis Knowledge', () => {
     }
 
     const paranets = await store.query(
-      `SELECT ?p WHERE { <did:dkg:paranet:agents> a <https://dkg.network/ontology#SystemParanet> }`,
+      `SELECT ?p WHERE { <did:dkg:context-graph:agents> a <https://dkg.network/ontology#SystemParanet> }`,
     );
     expect(paranets.type).toBe('bindings');
 

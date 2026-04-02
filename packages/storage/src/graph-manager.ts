@@ -1,82 +1,135 @@
 import type { TripleStore } from './triple-store.js';
 import {
-  paranetDataGraphUri,
-  paranetMetaGraphUri,
-  paranetPrivateGraphUri,
-  paranetWorkspaceGraphUri,
-  paranetWorkspaceMetaGraphUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphSharedMemoryUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphVerifiedMemoryUri,
+  contextGraphVerifiedMemoryMetaUri,
+  contextGraphDraftUri,
 } from '@origintrail-official/dkg-core';
 
-export class GraphManager {
+const CG_PREFIX = 'did:dkg:context-graph:';
+
+export class ContextGraphManager {
   private readonly store: TripleStore;
-  private readonly ensuredParanets = new Set<string>();
+  private readonly ensuredContextGraphs = new Set<string>();
 
   constructor(store: TripleStore) {
     this.store = store;
   }
 
-  dataGraphUri(paranetId: string): string {
-    return paranetDataGraphUri(paranetId);
+  dataGraphUri(contextGraphId: string): string {
+    return contextGraphDataUri(contextGraphId);
   }
 
-  metaGraphUri(paranetId: string): string {
-    return paranetMetaGraphUri(paranetId);
+  metaGraphUri(contextGraphId: string): string {
+    return contextGraphMetaUri(contextGraphId);
   }
 
-  privateGraphUri(paranetId: string): string {
-    return paranetPrivateGraphUri(paranetId);
+  privateGraphUri(contextGraphId: string): string {
+    return contextGraphPrivateUri(contextGraphId);
   }
 
-  workspaceGraphUri(paranetId: string): string {
-    return paranetWorkspaceGraphUri(paranetId);
+  sharedMemoryUri(contextGraphId: string): string {
+    return contextGraphSharedMemoryUri(contextGraphId);
   }
 
-  workspaceMetaGraphUri(paranetId: string): string {
-    return paranetWorkspaceMetaGraphUri(paranetId);
+  sharedMemoryMetaUri(contextGraphId: string): string {
+    return contextGraphSharedMemoryMetaUri(contextGraphId);
   }
 
-  async ensureParanet(paranetId: string): Promise<void> {
-    if (this.ensuredParanets.has(paranetId)) return;
-    await this.store.createGraph(this.dataGraphUri(paranetId));
-    await this.store.createGraph(this.metaGraphUri(paranetId));
-    await this.store.createGraph(this.privateGraphUri(paranetId));
-    await this.store.createGraph(this.workspaceGraphUri(paranetId));
-    await this.store.createGraph(this.workspaceMetaGraphUri(paranetId));
-    this.ensuredParanets.add(paranetId);
+  verifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string): string {
+    return contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId);
   }
 
-  async listParanets(): Promise<string[]> {
+  verifiedMemoryMetaUri(contextGraphId: string, verifiedMemoryId: string): string {
+    return contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
+  }
+
+  draftUri(contextGraphId: string, agentAddress: string, name: string): string {
+    return contextGraphDraftUri(contextGraphId, agentAddress, name);
+  }
+
+  async ensureContextGraph(contextGraphId: string): Promise<void> {
+    if (this.ensuredContextGraphs.has(contextGraphId)) return;
+    await this.store.createGraph(this.dataGraphUri(contextGraphId));
+    await this.store.createGraph(this.metaGraphUri(contextGraphId));
+    await this.store.createGraph(this.privateGraphUri(contextGraphId));
+    await this.store.createGraph(this.sharedMemoryUri(contextGraphId));
+    await this.store.createGraph(this.sharedMemoryMetaUri(contextGraphId));
+    this.ensuredContextGraphs.add(contextGraphId);
+  }
+
+  async listContextGraphs(): Promise<string[]> {
     const graphs = await this.store.listGraphs();
-    const paranets = new Set<string>();
-    const prefix = 'did:dkg:paranet:';
+    const contextGraphs = new Set<string>();
     for (const g of graphs) {
-      if (g.startsWith(prefix)) {
-        const rest = g.slice(prefix.length);
+      if (g.startsWith(CG_PREFIX)) {
+        const rest = g.slice(CG_PREFIX.length);
         const id = rest.endsWith('/_meta')
           ? rest.slice(0, -6)
           : rest.endsWith('/_private')
             ? rest.slice(0, -9)
-            : rest.endsWith('/_workspace_meta')
-              ? rest.slice(0, -16)
-              : rest.endsWith('/_workspace')
-                ? rest.slice(0, -11)
+            : rest.endsWith('/_shared_memory_meta')
+              ? rest.slice(0, -20)
+              : rest.endsWith('/_shared_memory')
+                ? rest.slice(0, -15)
                 : rest;
-        paranets.add(id);
+        if (!id.includes('/')) {
+          contextGraphs.add(id);
+        }
       }
     }
-    return [...paranets];
+    return [...contextGraphs];
   }
 
+  async hasContextGraph(contextGraphId: string): Promise<boolean> {
+    return this.store.hasGraph(this.dataGraphUri(contextGraphId));
+  }
+
+  async dropContextGraph(contextGraphId: string): Promise<void> {
+    this.ensuredContextGraphs.delete(contextGraphId);
+    await this.store.dropGraph(this.dataGraphUri(contextGraphId));
+    await this.store.dropGraph(this.metaGraphUri(contextGraphId));
+    await this.store.dropGraph(this.privateGraphUri(contextGraphId));
+    await this.store.dropGraph(this.sharedMemoryUri(contextGraphId));
+    await this.store.dropGraph(this.sharedMemoryMetaUri(contextGraphId));
+  }
+
+  // ── Deprecated V9 aliases ────────────────────────────────────────────
+
+  /** @deprecated Use dataGraphUri */
+  workspaceGraphUri(contextGraphId: string): string {
+    return this.sharedMemoryUri(contextGraphId);
+  }
+
+  /** @deprecated Use sharedMemoryMetaUri */
+  workspaceMetaGraphUri(contextGraphId: string): string {
+    return this.sharedMemoryMetaUri(contextGraphId);
+  }
+
+  /** @deprecated Use ensureContextGraph */
+  async ensureParanet(paranetId: string): Promise<void> {
+    return this.ensureContextGraph(paranetId);
+  }
+
+  /** @deprecated Use listContextGraphs */
+  async listParanets(): Promise<string[]> {
+    return this.listContextGraphs();
+  }
+
+  /** @deprecated Use hasContextGraph */
   async hasParanet(paranetId: string): Promise<boolean> {
-    return this.store.hasGraph(this.dataGraphUri(paranetId));
+    return this.hasContextGraph(paranetId);
   }
 
+  /** @deprecated Use dropContextGraph */
   async dropParanet(paranetId: string): Promise<void> {
-    this.ensuredParanets.delete(paranetId);
-    await this.store.dropGraph(this.dataGraphUri(paranetId));
-    await this.store.dropGraph(this.metaGraphUri(paranetId));
-    await this.store.dropGraph(this.privateGraphUri(paranetId));
-    await this.store.dropGraph(this.workspaceGraphUri(paranetId));
-    await this.store.dropGraph(this.workspaceMetaGraphUri(paranetId));
+    return this.dropContextGraph(paranetId);
   }
 }
+
+/** @deprecated Use ContextGraphManager */
+export class GraphManager extends ContextGraphManager {}

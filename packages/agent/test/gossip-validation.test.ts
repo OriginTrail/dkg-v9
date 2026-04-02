@@ -124,7 +124,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     const entity = 'did:dkg:agent:QmGossipEntity';
     const triples = [
-      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${PARANET}`),
     ];
 
     const partitioned = autoPartition(triples);
@@ -306,12 +306,12 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   it('merkle verification detects tampered gossip data', () => {
     const entity = 'did:dkg:agent:QmTampered';
     const legitimateTriples = [
-      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:paranet:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${PARANET}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),
     ];
     const tamperedTriples = [
-      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:paranet:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:context-graph:${PARANET}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),
     ];
 
     const legitimatePartitioned = autoPartition(legitimateTriples);
@@ -386,7 +386,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const statusResult = await agentB.query(
       `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-verify/_meta> {
+        GRAPH <did:dkg:context-graph:gossip-verify/_meta> {
           ?kc <http://dkg.io/ontology/status> ?status
         }
       }`,
@@ -437,7 +437,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const statusResult = await agentB.query(
       `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-tent/_meta> {
+        GRAPH <did:dkg:context-graph:gossip-tent/_meta> {
           ?kc <http://dkg.io/ontology/status> ?status
         }
       }`,

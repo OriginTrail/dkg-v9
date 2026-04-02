@@ -165,7 +165,7 @@ describe('Private triple confidentiality via GossipSub', () => {
     expect(aPublicQuery.bindings).toHaveLength(0);
 
     // But the underlying store DOES have them in the private graph
-    const privateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const privateGraph = `did:dkg:context-graph:${PARANET}/_private`;
     const directResult = await agentA.store.query(
       `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
     );
@@ -315,7 +315,7 @@ describe('Access protocol denial', () => {
     await publisherA.publish({
       paranetId: 'no-priv-test',
       quads: [
-        { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:paranet:no-priv-test' },
+        { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:context-graph:no-priv-test' },
       ],
     });
 
@@ -444,11 +444,11 @@ describe('Access protocol round-trip', () => {
       paranetId: PARANET,
       publisherPeerId: nodeA.peerId.toString(),
       quads: [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:paranet:${PARANET}` },
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:context-graph:${PARANET}` },
       ],
       privateQuads: [
-        { subject: ENTITY, predicate: 'http://ex.org/apiKey', object: '"secret-api-key"', graph: `did:dkg:paranet:${PARANET}` },
-        { subject: ENTITY, predicate: 'http://ex.org/modelPath', object: '"s3://priv/model.bin"', graph: `did:dkg:paranet:${PARANET}` },
+        { subject: ENTITY, predicate: 'http://ex.org/apiKey', object: '"secret-api-key"', graph: `did:dkg:context-graph:${PARANET}` },
+        { subject: ENTITY, predicate: 'http://ex.org/modelPath', object: '"s3://priv/model.bin"', graph: `did:dkg:context-graph:${PARANET}` },
       ],
     });
 
@@ -457,7 +457,7 @@ describe('Access protocol round-trip', () => {
     // Stabilize policy for this round-trip test: ensure KC access policy is explicitly public.
     // Without this, concurrent test suites that mutate mock-chain/paranet state can make this
     // check flaky (ownerOnly would deny requests from nodeB).
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     await storeA.deleteByPattern({
       graph: metaGraph,
       subject: result.ual,
@@ -608,7 +608,7 @@ describe('Private triple confidentiality via sync protocol', () => {
     );
     expect(secretResult.bindings).toHaveLength(0);
 
-    const bPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const bPrivateGraph = `did:dkg:context-graph:${PARANET}/_private`;
     const bPrivateResult = await agentB.store.query(
       `SELECT ?val WHERE { GRAPH <${bPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
     );
@@ -618,7 +618,7 @@ describe('Private triple confidentiality via sync protocol', () => {
     }
 
     // A should still have the private triple in its private graph
-    const aPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const aPrivateGraph = `did:dkg:context-graph:${PARANET}/_private`;
     const aPrivateResult = await agentA.store.query(
       `SELECT ?val WHERE { GRAPH <${aPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
     );
@@ -646,7 +646,7 @@ describe('SPARQL injection prevention', () => {
       'INSERT DATA { <x> <y> <z> }',
       'DELETE WHERE { ?s ?p ?o }',
       'DROP ALL',
-      'CLEAR GRAPH <did:dkg:paranet:test>',
+      'CLEAR GRAPH <did:dkg:context-graph:test>',
       'COPY GRAPH <a> TO GRAPH <b>',
       'MOVE GRAPH <a> TO GRAPH <b>',
     ];

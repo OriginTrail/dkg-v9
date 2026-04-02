@@ -8,6 +8,12 @@ export {
   computeFlatKCRoot,
   computeKARoot,
   computeKCRoot,
+  computeTripleHashV10,
+  computePublicRootV10,
+  computePrivateRootV10,
+  computeFlatKCRootV10,
+  computeKARootV10,
+  computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
 export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance } from './metadata.js';

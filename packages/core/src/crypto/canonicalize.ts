@@ -1,5 +1,6 @@
 import canonize from 'rdf-canonize';
 import { sha256 } from './hashing.js';
+import { keccak256 } from './keccak.js';
 
 const textEncoder = new TextEncoder();
 
@@ -42,6 +43,19 @@ function formatNTriple(
   const p = formatTerm(predicate);
   const o = formatTerm(object);
   return `${s} ${p} ${o} .`;
+}
+
+/**
+ * V10 triple hash using keccak256 (spec §9.0.2).
+ * Used for V10 merkle trees that match on-chain Solidity verification.
+ */
+export function hashTripleV10(
+  subject: string,
+  predicate: string,
+  object: string,
+): Uint8Array {
+  const ntriple = formatNTriple(subject, predicate, object);
+  return keccak256(textEncoder.encode(ntriple));
 }
 
 function formatTerm(term: string): string {

@@ -1,4 +1,4 @@
-import { sha256, MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import { sha256, MerkleTree, hashTriple, hashTripleV10, V10MerkleTree } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /**
@@ -49,4 +49,44 @@ export function computeKARoot(
 
 export function computeKCRoot(kaRoots: Uint8Array[]): Uint8Array {
   return MerkleTree.computeKCRoot(kaRoots);
+}
+
+// ── V10 variants (keccak256, spec §9.0.2) ──────────────────────────────
+
+export function computeTripleHashV10(q: Quad): Uint8Array {
+  return hashTripleV10(q.subject, q.predicate, q.object);
+}
+
+export function computePublicRootV10(publicQuads: Quad[]): Uint8Array | undefined {
+  if (publicQuads.length === 0) return undefined;
+  const hashes = publicQuads.map(computeTripleHashV10);
+  return new V10MerkleTree(hashes).root;
+}
+
+export function computePrivateRootV10(privateQuads: Quad[]): Uint8Array | undefined {
+  if (privateQuads.length === 0) return undefined;
+  const hashes = privateQuads.map(computeTripleHashV10);
+  return new V10MerkleTree(hashes).root;
+}
+
+export function computeFlatKCRootV10(
+  publicQuads: Quad[],
+  privateRoots: Uint8Array[],
+): Uint8Array {
+  const leaves: Uint8Array[] = publicQuads.map(computeTripleHashV10);
+  for (const root of privateRoots) {
+    leaves.push(root);
+  }
+  return new V10MerkleTree(leaves).root;
+}
+
+export function computeKARootV10(
+  publicRoot?: Uint8Array,
+  privateRoot?: Uint8Array,
+): Uint8Array {
+  return V10MerkleTree.computeKARoot(publicRoot, privateRoot);
+}
+
+export function computeKCRootV10(kaRoots: Uint8Array[]): Uint8Array {
+  return V10MerkleTree.computeKCRoot(kaRoots);
 }

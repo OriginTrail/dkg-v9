@@ -34,3 +34,11 @@ export {
   toErrorMessage,
   hasErrorCode,
 } from './errors.js';
+export {
+  dkgHomeDir,
+  readDaemonPid,
+  isProcessAlive,
+  readDkgApiPort,
+  loadAuthTokenSync,
+  loadAuthToken,
+} from './dkg-home.js';

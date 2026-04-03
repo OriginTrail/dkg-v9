@@ -1,51 +1,9 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
-
-function dkgDir(): string {
-  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
-}
-
-async function readPid(): Promise<number | null> {
-  try {
-    const raw = await readFile(join(dkgDir(), 'daemon.pid'), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function readApiPort(): Promise<number | null> {
-  try {
-    const raw = await readFile(join(dkgDir(), 'api.port'), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-async function loadAuthToken(): Promise<string | undefined> {
-  const filePath = join(dkgDir(), 'auth.token');
-  if (!existsSync(filePath)) return undefined;
-  try {
-    const raw = await readFile(filePath, 'utf-8');
-    for (const line of raw.split('\n')) {
-      const t = line.trim();
-      if (t.length > 0 && !t.startsWith('#')) return t;
-    }
-  } catch { /* unreadable */ }
-  return undefined;
-}
+import {
+  readDaemonPid,
+  isProcessAlive,
+  readDkgApiPort,
+  loadAuthToken,
+} from '@origintrail-official/dkg-core';
 
 export class DkgClient {
   private baseUrl: string;
@@ -57,15 +15,11 @@ export class DkgClient {
   }
 
   static async connect(): Promise<DkgClient> {
-    const envPort = process.env.DKG_API_PORT
-      ? parseInt(process.env.DKG_API_PORT, 10)
-      : null;
-
-    let port = envPort ?? (await readApiPort());
+    const port = await readDkgApiPort();
 
     if (!port) {
-      const pid = await readPid();
-      if (!pid || !isProcessRunning(pid)) {
+      const pid = await readDaemonPid();
+      if (!pid || !isProcessAlive(pid)) {
         throw new Error('DKG daemon is not running. Start it with: dkg start');
       }
       throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');

@@ -2,6 +2,7 @@ import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat, realpath } from 'node:fs/promises';
+import { PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
 import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
@@ -858,6 +859,3 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
 
 const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
-class PayloadTooLargeError extends Error {
-  constructor() { super('Payload too large'); }
-}

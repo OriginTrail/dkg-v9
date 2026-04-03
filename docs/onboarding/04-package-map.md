@@ -1,6 +1,6 @@
 # Package Map
 
-This guide maps all 17 packages in the DKG v9 monorepo, explains what each one does, and shows how they depend on each other.
+This guide maps the packages in the DKG v9 monorepo (20 workspace packages), explains what each one does, and shows how they depend on each other.
 
 > **Key Concepts**
 >

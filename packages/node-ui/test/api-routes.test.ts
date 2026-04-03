@@ -4,7 +4,7 @@ import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve, sep, isAbsolute } from 'node:path';
 import { handleNodeUIRequest } from '../src/api.js';
 
 function createMockReq(opts: {
@@ -680,12 +680,11 @@ describe('serveStatic path traversal prevention', () => {
   });
 
   it('allows filenames starting with .. that are not traversals', () => {
-    const { relative: rel, resolve: res, sep: s, isAbsolute: abs } = require('node:path');
     const base = '/srv/static';
-    const file = res(base, '..page.html');
-    const r = rel(base, file);
+    const file = resolve(base, '..page.html');
+    const r = relative(base, file);
     expect(r).toBe('..page.html');
-    expect(r === '..' || r.startsWith(`..${s}`) || abs(r)).toBe(false);
+    expect(r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r)).toBe(false);
   });
 
   it('serves valid /ui/ root normally', async () => {

@@ -22,11 +22,11 @@ const results = await engine.query(
   { paranetId: 'urn:paranet:example' },
 );
 
-// Query workspace data
-const wsResults = await engine.query(sparql, {
-  paranetId: 'urn:paranet:example',
-  includeWorkspace: true,
-});
+// Query with workspace data included
+const wsResults = await engine.query(
+  'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
+  { paranetId: 'urn:paranet:example', includeWorkspace: true },
+);
 ```
 
 ## Internal Dependencies

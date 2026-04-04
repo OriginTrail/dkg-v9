@@ -771,11 +771,15 @@ export class DKGPublisher implements Publisher {
         v10ACKs = await options.v10ACKProvider(kcMerkleRoot, paranetId, kaCount, rootEntities, publicByteSize, nquadsBytes);
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
-        onPhase?.('collect_v10_acks', 'end');
         const msg = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `V10 ACK collection failed, falling back to V9 receiver-signature path: ${msg}`);
+        if (options.receiverSignatureProvider) {
+          this.log.warn(ctx, `V10 ACK collection failed, falling back to V9 receiver-signature path: ${msg}`);
+        } else {
+          this.log.warn(ctx, `V10 ACK collection failed and no V9 receiverSignatureProvider configured — will attempt self-signed V9 path (degraded mode, may fail on-chain if minimumRequiredSignatures > 1): ${msg}`);
+        }
+      } finally {
+        onPhase?.('collect_v10_acks', 'end');
       }
-      onPhase?.('collect_v10_acks', 'end');
     } else if (options.v10ACKProvider && hasPrivateData) {
       this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }

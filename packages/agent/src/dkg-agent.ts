@@ -102,6 +102,8 @@ export interface DKGAgentConfig {
   nodeRole?: 'core' | 'edge';
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
+  /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
+  ackSignerKey?: string;
   /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
    * `operationalKeys` are the private keys for operational wallets.
@@ -356,9 +358,11 @@ export class DKGAgent {
       }
     }
 
-    // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved
-    if ((this.config.nodeRole ?? 'edge') === 'core' && this.config.chainConfig?.operationalKeys?.[0]) {
-      const ackSignerWallet = new ethers.Wallet(this.config.chainConfig.operationalKeys[0]);
+    // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
+    // ackSignerKey is preferred; falls back to chainConfig.operationalKeys[0].
+    const ackSignerKeyStr = this.config.ackSignerKey ?? this.config.chainConfig?.operationalKeys?.[0];
+    if ((this.config.nodeRole ?? 'edge') === 'core' && ackSignerKeyStr) {
+      const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
       const identityId = await this.chain.getIdentityId();
       if (identityId > 0n) {
         const ackHandler = new StorageACKHandler(this.store, {

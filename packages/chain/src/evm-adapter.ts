@@ -1120,6 +1120,7 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   async getMinimumRequiredSignatures(): Promise<number> {
+    await this.init();
     if (!this.contracts.parametersStorage) return 3;
     return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
   }

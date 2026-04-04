@@ -7,6 +7,7 @@ import {
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -58,7 +59,7 @@ export class StorageACKHandler {
     // This avoids workspace graph pollution from gossip-based pre-positioning.
     let swmQuads: Quad[];
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      swmQuads = this.parseNQuads(intent.stagingQuads);
+      swmQuads = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
     } else {
       const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
       swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
@@ -97,23 +98,6 @@ export class StorageACKHandler {
         : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
     });
   };
-
-  private parseNQuads(raw: Uint8Array): Quad[] {
-    const text = new TextDecoder().decode(raw);
-    const quads: Quad[] = [];
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const match = trimmed.match(/^<([^>]+)>\s+<([^>]+)>\s+((?:<[^>]+>)|(?:"[^"]*"(?:\^\^<[^>]+>)?(?:@\w+)?))\s*(?:<([^>]+)>)?\s*\.$/);
-      if (!match) continue;
-      let obj = match[3];
-      if (obj.startsWith('<') && obj.endsWith('>')) {
-        obj = obj.slice(1, -1);
-      }
-      quads.push({ subject: match[1], predicate: match[2], object: obj, graph: match[4] ?? '' });
-    }
-    return quads;
-  }
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
     assertSafeIri(graphUri);

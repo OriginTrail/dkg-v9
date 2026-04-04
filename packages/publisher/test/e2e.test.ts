@@ -19,7 +19,7 @@ import { AccessClient } from '../src/access-client.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
-import { computePublicRoot, computeKARoot, computeKCRoot } from '../src/merkle.js';
+import { computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot } from '../src/merkle.js';
 import { autoPartition } from '../src/auto-partition.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 

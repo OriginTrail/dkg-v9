@@ -6,7 +6,7 @@ import {
   computeACKDigest,
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
-import { computeFlatKCRoot } from './merkle.js';
+import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };

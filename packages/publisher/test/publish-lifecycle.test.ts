@@ -15,7 +15,7 @@ import {
   encodePublishRequest,
   decodePublishAck,
   createOperationContext,
-  MerkleTree,
+  V10MerkleTree as MerkleTree,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -23,7 +23,7 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
-import { computeTripleHash } from '../src/merkle.js';
+import { computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-lifecycle';
@@ -131,7 +131,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
     const goldenHex =
-      '89a5e67f0c299318f22ba653ebae8eb5eb98e49f69126e901b067a6596abcc4b';
+      'd0d2a43d52a4925eabf280043ac3fa21043d7da90f9813fb22fecfc038d3da97';
     expect(actualHex).toBe(goldenHex);
   });
 
@@ -964,5 +964,47 @@ describe('Tentative publish UAL uniqueness', () => {
     // update should NOT have prepare:ensureParanet or prepare:validate
     expect(started).not.toContain('prepare:ensureParanet');
     expect(started).not.toContain('prepare:validate');
+  });
+
+  it('V10: swmReplicator is called BEFORE v10ACKProvider (spec §9.0 ordering)', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const callOrder: string[] = [];
+
+    const swmReplicator = async (quads: Quad[], _pid: string, rootEntities: string[]) => {
+      callOrder.push('swmReplicator');
+      expect(quads.length).toBeGreaterThan(0);
+      expect(rootEntities.length).toBeGreaterThan(0);
+    };
+
+    const v10ACKProvider = async () => {
+      callOrder.push('v10ACKProvider');
+      return [];
+    };
+
+    const phases: [string, 'start' | 'end'][] = [];
+    const onPhase = (phase: string, status: 'start' | 'end') => phases.push([phase, status]);
+
+    await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"V10 Ordering Test"')],
+      swmReplicator,
+      v10ACKProvider,
+      onPhase,
+    });
+
+    expect(callOrder).toEqual(['swmReplicator', 'v10ACKProvider']);
+
+    const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
+    expect(started.indexOf('swm_replicate')).toBeLessThan(started.indexOf('collect_v10_acks'));
   });
 });

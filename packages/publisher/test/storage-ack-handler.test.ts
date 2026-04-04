@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRoot } from '../src/merkle.js';
+import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computeACKDigest,
 } from '@origintrail-official/dkg-core';

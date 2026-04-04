@@ -7,7 +7,7 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
-  computeTripleHash, computeFlatKCRoot, autoPartition,
+  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   validatePublishRequest, parseSimpleNQuads,
   type KAMetadata,

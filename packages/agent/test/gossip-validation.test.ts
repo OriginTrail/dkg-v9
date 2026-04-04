@@ -18,9 +18,9 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computePublicRootV10 as computePublicRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
   autoPartition,
   generateTentativeMetadata,
   generateKCMetadata,

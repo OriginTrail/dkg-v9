@@ -6,7 +6,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHash, computePrivateRoot, computeFlatKCRoot, computeTripleHashV10, computePrivateRootV10, computeFlatKCRootV10 } from './merkle.js';
+import { computeTripleHashV10 as computeTripleHash, computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
@@ -389,6 +389,7 @@ export class DKGPublisher implements Publisher {
       onPhase?: PhaseCallback;
       contextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      v10ACKProvider?: PublishOptions['v10ACKProvider'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
@@ -445,6 +446,7 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      v10ACKProvider: options?.v10ACKProvider,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
@@ -754,11 +756,27 @@ export class DKGPublisher implements Publisher {
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 
+    // V10 spec §9.0: Pre-position data in peers' SWM before ACK collection.
+    // The swmReplicator writes the same skolemized quads to SWM + gossips,
+    // ensuring core nodes can verify the identical merkle root.
+    const hasPrivateData = privateRoots.length > 0;
+    if (options.swmReplicator && options.v10ACKProvider && !hasPrivateData) {
+      onPhase?.('swm_replicate', 'start');
+      try {
+        const rootEntities = manifestEntries.map(m => m.rootEntity);
+        await options.swmReplicator(allSkolemizedQuads, paranetId, rootEntities);
+        this.log.info(ctx, `V10: Pre-positioned ${allSkolemizedQuads.length} quads in peers' SWM`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `V10: SWM replication failed, ACK collection may not succeed: ${msg}`);
+      }
+      onPhase?.('swm_replicate', 'end');
+    }
+
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
     // Skipped for private publishes because StorageACKHandler cannot recompute
     // private merkle roots from SWM data alone.
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
-    const hasPrivateData = privateRoots.length > 0;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {

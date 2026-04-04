@@ -6,6 +6,7 @@ import {
   contextGraphSharedMemoryUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
+  encodeWorkspacePublishRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
@@ -17,7 +18,7 @@ import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
-  computeTripleHash, computeFlatKCRoot, autoPartition,
+  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK,
 } from '@origintrail-official/dkg-publisher';
@@ -1201,6 +1202,35 @@ export class DKGAgent {
       }
     }
     const v10ACKProvider = this.createV10ACKProvider(paranetId);
+
+    // V10 spec §9.0: data MUST be in peers' SWM before ACK collection.
+    // This callback writes the publisher's skolemized quads to local SWM
+    // and gossips them so core nodes can verify the identical merkle root.
+    const swmReplicator = async (skolemizedQuads: Quad[], pId: string, rootEntities: string[]) => {
+      const swmGraph = paranetWorkspaceGraphUri(pId);
+      const swmQuads = skolemizedQuads.map(q => ({ ...q, graph: swmGraph }));
+      await this.store.insert(swmQuads);
+
+      const dataGraph = paranetDataGraphUri(pId);
+      const gossipQuads = skolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
+      const nquadsStr = gossipQuads
+        .map(q => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
+        .join('\n');
+      const message = encodeWorkspacePublishRequest({
+        paranetId: pId,
+        nquads: new TextEncoder().encode(nquadsStr),
+        manifest: rootEntities.map(r => ({ rootEntity: r, privateMerkleRoot: undefined, privateTripleCount: 0 })),
+        publisherPeerId: this.peerId,
+        workspaceOperationId: `swm-pre-${Date.now()}`,
+        timestampMs: Date.now(),
+        operationId: ctx.operationId,
+      });
+      const topic = paranetWorkspaceTopic(pId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch { /* no peers subscribed yet */ }
+    };
+
     const result = await this.publisher.publish({
       paranetId,
       quads,
@@ -1211,6 +1241,7 @@ export class DKGAgent {
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
+      swmReplicator,
     });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
@@ -1345,12 +1376,16 @@ export class DKGAgent {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
 
+    // Data is already in peers' SWM (via prior writeToWorkspace + gossip),
+    // so V10 ACK collection can proceed without swmReplicator.
+    const v10ACKProvider = this.createV10ACKProvider(paranetId);
     const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
       operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       onPhase: options?.onPhase,
       contextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
+      v10ACKProvider,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {

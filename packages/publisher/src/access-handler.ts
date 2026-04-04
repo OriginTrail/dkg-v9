@@ -8,7 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import { computePrivateRoot } from './merkle.js';
+import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 

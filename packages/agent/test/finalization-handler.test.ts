@@ -9,8 +9,8 @@ import {
   Logger,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
-import { computeTripleHash } from '@origintrail-official/dkg-publisher';
-import { MerkleTree } from '@origintrail-official/dkg-core';
+import { computeTripleHashV10 as computeTripleHash } from '@origintrail-official/dkg-publisher';
+import { V10MerkleTree as MerkleTree } from '@origintrail-official/dkg-core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
 const PARANET = 'test-finalization';

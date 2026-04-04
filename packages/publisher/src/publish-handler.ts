@@ -13,7 +13,7 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
+import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,

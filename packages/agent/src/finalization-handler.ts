@@ -9,7 +9,7 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
-  computeFlatKCRoot, autoPartition,
+  computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateConfirmedFullMetadata, getTentativeStatusQuad,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';

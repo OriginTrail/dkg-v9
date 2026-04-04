@@ -85,12 +85,17 @@ export interface PublishOptions {
    */
   receiverSignatureProvider?: ReceiverSignatureProvider;
   /**
-   * V10 ACK provider: collects 3 core node StorageACKs via P2P.
+   * V10 ACK provider: collects core node StorageACKs via P2P.
    * When provided, ACKs are collected and stored in the result.
-   * The chain TX still uses the V9 receiver signature model for
-   * backward compatibility until the V10 contract is deployed.
    */
   v10ACKProvider?: V10ACKProvider;
+  /**
+   * V10 spec §9.0: data MUST be in peers' SWM before ACK collection.
+   * Called with the skolemized quads AFTER local storage, BEFORE ACK
+   * collection. The callback writes quads to the SWM graph and gossips
+   * them to peers so core nodes can verify and sign.
+   */
+  swmReplicator?: (quads: Quad[], paranetId: string, rootEntities: string[]) => Promise<void>;
 }
 
 export interface PublishResult {

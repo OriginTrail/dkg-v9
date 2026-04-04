@@ -12,9 +12,9 @@ import {
   UpdateHandler,
   WorkspaceHandler,
   autoPartition,
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computePublicRootV10 as computePublicRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 

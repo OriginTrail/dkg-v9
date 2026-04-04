@@ -1085,7 +1085,9 @@ export class EVMChainAdapter implements ChainAdapter {
           }
           if (parsed?.name === 'KnowledgeAssetsMinted') {
             startKAId = BigInt(parsed.args.startId);
-            endKAId = BigInt(parsed.args.endId);
+            // KnowledgeCollectionStorage emits exclusive endId (startId + amount);
+            // convert to inclusive for consistent UAL range representation.
+            endKAId = BigInt(parsed.args.endId) - 1n;
             publisherAddress = parsed.args.to;
           }
         } catch { /* not this contract */ }

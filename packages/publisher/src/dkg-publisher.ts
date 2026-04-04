@@ -768,9 +768,11 @@ export class DKGPublisher implements Publisher {
       } catch (err) {
         onPhase?.('collect_v10_acks', 'end');
         const msg = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `V10 ACK collection failed: ${msg}`);
+        this.log.warn(ctx, `V10 ACK collection failed, falling back to V9 receiver-signature path: ${msg}`);
       }
       onPhase?.('collect_v10_acks', 'end');
+    } else if (options.v10ACKProvider && hasPrivateData) {
+      this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
     // Collect receiver signatures from peers (replicate-then-publish)

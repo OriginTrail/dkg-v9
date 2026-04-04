@@ -23,6 +23,29 @@ export type ReceiverSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 /**
+ * V10 core node ACK signature collected via /dkg/10.0.0/storage-ack.
+ * Spec §9.0.3: ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ */
+export interface V10CoreNodeACK {
+  peerId: string;
+  signatureR: Uint8Array;
+  signatureVS: Uint8Array;
+  nodeIdentityId: bigint;
+}
+
+/**
+ * Callback that collects V10 StorageACKs from 3 core nodes.
+ * Called AFTER merkle root computation, BEFORE on-chain tx.
+ */
+export type V10ACKProvider = (
+  merkleRoot: Uint8Array,
+  contextGraphId: string,
+  kaCount: number,
+  rootEntities: string[],
+  publicByteSize: bigint,
+) => Promise<V10CoreNodeACK[]>;
+
+/**
  * Callback that collects participant signatures for context graph governance.
  */
 export type ParticipantSignatureProvider = (
@@ -61,6 +84,13 @@ export interface PublishOptions {
    * If absent, falls back to self-signing (legacy behavior).
    */
   receiverSignatureProvider?: ReceiverSignatureProvider;
+  /**
+   * V10 ACK provider: collects 3 core node StorageACKs via P2P.
+   * When provided, ACKs are collected and stored in the result.
+   * The chain TX still uses the V9 receiver signature model for
+   * backward compatibility until the V10 contract is deployed.
+   */
+  v10ACKProvider?: V10ACKProvider;
 }
 
 export interface PublishResult {
@@ -75,6 +105,8 @@ export interface PublishResult {
   publicQuads?: Quad[];
   /** Set when KC is confirmed on-chain but context-graph registration failed. */
   contextGraphError?: string;
+  /** V10: Core node ACK signatures collected before chain TX (spec §9.0.3). */
+  v10ACKs?: V10CoreNodeACK[];
 }
 
 export interface Publisher {

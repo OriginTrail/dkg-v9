@@ -1,0 +1,192 @@
+import {
+  PROTOCOL_STORAGE_ACK,
+  encodePublishIntent,
+  decodeStorageACK,
+  computeACKDigest,
+  type PublishIntentMsg,
+  type StorageACKMsg,
+} from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
+
+export interface ACKCollectorDeps {
+  gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
+  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  getConnectedCorePeers: () => string[];
+  log?: (msg: string) => void;
+}
+
+export interface CollectedACK {
+  peerId: string;
+  signatureR: Uint8Array;
+  signatureVS: Uint8Array;
+  nodeIdentityId: bigint;
+}
+
+export interface ACKCollectionResult {
+  acks: CollectedACK[];
+  merkleRoot: Uint8Array;
+  contextGraphId: bigint;
+}
+
+const REQUIRED_ACKS = 3;
+const ACK_TIMEOUT_MS = 60_000;
+const MAX_RETRIES = 3;
+
+/**
+ * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
+ * StorageACKs via direct P2P before the chain TX.
+ *
+ * Flow:
+ * 1. Broadcast PublishIntent via GossipSub (finalization topic)
+ * 2. Concurrently dial each known core node on /dkg/10.0.0/storage-ack
+ * 3. First 3 valid ACKs win; verify each signature via ecrecover
+ */
+export class ACKCollector {
+  private deps: ACKCollectorDeps;
+
+  constructor(deps: ACKCollectorDeps) {
+    this.deps = deps;
+  }
+
+  async collect(params: {
+    merkleRoot: Uint8Array;
+    contextGraphId: bigint;
+    contextGraphIdStr: string;
+    publisherPeerId: string;
+    publicByteSize: bigint;
+    isPrivate: boolean;
+    kaCount: number;
+    rootEntities: string[];
+    finalizationTopic: string;
+  }): Promise<ACKCollectionResult> {
+    const {
+      merkleRoot, contextGraphId, contextGraphIdStr,
+      publisherPeerId, publicByteSize, isPrivate,
+      kaCount, rootEntities, finalizationTopic,
+    } = params;
+
+    const log = this.deps.log ?? (() => {});
+
+    const intentMsg: PublishIntentMsg = {
+      merkleRoot,
+      contextGraphId: contextGraphIdStr,
+      publisherPeerId,
+      publicByteSize: Number(publicByteSize),
+      isPrivate,
+      kaCount,
+      rootEntities,
+    };
+    const intentBytes = encodePublishIntent(intentMsg);
+
+    log(`[ACKCollector] Broadcasting PublishIntent on ${finalizationTopic} (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
+    await this.deps.gossipPublish(finalizationTopic, intentBytes);
+
+    const corePeers = this.deps.getConnectedCorePeers();
+    if (corePeers.length === 0) {
+      throw new Error('ACK collection failed: no connected core peers');
+    }
+    log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers`);
+
+    const ackDigest = computeACKDigest(contextGraphId, merkleRoot);
+
+    const collected: CollectedACK[] = [];
+    const seenPeers = new Set<string>();
+
+    const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          const response = await this.deps.sendP2P(peerId, PROTOCOL_STORAGE_ACK, intentBytes);
+          const ack: StorageACKMsg = decodeStorageACK(response);
+
+          if (!this.verifyACKSignature(ack, ackDigest)) {
+            log(`[ACKCollector] Invalid ACK signature from ${peerId.slice(-8)}`);
+            return null;
+          }
+
+          if (!this.merkleRootsMatch(ack.merkleRoot, merkleRoot)) {
+            log(`[ACKCollector] Merkle root mismatch from ${peerId.slice(-8)}`);
+            return null;
+          }
+
+          const identityId = typeof ack.nodeIdentityId === 'number'
+            ? BigInt(ack.nodeIdentityId)
+            : BigInt(ack.nodeIdentityId.low) | (BigInt(ack.nodeIdentityId.high) << 32n);
+
+          log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId})`);
+
+          return {
+            peerId,
+            signatureR: ack.coreNodeSignatureR,
+            signatureVS: ack.coreNodeSignatureVS,
+            nodeIdentityId: identityId,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (attempt < MAX_RETRIES - 1) {
+            log(`[ACKCollector] Retry ${attempt + 1}/${MAX_RETRIES} for ${peerId.slice(-8)}: ${msg}`);
+            await new Promise(r => setTimeout(r, (attempt + 1) * 1000));
+          } else {
+            log(`[ACKCollector] Failed to get ACK from ${peerId.slice(-8)} after ${MAX_RETRIES} attempts: ${msg}`);
+          }
+        }
+      }
+      return null;
+    };
+
+    await Promise.race([
+      (async () => {
+        const promises = corePeers.map(async (peerId) => {
+          if (collected.length >= REQUIRED_ACKS) return;
+          const ack = await requestACK(peerId);
+          if (ack && !seenPeers.has(ack.peerId)) {
+            seenPeers.add(ack.peerId);
+            collected.push(ack);
+            if (collected.length >= REQUIRED_ACKS) return;
+          }
+        });
+        await Promise.allSettled(promises);
+      })(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms`)),
+          ACK_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+    if (collected.length < REQUIRED_ACKS) {
+      throw new Error(
+        `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
+        `Tried ${corePeers.length} core peers.`,
+      );
+    }
+
+    log(`[ACKCollector] Collected ${collected.length} ACKs successfully`);
+    return {
+      acks: collected.slice(0, REQUIRED_ACKS),
+      merkleRoot,
+      contextGraphId,
+    };
+  }
+
+  private verifyACKSignature(ack: StorageACKMsg, expectedDigest: Uint8Array): boolean {
+    try {
+      const r = ethers.hexlify(ack.coreNodeSignatureR);
+      const vs = ethers.hexlify(ack.coreNodeSignatureVS);
+
+      const prefixedHash = ethers.hashMessage(expectedDigest);
+      const recovered = ethers.recoverAddress(prefixedHash, { r, yParityAndS: vs });
+
+      return recovered.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private merkleRootsMatch(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+}

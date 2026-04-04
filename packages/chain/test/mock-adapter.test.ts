@@ -301,6 +301,106 @@ describe('MockChainAdapter V9', () => {
   // V8 backward compat
   // =====================================================================
 
+  // =====================================================================
+  // V10 createKnowledgeAssetsV10
+  // =====================================================================
+
+  it('createKnowledgeAssetsV10 stores KC and emits event with V10 params', async () => {
+    const adapter = createAdapter();
+    const merkleRoot = new Uint8Array(32).fill(0xdd);
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    const result = await adapter.createKnowledgeAssetsV10({
+      publishOperationId: 'v10-op-001',
+      contextGraphId: 42n,
+      merkleRoot,
+      knowledgeAssetsAmount: 5,
+      byteSize: 2048n,
+      epochs: 3,
+      tokenAmount: 100n,
+      isImmutable: true,
+      paymaster: '0x' + '0'.repeat(40),
+      convictionAccountId: 0n,
+      publisherNodeIdentityId: 1n,
+      publisherSignature: sig,
+      ackSignatures: [
+        { identityId: 2n, ...sig },
+        { identityId: 3n, ...sig },
+        { identityId: 4n, ...sig },
+      ],
+    });
+
+    expect(result.batchId).toBe(1n);
+    expect(result.txHash).toBeDefined();
+    expect(result.blockNumber).toBeGreaterThan(0);
+    expect(result.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);
+    expect(result.tokenAmount).toBe(100n);
+
+    const collection = adapter.getCollection(1n);
+    expect(collection).toBeDefined();
+    expect(collection!.kaCount).toBe(5);
+  });
+
+  it('createKnowledgeAssetsV10 rejects insufficient ACK signatures', async () => {
+    const adapter = createAdapter();
+    adapter.minimumRequiredSignatures = 3;
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await expect(
+      adapter.createKnowledgeAssetsV10({
+        publishOperationId: 'v10-insufficient',
+        contextGraphId: 42n,
+        merkleRoot: new Uint8Array(32).fill(0xee),
+        knowledgeAssetsAmount: 1,
+        byteSize: 512n,
+        epochs: 1,
+        tokenAmount: 10n,
+        isImmutable: false,
+        paymaster: '0x' + '0'.repeat(40),
+        convictionAccountId: 0n,
+        publisherNodeIdentityId: 1n,
+        publisherSignature: sig,
+        ackSignatures: [{ identityId: 2n, ...sig }],
+      }),
+    ).rejects.toThrow('MinSignaturesRequirementNotMet');
+  });
+
+  it('createKnowledgeAssetsV10 emits KnowledgeCollectionCreated event with contextGraphId', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.createKnowledgeAssetsV10({
+      publishOperationId: 'v10-event-test',
+      contextGraphId: 99n,
+      merkleRoot: new Uint8Array(32).fill(0xff),
+      knowledgeAssetsAmount: 1,
+      byteSize: 100n,
+      epochs: 1,
+      tokenAmount: 1n,
+      isImmutable: false,
+      paymaster: '0x' + '0'.repeat(40),
+      convictionAccountId: 7n,
+      publisherNodeIdentityId: 1n,
+      publisherSignature: sig,
+      ackSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    for await (const evt of adapter.listenForEvents({ eventTypes: ['KnowledgeCollectionCreated'] })) {
+      events.push(evt);
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0].data.publishOperationId).toBe('v10-event-test');
+    expect(events[0].data.contextGraphId).toBe('99');
+    expect(events[0].data.convictionAccountId).toBe('7');
+    expect(events[0].data.isImmutable).toBe(false);
+  });
+
+  // =====================================================================
+  // V8 backward compat
+  // =====================================================================
+
   it('createKnowledgeCollection still works (V8 compat)', async () => {
     const adapter = createAdapter();
     const result = await adapter.createKnowledgeCollection({

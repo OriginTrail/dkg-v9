@@ -22,6 +22,7 @@ import type {
   CreateContextGraphResult,
   AddBatchToContextGraphParams,
   PublishToContextGraphParams,
+  V10PublishParams,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -657,6 +658,41 @@ export class MockChainAdapter implements ChainAdapter {
 
   getContextGraph(contextGraphId: bigint) {
     return this.contextGraphs.get(contextGraphId);
+  }
+
+  // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+    if (params.ackSignatures.length < this.minimumRequiredSignatures) {
+      throw new Error('MinSignaturesRequirementNotMet');
+    }
+
+    const kcId = this.nextBatchId++;
+    this.collections.set(kcId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.knowledgeAssetsAmount,
+    });
+
+    const txHash = this.peekTxHash();
+    this.pushEvent('KnowledgeCollectionCreated', {
+      id: kcId.toString(),
+      publishOperationId: params.publishOperationId,
+      merkleRoot: toHex(params.merkleRoot),
+      byteSize: params.byteSize.toString(),
+      isImmutable: params.isImmutable,
+      contextGraphId: params.contextGraphId.toString(),
+      convictionAccountId: params.convictionAccountId.toString(),
+    });
+
+    const result = this.txResult(true);
+    return {
+      batchId: kcId,
+      txHash: result.hash,
+      blockNumber: result.blockNumber,
+      blockTimestamp: Math.floor(Date.now() / 1000),
+      publisherAddress: this.signerAddress,
+      tokenAmount: params.tokenAmount,
+    };
   }
 
   // --- Test helpers ---

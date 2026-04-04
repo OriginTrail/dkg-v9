@@ -23,6 +23,7 @@ import type {
   CreateContextGraphResult,
   AddBatchToContextGraphParams,
   PublishToContextGraphParams,
+  V10PublishParams,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -38,7 +39,7 @@ function loadAbi(contractName: string): ethers.InterfaceAbi {
 }
 
 const ERROR_ABI_CONTRACTS = [
-  'KnowledgeAssets', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
+  'KnowledgeAssets', 'KnowledgeAssetsV10', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
   'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
   'ParanetV9Registry', 'Paranet', 'Profile', 'Identity', 'IdentityStorage',
   'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
@@ -122,6 +123,7 @@ interface ContractCache {
   askStorage?: Contract;
   contextGraphs?: Contract;
   contextGraphStorage?: Contract;
+  knowledgeAssetsV10?: Contract;
 }
 
 /**
@@ -218,6 +220,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
     } catch {
       // ContextGraphs not deployed — context graph operations unavailable
+    }
+
+    try {
+      this.contracts.knowledgeAssetsV10 = await this.resolveContract('KnowledgeAssetsV10');
+    } catch {
+      // V10 contract not deployed — createKnowledgeAssetsV10 unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -1011,6 +1019,83 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       blockTimestamp,
       publisherAddress,
+    };
+  }
+
+  // =====================================================================
+  // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
+  // =====================================================================
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+    await this.init();
+
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed.');
+    }
+
+    const txSigner = this.nextSigner();
+    const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
+
+    if (this.contracts.token && params.convictionAccountId === 0n) {
+      const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
+      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, await ka.getAddress());
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await tokenWithSigner.approve(await ka.getAddress(), params.tokenAmount);
+        await approveTx.wait();
+      }
+    }
+
+    const identityIds = params.ackSignatures.map((s) => s.identityId);
+    const rValues = params.ackSignatures.map((s) => ethers.hexlify(s.r));
+    const vsValues = params.ackSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const tx = await ka.createKnowledgeAssets(
+      params.publishOperationId,
+      params.contextGraphId,
+      ethers.hexlify(params.merkleRoot),
+      params.knowledgeAssetsAmount,
+      params.byteSize,
+      params.epochs,
+      params.tokenAmount,
+      params.isImmutable,
+      params.paymaster,
+      params.convictionAccountId,
+      params.publisherNodeIdentityId,
+      ethers.hexlify(params.publisherSignature.r),
+      ethers.hexlify(params.publisherSignature.vs),
+      identityIds,
+      rValues,
+      vsValues,
+    );
+
+    const receipt = await tx.wait();
+    if (!receipt) throw new Error('Transaction receipt is null');
+
+    let kcId = 0n;
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (kcs) {
+      for (const log of receipt.logs) {
+        try {
+          const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed?.name === 'KnowledgeCollectionCreated') {
+            kcId = BigInt(parsed.args.id);
+          }
+        } catch { /* not this contract */ }
+      }
+    }
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId: kcId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress: txSigner.address,
+      gasUsed: receipt.gasUsed ? BigInt(receipt.gasUsed) : undefined,
+      effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
+      gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
+      tokenAmount: params.tokenAmount,
     };
   }
 

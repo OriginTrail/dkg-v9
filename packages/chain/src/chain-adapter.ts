@@ -185,6 +185,24 @@ export interface ConvictionAccountInfo {
   discountBps: number;
 }
 
+// ----- V10 publish types -----
+
+export interface V10PublishParams {
+  publishOperationId: string;
+  contextGraphId: bigint;
+  merkleRoot: Uint8Array;
+  knowledgeAssetsAmount: number;
+  byteSize: bigint;
+  epochs: number;
+  tokenAmount: bigint;
+  isImmutable: boolean;
+  paymaster: string;
+  convictionAccountId: bigint;
+  publisherNodeIdentityId: bigint;
+  publisherSignature: { r: Uint8Array; vs: Uint8Array };
+  ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
 
 export interface CreateKCParams {
@@ -299,6 +317,9 @@ export interface ChainAdapter {
   createContextGraph?(params: CreateContextGraphParams): Promise<CreateContextGraphResult>;
   addBatchToContextGraph?(params: AddBatchToContextGraphParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
+
+  // V10 publish (KnowledgeAssetsV10 contract — writes to KnowledgeCollectionStorage)
+  createKnowledgeAssetsV10?(params: V10PublishParams): Promise<OnChainPublishResult>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

@@ -109,3 +109,5 @@ export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
+export { ACKCollector, type ACKCollectorDeps, type CollectedACK, type ACKCollectionResult } from './ack-collector.js';
+export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';

@@ -19,7 +19,7 @@ import { AccessClient } from '../src/access-client.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
-import { computePublicRoot, computeKARoot, computeKCRoot } from '../src/merkle.js';
+import { computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRootV10 } from '../src/merkle.js';
 import { autoPartition } from '../src/auto-partition.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 
@@ -403,10 +403,11 @@ describe('Publisher wallet signature verification', () => {
     const ack = decodePublishAck(ackData);
     expect(ack.accepted).toBe(true);
 
-    // Confirm with matching on-chain data
+    // V10: handler stores V10 flat merkle root, so confirm with V10 root
+    const v10MerkleRoot = computeFlatKCRootV10(testQuads, []);
     const confirmed = await handler.confirmPublish(ual, {
       publisherAddress: signerWallet.address,
-      merkleRoot,
+      merkleRoot: v10MerkleRoot,
       startKAId: 5n,
       endKAId: 5n,
     });
@@ -454,9 +455,11 @@ describe('Publisher wallet signature verification', () => {
       expect(statuses).toContainEqual(expect.stringMatching(/tentative/));
     }
 
+    // V10: handler stores V10 flat merkle root
+    const v10MerkleRoot = computeFlatKCRootV10(testQuads, []);
     const confirmed = await handler.confirmPublish(ual, {
       publisherAddress: signerWallet.address,
-      merkleRoot,
+      merkleRoot: v10MerkleRoot,
       startKAId: 7n,
       endKAId: 7n,
     });

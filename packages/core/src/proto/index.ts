@@ -85,3 +85,9 @@ export {
   decodeGossipEnvelope,
   computeGossipSigningPayload,
 } from './gossip-envelope.js';
+
+export {
+  type PublishIntentMsg,
+  encodePublishIntent,
+  decodePublishIntent,
+} from './publish-intent.js';

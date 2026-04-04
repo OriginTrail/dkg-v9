@@ -6,7 +6,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHash, computePrivateRoot, computeFlatKCRoot } from './merkle.js';
+import { computeTripleHash, computePrivateRoot, computeFlatKCRoot, computeTripleHashV10, computePrivateRootV10, computeFlatKCRootV10 } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
@@ -684,7 +684,7 @@ export class DKGPublisher implements Publisher {
         tokenId: tokenCounter,
         rootEntity,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
+          ? computePrivateRootV10(entityPrivateQuads)
           : undefined,
         privateTripleCount: entityPrivateQuads.length,
       });
@@ -696,7 +696,7 @@ export class DKGPublisher implements Publisher {
         publicTripleCount: publicQuads.length,
         privateTripleCount: entityPrivateQuads.length,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
+          ? computePrivateRootV10(entityPrivateQuads)
           : undefined,
       });
 
@@ -718,8 +718,8 @@ export class DKGPublisher implements Publisher {
     const privateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
-    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
+    const kcMerkleRoot = computeFlatKCRootV10(allSkolemizedQuads, privateRoots);
+    this.log.info(ctx, `Computed V10 kcMerkleRoot (keccak256) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -753,6 +753,22 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
+
+    // V10: Collect 3 core node StorageACKs (spec §9.0, Phase 3)
+    let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
+    if (options.v10ACKProvider) {
+      onPhase?.('collect_v10_acks', 'start');
+      try {
+        const rootEntities = manifestEntries.map(m => m.rootEntity);
+        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, paranetId, kaCount, rootEntities, publicByteSize);
+        this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
+      } catch (err) {
+        onPhase?.('collect_v10_acks', 'end');
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `V10 ACK collection failed: ${msg}`);
+      }
+      onPhase?.('collect_v10_acks', 'end');
+    }
 
     // Collect receiver signatures from peers (replicate-then-publish)
     let collectedReceiverSigs: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> | undefined;
@@ -834,19 +850,45 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:submit', 'start');
       this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
-        onChainResult = await this.chain.publishKnowledgeAssets({
-          kaCount,
-          publisherNodeIdentityId: identityId,
-          merkleRoot: kcMerkleRoot,
-          publicByteSize,
-          epochs: 1,
-          tokenAmount,
-          publisherSignature: {
-            r: ethers.getBytes(pubSig.r),
-            vs: ethers.getBytes(pubSig.yParityAndS),
-          },
-          receiverSignatures,
-        });
+        if (v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function') {
+          const contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(paranetId)));
+          onChainResult = await this.chain.createKnowledgeAssetsV10!({
+            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
+            contextGraphId: contextGraphIdBigInt,
+            merkleRoot: kcMerkleRoot,
+            knowledgeAssetsAmount: kaCount,
+            byteSize: publicByteSize,
+            epochs: 1,
+            tokenAmount,
+            isImmutable: false,
+            paymaster: ethers.ZeroAddress,
+            convictionAccountId: 0n,
+            publisherNodeIdentityId: identityId,
+            publisherSignature: {
+              r: ethers.getBytes(pubSig.r),
+              vs: ethers.getBytes(pubSig.yParityAndS),
+            },
+            ackSignatures: v10ACKs.map(ack => ({
+              identityId: ack.nodeIdentityId,
+              r: ack.signatureR,
+              vs: ack.signatureVS,
+            })),
+          });
+        } else {
+          onChainResult = await this.chain.publishKnowledgeAssets({
+            kaCount,
+            publisherNodeIdentityId: identityId,
+            merkleRoot: kcMerkleRoot,
+            publicByteSize,
+            epochs: 1,
+            tokenAmount,
+            publisherSignature: {
+              r: ethers.getBytes(pubSig.r),
+              vs: ethers.getBytes(pubSig.yParityAndS),
+            },
+            receiverSignatures,
+          });
+        }
 
         onChainResult.tokenAmount = tokenAmount;
 
@@ -944,6 +986,7 @@ export class DKGPublisher implements Publisher {
       status,
       onChainResult,
       publicQuads: allSkolemizedQuads,
+      v10ACKs,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -976,7 +1019,7 @@ export class DKGPublisher implements Publisher {
         tokenId: tokenCounter++,
         rootEntity,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads) : undefined,
+          ? computePrivateRootV10(entityPrivateQuads) : undefined,
         privateTripleCount: entityPrivateQuads.length,
       });
     }
@@ -987,7 +1030,7 @@ export class DKGPublisher implements Publisher {
     const updatePrivateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
+    const kcMerkleRoot = computeFlatKCRootV10(allSkolemizedQuads, updatePrivateRoots);
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 

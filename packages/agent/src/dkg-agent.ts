@@ -1,8 +1,9 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
+  contextGraphSharedMemoryUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
@@ -15,8 +16,10 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig,
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
+  ACKCollector, StorageACKHandler,
   computeTripleHash, computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
+  type CollectedACK,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -310,6 +313,20 @@ export class DKGAgent {
       } catch (err) {
         this.log.warn(ctx, `Journal restore failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+
+    // Register V10 StorageACK handler (core nodes only)
+    if ((this.config.nodeRole ?? 'edge') === 'core' && this.config.chainConfig?.operationalKeys?.[0]) {
+      const ackSignerWallet = new ethers.Wallet(this.config.chainConfig.operationalKeys[0]);
+      const identityId = await this.chain.getIdentityId();
+      const ackHandler = new StorageACKHandler(this.store, {
+        nodeRole: 'core',
+        nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
+        signerWallet: ackSignerWallet,
+        contextGraphSharedMemoryUri,
+      }, this.eventBus);
+      this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+      this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
     }
 
     // Register cross-agent query handler (deny-by-default for security)
@@ -1180,6 +1197,7 @@ export class DKGAgent {
         );
       }
     }
+    const v10ACKProvider = this.createV10ACKProvider(paranetId);
     const result = await this.publisher.publish({
       paranetId,
       quads,
@@ -1189,6 +1207,7 @@ export class DKGAgent {
       allowedPeers: opts?.allowedPeers,
       operationCtx: ctx,
       onPhase,
+      v10ACKProvider,
     });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
@@ -2269,6 +2288,61 @@ export class DKGAgent {
       graph: gq.graph,
     }));
     await store.insert(quads);
+  }
+
+  /**
+   * Create a V10 ACK provider callback for the publisher.
+   * Uses ACKCollector to broadcast PublishIntent and collect 3 StorageACKs
+   * via direct P2P from connected core nodes.
+   */
+  private createV10ACKProvider(paranetId: string) {
+    if (!this.router || !this.gossip) return undefined;
+
+    const collector = new ACKCollector({
+      gossipPublish: async (topic, data) => {
+        await this.gossip.publish(topic, data);
+      },
+      sendP2P: async (peerId, protocol, data) => {
+        return this.router.send(peerId, protocol, data);
+      },
+      getConnectedCorePeers: () => {
+        const peers = this.node.libp2p.getPeers();
+        return peers
+          .map(p => p.toString())
+          .filter(id => id !== this.peerId);
+      },
+      log: (msg) => {
+        const ctx = createOperationContext('publish');
+        this.log.info(ctx, msg);
+      },
+    });
+
+    return async (
+      merkleRoot: Uint8Array,
+      contextGraphId: string,
+      kaCount: number,
+      rootEntities: string[],
+      publicByteSize: bigint,
+    ) => {
+      const finalizationTopic = paranetFinalizationTopic(paranetId);
+      // Derive a numeric context graph ID from the string for the ACK digest.
+      // In V10 production, this will be the on-chain CG uint256 ID.
+      const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
+      const cgIdBigInt = BigInt(cgIdHash);
+
+      const result = await collector.collect({
+        merkleRoot,
+        contextGraphId: cgIdBigInt,
+        contextGraphIdStr: contextGraphId,
+        publisherPeerId: this.peerId,
+        publicByteSize,
+        isPrivate: false,
+        kaCount,
+        rootEntities,
+        finalizationTopic,
+      });
+      return result.acks;
+    };
   }
 
   private async broadcastPublish(paranetId: string, result: PublishResult, ctx: OperationContext): Promise<void> {

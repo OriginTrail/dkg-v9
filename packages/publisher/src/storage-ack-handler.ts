@@ -54,10 +54,18 @@ export class StorageACKHandler {
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
 
-    const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
-    const swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+    // Prefer inline staging quads (sent via direct P2P) over SWM lookup.
+    // This avoids workspace graph pollution from gossip-based pre-positioning.
+    let swmQuads: Quad[];
+    if (intent.stagingQuads && intent.stagingQuads.length > 0) {
+      swmQuads = this.parseNQuads(intent.stagingQuads);
+    } else {
+      const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
+      swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+    }
 
     if (swmQuads.length === 0) {
+      const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
       throw new Error(`No data found in SWM graph ${swmGraphUri} for entities: ${intent.rootEntities.join(', ')}`);
     }
 
@@ -89,6 +97,23 @@ export class StorageACKHandler {
         : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
     });
   };
+
+  private parseNQuads(raw: Uint8Array): Quad[] {
+    const text = new TextDecoder().decode(raw);
+    const quads: Quad[] = [];
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^<([^>]+)>\s+<([^>]+)>\s+((?:<[^>]+>)|(?:"[^"]*"(?:\^\^<[^>]+>)?(?:@\w+)?))\s*(?:<([^>]+)>)?\s*\.$/);
+      if (!match) continue;
+      let obj = match[3];
+      if (obj.startsWith('<') && obj.endsWith('>')) {
+        obj = obj.slice(1, -1);
+      }
+      quads.push({ subject: match[1], predicate: match[2], object: obj, graph: match[4] ?? '' });
+    }
+    return quads;
+  }
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
     assertSafeIri(graphUri);

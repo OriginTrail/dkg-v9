@@ -36,6 +36,8 @@ export interface V10CoreNodeACK {
 /**
  * Callback that collects V10 StorageACKs from 3 core nodes.
  * Called AFTER merkle root computation, BEFORE on-chain tx.
+ * stagingQuads: optional N-Quads bytes to send inline to core nodes
+ * so they can verify the merkle root without needing SWM pre-positioning.
  */
 export type V10ACKProvider = (
   merkleRoot: Uint8Array,
@@ -43,6 +45,7 @@ export type V10ACKProvider = (
   kaCount: number,
   rootEntities: string[],
   publicByteSize: bigint,
+  stagingQuads?: Uint8Array,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**
@@ -89,13 +92,6 @@ export interface PublishOptions {
    * When provided, ACKs are collected and stored in the result.
    */
   v10ACKProvider?: V10ACKProvider;
-  /**
-   * V10 spec §9.0: data MUST be in peers' SWM before ACK collection.
-   * Called with the skolemized quads AFTER local storage, BEFORE ACK
-   * collection. The callback writes quads to the SWM graph and gossips
-   * them to peers so core nodes can verify and sign.
-   */
-  swmReplicator?: (quads: Quad[], paranetId: string, rootEntities: string[]) => Promise<void>;
 }
 
 export interface PublishResult {

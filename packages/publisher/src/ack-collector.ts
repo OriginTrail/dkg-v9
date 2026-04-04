@@ -12,6 +12,7 @@ export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers: () => string[];
+  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
   log?: (msg: string) => void;
 }
 
@@ -59,6 +60,7 @@ export class ACKCollector {
     rootEntities: string[];
     finalizationTopic: string;
     requiredACKs?: number;
+    stagingQuads?: Uint8Array;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -69,7 +71,8 @@ export class ACKCollector {
 
     const log = this.deps.log ?? (() => {});
 
-    const intentMsg: PublishIntentMsg = {
+    // Broadcast intent without staging quads (gossip is public, quads go via P2P)
+    const broadcastMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
       publisherPeerId,
@@ -78,10 +81,17 @@ export class ACKCollector {
       kaCount,
       rootEntities,
     };
-    const intentBytes = encodePublishIntent(intentMsg);
+    const broadcastBytes = encodePublishIntent(broadcastMsg);
+
+    // P2P intent includes staging quads so core nodes can verify inline
+    const p2pMsg: PublishIntentMsg = {
+      ...broadcastMsg,
+      stagingQuads: params.stagingQuads,
+    };
+    const intentBytes = encodePublishIntent(p2pMsg);
 
     log(`[ACKCollector] Broadcasting PublishIntent on ${finalizationTopic} (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
-    await this.deps.gossipPublish(finalizationTopic, intentBytes);
+    await this.deps.gossipPublish(finalizationTopic, broadcastBytes);
 
     const corePeers = this.deps.getConnectedCorePeers();
     if (corePeers.length === 0) {
@@ -115,6 +125,14 @@ export class ACKCollector {
           const identityId = typeof ack.nodeIdentityId === 'number'
             ? BigInt(ack.nodeIdentityId)
             : BigInt(ack.nodeIdentityId.low) | (BigInt(ack.nodeIdentityId.high) << 32n);
+
+          if (this.deps.verifyIdentity) {
+            const valid = await this.deps.verifyIdentity(recoveredAddress, identityId);
+            if (!valid) {
+              log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
+              return null;
+            }
+          }
 
           log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId}, signer=${recoveredAddress.slice(0, 10)}...)`);
 

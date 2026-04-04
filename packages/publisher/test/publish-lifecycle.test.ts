@@ -966,7 +966,7 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(started).not.toContain('prepare:validate');
   });
 
-  it('V10: swmReplicator is called BEFORE v10ACKProvider (spec §9.0 ordering)', async () => {
+  it('V10: staging quads are passed inline to v10ACKProvider (spec §9.0)', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -978,16 +978,12 @@ describe('Tentative publish UAL uniqueness', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    const callOrder: string[] = [];
-
-    const swmReplicator = async (quads: Quad[], _pid: string, rootEntities: string[]) => {
-      callOrder.push('swmReplicator');
-      expect(quads.length).toBeGreaterThan(0);
-      expect(rootEntities.length).toBeGreaterThan(0);
-    };
-
-    const v10ACKProvider = async () => {
-      callOrder.push('v10ACKProvider');
+    let receivedStagingQuads: Uint8Array | undefined;
+    const v10ACKProvider = async (
+      _merkleRoot: Uint8Array, _cgId: string, _kaCount: number,
+      _rootEntities: string[], _byteSize: bigint, stagingQuads?: Uint8Array,
+    ) => {
+      receivedStagingQuads = stagingQuads;
       return [];
     };
 
@@ -996,15 +992,17 @@ describe('Tentative publish UAL uniqueness', () => {
 
     await publisher.publish({
       paranetId: PARANET,
-      quads: [q(ENTITY, 'http://schema.org/name', '"V10 Ordering Test"')],
-      swmReplicator,
+      quads: [q(ENTITY, 'http://schema.org/name', '"V10 Staging Test"')],
       v10ACKProvider,
       onPhase,
     });
 
-    expect(callOrder).toEqual(['swmReplicator', 'v10ACKProvider']);
+    expect(receivedStagingQuads).toBeDefined();
+    expect(receivedStagingQuads!.length).toBeGreaterThan(0);
+    const decoded = new TextDecoder().decode(receivedStagingQuads);
+    expect(decoded).toContain('V10 Staging Test');
 
     const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
-    expect(started.indexOf('swm_replicate')).toBeLessThan(started.indexOf('collect_v10_acks'));
+    expect(started).toContain('collect_v10_acks');
   });
 });

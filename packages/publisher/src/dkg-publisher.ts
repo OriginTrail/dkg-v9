@@ -756,32 +756,19 @@ export class DKGPublisher implements Publisher {
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 
-    // V10 spec §9.0: Pre-position data in peers' SWM before ACK collection.
-    // The swmReplicator writes the same skolemized quads to SWM + gossips,
-    // ensuring core nodes can verify the identical merkle root.
-    const hasPrivateData = privateRoots.length > 0;
-    if (options.swmReplicator && options.v10ACKProvider && !hasPrivateData) {
-      onPhase?.('swm_replicate', 'start');
-      try {
-        const rootEntities = manifestEntries.map(m => m.rootEntity);
-        await options.swmReplicator(allSkolemizedQuads, paranetId, rootEntities);
-        this.log.info(ctx, `V10: Pre-positioned ${allSkolemizedQuads.length} quads in peers' SWM`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `V10: SWM replication failed, ACK collection may not succeed: ${msg}`);
-      }
-      onPhase?.('swm_replicate', 'end');
-    }
-
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
-    // Skipped for private publishes because StorageACKHandler cannot recompute
-    // private merkle roots from SWM data alone.
+    // Staging quads are sent inline via P2P so core nodes can verify
+    // the merkle root without workspace gossip pre-positioning.
+    // Skipped for private publishes because StorageACKHandler cannot
+    // recompute private merkle roots from SWM data alone.
+    const hasPrivateData = privateRoots.length > 0;
+    const nquadsBytes = new TextEncoder().encode(nquadsStr);
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, paranetId, kaCount, rootEntities, publicByteSize);
+        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, paranetId, kaCount, rootEntities, publicByteSize, nquadsBytes);
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
         onPhase?.('collect_v10_acks', 'end');

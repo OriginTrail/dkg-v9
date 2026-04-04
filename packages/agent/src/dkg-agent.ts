@@ -6,7 +6,6 @@ import {
   contextGraphSharedMemoryUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
-  encodeWorkspacePublishRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
@@ -1203,37 +1202,6 @@ export class DKGAgent {
     }
     const v10ACKProvider = this.createV10ACKProvider(paranetId);
 
-    // V10 spec §9.0: data MUST be in peers' SWM before ACK collection.
-    // This callback writes the publisher's skolemized quads to local SWM
-    // and gossips them so core nodes can verify the identical merkle root.
-    // Ephemeral: quads are cleaned up after publish completes.
-    let swmPrePositionedQuads: Quad[] | undefined;
-    const swmReplicator = async (skolemizedQuads: Quad[], pId: string, rootEntities: string[]) => {
-      const swmGraph = paranetWorkspaceGraphUri(pId);
-      const swmQuads = skolemizedQuads.map(q => ({ ...q, graph: swmGraph }));
-      await this.store.insert(swmQuads);
-      swmPrePositionedQuads = swmQuads;
-
-      const dataGraph = paranetDataGraphUri(pId);
-      const gossipQuads = skolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
-      const nquadsStr = gossipQuads
-        .map(q => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
-        .join('\n');
-      const message = encodeWorkspacePublishRequest({
-        paranetId: pId,
-        nquads: new TextEncoder().encode(nquadsStr),
-        manifest: rootEntities.map(r => ({ rootEntity: r, privateMerkleRoot: undefined, privateTripleCount: 0 })),
-        publisherPeerId: this.peerId,
-        workspaceOperationId: `swm-pre-${Date.now()}`,
-        timestampMs: Date.now(),
-        operationId: ctx.operationId,
-      });
-      const topic = paranetWorkspaceTopic(pId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch { /* no peers subscribed yet */ }
-    };
-
     const result = await this.publisher.publish({
       paranetId,
       quads,
@@ -1244,18 +1212,8 @@ export class DKGAgent {
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
-      swmReplicator,
     });
 
-    // Clean up ephemeral SWM pre-positioning data to prevent
-    // workspace queries / enshrineFromWorkspace from picking it up.
-    if (swmPrePositionedQuads) {
-      try {
-        await this.store.delete(swmPrePositionedQuads);
-      } catch {
-        this.log.warn(ctx, 'Failed to clean up SWM pre-positioned quads');
-      }
-    }
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(paranetId, result, ctx);
@@ -2358,13 +2316,20 @@ export class DKGAgent {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
-        // Returns all connected peers; non-core nodes reject with
-        // "Only core nodes can issue StorageACKs" (handled by retry loop).
-        // TODO: filter by sharding table / profile role metadata.
         const peers = this.node.libp2p.getPeers();
         return peers
           .map(p => p.toString())
           .filter(id => id !== this.peerId);
+      },
+      verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        try {
+          const identityStorage = await (this.chain as any).resolveContract?.('IdentityStorage');
+          if (!identityStorage) return true;
+          const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
+          return chainId === claimedIdentityId;
+        } catch {
+          return true;
+        }
       },
       log: (msg) => {
         const ctx = createOperationContext('publish');
@@ -2380,6 +2345,7 @@ export class DKGAgent {
       kaCount: number,
       rootEntities: string[],
       publicByteSize: bigint,
+      stagingQuads?: Uint8Array,
     ) => {
       const finalizationTopic = paranetFinalizationTopic(paranetId);
       const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
@@ -2400,6 +2366,7 @@ export class DKGAgent {
         rootEntities,
         finalizationTopic,
         requiredACKs,
+        stagingQuads,
       });
       return result.acks;
     };

@@ -19,7 +19,8 @@ export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('publicByteSize', 4, 'uint64'))
   .add(new Field('isPrivate', 5, 'bool'))
   .add(new Field('kaCount', 6, 'uint32'))
-  .add(new Field('rootEntities', 7, 'string', 'repeated'));
+  .add(new Field('rootEntities', 7, 'string', 'repeated'))
+  .add(new Field('stagingQuads', 8, 'bytes'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -31,6 +32,7 @@ export interface PublishIntentMsg {
   isPrivate: boolean;
   kaCount: number;
   rootEntities: string[];
+  stagingQuads?: Uint8Array;
 }
 
 export function encodePublishIntent(msg: PublishIntentMsg): Uint8Array {

@@ -84,7 +84,9 @@ export class StorageACKHandler {
       coreNodeSignatureR: ethers.getBytes(signature.r),
       coreNodeSignatureVS: ethers.getBytes(signature.yParityAndS),
       contextGraphId: cgId,
-      nodeIdentityId: Number(this.config.nodeIdentityId),
+      nodeIdentityId: this.config.nodeIdentityId <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(this.config.nodeIdentityId)
+        : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
     });
   };
 

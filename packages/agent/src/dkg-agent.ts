@@ -1206,10 +1206,13 @@ export class DKGAgent {
     // V10 spec §9.0: data MUST be in peers' SWM before ACK collection.
     // This callback writes the publisher's skolemized quads to local SWM
     // and gossips them so core nodes can verify the identical merkle root.
+    // Ephemeral: quads are cleaned up after publish completes.
+    let swmPrePositionedQuads: Quad[] | undefined;
     const swmReplicator = async (skolemizedQuads: Quad[], pId: string, rootEntities: string[]) => {
       const swmGraph = paranetWorkspaceGraphUri(pId);
       const swmQuads = skolemizedQuads.map(q => ({ ...q, graph: swmGraph }));
       await this.store.insert(swmQuads);
+      swmPrePositionedQuads = swmQuads;
 
       const dataGraph = paranetDataGraphUri(pId);
       const gossipQuads = skolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
@@ -1243,6 +1246,16 @@ export class DKGAgent {
       v10ACKProvider,
       swmReplicator,
     });
+
+    // Clean up ephemeral SWM pre-positioning data to prevent
+    // workspace queries / enshrineFromWorkspace from picking it up.
+    if (swmPrePositionedQuads) {
+      try {
+        await this.store.delete(swmPrePositionedQuads);
+      } catch {
+        this.log.warn(ctx, 'Failed to clean up SWM pre-positioned quads');
+      }
+    }
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(paranetId, result, ctx);

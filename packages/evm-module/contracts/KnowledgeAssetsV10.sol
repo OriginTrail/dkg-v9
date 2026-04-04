@@ -164,17 +164,19 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         );
 
         _validateTokenAmount(byteSize, epochs, tokenAmount, false);
-        _distributeTokens(tokenAmount, epochs, currentEpoch);
-        epochStorage.addEpochProducedKnowledgeValue(publisherNodeIdentityId, currentEpoch, tokenAmount);
 
+        uint96 effectiveAmount = tokenAmount;
         if (convictionAccountId > 0) {
             if (address(convictionAccount) == address(0)) {
                 revert ConvictionAccountNotConfigured();
             }
-            convictionAccount.coverPublishingCost(convictionAccountId, tokenAmount, msg.sender);
+            effectiveAmount = convictionAccount.coverPublishingCost(convictionAccountId, tokenAmount, msg.sender);
         } else {
             _addTokens(tokenAmount, paymaster);
         }
+
+        _distributeTokens(effectiveAmount, epochs, currentEpoch);
+        epochStorage.addEpochProducedKnowledgeValue(publisherNodeIdentityId, currentEpoch, effectiveAmount);
 
         return id;
     }

@@ -365,7 +365,7 @@ describe('MockChainAdapter V9', () => {
     ).rejects.toThrow('MinSignaturesRequirementNotMet');
   });
 
-  it('createKnowledgeAssetsV10 emits KnowledgeCollectionCreated event with contextGraphId', async () => {
+  it('createKnowledgeAssetsV10 emits KCCreated event with contextGraphId', async () => {
     const adapter = createAdapter();
     const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
 
@@ -386,15 +386,18 @@ describe('MockChainAdapter V9', () => {
     });
 
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];
-    for await (const evt of adapter.listenForEvents({ eventTypes: ['KnowledgeCollectionCreated'] })) {
+    for await (const evt of adapter.listenForEvents({ eventTypes: ['KCCreated'] })) {
       events.push(evt);
     }
 
     expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('KCCreated');
     expect(events[0].data.publishOperationId).toBe('v10-event-test');
     expect(events[0].data.contextGraphId).toBe('99');
     expect(events[0].data.convictionAccountId).toBe('7');
     expect(events[0].data.isImmutable).toBe(false);
+    expect(events[0].data.txHash).toBeDefined();
+    expect(events[0].data.publisherAddress).toBeDefined();
   });
 
   // =====================================================================

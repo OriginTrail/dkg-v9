@@ -57,31 +57,54 @@ export class StorageACKHandler {
 
     const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
 
-    // When inline staging quads are provided via P2P, persist them to SWM
-    // first to maintain the storage-attestation guarantee — we only sign
-    // after the data is actually stored locally.
+    let swmQuads: Quad[];
+
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
-      if (parsed.length > 0) {
-        const graphedQuads = parsed.map(q => ({ ...q, graph: swmGraphUri }));
-        await this.store.insert(graphedQuads);
+      // Size limit: reject payloads over 4 MB to prevent memory exhaustion
+      const MAX_STAGING_BYTES = 4 * 1024 * 1024;
+      if (intent.stagingQuads.length > MAX_STAGING_BYTES) {
+        throw new Error(
+          `stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
+          `${MAX_STAGING_BYTES} byte limit — rejecting request`,
+        );
       }
-    }
 
-    const swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+      // Verify merkle root IN-MEMORY before persisting anything to SWM.
+      // This prevents untrusted peers from injecting arbitrary quads.
+      const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+      if (parsed.length === 0) {
+        throw new Error('stagingQuads present but contained no parseable N-Quads');
+      }
 
-    if (swmQuads.length === 0) {
-      throw new Error(`No data found in SWM graph ${swmGraphUri} for entities: ${intent.rootEntities.join(', ')}`);
-    }
+      const inMemoryRoot = computeFlatKCRoot(parsed, []);
+      if (!bytesEqual(inMemoryRoot, merkleRoot)) {
+        throw new Error(
+          `Merkle root mismatch (inline quads): publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
+          `computed=${ethers.hexlify(inMemoryRoot).slice(0, 18)}... ` +
+          `(${parsed.length} triples) — refusing to store`,
+        );
+      }
 
-    const recomputedRoot = computeFlatKCRoot(swmQuads, []);
+      // Root verified — now persist to SWM
+      const graphedQuads = parsed.map(q => ({ ...q, graph: swmGraphUri }));
+      await this.store.insert(graphedQuads);
+      swmQuads = parsed;
+    } else {
+      // Fallback: data should already be in SWM (enshrineFromWorkspace path)
+      swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
 
-    if (!bytesEqual(recomputedRoot, merkleRoot)) {
-      throw new Error(
-        `Merkle root mismatch: publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
-        `local=${ethers.hexlify(recomputedRoot).slice(0, 18)}... ` +
-        `(${swmQuads.length} triples in SWM)`,
-      );
+      if (swmQuads.length === 0) {
+        throw new Error(`No data found in SWM graph ${swmGraphUri} for entities: ${intent.rootEntities.join(', ')}`);
+      }
+
+      const recomputedRoot = computeFlatKCRoot(swmQuads, []);
+      if (!bytesEqual(recomputedRoot, merkleRoot)) {
+        throw new Error(
+          `Merkle root mismatch: publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
+          `local=${ethers.hexlify(recomputedRoot).slice(0, 18)}... ` +
+          `(${swmQuads.length} triples in SWM)`,
+        );
+      }
     }
 
     // Derive numeric CG ID the same way the publisher does

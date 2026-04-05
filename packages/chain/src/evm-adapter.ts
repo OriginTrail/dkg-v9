@@ -737,17 +737,19 @@ export class EVMChainAdapter implements ChainAdapter {
       if (eventType === 'KCCreated' || eventType === 'KnowledgeCollectionCreated') {
         const kcStorage = this.contracts.knowledgeCollectionStorage;
         if (kcStorage) {
-          const kcFilter = kcStorage.filters.KnowledgeCollectionCreated();
-          const kcLogs = await kcStorage.queryFilter(kcFilter, filter.fromBlock ?? 0);
+          const fromB = filter.fromBlock ?? 0;
+          const toB = filter.toBlock ?? 'latest';
 
-          // Also fetch KnowledgeAssetsMinted to get publisher address and KA range
+          const kcFilter = kcStorage.filters.KnowledgeCollectionCreated();
+          const kcLogs = await kcStorage.queryFilter(kcFilter, fromB, toB);
+
           const mintFilter = kcStorage.filters.KnowledgeAssetsMinted();
-          const mintLogs = await kcStorage.queryFilter(mintFilter, filter.fromBlock ?? 0);
-          const mintByBlock = new Map<number, { publisherAddress: string; startKAId: string; endKAId: string }>();
+          const mintLogs = await kcStorage.queryFilter(mintFilter, fromB, toB);
+          const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
           for (const ml of mintLogs) {
             const mp = kcStorage.interface.parseLog({ topics: [...ml.topics], data: ml.data });
             if (mp) {
-              mintByBlock.set(ml.blockNumber, {
+              mintByTx.set(ml.transactionHash, {
                 publisherAddress: mp.args.to,
                 startKAId: mp.args.startId.toString(),
                 endKAId: (BigInt(mp.args.endId) - 1n).toString(),
@@ -758,7 +760,7 @@ export class EVMChainAdapter implements ChainAdapter {
           for (const log of kcLogs) {
             const parsed = kcStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
-              const mint = mintByBlock.get(log.blockNumber);
+              const mint = mintByTx.get(log.transactionHash);
               yield {
                 type: 'KCCreated',
                 blockNumber: log.blockNumber,
@@ -767,6 +769,7 @@ export class EVMChainAdapter implements ChainAdapter {
                   merkleRoot: parsed.args.merkleRoot,
                   merkleRootBytes: parsed.args.merkleRoot,
                   byteSize: parsed.args.byteSize.toString(),
+                  txHash: log.transactionHash,
                   publisherAddress: mint?.publisherAddress ?? '',
                   startKAId: mint?.startKAId ?? '0',
                   endKAId: mint?.endKAId ?? '0',

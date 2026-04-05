@@ -689,18 +689,22 @@ export class MockChainAdapter implements ChainAdapter {
     });
 
     const txHash = this.peekTxHash();
-    this.pushEvent('KnowledgeCollectionCreated', {
-      id: kcId.toString(),
+    const startKAId = kcId * 100n + 1n;
+    const endKAId = startKAId + BigInt(params.knowledgeAssetsAmount) - 1n;
+
+    this.pushEvent('KCCreated', {
+      kcId: kcId.toString(),
       publishOperationId: params.publishOperationId,
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
+      txHash,
+      publisherAddress: this.signerAddress,
+      startKAId: startKAId.toString(),
+      endKAId: endKAId.toString(),
       isImmutable: params.isImmutable,
       contextGraphId: params.contextGraphId.toString(),
       convictionAccountId: params.convictionAccountId.toString(),
     });
-
-    const startKAId = kcId * 100n + 1n;
-    const endKAId = startKAId + BigInt(params.knowledgeAssetsAmount) - 1n;
 
     const result = this.txResult(true);
     return {

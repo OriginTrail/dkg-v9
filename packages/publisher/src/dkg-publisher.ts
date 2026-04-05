@@ -792,9 +792,11 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
-    // Collect receiver signatures from peers (replicate-then-publish)
+    // Collect receiver signatures from peers (replicate-then-publish).
+    // Skip if V10 ACKs were already collected — they supersede the legacy
+    // receiver signature path and the on-chain V10 contract uses ACK sigs directly.
     let collectedReceiverSigs: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> | undefined;
-    if (options.receiverSignatureProvider) {
+    if (options.receiverSignatureProvider && !v10ACKs) {
       onPhase?.('collect_signatures', 'start');
       try {
         collectedReceiverSigs = await options.receiverSignatureProvider(merkleRootHex, publicByteSize);

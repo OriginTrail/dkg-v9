@@ -76,21 +76,26 @@ export class StorageACKHandler {
         throw new Error('stagingQuads present but contained no parseable N-Quads');
       }
 
-      // Validate kaCount matches the number of distinct root entities
+      // Validate kaCount matches the number of declared root entities.
+      // Exclude skolemized blank node children (/.well-known/genid/) from the count
+      // since those are internal sub-nodes of a single KA, not separate entities.
       const uniqueSubjects = new Set(parsed.map(q => q.subject));
-      if (intent.kaCount > 0 && uniqueSubjects.size !== intent.kaCount) {
+      const rootSubjects = new Set(
+        [...uniqueSubjects].filter(s => !s.includes('/.well-known/genid/')),
+      );
+      if (intent.kaCount > 0 && rootSubjects.size !== intent.kaCount) {
         throw new Error(
           `kaCount mismatch: intent claims ${intent.kaCount} KAs but staging quads have ` +
-          `${uniqueSubjects.size} distinct root entities`,
+          `${rootSubjects.size} root entities (${uniqueSubjects.size} total subjects)`,
         );
       }
 
-      // Validate rootEntities match actual subjects in the payload
+      // Validate rootEntities match actual root subjects in the payload
       if (intent.rootEntities && intent.rootEntities.length > 0) {
         for (const entity of intent.rootEntities) {
-          if (!uniqueSubjects.has(entity)) {
+          if (!rootSubjects.has(entity)) {
             throw new Error(
-              `rootEntity '${entity}' from intent not found in staging quads subjects`,
+              `rootEntity '${entity}' from intent not found in staging quads root subjects`,
             );
           }
         }

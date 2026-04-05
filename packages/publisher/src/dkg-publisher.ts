@@ -447,6 +447,7 @@ export class DKGPublisher implements Publisher {
       operationCtx: ctx,
       onPhase: options?.onPhase,
       v10ACKProvider: options?.v10ACKProvider,
+      contextGraphId: ctxGraphId ?? undefined,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
@@ -768,7 +769,8 @@ export class DKGPublisher implements Publisher {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, paranetId, kaCount, rootEntities, publicByteSize, nquadsBytes);
+        const ackDomain = options.contextGraphId ?? paranetId;
+        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, nquadsBytes);
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -865,7 +867,8 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         if (v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function') {
-          const contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(paranetId)));
+          const ackDomain = options.contextGraphId ?? paranetId;
+          const contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomain)));
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
             contextGraphId: contextGraphIdBigInt,

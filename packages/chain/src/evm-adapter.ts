@@ -1160,6 +1160,10 @@ export class EVMChainAdapter implements ChainAdapter {
     return this.signer.privateKey;
   }
 
+  isV10Ready(): boolean {
+    return !!this.contracts.knowledgeAssetsV10;
+  }
+
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
     const sig = ethers.Signature.from(
       await this.signer.signMessage(messageHash),

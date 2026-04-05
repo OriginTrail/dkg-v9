@@ -148,7 +148,6 @@ describe('V10 Publish E2E', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities,
-      finalizationTopic: `dkg/context-graph/${contextGraphId}/finalization`,
     });
 
     expect(result.acks).toHaveLength(3);

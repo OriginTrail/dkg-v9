@@ -330,6 +330,9 @@ export interface ChainAdapter {
   /** Get the private key for V10 ACK signing (core nodes only). */
   getACKSignerKey?(): string | undefined;
 
+  /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
+  isV10Ready?(): boolean;
+
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;

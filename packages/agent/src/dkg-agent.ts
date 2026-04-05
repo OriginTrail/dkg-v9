@@ -2319,6 +2319,7 @@ export class DKGAgent {
   private createV10ACKProvider(paranetId: string) {
     if (!this.router || !this.gossip) return undefined;
     if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') return undefined;
+    if (typeof this.chain.isV10Ready === 'function' && !this.chain.isV10Ready()) return undefined;
 
     const collector = new ACKCollector({
       gossipPublish: async (topic, data) => {

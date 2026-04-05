@@ -85,10 +85,11 @@ export class StorageACKHandler {
         );
       }
 
-      // Root verified — clear any stale data for this graph before persisting.
-      // This prevents accumulation from repeated publishes for the same CG.
-      await this.store.dropGraph(swmGraphUri);
-      const graphedQuads = parsed.map(q => ({ ...q, graph: swmGraphUri }));
+      // Root verified — persist into a scoped staging sub-graph to avoid
+      // mutating the main SWM graph (which may contain unrelated workspace data).
+      const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
+      await this.store.dropGraph(stagingGraphUri);
+      const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
       await this.store.insert(graphedQuads);
       swmQuads = parsed;
     } else {

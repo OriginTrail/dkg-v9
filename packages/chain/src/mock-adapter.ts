@@ -612,6 +612,10 @@ export class MockChainAdapter implements ChainAdapter {
     return undefined;
   }
 
+  isV10Ready(): boolean {
+    return true;
+  }
+
   async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {

@@ -92,6 +92,11 @@ export interface PublishOptions {
    * When provided, ACKs are collected and stored in the result.
    */
   v10ACKProvider?: V10ACKProvider;
+  /**
+   * When publishing into a specific context graph (enshrineFromWorkspace),
+   * this overrides paranetId as the ACK domain and on-chain contextGraphId.
+   */
+  contextGraphId?: string;
 }
 
 export interface PublishResult {

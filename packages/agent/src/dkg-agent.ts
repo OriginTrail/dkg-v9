@@ -359,24 +359,29 @@ export class DKGAgent {
     }
 
     // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
-    // Priority: explicit ackSignerKey > chainConfig.operationalKeys[0] > adapter.getACKSignerKey()
+    // Priority: explicit ackSignerKey > adapter.getACKSignerKey().
+    // chainConfig.operationalKeys is NOT consulted — when a prebuilt chainAdapter is
+    // supplied, chainConfig is conceptually ignored per the config contract.
     const ackSignerKeyStr = this.config.ackSignerKey
-      ?? this.config.chainConfig?.operationalKeys?.[0]
       ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
     if ((this.config.nodeRole ?? 'edge') === 'core' && ackSignerKeyStr) {
-      const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
-      const identityId = await this.chain.getIdentityId();
-      if (identityId > 0n) {
-        const ackHandler = new StorageACKHandler(this.store, {
-          nodeRole: 'core',
-          nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
-          signerWallet: ackSignerWallet,
-          contextGraphSharedMemoryUri,
-        }, this.eventBus);
-        this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-        this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
-      } else {
-        this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+      try {
+        const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
+        const identityId = await this.chain.getIdentityId();
+        if (identityId > 0n) {
+          const ackHandler = new StorageACKHandler(this.store, {
+            nodeRole: 'core',
+            nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
+            signerWallet: ackSignerWallet,
+            contextGraphSharedMemoryUri,
+          }, this.eventBus);
+          this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+          this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
+        } else {
+          this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+        }
+      } catch (err) {
+        this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -2313,6 +2318,7 @@ export class DKGAgent {
    */
   private createV10ACKProvider(paranetId: string) {
     if (!this.router || !this.gossip) return undefined;
+    if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') return undefined;
 
     const collector = new ACKCollector({
       gossipPublish: async (topic, data) => {

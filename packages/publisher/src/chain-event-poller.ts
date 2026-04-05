@@ -103,7 +103,12 @@ export class ChainEventPoller {
       }
     }
 
-    const eventTypes = ['KnowledgeBatchCreated', 'KCCreated'];
+    // Gate event types on deployed-contract capabilities to avoid
+    // throwing on V10-only deployments missing legacy event ABIs.
+    const eventTypes: string[] = [];
+    const isV10 = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
+    if (!isV10) eventTypes.push('KnowledgeBatchCreated');
+    eventTypes.push('KCCreated');
     if (watchParanets) eventTypes.push('ParanetCreated');
 
     const fromBlock = this.lastBlock + 1;

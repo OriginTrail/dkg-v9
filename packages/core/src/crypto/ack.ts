@@ -29,26 +29,27 @@ function uint256ToBytesValue(value: bigint): Uint8Array {
 /**
  * Compute the ACK digest that core nodes sign to attest data integrity.
  *
- * ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount)))
+ * ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize)))
  *
  * This function computes the inner digest (before EIP-191 prefix).
  * The EIP-191 prefix is applied by the signing function (e.g. ethers signMessage).
  *
  * @param contextGraphId - The uint256 context graph identifier
  * @param merkleRoot - The 32-byte merkle root of the triple set
- * @param kaCount - Optional number of knowledge assets (included in digest if provided)
+ * @param kaCount - Optional number of knowledge assets
+ * @param byteSize - Optional public byte size (uint88 on-chain, packed as uint256)
  * @returns 32-byte keccak256 digest
  */
-export function computeACKDigest(contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number): Uint8Array {
+export function computeACKDigest(contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint): Uint8Array {
   if (merkleRoot.length !== 32) {
     throw new Error(`merkleRoot must be 32 bytes, got ${merkleRoot.length}`);
   }
   if (kaCount !== undefined) {
-    // V10.1+: include kaCount in digest to prevent mint count manipulation
-    const packed = new Uint8Array(96);
+    const packed = new Uint8Array(128);
     packed.set(uint256ToBytes(contextGraphId), 0);
     packed.set(merkleRoot, 32);
     packed.set(uint256ToBytesValue(BigInt(kaCount)), 64);
+    packed.set(uint256ToBytesValue(byteSize ?? 0n), 96);
     return keccak256(packed);
   }
   const packed = new Uint8Array(64);

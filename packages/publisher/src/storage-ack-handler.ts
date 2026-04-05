@@ -151,7 +151,10 @@ export class StorageACKHandler {
     } catch {
       contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
     }
-    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, intent.kaCount);
+    const publicByteSize = typeof intent.publicByteSize === 'number'
+      ? BigInt(intent.publicByteSize)
+      : BigInt(Number(intent.publicByteSize));
+    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, intent.kaCount, publicByteSize);
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

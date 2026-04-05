@@ -1100,11 +1100,14 @@ export class EVMChainAdapter implements ChainAdapter {
     let publisherAddress = txSigner.address;
     const kcs = this.contracts.knowledgeCollectionStorage;
     if (kcs) {
+      let foundKCCreated = false;
+      let foundKAMinted = false;
       for (const log of receipt.logs) {
         try {
           const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'KnowledgeCollectionCreated') {
             kcId = BigInt(parsed.args.id);
+            foundKCCreated = true;
           }
           if (parsed?.name === 'KnowledgeAssetsMinted') {
             startKAId = BigInt(parsed.args.startId);
@@ -1112,8 +1115,21 @@ export class EVMChainAdapter implements ChainAdapter {
             // convert to inclusive for consistent UAL range representation.
             endKAId = BigInt(parsed.args.endId) - 1n;
             publisherAddress = parsed.args.to;
+            foundKAMinted = true;
           }
         } catch { /* not this contract */ }
+      }
+      if (!foundKCCreated) {
+        throw new Error(
+          `V10 publish tx ${receipt.hash} succeeded but KnowledgeCollectionCreated event ` +
+          `not found in receipt logs — contract ABI may be stale`,
+        );
+      }
+      if (!foundKAMinted) {
+        throw new Error(
+          `V10 publish tx ${receipt.hash} succeeded but KnowledgeAssetsMinted event ` +
+          `not found in receipt logs — contract ABI may be stale`,
+        );
       }
     }
 

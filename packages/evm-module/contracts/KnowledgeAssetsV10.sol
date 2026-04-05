@@ -10,6 +10,7 @@ import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.s
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
+import {StakingStorage} from "./storage/StakingStorage.sol";
 import {PublishingConvictionAccount} from "./PublishingConvictionAccount.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
 import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
@@ -145,7 +146,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             publisherNodeVS
         );
 
-        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount));
+        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount, uint256(byteSize)));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
 
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
@@ -275,6 +276,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         ) {
             revert KnowledgeCollectionLib.SignerIsNotNodeOperator(identityId, signer);
         }
+
+        // Core nodes must be staked (spec §9.0)
+        StakingStorage ss = StakingStorage(hub.getContractAddress("StakingStorage"));
+        require(ss.getNodeStake(identityId) > 0, "ACK signer has no stake");
     }
 
     // ========================================================================

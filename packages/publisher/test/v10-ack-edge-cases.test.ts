@@ -30,8 +30,8 @@ function makeEventBus() {
   return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount);
+async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint) {
+  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize);
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -67,13 +67,14 @@ function buildSendP2P(opts: {
   identityMap?: Record<string, number>;
   merkleRootOverride?: Uint8Array;
   kaCount?: number;
+  byteSize?: bigint;
 } = {}) {
   const wallets = opts.wallets ?? coreWallets;
   return async (peerId: string) => {
     const idx = parseInt(peerId.replace('peer-', ''), 10);
     const wallet = wallets[idx % wallets.length];
     const root = opts.merkleRootOverride ?? merkleRoot;
-    const { r, vs } = await signACK(wallet, testCGId, root, opts.kaCount ?? 2);
+    const { r, vs } = await signACK(wallet, testCGId, root, opts.kaCount ?? 2, opts.byteSize ?? 500n);
     const identityId = opts.identityMap?.[peerId] ?? (idx + 1);
     return encodeStorageACK({
       merkleRoot: root,
@@ -253,7 +254,7 @@ describe('ACKCollector deduplication', () => {
         callCounts.set(peerId, count);
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2, 500n);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -332,7 +333,7 @@ describe('ACKCollector retry behavior', () => {
         }
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2, 500n);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -362,7 +363,7 @@ describe('ACKCollector retry behavior', () => {
         if (failPeers.has(peerId)) throw new Error('unreachable');
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 2, 500n);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -692,7 +693,7 @@ describe('StorageACKHandler signature format', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
 
-    const expectedDigest = computeACKDigest(testCGId, merkleRoot, 2);
+    const expectedDigest = computeACKDigest(testCGId, merkleRoot, 2, 300n);
     const prefixedHash = ethers.hashMessage(expectedDigest);
 
     const sigR = ack.coreNodeSignatureR instanceof Uint8Array
@@ -729,7 +730,7 @@ describe('StorageACKHandler signature format', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
 
-    const digest = computeACKDigest(testCGId, merkleRoot, 2);
+    const digest = computeACKDigest(testCGId, merkleRoot, 2, BigInt(stagingBytes.length));
     const prefixedHash = ethers.hashMessage(digest);
 
     const sigR = ack.coreNodeSignatureR instanceof Uint8Array

@@ -158,6 +158,18 @@ export class MockChainAdapter implements ChainAdapter {
       txHash,
     });
 
+    // Also emit V10-style KCCreated so ChainEventPoller detects events
+    // regardless of isV10Ready() gating (mirrors real-world transition behaviour).
+    this.pushEvent('KCCreated', {
+      kcId: batchId.toString(),
+      merkleRoot: toHex(params.merkleRoot),
+      publisherAddress: this.signerAddress,
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      kaCount: params.kaCount,
+      txHash,
+    });
+
     const result = this.txResult(true);
     return {
       batchId,

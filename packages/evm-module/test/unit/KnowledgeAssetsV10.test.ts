@@ -25,6 +25,7 @@ import {
   getDefaultPublishingNode,
   getDefaultReceivingNodes,
   getDefaultKCCreator,
+  setNodeStake,
 } from '../helpers/setup-helpers';
 
 type V10Fixture = {
@@ -49,6 +50,7 @@ async function getV10SignaturesData(
   receivingNodes: { operational: SignerWithAddress; admin: SignerWithAddress }[],
   contextGraphId: bigint,
   knowledgeAssetsAmount: number = 10,
+  byteSize: number = 1000,
   merkleRoot: string = ethers.keccak256(ethers.toUtf8Bytes('test-merkle-root')),
 ) {
   const publisherMessageHash = ethers.solidityPackedKeccak256(
@@ -62,8 +64,8 @@ async function getV10SignaturesData(
   );
 
   const ackDigest = ethers.solidityPackedKeccak256(
-    ['uint256', 'bytes32', 'uint256'],
-    [contextGraphId, merkleRoot, knowledgeAssetsAmount],
+    ['uint256', 'bytes32', 'uint256', 'uint256'],
+    [contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize],
   );
 
   const receiverRs = [];
@@ -93,8 +95,22 @@ describe('@unit KnowledgeAssetsV10', () => {
   let Token: Token;
   let ParametersStorage: ParametersStorage;
   let Profile: Profile;
+  let StakingContract: Staking;
 
   const CONTEXT_GRAPH_ID = 42n;
+  const STAKE_AMOUNT = ethers.parseEther('50000');
+
+  async function stakeForNode(
+    node: { operational: SignerWithAddress; admin: SignerWithAddress },
+    identityId: number,
+  ) {
+    await Token.mint(node.operational.address, STAKE_AMOUNT);
+    await Token.connect(node.operational).approve(
+      await StakingContract.getAddress(),
+      STAKE_AMOUNT,
+    );
+    await StakingContract.connect(node.operational).stake(identityId, STAKE_AMOUNT);
+  }
 
   async function deployV10Fixture(): Promise<V10Fixture> {
     await hre.deployments.fixture([
@@ -149,6 +165,7 @@ describe('@unit KnowledgeAssetsV10', () => {
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
+    const fixture = await loadFixture(deployV10Fixture);
     ({
       accounts,
       KnowledgeAssetsV10,
@@ -159,7 +176,8 @@ describe('@unit KnowledgeAssetsV10', () => {
       Token,
       ParametersStorage,
       Profile,
-    } = await loadFixture(deployV10Fixture));
+    } = fixture);
+    StakingContract = fixture.Staking;
   });
 
   it('Should create KA with V10 ACK digest (contextGraphId + merkleRoot)', async () => {
@@ -168,7 +186,12 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
-    const receiverIds = (await createProfiles(Profile, receivingNodes)).map((p) => p.identityId);
+    await stakeForNode(publishingNode, publisherIdentityId);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const tokenAmount = ethers.parseEther('100');
     const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID);
@@ -207,7 +230,12 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
-    const receiverIds = (await createProfiles(Profile, receivingNodes)).map((p) => p.identityId);
+    await stakeForNode(publishingNode, publisherIdentityId);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-merkle-root'));
     const publisherMessageHash = ethers.solidityPackedKeccak256(
@@ -256,6 +284,7 @@ describe('@unit KnowledgeAssetsV10', () => {
     const publishingNode = getDefaultPublishingNode(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
+    await stakeForNode(publishingNode, publisherIdentityId);
 
     const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, [], CONTEXT_GRAPH_ID);
 
@@ -289,10 +318,15 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
-    const receiverIds = (await createProfiles(Profile, receivingNodes)).map((p) => p.identityId);
+    await stakeForNode(publishingNode, publisherIdentityId);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const tokenAmount = ethers.parseEther('100');
-    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID);
+    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID, 5, 500);
 
     await Token.connect(kcCreator).increaseAllowance(KnowledgeAssetsV10.getAddress(), tokenAmount);
 
@@ -325,10 +359,15 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
-    const receiverIds = (await createProfiles(Profile, receivingNodes)).map((p) => p.identityId);
+    await stakeForNode(publishingNode, publisherIdentityId);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const tokenAmount = ethers.parseEther('100');
-    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID);
+    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID, 5, 500);
 
     await Token.connect(kcCreator).increaseAllowance(KnowledgeAssetsV10.getAddress(), tokenAmount);
 
@@ -372,10 +411,15 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
-    const receiverIds = (await createProfiles(Profile, receivingNodes)).map((p) => p.identityId);
+    await stakeForNode(publishingNode, publisherIdentityId);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const tokenAmount = ethers.parseEther('100');
-    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID);
+    const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID, 5, 500);
 
     await Token.connect(kcCreator).increaseAllowance(KnowledgeAssetsV10.getAddress(), tokenAmount);
 
@@ -411,7 +455,11 @@ describe('@unit KnowledgeAssetsV10', () => {
     const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
 
     const { identityId: publisherIdentityId } = await createProfile(Profile, publishingNode);
+    await stakeForNode(publishingNode, publisherIdentityId);
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    for (let i = 0; i < receivingNodes.length; i++) {
+      await stakeForNode(receivingNodes[i], receiverProfiles[i].identityId);
+    }
 
     const sig = await getV10SignaturesData(publishingNode, publisherIdentityId, receivingNodes, CONTEXT_GRAPH_ID);
 

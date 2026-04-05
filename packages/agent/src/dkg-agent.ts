@@ -367,17 +367,13 @@ export class DKGAgent {
     const hasACKSigningCapability = ackSignerKeyStr || typeof this.chain.signACKDigest === 'function';
     if ((this.config.nodeRole ?? 'edge') === 'core' && hasACKSigningCapability) {
       try {
-        let ackSignerWallet: ethers.Wallet;
-        if (ackSignerKeyStr) {
-          ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
-        } else {
-          // No extractable key — create a placeholder wallet. The actual signing
-          // will be done through chain.signACKDigest() once StorageACKHandler
-          // is updated. For now, fall through to registration with an ephemeral key
-          // to avoid blocking the start flow.
-          this.log.info(ctx, `V10 StorageACK: no explicit signer key, using adapter signACKDigest capability`);
-          ackSignerWallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
+        if (!ackSignerKeyStr) {
+          // signACKDigest is available but no extractable key — skip registration
+          // until StorageACKHandler can delegate signing to the adapter.
+          this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred`);
+          throw new Error('No ACK signer key available for StorageACKHandler');
         }
+        const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
         const identityId = await this.chain.getIdentityId();
         if (identityId > 0n) {
           const ackHandler = new StorageACKHandler(this.store, {

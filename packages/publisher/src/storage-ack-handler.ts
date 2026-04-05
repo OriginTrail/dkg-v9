@@ -126,7 +126,7 @@ export class StorageACKHandler {
         try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
       }, 10 * 60 * 1000);
     } else {
-      // Fallback: data should already be in SWM (enshrineFromWorkspace path)
+      // Fallback: data should already be in SWM (publishFromSharedMemory path)
       swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
 
       if (swmQuads.length === 0) {

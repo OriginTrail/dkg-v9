@@ -93,7 +93,7 @@ export interface PublishOptions {
    */
   v10ACKProvider?: V10ACKProvider;
   /**
-   * When publishing into a specific context graph (enshrineFromWorkspace),
+   * When publishing into a specific context graph (publishFromSharedMemory),
    * this overrides paranetId as the ACK domain and on-chain contextGraphId.
    */
   contextGraphId?: string;

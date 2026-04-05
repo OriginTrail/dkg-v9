@@ -42,7 +42,7 @@ interface DKGAgent {
     conditions: Array<{ subject: string; predicate: string; expectedValue: string | null }>,
   ): Promise<{ workspaceOperationId: string }>;
   publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
-  enshrineFromWorkspace(
+  publishFromSharedMemory(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
@@ -985,7 +985,7 @@ export class OriginTrailGameCoordinator {
    * Quads are normalized to the workspace graph before staging because
    * the workspace validator enforces graph URI === paranet workspace graph.
    * The on-chain context graph linkage is handled by the contextGraphId
-   * parameter passed to enshrineFromWorkspace, not the quad's graph URI.
+   * parameter passed to publishFromSharedMemory, not the quad's graph URI.
    */
   private async enshrineToContextGraph(
     swarm: SwarmState,
@@ -1000,7 +1000,7 @@ export class OriginTrailGameCoordinator {
     const rootEntities = [...new Set(normalized.map(q => q.subject))];
 
     if (swarm.contextGraphId) {
-      const result = await this.agent.enshrineFromWorkspace(
+      const result = await this.agent.publishFromSharedMemory(
         this.paranetId,
         { rootEntities },
         { contextGraphId: swarm.contextGraphId, contextGraphSignatures },

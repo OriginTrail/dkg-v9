@@ -282,7 +282,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
-    const enshrineResult = await nodeA.enshrineFromWorkspace(PARANET, {
+    const enshrineResult = await nodeA.publishFromSharedMemory(PARANET, {
       rootEntities: [ENTITY_1],
     });
 
@@ -368,7 +368,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(ws2.bindings.length).toBe(1);
 
     // Enshrine entity 2
-    const result2 = await nodeA.enshrineFromWorkspace(PARANET, { rootEntities: [ENTITY_2] });
+    const result2 = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_2] });
     expect(result2.status).toBe('confirmed');
     expect(result2.onChainResult).toBeDefined();
 
@@ -384,7 +384,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
   // ── Workspace cleanup: clearWorkspaceAfter flag ────────────────────────
 
-  it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async (ctx) => {
+  it('publishFromSharedMemory with clearWorkspaceAfter removes workspace data', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 
@@ -398,7 +398,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     );
     expect(wsBefore.bindings.length).toBe(1);
 
-    const result = await nodeA.enshrineFromWorkspace(PARANET, { rootEntities: [ENTITY_3] }, {
+    const result = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_3] }, {
       clearWorkspaceAfter: true,
     });
     expect(result.status).toBe('confirmed');

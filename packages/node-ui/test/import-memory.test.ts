@@ -9,18 +9,18 @@ function createMocks() {
   const mockWriteToWorkspace = vi.fn().mockResolvedValue({ workspaceOperationId: 'op-1' });
   const mockCreateParanet = vi.fn().mockResolvedValue(undefined);
   const mockListParanets = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
-  const mockEnshrineFromWorkspace = vi.fn().mockResolvedValue({});
+  const mockPublishFromSharedMemory = vi.fn().mockResolvedValue({});
 
   return {
     mockQuery,
     mockWriteToWorkspace,
     mockCreateParanet,
     mockListParanets,
-    mockEnshrineFromWorkspace,
+    mockPublishFromSharedMemory,
     tools: {
       query: mockQuery,
       writeToWorkspace: mockWriteToWorkspace,
-      enshrineFromWorkspace: mockEnshrineFromWorkspace,
+      publishFromSharedMemory: mockPublishFromSharedMemory,
       createParanet: mockCreateParanet,
       listParanets: mockListParanets,
     },

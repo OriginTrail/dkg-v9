@@ -235,7 +235,7 @@ When the user asks about their memories, imported memories, preferences, or what
           const paranetId = String(args.paranetId ?? '');
           const sel = String(args.selection ?? 'all');
           const selection = sel === 'all' ? 'all' as const : { rootEntities: sel.split(',').map(s => s.trim()).filter(Boolean) };
-          const res = await this.agentTools.enshrineFromWorkspace(paranetId, selection);
+          const res = await this.agentTools.publishFromSharedMemory(paranetId, selection);
           return { result: res, summary: `Enshrined workspace content for paranet ${paranetId}.` };
         }
         default:

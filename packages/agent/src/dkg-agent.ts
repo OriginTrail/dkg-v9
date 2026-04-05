@@ -9,7 +9,7 @@ import {
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
-  type DKGNodeConfig, type OperationContext,
+  type DKGNodeConfig, type OperationContext, type GetView,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -1347,11 +1347,11 @@ export class DKGAgent {
   }
 
   /**
-   * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
+   * Publish workspace content: read from shared memory graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
    */
-  async enshrineFromWorkspace(
+  async publishFromSharedMemory(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
@@ -1362,13 +1362,13 @@ export class DKGAgent {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
   ): Promise<PublishResult> {
-    const ctx = options?.operationCtx ?? createOperationContext('enshrine');
+    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
     const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
 
     // Data is already in peers' SWM (via prior writeToWorkspace + gossip),
     // so V10 ACK collection can proceed without swmReplicator.
     const v10ACKProvider = this.createV10ACKProvider(paranetId);
-    const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
+    const result = await this.publisher.publishFromSharedMemory(paranetId, selection, {
       operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       onPhase: options?.onPhase,
@@ -1406,6 +1406,13 @@ export class DKGAgent {
     }
 
     return result;
+  }
+
+  /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
+  async enshrineFromWorkspace(
+    ...args: Parameters<DKGAgent['publishFromSharedMemory']>
+  ): ReturnType<DKGAgent['publishFromSharedMemory']> {
+    return this.publishFromSharedMemory(...args);
   }
 
   /**
@@ -1488,15 +1495,26 @@ export class DKGAgent {
 
   async query(
     sparql: string,
-    options?: string | { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean; operationCtx?: OperationContext },
+    options?: string | {
+      paranetId?: string;
+      graphSuffix?: '_shared_memory';
+      includeWorkspace?: boolean;
+      operationCtx?: OperationContext;
+      view?: GetView;
+      verifiedGraph?: string;
+    },
   ) {
     const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
     const ctx = opts.operationCtx ?? createOperationContext('query');
-    this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
+    const viewLabel = opts.view ? ` view=${opts.view}` : '';
+    this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.paranetId,
       graphSuffix: opts.graphSuffix,
       includeWorkspace: opts.includeWorkspace,
+      view: opts.view,
+      agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
+      verifiedGraph: opts.verifiedGraph,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -2438,6 +2456,30 @@ export class DKGAgent {
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }
+  }
+
+  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+
+  get draft() {
+    const agent = this;
+    const agentAddress = this.publisher['publisherAddress'] ?? this.node.peerId?.toString() ?? 'unknown';
+    return {
+      async create(contextGraphId: string, draftName: string): Promise<string> {
+        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);
+      },
+      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>): Promise<void> {
+        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples);
+      },
+      async query(contextGraphId: string, draftName: string): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress);
+      },
+      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all' }): Promise<{ promotedCount: number }> {
+        return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
+      },
+      async discard(contextGraphId: string, draftName: string): Promise<void> {
+        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress);
+      },
+    };
   }
 
 }

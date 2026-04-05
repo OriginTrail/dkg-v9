@@ -1,6 +1,6 @@
 /**
  * E2E tests for the workspace graph: writeToWorkspace → GossipSub replicate →
- * query workspace → enshrineFromWorkspace → query data graph.
+ * query workspace → publishFromSharedMemory → query data graph.
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
@@ -102,7 +102,7 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 5000);
 
   it('node A enshrines workspace to data graph', async () => {
-    const result = await nodeA.enshrineFromWorkspace(PARANET, 'all');
+    const result = await nodeA.publishFromSharedMemory(PARANET, 'all');
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);

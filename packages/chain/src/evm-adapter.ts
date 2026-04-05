@@ -1168,19 +1168,19 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     const identityStorage = await this.resolveContract('IdentityStorage');
     if (!identityStorage) return false;
-    const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
-    if (chainId !== claimedIdentityId) return false;
+
+    // Match on-chain verification: keyHasPurpose(identityId, keccak256(signer), OPERATIONAL_KEY)
+    const OPERATIONAL_KEY = 2;
+    const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
+    const hasPurpose: boolean = await identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
+    if (!hasPurpose) return false;
 
     // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked")
-    try {
-      const stakingStorage = await this.resolveContract('StakingStorage');
-      if (stakingStorage) {
-        const stake: bigint = await stakingStorage.getNodeStake(claimedIdentityId);
-        if (stake === 0n) return false;
-      }
-    } catch {
-      // StakingStorage not available — accept identity-only verification
-    }
+    const stakingStorage = await this.resolveContract('StakingStorage');
+    if (!stakingStorage) return false;
+    const stake: bigint = await stakingStorage.getNodeStake(claimedIdentityId);
+    if (stake === 0n) return false;
+
     return true;
   }
 

@@ -5,7 +5,7 @@ import type { LlmConfig } from './llm/types.js';
 export interface MemoryToolContext {
   query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => Promise<any>;
   writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ workspaceOperationId: string }>;
-  enshrineFromWorkspace: (
+  publishFromSharedMemory: (
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     opts?: { clearWorkspaceAfter?: boolean },
@@ -1269,7 +1269,7 @@ export class ChatMemoryManager {
     opts?: { clearWorkspaceAfter?: boolean },
   ): Promise<EnshrineResult> {
     await this.ensureInitialized();
-    const result = await this.tools.enshrineFromWorkspace(MEMORY_PARANET, selection, {
+    const result = await this.tools.publishFromSharedMemory(MEMORY_PARANET, selection, {
       clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false,
     });
     return {

@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -13,6 +13,8 @@ import {
   generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
   generateOwnershipQuads,
+  generateAuthorshipProof,
+  generateShareTransitionMetadata,
   toHex,
   updateMetaMerkleRoot,
   type KAMetadata,
@@ -378,9 +380,9 @@ export class DKGPublisher implements Publisher {
 
   /**
    * Read quads from the paranet's workspace graph and publish them with full finality (data graph + chain).
-   * Selection: 'all' or { rootEntities: string[] } to enshrine only those root entities.
+   * Selection: 'all' or { rootEntities: string[] } to publish only those root entities from shared memory.
    */
-  async enshrineFromWorkspace(
+  async publishFromSharedMemory(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
@@ -392,7 +394,7 @@ export class DKGPublisher implements Publisher {
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
     },
   ): Promise<PublishResult> {
-    const ctx = options?.operationCtx ?? createOperationContext('enshrine');
+    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
 
     let sparql: string;
@@ -542,8 +544,11 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    if (options?.clearWorkspaceAfter) {
-      const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+    // SWM cleanup (spec §9.0.5): delete published triples from _shared_memory after confirmation.
+    // Defaults to true per spec — published triples MUST be removed from SWM.
+    const shouldClearSWM = options?.clearWorkspaceAfter !== false && publishResult.status === 'confirmed';
+    if (shouldClearSWM) {
+      const wsMetaGraph = this.graphManager.sharedMemoryMetaUri(paranetId);
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
       for (const rootEntity of kaMap.keys()) {
@@ -557,11 +562,16 @@ export class DKGPublisher implements Publisher {
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
       }
       if (ownerDeletedTotal > 0) {
-        this.log.info(ctx, `Cleared ${ownerDeletedTotal} ownership triple(s) during enshrine cleanup`);
+        this.log.info(ctx, `Cleared ${ownerDeletedTotal} SWM triple(s) after confirmed publish`);
       }
     }
 
     return publishResult;
+  }
+
+  /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
+  async enshrineFromWorkspace(...args: Parameters<DKGPublisher['publishFromSharedMemory']>): ReturnType<DKGPublisher['publishFromSharedMemory']> {
+    return this.publishFromSharedMemory(...args);
   }
 
   /**
@@ -760,14 +770,14 @@ export class DKGPublisher implements Publisher {
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
     // For direct publish: send staging quads inline via P2P so core nodes
     // can verify the merkle root without needing SWM pre-positioning.
-    // For enshrineFromWorkspace (contextGraphId set): data is already in
+    // For publishFromSharedMemory (contextGraphId set): data is already in
     // peers' SWM via workspace gossip — do NOT send inline quads; core nodes
     // verify against their local SWM copy (preserving storage-attestation).
     // Skipped for private publishes because StorageACKHandler cannot
     // recompute private merkle roots from SWM data alone.
     const hasPrivateData = privateRoots.length > 0;
-    const isEnshrineFromWorkspace = !!options.contextGraphId;
-    const stagingQuads = isEnshrineFromWorkspace
+    const isPublishFromSharedMemory = !!options.contextGraphId;
+    const stagingQuads = isPublishFromSharedMemory
       ? undefined
       : new TextEncoder().encode(nquadsStr);
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
@@ -956,6 +966,34 @@ export class DKGPublisher implements Publisher {
           );
         }
         await this.store.insert(confirmedQuads);
+
+        // Agent authorship proof (spec §9.0.6): sign keccak256(merkleRoot) and store in _meta
+        if (this.publisherWallet) {
+          try {
+            const merkleHashBytes = ethers.keccak256(kcMerkleRoot);
+            const sig = await this.publisherWallet.signMessage(ethers.getBytes(merkleHashBytes));
+            const proofQuads = generateAuthorshipProof({
+              kcUal: ual,
+              paranetId,
+              agentAddress: this.publisherWallet.address,
+              signature: sig,
+              signedHash: merkleHashBytes,
+            });
+            if (options.targetMetaGraphUri) {
+              const defaultMeta = `did:dkg:context-graph:${paranetId}/_meta`;
+              const remapped = proofQuads.map((q) =>
+                q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
+              );
+              await this.store.insert(remapped);
+            } else {
+              await this.store.insert(proofQuads);
+            }
+            this.log.info(ctx, `Authorship proof stored for agent ${this.publisherWallet.address}`);
+          } catch (proofErr) {
+            this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
+          }
+        }
+
         status = 'confirmed';
         onPhase?.('chain:submit', 'end');
         onPhase?.('chain:metadata', 'start');
@@ -1266,6 +1304,85 @@ export class DKGPublisher implements Publisher {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }
+  }
+
+  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+
+  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string): Promise<string> {
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    await this.store.createGraph(graphUri);
+    return graphUri;
+  }
+
+  async draftWrite(
+    contextGraphId: string,
+    draftName: string,
+    agentAddress: string,
+    triples: Array<{ subject: string; predicate: string; object: string }>,
+  ): Promise<void> {
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    const quads = triples.map((t) => ({ ...t, graph: graphUri }));
+    await this.store.insert(quads);
+  }
+
+  async draftQuery(
+    contextGraphId: string,
+    draftName: string,
+    agentAddress: string,
+  ): Promise<Quad[]> {
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    const result = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+    );
+    return result.type === 'quads' ? result.quads : [];
+  }
+
+  async draftPromote(
+    contextGraphId: string,
+    draftName: string,
+    agentAddress: string,
+    opts?: { entities?: string[] | 'all' },
+  ): Promise<{ promotedCount: number }> {
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId);
+
+    const result = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'quads' || result.quads.length === 0) return { promotedCount: 0 };
+
+    let quadsToPromote = result.quads;
+
+    if (opts?.entities && opts.entities !== 'all') {
+      const entitySet = new Set(opts.entities);
+      quadsToPromote = quadsToPromote.filter((q) => entitySet.has(q.subject));
+    }
+
+    const swmQuads = quadsToPromote.map((q) => ({ ...q, graph: swmGraphUri }));
+    await this.store.insert(swmQuads);
+
+    // Delete promoted triples from draft
+    await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
+
+    // Record ShareTransition metadata in _shared_memory_meta (spec §8)
+    const entities = [...new Set(quadsToPromote.map((q) => q.subject))];
+    const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const shareMetadata = generateShareTransitionMetadata({
+      contextGraphId,
+      operationId,
+      agentAddress,
+      draftName,
+      entities,
+      timestamp: new Date(),
+    });
+    await this.store.insert(shareMetadata);
+
+    return { promotedCount: swmQuads.length };
+  }
+
+  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string): Promise<void> {
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    await this.store.dropGraph(graphUri);
   }
 }
 

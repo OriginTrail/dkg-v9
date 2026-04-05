@@ -571,7 +571,7 @@ function WorkspaceTab() {
     setResult('');
     const opId = addBroadcast('publish', state.selectedNode, 'enshrine workspace');
     try {
-      const res = await api.enshrineFromWorkspace(state.selectedNode, paranet, 'all', true);
+      const res = await api.publishFromSharedMemory(state.selectedNode, paranet, 'all', true);
       completeOperation(opId, 'success', `KC: ${res.kcId}`);
       setResult(
         `Enshrined to chain.\nKC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +

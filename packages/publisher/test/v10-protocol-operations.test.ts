@@ -551,7 +551,7 @@ describe('V10 ACK Edge Cases', () => {
     expect(decoded.stagingQuads!.length).toBe(stagingBytes.length);
   });
 
-  it('stagingQuads omitted for enshrineFromWorkspace (SWM-verified path)', () => {
+  it('stagingQuads omitted for publishFromSharedMemory (SWM-verified path)', () => {
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,

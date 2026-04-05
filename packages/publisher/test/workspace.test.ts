@@ -143,7 +143,7 @@ describe('Workspace: writeToWorkspace', () => {
   });
 });
 
-describe('Workspace: enshrineFromWorkspace', () => {
+describe('Workspace: publishFromSharedMemory', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
   let chain: MockChainAdapter;
@@ -170,7 +170,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     ];
     await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
 
-    const result = await publisher.enshrineFromWorkspace(PARANET, 'all');
+    const result = await publisher.publishFromSharedMemory(PARANET, 'all');
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
@@ -194,7 +194,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
       q(entity2, 'http://schema.org/name', '"Two"'),
     ], { publisherPeerId: 'peer1' });
 
-    const result = await publisher.enshrineFromWorkspace(PARANET, {
+    const result = await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: [entity1],
     });
 
@@ -218,7 +218,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Clear After"')];
     await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
 
-    await publisher.enshrineFromWorkspace(PARANET, 'all', {
+    await publisher.publishFromSharedMemory(PARANET, 'all', {
       clearWorkspaceAfter: true,
     });
 
@@ -231,14 +231,14 @@ describe('Workspace: enshrineFromWorkspace', () => {
 
   it('throws when workspace is empty for selection', async () => {
     await expect(
-      publisher.enshrineFromWorkspace(PARANET, 'all'),
+      publisher.publishFromSharedMemory(PARANET, 'all'),
     ).rejects.toThrow(/No quads in workspace/);
   });
 
   it('escapes backslash and double-quote in rootEntity filter (SPARQL injection prevention)', async () => {
     const entityWithSpecialChars = 'urn:test:entity:with\\"backslash';
     await expect(
-      publisher.enshrineFromWorkspace(PARANET, {
+      publisher.publishFromSharedMemory(PARANET, {
         rootEntities: [entityWithSpecialChars],
       }),
     ).rejects.toThrow(/No valid rootEntities provided/);
@@ -246,11 +246,11 @@ describe('Workspace: enshrineFromWorkspace', () => {
 
   it('throws distinct error for empty rootEntities array', async () => {
     await expect(
-      publisher.enshrineFromWorkspace(PARANET, { rootEntities: [] }),
+      publisher.publishFromSharedMemory(PARANET, { rootEntities: [] }),
     ).rejects.toThrow(/No rootEntities provided/);
   });
 
-  it('enshrineFromWorkspace with contextGraphId remaps quads to context graph URIs', async () => {
+  it('publishFromSharedMemory with contextGraphId remaps quads to context graph URIs', async () => {
     const ctxId = '1';
     const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}`;
     const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}/_meta`;
@@ -266,7 +266,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     ];
     await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
 
-    const result = await publisher.enshrineFromWorkspace(PARANET, 'all', {
+    const result = await publisher.publishFromSharedMemory(PARANET, 'all', {
       contextGraphId: ctxId,
     });
 
@@ -290,7 +290,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
     }
   });
 
-  it('enshrineFromWorkspace with contextGraphId calls addBatchToContextGraph', async () => {
+  it('publishFromSharedMemory with contextGraphId calls addBatchToContextGraph', async () => {
     const ctxId = '1';
     await chain.createContextGraph!({
       participantIdentityIds: [1n],
@@ -302,7 +302,7 @@ describe('Workspace: enshrineFromWorkspace', () => {
 
     const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
 
-    await publisher.enshrineFromWorkspace(PARANET, 'all', { contextGraphId: ctxId });
+    await publisher.publishFromSharedMemory(PARANET, 'all', { contextGraphId: ctxId });
 
     expect(addBatchSpy).toHaveBeenCalledTimes(1);
     expect(addBatchSpy).toHaveBeenCalledWith(
@@ -379,12 +379,12 @@ describe('Workspace: ownership persistence and reconstruction', () => {
     expect(freshOwned.get(PARANET)?.get(entity2)).toBe('peerB');
   });
 
-  it('clears ownership quads on enshrineFromWorkspace with clearWorkspaceAfter', async () => {
+  it('clears ownership quads on publishFromSharedMemory with clearWorkspaceAfter', async () => {
     await publisher.writeToWorkspace(PARANET, [
       q(ENTITY, 'http://schema.org/name', '"Enshrine"'),
     ], { publisherPeerId: 'peer1' });
 
-    await publisher.enshrineFromWorkspace(PARANET, 'all', { clearWorkspaceAfter: true });
+    await publisher.publishFromSharedMemory(PARANET, 'all', { clearWorkspaceAfter: true });
 
     const result = await store.query(
       `ASK { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,

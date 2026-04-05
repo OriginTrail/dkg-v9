@@ -16,7 +16,7 @@ export {
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,
@@ -106,7 +106,7 @@ export {
 } from './lift-job.js';
 export { WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
-export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
+export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated, type OnCollectionUpdated, type OnAllowListUpdated, type OnProfileEvent, type CursorPersistence } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export { ACKCollector, type ACKCollectorDeps, type CollectedACK, type ACKCollectionResult } from './ack-collector.js';

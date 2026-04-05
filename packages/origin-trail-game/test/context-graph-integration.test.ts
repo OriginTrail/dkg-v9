@@ -2,7 +2,7 @@
  * Context Graph Integration Tests
  *
  * Verifies that the game coordinator properly wires up to the DKG context
- * graph protocol: createContextGraph on launch, enshrineFromWorkspace on
+ * graph protocol: createContextGraph on launch, publishFromSharedMemory on
  * turn resolution, and identity propagation through gossip messages.
  */
 
@@ -46,7 +46,7 @@ function makeMockAgent(peerId: string, identityId = 1n) {
       published.push(quads);
       return { onChainResult: { txHash: '0xpublish123' }, ual: 'did:dkg:test:ual' };
     },
-    enshrineFromWorkspace: async (_paranetId: string, selection: any, options?: any) => {
+    publishFromSharedMemory: async (_paranetId: string, selection: any, options?: any) => {
       enshrined.push({ selection, options });
       return { onChainResult: { txHash: '0xenshrine123', blockNumber: 100 }, ual: 'did:dkg:test:enshrined' };
     },
@@ -297,7 +297,7 @@ describe('Context Graph Integration', () => {
     });
   });
 
-  describe('enshrineFromWorkspace on turn resolution', () => {
+  describe('publishFromSharedMemory on turn resolution', () => {
     it('enshrines turn quads to context graph when contextGraphId is set', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
@@ -599,7 +599,7 @@ describe('Context Graph Integration', () => {
       coord.destroy();
     });
 
-    it('collected signatures are passed to enshrineFromWorkspace', async () => {
+    it('collected signatures are passed to publishFromSharedMemory', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 

@@ -18,7 +18,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({}),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -62,7 +62,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({}),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -218,7 +218,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({}),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -295,7 +295,7 @@ describe('ChatMemoryManager', () => {
   });
 
   it('publishSession uses derived session root entities when none are provided', async () => {
-    const enshrineFromWorkspace = vi.fn().mockResolvedValue({
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
       status: 'confirmed',
       publicQuads: [{}, {}],
       kcId: 10n,
@@ -305,7 +305,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace,
+        publishFromSharedMemory,
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -320,7 +320,7 @@ describe('ChatMemoryManager', () => {
       .mockResolvedValueOnce({ bindings: [{ s: 'urn:dkg:chat:session:s-2' }] }); // root count for status
 
     const result = await managerWithPublish.publishSession('s-2');
-    expect(enshrineFromWorkspace).toHaveBeenCalledWith(
+    expect(publishFromSharedMemory).toHaveBeenCalledWith(
       'agent-memory',
       { rootEntities: ['urn:dkg:chat:session:s-2', 'urn:dkg:chat:msg:m-2'] },
       { clearWorkspaceAfter: false },
@@ -331,7 +331,7 @@ describe('ChatMemoryManager', () => {
   });
 
   it('publishSession restricts requested roots to entities belonging to the target session', async () => {
-    const enshrineFromWorkspace = vi.fn().mockResolvedValue({
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
       status: 'confirmed',
       publicQuads: [{}, {}],
       kcId: 11n,
@@ -341,7 +341,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace,
+        publishFromSharedMemory,
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -359,7 +359,7 @@ describe('ChatMemoryManager', () => {
       rootEntities: ['urn:dkg:chat:msg:m-3', 'urn:dkg:chat:msg:not-in-session'],
     });
 
-    expect(enshrineFromWorkspace).toHaveBeenCalledWith(
+    expect(publishFromSharedMemory).toHaveBeenCalledWith(
       'agent-memory',
       { rootEntities: ['urn:dkg:chat:msg:m-3'] },
       { clearWorkspaceAfter: false },
@@ -367,7 +367,7 @@ describe('ChatMemoryManager', () => {
   });
 
   it('publishSession rejects requested roots that are not in session scope', async () => {
-    const enshrineFromWorkspace = vi.fn().mockResolvedValue({
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
       status: 'confirmed',
       publicQuads: [{}, {}],
     });
@@ -375,7 +375,7 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace,
+        publishFromSharedMemory,
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },
@@ -391,7 +391,7 @@ describe('ChatMemoryManager', () => {
         rootEntities: ['urn:dkg:chat:msg:not-in-session'],
       }),
     ).rejects.toThrow('Selected root entities are not part of session s-4');
-    expect(enshrineFromWorkspace).not.toHaveBeenCalled();
+    expect(publishFromSharedMemory).not.toHaveBeenCalled();
   });
 
   it('getSessionGraphDelta returns turn-scoped triples when watermark matches', async () => {
@@ -558,7 +558,7 @@ describe('ChatMemoryManager privacy guarantees', () => {
       {
         query: mockQuery,
         writeToWorkspace: mockWriteToWorkspace,
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({}),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createParanet: mockCreateParanet,
         listParanets: mockListParanets,
       },

@@ -7,10 +7,14 @@ import {
   generateConfirmedMetadata,
   generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
+  generateAuthorshipProof,
+  generateShareTransitionMetadata,
   type KCMetadata,
   type KAMetadata,
   type OnChainProvenance,
   type WorkspaceMetadata,
+  type AuthorshipProof,
+  type ShareTransitionMetadata,
 } from '../src/metadata.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -210,5 +214,119 @@ describe('generateWorkspaceMetadata', () => {
     const preds = quads.map(q => q.predicate);
     expect(preds).toContain(`${DKG}publishedAt`);
     expect(preds).toContain('http://www.w3.org/ns/prov#wasAttributedTo');
+  });
+});
+
+describe('generateAuthorshipProof', () => {
+  const proof: AuthorshipProof = {
+    kcUal: UAL,
+    paranetId: PARANET,
+    agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
+    signature: '0xdeadbeef01234567',
+    signedHash: '0xabcdef1234567890',
+  };
+
+  it('generates authoredBy link from KC to blank node', () => {
+    const quads = generateAuthorshipProof(proof);
+    const authoredBy = quads.find(q => q.subject === UAL && q.predicate === `${DKG}authoredBy`);
+    expect(authoredBy).toBeDefined();
+    expect(authoredBy!.object).toMatch(/^_:/);
+  });
+
+  it('blank node has AuthorshipProof type', () => {
+    const quads = generateAuthorshipProof(proof);
+    const authoredBy = quads.find(q => q.subject === UAL && q.predicate === `${DKG}authoredBy`)!;
+    const blankNode = authoredBy.object;
+    const typeQuad = quads.find(q => q.subject === blankNode && q.predicate === RDF_TYPE);
+    expect(typeQuad).toBeDefined();
+    expect(typeQuad!.object).toBe(`${DKG}AuthorshipProof`);
+  });
+
+  it('includes agent DID, signature, and signedHash', () => {
+    const quads = generateAuthorshipProof(proof);
+    const authoredBy = quads.find(q => q.subject === UAL && q.predicate === `${DKG}authoredBy`)!;
+    const blankNode = authoredBy.object;
+    const bnQuads = quads.filter(q => q.subject === blankNode);
+    const preds = bnQuads.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}agent`);
+    expect(preds).toContain(`${DKG}signature`);
+    expect(preds).toContain(`${DKG}signedHash`);
+  });
+
+  it('agent value is a did:dkg:agent URI', () => {
+    const quads = generateAuthorshipProof(proof);
+    const agentQuad = quads.find(q => q.predicate === `${DKG}agent`);
+    expect(agentQuad).toBeDefined();
+    expect(agentQuad!.object).toBe(`did:dkg:agent:${proof.agentAddress}`);
+  });
+
+  it('all quads target the correct meta graph', () => {
+    const quads = generateAuthorshipProof(proof);
+    for (const q of quads) {
+      expect(q.graph).toBe(META_GRAPH);
+    }
+  });
+
+  it('returns exactly 5 quads', () => {
+    const quads = generateAuthorshipProof(proof);
+    expect(quads).toHaveLength(5);
+  });
+});
+
+describe('generateShareTransitionMetadata', () => {
+  const shareMeta: ShareTransitionMetadata = {
+    contextGraphId: PARANET,
+    operationId: 'op-share-001',
+    agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
+    draftName: 'my-draft',
+    entities: ['urn:test:entity:alice', 'urn:test:entity:bob'],
+    timestamp: new Date('2026-04-01T00:00:00Z'),
+  };
+  const SWM_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+
+  it('generates ShareTransition with correct type', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    const typeQuad = quads.find(q => q.predicate === RDF_TYPE);
+    expect(typeQuad).toBeDefined();
+    expect(typeQuad!.object).toBe(`${DKG}ShareTransition`);
+  });
+
+  it('subject is urn:dkg:share:{operationId}', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    const subject = quads[0].subject;
+    expect(subject).toBe('urn:dkg:share:op-share-001');
+  });
+
+  it('includes source, agent, timestamp, and entities', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    const preds = quads.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}source`);
+    expect(preds).toContain(`${DKG}agent`);
+    expect(preds).toContain(`${DKG}timestamp`);
+    expect(preds).toContain(`${DKG}entities`);
+  });
+
+  it('source includes draft path with agent and name', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    const sourceQuad = quads.find(q => q.predicate === `${DKG}source`);
+    expect(sourceQuad!.object).toContain('draft/');
+    expect(sourceQuad!.object).toContain(shareMeta.agentAddress);
+    expect(sourceQuad!.object).toContain(shareMeta.draftName);
+  });
+
+  it('generates one entity quad per entity', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    const entityQuads = quads.filter(q => q.predicate === `${DKG}entities`);
+    expect(entityQuads).toHaveLength(2);
+    const entities = entityQuads.map(q => q.object);
+    expect(entities).toContain('urn:test:entity:alice');
+    expect(entities).toContain('urn:test:entity:bob');
+  });
+
+  it('all quads target the _shared_memory_meta graph', () => {
+    const quads = generateShareTransitionMetadata(shareMeta);
+    for (const q of quads) {
+      expect(q.graph).toBe(SWM_META_GRAPH);
+    }
   });
 });

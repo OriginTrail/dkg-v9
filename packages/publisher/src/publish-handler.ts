@@ -183,6 +183,22 @@ export class PublishHandler {
       this.log.error(opCtx, `Failed to promote tentative→confirmed in store: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // SWM cleanup (spec §9.0.5): delete published triples from _shared_memory
+    try {
+      const swmGraph = this.graphManager.sharedMemoryUri(pending.paranetId);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(pending.paranetId);
+      const rootEntities = new Set(pending.dataQuads.map(q => q.subject));
+      for (const rootEntity of rootEntities) {
+        await this.store.deleteByPattern({ graph: swmGraph, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(swmGraph, rootEntity + '/.well-known/genid/');
+        await this.store.deleteByPattern({
+          graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
+      }
+    } catch (swmErr) {
+      this.log.warn(opCtx, `SWM cleanup after confirm failed: ${swmErr instanceof Error ? swmErr.message : String(swmErr)}`);
+    }
+
     this.pendingPublishes.delete(ual);
     this.persistJournal();
     return true;

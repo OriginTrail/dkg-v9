@@ -99,7 +99,7 @@ export async function writeToWorkspace(
   });
 }
 
-export async function enshrineFromWorkspace(
+export async function publishFromSharedMemory(
   nodeId: number,
   paranetId: string,
   selection: 'all' | { rootEntities: string[] } = 'all',

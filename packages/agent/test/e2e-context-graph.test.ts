@@ -97,7 +97,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   }, 25_000);
 
   it('A enshrines to context graph; A has data in context graph URI', async () => {
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_CTX_1] },
       { contextGraphId },
@@ -182,7 +182,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       await sleep(500);
     }
 
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_CTX_2] },
       { contextGraphId, clearWorkspaceAfter: true },

@@ -128,14 +128,14 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     /**
      * The new flow:
      * 1. A has data in workspace (already replicated to B and C)
-     * 2. A calls enshrineFromWorkspace
+     * 2. A calls publishFromSharedMemory
      * 3. Publisher internally: prepares merkle root → requests receiver sigs from B, C
      * 4. B and C verify they have the data and sign (merkleRoot, publicByteSize)
      * 5. Publisher submits on-chain tx with collected receiver signatures
      * 6. On-chain: verifies publisher sig + minimumRequiredSignatures receiver sigs
      * 7. Finalization broadcast → B, C promote workspace → data graph
      */
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_1] },
     );
@@ -262,7 +262,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
      * 4. Submit atomic publishToContextGraph on-chain with both sets of signatures
      * 5. Broadcast finalization to peers
      */
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_2] },
       {
@@ -357,7 +357,7 @@ describe('E2E: Link existing published KC to context graph', () => {
     ]);
     await sleep(3000);
 
-    const result = await nodeA.enshrineFromWorkspace(PARANET, { rootEntities: [ENTITY_3] });
+    const result = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_3] });
     expect(result.status).toBe('confirmed');
     publishedBatchId = result.onChainResult!.batchId;
 
@@ -434,7 +434,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
      * single signature will be rejected by the chain's signature check,
      * resulting in a tentative (off-chain only) publish.
      */
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_1] },
     );
@@ -481,7 +481,7 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"', graph: '' },
     ]);
 
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_1] },
       { contextGraphId },
@@ -570,7 +570,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
      * even though it has no stake and isn't in the sharding table.
      */
     // Both core and edge node sign as participants
-    const result = await coreNode.enshrineFromWorkspace(
+    const result = await coreNode.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_1] },
       {

@@ -622,7 +622,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   const agentToolsContext = {
     query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
     writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.writeToWorkspace(paranetId, quads, opts),
-    enshrineFromWorkspace: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.enshrineFromWorkspace(paranetId, selection, opts),
+    publishFromSharedMemory: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.publishFromSharedMemory(paranetId, selection, opts),
     createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createParanet(opts),
     listParanets: () => agent.listParanets(),
   };
@@ -1826,11 +1826,11 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { paranetId, selection, clearAfter, contextGraphId } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
-    const ctx = createOperationContext('enshrine');
+    const ctx = createOperationContext('publishFromSWM');
     tracker.start(ctx, { paranetId, details: { source: 'api', contextGraphId } });
     try {
       const result = await tracker.trackPhase(ctx, 'read-workspace', () =>
-        agent.enshrineFromWorkspace(paranetId, selection || 'all', {
+        agent.publishFromSharedMemory(paranetId, selection || 'all', {
           clearWorkspaceAfter: clearAfter ?? true,
           operationCtx: ctx,
           ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),

@@ -230,6 +230,58 @@ function dateLit(d: Date): string {
   return `"${d.toISOString()}"^^<${XSD}dateTime>`;
 }
 
+/**
+ * Agent authorship proof per spec §9.0.6.
+ * The agent signs keccak256(merkleRoot) and the proof is stored in _meta.
+ */
+export interface AuthorshipProof {
+  kcUal: string;
+  paranetId: string;
+  agentAddress: string;
+  signature: string;
+  signedHash: string;
+}
+
+export function generateAuthorshipProof(proof: AuthorshipProof): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${proof.paranetId}/_meta`;
+  const blankNode = `_:authorship_${proof.kcUal.replace(/[^a-zA-Z0-9]/g, '_')}`;
+  return [
+    mq(proof.kcUal, `${DKG}authoredBy`, blankNode, metaGraph),
+    mq(blankNode, `${RDF}type`, `${DKG}AuthorshipProof`, metaGraph),
+    mq(blankNode, `${DKG}agent`, `did:dkg:agent:${proof.agentAddress}`, metaGraph),
+    mq(blankNode, `${DKG}signature`, lit(proof.signature), metaGraph),
+    mq(blankNode, `${DKG}signedHash`, lit(proof.signedHash), metaGraph),
+  ];
+}
+
+/**
+ * ShareTransition metadata per spec §8.
+ * Recorded in _shared_memory_meta when data is promoted from WM → SWM.
+ */
+export interface ShareTransitionMetadata {
+  contextGraphId: string;
+  operationId: string;
+  agentAddress: string;
+  draftName: string;
+  entities: string[];
+  timestamp: Date;
+}
+
+export function generateShareTransitionMetadata(meta: ShareTransitionMetadata): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_shared_memory_meta`;
+  const subject = `urn:dkg:share:${meta.operationId}`;
+  const quads: Quad[] = [
+    mq(subject, `${RDF}type`, `${DKG}ShareTransition`, metaGraph),
+    mq(subject, `${DKG}source`, lit(`draft/${meta.agentAddress}/${meta.draftName}`), metaGraph),
+    mq(subject, `${DKG}agent`, `did:dkg:agent:${meta.agentAddress}`, metaGraph),
+    mq(subject, `${DKG}timestamp`, dateLit(meta.timestamp), metaGraph),
+  ];
+  for (const entity of meta.entities) {
+    quads.push(mq(subject, `${DKG}entities`, entity, metaGraph));
+  }
+  return quads;
+}
+
 /** Workspace metadata: no UAL; stored in _workspace_meta graph. */
 export interface WorkspaceMetadata {
   workspaceOperationId: string;

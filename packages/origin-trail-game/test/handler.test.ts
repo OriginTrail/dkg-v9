@@ -37,7 +37,7 @@ function makeMockAgent(peerId = 'test-peer-1') {
       published.push(quads);
       return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
-    enshrineFromWorkspace: async (_paranetId: string, selection: any, options?: any) => {
+    publishFromSharedMemory: async (_paranetId: string, selection: any, options?: any) => {
       enshrined.push({ selection, options });
       return { onChainResult: { txHash: '0xenshrine123', blockNumber: 100 }, ual: 'did:dkg:test:enshrined' };
     },

@@ -399,7 +399,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
     });
   });
 
-  it('enshrineFromWorkspace passes participant signatures to addBatchToContextGraph', async () => {
+  it('publishFromSharedMemory passes participant signatures to addBatchToContextGraph', async () => {
     // Write some data to workspace first
     await publisher.writeToWorkspace(PARANET, [
       q(ENTITY, 'http://schema.org/name', '"Context Data"'),
@@ -408,7 +408,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
     const participant = new MockSignerPeer(2n);
     const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
 
-    await publisher.enshrineFromWorkspace(PARANET, {
+    await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: [ENTITY],
     }, {
       contextGraphId: '1',
@@ -429,7 +429,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
 
   it('publishToContextGraph available on MockChainAdapter for atomic path', async () => {
     // The atomic path (publishToContextGraph) is available on the chain adapter.
-    // enshrineFromWorkspace currently uses the two-call approach:
+    // publishFromSharedMemory currently uses the two-call approach:
     //   publish() → addBatchToContextGraph()
     // The atomic single-tx path is tested directly in the
     // "PublishToContextGraph chain adapter method" suite below.
@@ -536,7 +536,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       await peer3.signParticipantAck(1n, root),
     ];
 
-    await publisher.enshrineFromWorkspace(PARANET, {
+    await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: ['urn:test:sort:1'],
     }, {
       contextGraphId: '1',
@@ -565,7 +565,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
     // Same sig twice
     const sigs = [sig, { ...sig }];
 
-    await publisher.enshrineFromWorkspace(PARANET, {
+    await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: ['urn:test:dedup:1'],
     }, {
       contextGraphId: '1',

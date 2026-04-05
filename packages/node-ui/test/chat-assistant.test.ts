@@ -180,7 +180,7 @@ describe('ChatAssistant', () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
         listParanets: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
       };
@@ -377,7 +377,7 @@ describe('ChatAssistant', () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test-123' }),
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
         listParanets: vi.fn().mockResolvedValue([]),
       };
@@ -432,7 +432,7 @@ describe('ChatAssistant', () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
         listParanets: vi.fn().mockResolvedValue([]),
       };
@@ -456,7 +456,7 @@ describe('ChatAssistant', () => {
       mockTools = {
         query: vi.fn().mockResolvedValue({ bindings: [{ s: 'x', p: 'y', o: 'z' }] }),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-abc' }),
-        enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed', kcId: 42n }),
+        publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed', kcId: 42n }),
         createParanet: vi.fn().mockResolvedValue(undefined),
         listParanets: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
       };
@@ -533,7 +533,7 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Finalize everything on chain now' });
-      expect(mockTools.enshrineFromWorkspace).toHaveBeenCalledWith('testing', 'all');
+      expect(mockTools.publishFromSharedMemory).toHaveBeenCalledWith('testing', 'all');
       expect(res.toolCalls![0].name).toBe('dkg_enshrine');
       fetchSpy.mockRestore();
     });

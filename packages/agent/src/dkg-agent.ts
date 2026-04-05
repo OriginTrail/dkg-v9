@@ -2362,7 +2362,6 @@ export class DKGAgent {
       publicByteSize: bigint,
       stagingQuads?: Uint8Array,
     ) => {
-      const finalizationTopic = paranetFinalizationTopic(paranetId);
       const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
       const cgIdBigInt = BigInt(cgIdHash);
 
@@ -2379,7 +2378,6 @@ export class DKGAgent {
         isPrivate: false,
         kaCount,
         rootEntities,
-        finalizationTopic,
         requiredACKs,
         stagingQuads,
       });

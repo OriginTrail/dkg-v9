@@ -85,7 +85,9 @@ export class StorageACKHandler {
         );
       }
 
-      // Root verified — now persist to SWM
+      // Root verified — clear any stale data for this graph before persisting.
+      // This prevents accumulation from repeated publishes for the same CG.
+      await this.store.dropGraph(swmGraphUri);
       const graphedQuads = parsed.map(q => ({ ...q, graph: swmGraphUri }));
       await this.store.insert(graphedQuads);
       swmQuads = parsed;

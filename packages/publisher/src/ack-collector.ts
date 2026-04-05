@@ -58,21 +58,20 @@ export class ACKCollector {
     isPrivate: boolean;
     kaCount: number;
     rootEntities: string[];
-    finalizationTopic: string;
     requiredACKs?: number;
     stagingQuads?: Uint8Array;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
       publisherPeerId, publicByteSize, isPrivate,
-      kaCount, rootEntities, finalizationTopic,
+      kaCount, rootEntities,
     } = params;
     const REQUIRED_ACKS = params.requiredACKs ?? DEFAULT_REQUIRED_ACKS;
 
     const log = this.deps.log ?? (() => {});
 
-    // Broadcast intent without staging quads (gossip is public, quads go via P2P)
-    const broadcastMsg: PublishIntentMsg = {
+    // P2P intent includes staging quads so core nodes can verify inline
+    const p2pMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
       publisherPeerId,
@@ -80,18 +79,14 @@ export class ACKCollector {
       isPrivate,
       kaCount,
       rootEntities,
-    };
-    const broadcastBytes = encodePublishIntent(broadcastMsg);
-
-    // P2P intent includes staging quads so core nodes can verify inline
-    const p2pMsg: PublishIntentMsg = {
-      ...broadcastMsg,
       stagingQuads: params.stagingQuads,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
-    log(`[ACKCollector] Broadcasting PublishIntent on ${finalizationTopic} (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
-    await this.deps.gossipPublish(finalizationTopic, broadcastBytes);
+    // ACK requests are sent exclusively via direct P2P — NOT via gossip.
+    // Publishing on the finalization topic would conflict with existing handlers
+    // that decode payloads as FinalizationMessages, causing decode errors.
+    log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
     const corePeers = this.deps.getConnectedCorePeers();
     if (corePeers.length === 0) {

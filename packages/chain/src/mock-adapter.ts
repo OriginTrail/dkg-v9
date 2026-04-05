@@ -687,6 +687,11 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
     });
+    // Also store in batches so addBatchToContextGraph can find this publish
+    this.batches.set(kcId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.knowledgeAssetsAmount,
+    });
 
     const txHash = this.peekTxHash();
     const startKAId = kcId * 100n + 1n;

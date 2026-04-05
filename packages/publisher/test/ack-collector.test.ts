@@ -61,11 +61,10 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
-      finalizationTopic: 'dkg/context-graph/test-cg/finalization',
     });
 
     expect(result.acks).toHaveLength(3);
-    expect(gossipCalls).toHaveLength(1);
+    expect(gossipCalls).toHaveLength(0);
     expect(result.merkleRoot).toBe(merkleRoot);
     expect(result.contextGraphId).toBe(testCGId);
 
@@ -112,7 +111,6 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
-      finalizationTopic: 'dkg/context-graph/test-cg/finalization',
     });
 
     expect(result.acks).toHaveLength(3);
@@ -139,7 +137,6 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
-      finalizationTopic: 'dkg/context-graph/test-cg/finalization',
     })).rejects.toThrow('no connected core peers');
   });
 
@@ -173,7 +170,6 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
-      finalizationTopic: 'dkg/context-graph/test-cg/finalization',
     })).rejects.toThrow('storage_ack_insufficient');
   });
 
@@ -206,7 +202,6 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
-      finalizationTopic: 'dkg/context-graph/test-cg/finalization',
     })).rejects.toThrow('storage_ack_insufficient');
   });
 });

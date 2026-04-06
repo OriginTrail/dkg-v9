@@ -7,7 +7,7 @@ import { OxigraphStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
 import { monotonicTransition } from '../src/workspace-consistency.js';
-import { encodeFinalizationMessage } from '@origintrail-official/dkg-core';
+import { encodeFinalizationMessage, encodePublishRequest } from '@origintrail-official/dkg-core';
 
 const PARANET = 'adv-determinism';
 
@@ -77,6 +77,65 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     await expect(
       handler.handlePublishMessage(new Uint8Array([0x0a, 0xff, 0xff, 0x01]), PARANET),
     ).resolves.toBeUndefined();
+
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores publish when message paranetId does not match gossip topic', async () => {
+    const store = new OxigraphStore();
+    const handler = new GossipPublishHandler(store, undefined, new Map(), {
+      paranetExists: async () => true,
+      subscribeToParanet: () => {},
+    });
+    const insertSpy = vi.spyOn(store, 'insert');
+
+    const nquads = new TextEncoder().encode(
+      `<http://ex.org/e> <http://ex.org/p> "x" <did:dkg:context-graph:topic-a> .`,
+    );
+    const data = encodePublishRequest({
+      ual: 'did:dkg:mock:31337/0x1/1',
+      nquads,
+      paranetId: 'topic-a',
+      kas: [{ tokenId: 1, rootEntity: 'http://ex.org/e' }],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+      startKAId: 1,
+      endKAId: 1,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    await handler.handlePublishMessage(data, 'topic-b');
+
+    expect(insertSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects gossip publish when no manifest rootEntity survives IRI safety filter', async () => {
+    const store = new OxigraphStore();
+    const gm = new GraphManager(store);
+    await gm.ensureParanet(PARANET);
+    const handler = new GossipPublishHandler(store, undefined, new Map(), {
+      paranetExists: async () => true,
+      subscribeToParanet: () => {},
+    });
+    const insertSpy = vi.spyOn(store, 'insert');
+
+    const data = encodePublishRequest({
+      ual: 'did:dkg:mock:31337/0x1/99',
+      nquads: new Uint8Array(0),
+      paranetId: PARANET,
+      kas: [{ tokenId: 1, rootEntity: 'http://evil">injection' }],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: '0x2222222222222222222222222222222222222222',
+      startKAId: 1,
+      endKAId: 1,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    await handler.handlePublishMessage(data, PARANET);
 
     expect(insertSpy).not.toHaveBeenCalled();
   });

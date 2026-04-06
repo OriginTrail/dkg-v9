@@ -136,6 +136,7 @@ export interface SwarmState {
   playerIndexMap: Map<string, number>;
   contextGraphId?: string;
   requiredSignatures?: number;
+  cclPolicyInstalled?: boolean;
 }
 
 export interface ResolvedTurn {
@@ -811,9 +812,11 @@ export class OriginTrailGameCoordinator {
           paranetId: this.contextGraphId,
           policyUri: published.policyUri,
         });
+        swarm.cclPolicyInstalled = true;
         this.log(`CCL turn-validation policy installed for ${swarmId}`);
       } catch (err: any) {
-        this.log(`CCL policy installation skipped: ${err.message}`);
+        swarm.cclPolicyInstalled = false;
+        this.log(`CCL policy installation failed: ${err.message} — CCL governance disabled for this swarm`);
       }
     }
 
@@ -1002,7 +1005,8 @@ export class OriginTrailGameCoordinator {
     // propose_publish), the turn is rejected and votes are reset.
     // This is the enforcement point — every participant can independently
     // replay the same policy + facts to verify the decision.
-    if (this.agent.evaluateCclPolicy) {
+    // Only enforced if the policy was successfully installed at expedition start.
+    if (this.agent.evaluateCclPolicy && swarm.cclPolicyInstalled) {
       const aliveCount = result.newState.party?.filter((m: any) => m.alive !== false).length
         ?? swarm.players.length;
       const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
@@ -1595,6 +1599,10 @@ export class OriginTrailGameCoordinator {
     swarm.turnDeadline = Date.now() + 30_000;
     if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
     if (msg.requiredSignatures != null) swarm.requiredSignatures = msg.requiredSignatures;
+    // Followers assume CCL is installed if the agent supports it and a context graph exists.
+    // The leader publishes the policy via gossip; followers will resolve it at evaluation time.
+    // If the policy isn't found, the evaluation catch block will handle it gracefully.
+    swarm.cclPolicyInstalled = !!this.agent.evaluateCclPolicy && !!swarm.contextGraphId;
 
     this.pushNotification({
       type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,
@@ -1830,9 +1838,8 @@ export class OriginTrailGameCoordinator {
 
     // CCL governance: follower independently evaluates the turn-validation
     // policy. Reject the proposal if CCL does not produce propose_publish.
-    // This ensures every participant enforces the same rules — the leader
-    // cannot bypass governance because followers will refuse to approve.
-    if (this.agent.evaluateCclPolicy) {
+    // Only enforced if the swarm has CCL installed (matches leader behavior).
+    if (this.agent.evaluateCclPolicy && swarm.cclPolicyInstalled) {
       try {
         const aliveCount = swarm.gameState?.party?.filter((m: any) => m.alive !== false).length
           ?? swarm.players.length;

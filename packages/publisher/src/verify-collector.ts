@@ -70,10 +70,13 @@ export class VerifyCollector {
     const proposalId = crypto.getRandomValues(new Uint8Array(16));
     const expiresAt = new Date(Date.now() + timeoutMs).toISOString();
 
+    // Use { low, high, unsigned } Long objects for uint64 fields to avoid
+    // precision loss above 2^53 - 1 (protobufjs uint64 representation).
+    const toLong = (n: bigint) => ({ low: Number(n & 0xFFFFFFFFn), high: Number((n >> 32n) & 0xFFFFFFFFn), unsigned: true });
     const proposal: VerifyProposalMsg = {
       proposalId,
-      verifiedMemoryId: Number(verifiedMemoryId),
-      batchId: Number(batchId),
+      verifiedMemoryId: toLong(verifiedMemoryId),
+      batchId: toLong(batchId),
       merkleRoot,
       entities,
       agentSignatureR: proposerSignature.r,

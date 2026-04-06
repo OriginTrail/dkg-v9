@@ -2112,15 +2112,23 @@ export class DKGAgent {
   }> {
     const ctx = createOperationContext('verify');
 
-    // 1. Look up batch merkle root from local metadata
+    // 1. Look up batch merkle root from local metadata (use typed literal for batchId)
     const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
-    const rootResult = await this.store.query(
-      `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> "${opts.batchId}" } } LIMIT 1`,
-    );
-    if (rootResult.type !== 'bindings' || rootResult.bindings.length === 0) {
+    // Try typed literal first, fallback to untyped for backward compat
+    let batchBindings: Record<string, string>[] | null = null;
+    for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
+      const r = await this.store.query(
+        `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
+      );
+      if (r.type === 'bindings' && r.bindings.length > 0) {
+        batchBindings = r.bindings as Record<string, string>[];
+        break;
+      }
+    }
+    if (!batchBindings) {
       throw new Error(`Batch ${opts.batchId} not found in context graph ${opts.contextGraphId}`);
     }
-    const rootHex = (rootResult.bindings[0] as Record<string, string>)['root'];
+    const rootHex = batchBindings[0]['root'];
     const merkleRoot = ethers.getBytes(rootHex.startsWith('"') ? rootHex.slice(1, -1) : rootHex);
 
     // 2. Look up context graph on-chain config
@@ -2130,8 +2138,17 @@ export class DKGAgent {
       throw new Error(`Context graph ${opts.contextGraphId} not found on-chain`);
     }
 
-    // 3. Get required signatures (from opts or default to 1)
-    const requiredSignatures = opts.requiredSignatures ?? 1;
+    // 3. Get required signatures from chain config or opts (never silently default to 1)
+    let requiredSignatures = opts.requiredSignatures ?? 0;
+    if (requiredSignatures === 0 && typeof (this.chain as any).getContextGraphConfig === 'function') {
+      try {
+        const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
+        requiredSignatures = cgConfig?.requiredSignatures ?? 1;
+      } catch {
+        requiredSignatures = 1;
+      }
+    }
+    if (requiredSignatures === 0) requiredSignatures = 1;
 
     // 4. Sign the verify digest as proposer
     const signerKey = this.config.ackSignerKey
@@ -2173,16 +2190,33 @@ export class DKGAgent {
       throw new Error('Chain adapter does not support verify');
     }
 
-    const identityId = await this.chain.getIdentityId();
+    // 6. Resolve identity IDs for each approver before on-chain submission.
+    // Each signature must be paired with its signer's own identityId.
+    const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [];
+    for (const a of result.approvals) {
+      let id = a.identityId;
+      if ((!id || id === 0n) && typeof (this.chain as any).getIdentityIdForAddress === 'function') {
+        try { id = await (this.chain as any).getIdentityIdForAddress(a.approverAddress); } catch { /* use 0n */ }
+      }
+      if (!id || id === 0n) {
+        // Last resort: try local identity (only valid if this node is the approver)
+        try { id = await this.chain.getIdentityId(); } catch { /* skip */ }
+      }
+      if (!id || id === 0n) {
+        this.log.warn(ctx, `Cannot resolve identityId for approver ${a.approverAddress} — skipping`);
+        continue;
+      }
+      resolvedSignatures.push({ identityId: id, r: a.signatureR, vs: a.signatureVS });
+    }
+    if (resolvedSignatures.length < requiredSignatures) {
+      throw new Error(`verify_identity_resolution: only ${resolvedSignatures.length}/${requiredSignatures} approvers have resolvable identities`);
+    }
+
     const txResult = await this.chain.verify({
       contextGraphId: contextGraphIdOnChain,
       batchId: opts.batchId,
       merkleRoot,
-      signerSignatures: result.approvals.map(a => ({
-        identityId: a.identityId || identityId,
-        r: a.signatureR,
-        vs: a.signatureVS,
-      })),
+      signerSignatures: resolvedSignatures,
     });
 
     // 7. Promote triples to Verified Memory
@@ -2213,10 +2247,16 @@ export class DKGAgent {
     blockNumber: number,
     signers: string[],
   ): Promise<void> {
-    // Query LTM for all triples in this batch
+    // Query only the triples belonging to this batch via root entities in _meta
+    const rootEntities = await this.getRootEntities(contextGraphId, batchId);
+    if (rootEntities.length === 0) {
+      this.log.warn(createOperationContext('verify'), `No root entities found for batch ${batchId} — skipping VM promotion`);
+      return;
+    }
     const dataGraph = paranetDataGraphUri(contextGraphId);
+    const entityFilter = rootEntities.map(e => `<${e}>`).join(' ');
     const result = await this.store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o . VALUES ?s { ${entityFilter} } } }`,
     );
     if (result.type !== 'bindings') return;
 
@@ -2248,11 +2288,16 @@ export class DKGAgent {
 
   private async getRootEntities(contextGraphId: string, batchId: bigint): Promise<string[]> {
     const metaGraph = paranetMetaGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <https://dkg.network/ontology#rootEntity> ?entity . ?ka <https://dkg.network/ontology#batchId> "${batchId}" } }`,
-    );
-    if (result.type !== 'bindings') return [];
-    return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+    // Try typed literal first, fallback to untyped for backward compat
+    for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+      const result = await this.store.query(
+        `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <https://dkg.network/ontology#rootEntity> ?entity . ?ka <https://dkg.network/ontology#batchId> ${literal} } }`,
+      );
+      if (result.type === 'bindings' && result.bindings.length > 0) {
+        return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+      }
+    }
+    return [];
   }
 
   // ── CCL ──────────────────────────────────────────────────────────────

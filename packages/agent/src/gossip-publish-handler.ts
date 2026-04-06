@@ -330,9 +330,24 @@ export class GossipPublishHandler {
   }
 
   private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    // Detect binding subjects from rdf:type AND from revocation/approval predicates.
+    // Revocation quads may not include the type triple, so we must also check
+    // for policy-binding-specific predicates to prevent forged revocations.
+    const BINDING_PREDICATES = new Set<string>([
+      DKG_ONTOLOGY.DKG_POLICY_BINDING_STATUS,
+      DKG_ONTOLOGY.DKG_ACTIVE_POLICY,
+      DKG_ONTOLOGY.DKG_APPROVED_BY,
+      DKG_ONTOLOGY.DKG_APPROVED_AT,
+      DKG_ONTOLOGY.DKG_REVOKED_BY,
+      DKG_ONTOLOGY.DKG_REVOKED_AT,
+      DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET,
+    ]);
     const bindingSubjects = new Set(
       quads
-        .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_POLICY_BINDING)
+        .filter(q =>
+          (q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_POLICY_BINDING) ||
+          BINDING_PREDICATES.has(q.predicate),
+        )
         .map(q => q.subject),
     );
     if (bindingSubjects.size === 0) return quads;

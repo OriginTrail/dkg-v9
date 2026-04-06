@@ -1370,18 +1370,21 @@ cclCmd
         };
       }
 
-      if (!payload || !Array.isArray(payload.facts) || payload.facts.length === 0) {
-        throw new Error('Provide --case or --facts-file with a non-empty facts array');
+      // Allow snapshot-resolved mode: if no facts provided but scope options
+      // are given, the agent resolves facts from the graph snapshot.
+      const isSnapshotMode = !payload && (opts.snapshotId || opts.view || opts.scopeUal);
+      if (!payload && !isSnapshotMode) {
+        throw new Error('Provide --case, --facts-file, or --snapshot-id/--view/--scope-ual for snapshot-resolved evaluation');
       }
 
       const result = await client.evaluateCclPolicy({
         paranetId,
         name: opts.name,
         contextType: opts.contextType,
-        facts: payload.facts,
-        view: payload.view,
-        snapshotId: payload.snapshotId,
-        scopeUal: payload.scopeUal,
+        facts: payload?.facts,
+        view: payload?.view ?? opts.view,
+        snapshotId: payload?.snapshotId ?? opts.snapshotId,
+        scopeUal: payload?.scopeUal ?? opts.scopeUal,
         publishResult: !!opts.publishResult,
       });
 

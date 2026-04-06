@@ -96,26 +96,26 @@ export async function resolveFactsFromSnapshot(
     }
   }
 
-  // Resolve endorsement counts from dkg:endorses triples
-  const endorsementFacts = await resolveEndorsementFacts(store, graph);
-  for (const ef of endorsementFacts) {
-    factsByNode.set(`endorsement:${ef[1]}`, {
-      predicate: ef[0] as string,
-      args: new Map(ef.slice(1).map((v, i) => [i, v])),
-    });
-  }
-
   const deduped = new Map<string, CclFactTuple>();
   for (const fact of factsByNode.values()) {
     const tuple = [fact.predicate, ...materializeArgs(fact.args)] as CclFactTuple;
     deduped.set(JSON.stringify(tuple), tuple);
   }
 
+  // Resolve endorsement facts and add them after snapshot facts.
+  // Using deduped map (keyed by full tuple JSON) avoids the collision bug
+  // where endorsement(agentA, ual) and endorsement(agentB, ual) would
+  // overwrite each other if keyed only by UAL.
+  const endorsementFacts = await resolveEndorsementFacts(store, graph);
+  for (const ef of endorsementFacts) {
+    deduped.set(JSON.stringify(ef), ef);
+  }
+
   const facts = Array.from(deduped.values()).sort(compareTuples) as CclFactTuple[];
   return {
     facts,
     factSetHash: hashFacts(facts),
-    factQueryHash: hashString(`${profile.id}\n${query}`),
+    factQueryHash: hashString(`${profile.id}\n${query}\nsnapshotId=${opts.snapshotId ?? ''}\nview=${opts.view ?? ''}\nscopeUal=${opts.scopeUal ?? ''}`),
     factResolverVersion: profile.version,
     factResolutionMode: 'snapshot-resolved',
     context: {

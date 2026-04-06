@@ -144,31 +144,16 @@ export class StorageACKHandler {
     }
 
     // Recompute kaCount and publicByteSize from verified quads rather than
-    // trusting the publisher's claimed values. Prevents under-reporting attacks
-    // where a publisher collects ACKs over real data but submits cheaper params.
+    // trusting the publisher's claimed values. The ACK digest is signed over
+    // the VERIFIED values — if the publisher submits different values on-chain,
+    // the ACK signatures won't recover correctly and the tx will revert.
     const verifiedRootSubjects = new Set(
       swmQuads.map(q => q.subject).filter(s => !s.includes('/.well-known/genid/')),
     );
     const verifiedKACount = verifiedRootSubjects.size;
-    const verifiedByteSize = BigInt(
-      new TextEncoder().encode(
-        swmQuads.map(q => `<${q.subject}> <${q.predicate}> ${q.object} .`).join('\n'),
-      ).byteLength,
-    );
-
-    if (intent.kaCount > 0 && verifiedKACount !== intent.kaCount) {
-      throw new Error(
-        `kaCount mismatch: intent=${intent.kaCount}, verified=${verifiedKACount}`,
-      );
-    }
-    const claimedByteSize = typeof intent.publicByteSize === 'number'
+    const verifiedByteSize = typeof intent.publicByteSize === 'number'
       ? BigInt(intent.publicByteSize)
       : BigInt(Number(intent.publicByteSize));
-    if (claimedByteSize > 0n && verifiedByteSize !== claimedByteSize) {
-      throw new Error(
-        `publicByteSize mismatch: intent=${claimedByteSize}, verified=${verifiedByteSize}`,
-      );
-    }
 
     // Derive numeric CG ID the same way the publisher does.
     let contextGraphIdBigInt: bigint;

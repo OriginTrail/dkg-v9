@@ -750,10 +750,18 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         return;
       }
 
+      // Resolve CORS origin once per request for all response helpers
+      _currentRequestCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
+
       // CORS preflight
       if (req.method === 'OPTIONS') {
+        const corsOrigin = _currentRequestCorsOrigin;
+        if (!corsOrigin && corsAllowed !== '*') {
+          res.writeHead(403).end();
+          return;
+        }
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': resolveCorsOrigin(req, corsAllowed) ?? '*',
+          ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         });
@@ -851,7 +859,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
 
-  corsAllowed = buildCorsAllowlist((config as any).corsAllowlist);
+  corsAllowed = buildCorsAllowlist(config, boundPort);
   _moduleCorsAllowed = corsAllowed;
   if (corsAllowed !== '*') {
     log(`CORS allowlist: ${corsAllowed.join(', ')}`);
@@ -897,6 +905,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 }
 
 let _moduleCorsAllowed: CorsAllowlist = '*';
+/** Per-request resolved CORS origin — set at the top of each HTTP request handler. */
+let _currentRequestCorsOrigin: string | null = null;
 
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
@@ -1994,7 +2004,7 @@ async function handleRequest(
     } catch (err: any) {
       tracker.fail(ctx, err);
       const msg = err?.message ?? '';
-      if (msg.includes('SPARQL') || msg.includes('parse') || msg.includes('syntax') || msg.includes('query')) {
+      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
@@ -2422,11 +2432,15 @@ function parsePublishRequestBody(body: string):
 
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOrigin?: string | null): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : _currentRequestCorsOrigin;
+  const body = JSON.stringify(data, (_key, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    ...corsHeaders(corsOrigin),
+    ...corsHeaders(origin),
   });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
@@ -2460,14 +2474,22 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
 
 type CorsAllowlist = '*' | string[];
 
-function buildCorsAllowlist(raw: unknown): CorsAllowlist {
-  if (raw === '*' || raw === undefined || raw === null) return '*';
+function buildCorsAllowlist(config: DkgConfig, boundPort: number): CorsAllowlist {
+  const raw = config.corsOrigins;
+  if (raw === '*') return '*';
+  if (typeof raw === 'string' && raw.trim().length > 0) return [raw.trim()];
   if (Array.isArray(raw)) {
     const origins = raw.filter((v): v is string => typeof v === 'string' && v.length > 0);
-    return origins.length > 0 ? origins : '*';
+    if (origins.length > 0) return origins;
   }
-  if (typeof raw === 'string' && raw.trim().length > 0) return [raw.trim()];
-  return '*';
+  // Default: derive from apiHost
+  const host = config.apiHost ?? '127.0.0.1';
+  if (host === '0.0.0.0') return '*'; // backward-compatible
+  return [
+    `http://127.0.0.1:${boundPort}`,
+    `http://localhost:${boundPort}`,
+    `http://[::1]:${boundPort}`,
+  ];
 }
 
 function resolveCorsOrigin(req: IncomingMessage, allowlist: CorsAllowlist): string | undefined {

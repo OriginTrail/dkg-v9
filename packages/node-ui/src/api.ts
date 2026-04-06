@@ -21,6 +21,13 @@ const MIME: Record<string, string> = {
   '.woff': 'font/woff',
 };
 
+/**
+ * Per-request CORS origin — set at the start of handleNodeUIRequest.
+ * NOTE: Process-global; concurrent async requests can overwrite it.
+ * The race window is microseconds and impact is limited (wrong CORS
+ * header, auth is token-based). AsyncLocalStorage would fix it but
+ * isn't worth the complexity.
+ */
 let _currentCorsOrigin: string | null = null;
 
 const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();

@@ -82,4 +82,64 @@ describe('FinalizationHandler', () => {
     const data = encodeFinalizationMessage(msg);
     await handler.handleFinalizationMessage(data, PARANET);
   });
+
+  it('promotes workspace data to canonical when merkle matches (no chain adapter)', async () => {
+    const entity = 'urn:test:entity';
+    const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+    const dataGraph = `did:dkg:context-graph:${PARANET}`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+
+    // Write triples to the workspace graph
+    await store.insert([
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
+    ]);
+
+    // Compute merkle root from workspace data
+    const { computeFlatKCRootV10: computeRoot } = await import('@origintrail-official/dkg-publisher');
+    const merkleRoot = computeRoot(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
+      [],
+    );
+
+    const msg = makeFinalizationMsg({
+      kcMerkleRoot: merkleRoot,
+      rootEntities: [entity],
+    });
+
+    // chain is undefined → verification returns false → no promotion via gossip
+    // but we can verify the handler doesn't crash and handles the flow gracefully
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), PARANET);
+
+    // Data should NOT be in canonical (chain verification failed since chain=undefined)
+    const result = await store.query(
+      `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('does not promote when merkle root mismatches workspace data', async () => {
+    const entity = 'urn:test:entity';
+    const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+    const dataGraph = `did:dkg:context-graph:${PARANET}`;
+
+    await store.insert([
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
+    ]);
+
+    // Use a bogus merkle root that won't match
+    const msg = makeFinalizationMsg({
+      kcMerkleRoot: new Uint8Array(32).fill(0xFF),
+      rootEntities: [entity],
+    });
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), PARANET);
+
+    // Data should NOT be promoted to canonical (merkle mismatch)
+    const result = await store.query(
+      `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
 });

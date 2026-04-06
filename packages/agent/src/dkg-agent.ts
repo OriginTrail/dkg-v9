@@ -364,33 +364,31 @@ export class DKGAgent {
     // supplied, chainConfig is conceptually ignored per the config contract.
     const ackSignerKeyStr = this.config.ackSignerKey
       ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
-    const hasACKSigningCapability = ackSignerKeyStr || typeof this.chain.signACKDigest === 'function';
-    // All staked nodes can provide V10 ACKs — not just core nodes
-    if (hasACKSigningCapability) {
+    // Only register StorageACK handler when:
+    // 1. We have an extractable ACK signer key (HSM/callback not yet supported)
+    // 2. Identity is provisioned (> 0)
+    if (ackSignerKeyStr) {
       try {
-        if (!ackSignerKeyStr) {
-          // signACKDigest is available but no extractable key — skip registration
-          // until StorageACKHandler can delegate signing to the adapter.
-          this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred`);
-          throw new Error('No ACK signer key available for StorageACKHandler');
-        }
         const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
         const identityId = await this.chain.getIdentityId();
         if (identityId > 0n) {
+          const effectiveRole = this.config.nodeRole ?? 'edge';
           const ackHandler = new StorageACKHandler(this.store, {
-            nodeRole: 'core',
+            nodeRole: effectiveRole,
             nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
             signerWallet: ackSignerWallet,
             contextGraphSharedMemoryUri,
           }, this.eventBus);
           this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-          this.log.info(ctx, `Registered V10 StorageACK handler (role=${this.config.nodeRole ?? 'edge'}, identity=${identityId})`);
+          this.log.info(ctx, `Registered V10 StorageACK handler (role=${effectiveRole}, identity=${identityId})`);
         } else {
           this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
         }
       } catch (err) {
         this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
       }
+    } else if (typeof this.chain.signACKDigest === 'function') {
+      this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
     }
 
     // Start chain event poller for trustless confirmation of tentative publishes
@@ -2346,6 +2344,9 @@ export class DKGAgent {
     if (!this.router || !this.gossip) return undefined;
     if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') return undefined;
     if (typeof this.chain.isV10Ready === 'function' && !this.chain.isV10Ready()) return undefined;
+    // Require on-chain identity verification to prevent accepting unverified ACKs
+    // that would fail on-chain and waste gas. Fall back to legacy path if unavailable.
+    if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
 
     const collector = new ACKCollector({
       gossipPublish: async (topic, data) => {

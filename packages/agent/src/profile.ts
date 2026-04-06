@@ -29,6 +29,8 @@ export interface AgentProfileConfig {
   framework?: string;
   skills: SkillOfferingConfig[];
   contextGraphsServed?: string[];
+  /** @deprecated Use contextGraphsServed */
+  paranetsServed?: string[];
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
   relayAddress?: string;
@@ -109,11 +111,14 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
   q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
-  if (config.contextGraphsServed?.length) {
+  const served = config.contextGraphsServed ?? config.paranetsServed;
+  if (served?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;
     q(entity, `${SKILL}hostingProfile`, hostingUri);
     q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
-    q(hostingUri, `${SKILL}contextGraphsServed`, `"${config.contextGraphsServed.join(',')}"`);
+    const val = `"${served.join(',')}"`;
+    q(hostingUri, `${SKILL}contextGraphsServed`, val);
+    q(hostingUri, `${SKILL}paranetsServed`, val);
   }
 
   return { quads, rootEntity: entity };

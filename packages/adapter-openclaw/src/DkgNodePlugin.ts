@@ -537,7 +537,8 @@ export class DkgNodePlugin {
   private async handleListContextGraphs(): Promise<OpenClawToolResult> {
     try {
       const result = await this.client.listContextGraphs();
-      return this.json({ contextGraphs: result.contextGraphs, count: result.contextGraphs.length });
+      const graphs = result.contextGraphs;
+      return this.json({ contextGraphs: graphs, paranets: graphs, count: graphs.length });
     } catch (err: any) {
       return this.daemonError(err);
     }

@@ -1375,12 +1375,15 @@ export class DKGAgent {
       clearSharedMemoryAfter?: boolean;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
+      /** @deprecated Use subContextGraphId */
+      contextGraphId?: string | bigint;
       subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    const ctxGraphIdStr = options?.subContextGraphId != null ? String(options.subContextGraphId) : undefined;
+    const effectiveSubCG = options?.subContextGraphId ?? options?.contextGraphId;
+    const ctxGraphIdStr = effectiveSubCG != null ? String(effectiveSubCG) : undefined;
 
     // Data is already in peers' SWM (via prior share() + gossip),
     // so V10 ACK collection can proceed without swmReplicator.
@@ -1513,14 +1516,23 @@ export class DKGAgent {
     sparql: string,
     options?: string | {
       contextGraphId?: string;
+      /** @deprecated Use contextGraphId */
+      paranetId?: string;
       graphSuffix?: '_shared_memory';
       includeSharedMemory?: boolean;
+      /** @deprecated Use includeSharedMemory */
+      includeWorkspace?: boolean;
       operationCtx?: OperationContext;
       view?: GetView;
       verifiedGraph?: string;
     },
   ) {
-    const opts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
+    const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
+    const opts = {
+      ...rawOpts,
+      contextGraphId: rawOpts.contextGraphId ?? rawOpts.paranetId,
+      includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
+    };
     const ctx = opts.operationCtx ?? createOperationContext('query');
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
@@ -1767,7 +1779,7 @@ export class DKGAgent {
     } else if (this.chain.chainId !== 'none') {
       try {
         const result = await this.chain.createContextGraph({
-          name: opts.name,
+          name: opts.id,
           description: opts.description,
           accessPolicy: opts.accessPolicy ?? 0,
           revealOnChain: opts.revealOnChain,
@@ -1777,7 +1789,7 @@ export class DKGAgent {
       } catch (err) {
         const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           this.log.info(ctx, `Context graph "${opts.id}" already registered on-chain — creating local definition`);
         } else {
           this.log.warn(ctx, `On-chain context graph registration failed: ${msg} — creating locally without chain finality`);
@@ -1902,7 +1914,7 @@ export class DKGAgent {
     if (this.chain.chainId !== 'none') {
       try {
         const result = await this.chain.createContextGraph({
-          name: opts.name,
+          name: opts.id,
           description: opts.description,
           accessPolicy: 0,
           revealOnChain: opts.revealOnChain,
@@ -1912,7 +1924,7 @@ export class DKGAgent {
       } catch (err) {
         const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           alreadyOnChain = true;
           onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
           this.log.info(ctx, `Context graph "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);

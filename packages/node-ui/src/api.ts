@@ -21,6 +21,8 @@ const MIME: Record<string, string> = {
   '.woff': 'font/woff',
 };
 
+let _currentCorsOrigin: string | null = null;
+
 const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -93,7 +95,9 @@ export async function handleNodeUIRequest(
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
   telemetrySettings?: TelemetrySettingsCallbacks,
+  corsOrigin?: string | null,
 ): Promise<boolean> {
+  _currentCorsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 
   // --- Metrics ---
@@ -733,7 +737,7 @@ function beginSse(res: ServerResponse): void {
     'Cache-Control': 'no-cache, no-transform',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': _currentCorsOrigin ?? '*',
   });
 }
 
@@ -830,7 +834,7 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
 function json(res: ServerResponse, status: number, data: unknown): true {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': _currentCorsOrigin ?? '*',
   });
   res.end(JSON.stringify(data));
   return true;

@@ -209,13 +209,7 @@ export class QueryHandler {
         resultCount: resolved.quads.length,
       };
     } catch {
-      return {
-        operationId: opId,
-        status: 'OK',
-        ntriples: '',
-        truncated: false,
-        resultCount: 0,
-      };
+      return errorResponse(opId, 'ERROR', `Failed to resolve UAL: ${ual}`);
     }
   }
 
@@ -303,17 +297,18 @@ export class QueryHandler {
     }
 
     // Execute with timeout
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const result = await Promise.race([
       this.queryEngine.query(sparql, { paranetId }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('timeout')), timeout),
-      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), timeout);
+      }),
     ]).catch(err => {
       if (err.message === 'timeout') {
         return { _timeout: true } as any;
       }
       throw err;
-    });
+    }).finally(() => clearTimeout(timer!));
 
     if (result._timeout) {
       return errorResponse(opId, 'GAS_LIMIT_EXCEEDED', `Query exceeded time limit (${timeout}ms)`);

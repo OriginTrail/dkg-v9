@@ -878,7 +878,7 @@ export class EVMChainAdapter implements ChainAdapter {
     );
     const receipt = await tx.wait();
 
-    let contextGraphId = 0n;
+    let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
       try {
         const parsed = this.contracts.contextGraphStorage!.interface.parseLog({
@@ -892,10 +892,19 @@ export class EVMChainAdapter implements ChainAdapter {
       } catch { /* not this contract */ }
     }
 
+    if (contextGraphId === undefined) {
+      return {
+        hash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        success: false,
+        contextGraphId: 0n,
+      };
+    }
+
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
-      success: receipt.status === 1,
+      success: receipt.status === 1 && contextGraphId !== undefined,
       contextGraphId,
     };
   }

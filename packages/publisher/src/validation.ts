@@ -77,7 +77,8 @@ export function validatePublishRequest(
         continue;
       }
       errors.push(
-        `Rule 4: rootEntity "${m.rootEntity}" already exists in paranet "${paranetId}"`,
+        `Rule 4: rootEntity "${m.rootEntity}" already exists in paranet "${paranetId}". ` +
+        `Use the update API to modify existing entities, or set allowUpsert if you are the original creator.`,
       );
     }
   }

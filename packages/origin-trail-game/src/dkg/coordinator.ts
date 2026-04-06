@@ -798,7 +798,10 @@ export class OriginTrailGameCoordinator {
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
 
-    // Install CCL turn-validation policy (best-effort, doesn't block game)
+    // Install CCL turn-validation policy. If the agent supports CCL evaluation
+    // and installation fails, the expedition is aborted — we cannot silently
+    // skip governance since followers will expect CCL enforcement and reject
+    // proposals when they fail to resolve the policy.
     if (this.agent.publishCclPolicy && this.agent.approveCclPolicy) {
       try {
         const published = await this.agent.publishCclPolicy({
@@ -815,8 +818,20 @@ export class OriginTrailGameCoordinator {
         swarm.cclPolicyInstalled = true;
         this.log(`CCL turn-validation policy installed for ${swarmId}`);
       } catch (err: any) {
+        // If the agent supports CCL evaluation, installation failure is fatal —
+        // evaluateCclPolicy will be called later and followers will independently
+        // attempt to resolve the policy. If it's absent, they reject all turns.
+        if (this.agent.evaluateCclPolicy) {
+          swarm.status = 'idle';
+          this.swarms.delete(swarmId);
+          throw new Error(
+            `Expedition startup aborted: CCL policy installation failed (${err.message}). ` +
+            `Cannot proceed without governance — followers would reject all proposals.`,
+          );
+        }
+        // Agent doesn't support CCL evaluation — safe to proceed without it
         swarm.cclPolicyInstalled = false;
-        this.log(`CCL policy installation failed: ${err.message} — CCL governance disabled for this swarm`);
+        this.log(`CCL policy installation failed: ${err.message} — CCL governance not available, proceeding without`);
       }
     }
 

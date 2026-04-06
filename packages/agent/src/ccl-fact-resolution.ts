@@ -102,11 +102,14 @@ export async function resolveFactsFromSnapshot(
     deduped.set(JSON.stringify(tuple), tuple);
   }
 
-  // Resolve endorsement facts and add them after snapshot facts.
+  // Resolve endorsement facts scoped to the same snapshot context.
   // Using deduped map (keyed by full tuple JSON) avoids the collision bug
   // where endorsement(agentA, ual) and endorsement(agentB, ual) would
   // overwrite each other if keyed only by UAL.
-  const endorsementFacts = await resolveEndorsementFacts(store, graph);
+  const endorsementFacts = await resolveEndorsementFacts(store, graph, {
+    snapshotId: opts.snapshotId,
+    scopeUal: opts.scopeUal,
+  });
   for (const ef of endorsementFacts) {
     deduped.set(JSON.stringify(ef), ef);
   }
@@ -219,18 +222,34 @@ function unescapeLiteralContent(value: string): string {
  * Query endorsement triples and produce CCL facts:
  *   endorsement(agent, ual)       — one per endorsement
  *   endorsement_count(ual, N)     — aggregate count per KA
+ *
+ * When snapshot scope filters are provided, only endorsements for KAs
+ * that exist within the scoped snapshot are included.
  */
 async function resolveEndorsementFacts(
   store: TripleStore,
   graph: string,
+  scope?: { snapshotId?: string; scopeUal?: string },
 ): Promise<CclFactTuple[]> {
+  // Build optional FILTER clauses to scope endorsements to the snapshot.
+  // If scopeUal is given, only include endorsements for that specific UAL.
+  // If snapshotId is given, only include endorsements where the endorsed
+  // UAL has a snapshotId matching the requested snapshot.
+  const filters: string[] = [];
+  if (scope?.scopeUal) {
+    filters.push(`FILTER(?ual = <${scope.scopeUal}>)`);
+  }
+  const snapshotJoin = scope?.snapshotId
+    ? `?ual <${DKG_ONTOLOGY.DKG_SNAPSHOT_ID}> ?sid . FILTER(STR(?sid) = ${JSON.stringify(scope.snapshotId)})`
+    : '';
   const query = `
-    SELECT ?endorser ?ual (COUNT(DISTINCT ?endorser) AS ?count) WHERE {
+    SELECT ?endorser ?ual WHERE {
       GRAPH <${graph}> {
         ?endorser <${DKG_ENDORSES}> ?ual .
+        ${snapshotJoin}
+        ${filters.join('\n        ')}
       }
     }
-    GROUP BY ?ual ?endorser
   `;
   const result = await store.query(query);
   if (result.type !== 'bindings') return [];

@@ -442,13 +442,18 @@ export class DKGAgent {
         agentAddress: verifyWallet.address,
         getBatchMerkleRoot: async (cgId, batchId) => {
           const metaGraph = paranetMetaGraphUri(cgId);
-          const result = await this.store.query(
-            `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> "${batchId}" } } LIMIT 1`,
-          );
-          if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-          const hex = (result.bindings[0] as Record<string, string>)['root'];
-          if (!hex) return null;
-          return ethers.getBytes(hex.startsWith('"') ? hex.slice(1, -1) : hex);
+          // Try typed literal first, fallback to untyped for backward compat
+          for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+            const result = await this.store.query(
+              `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
+            );
+            if (result.type === 'bindings' && result.bindings.length > 0) {
+              const hex = (result.bindings[0] as Record<string, string>)['root'];
+              if (!hex) return null;
+              return ethers.getBytes(hex.startsWith('"') ? hex.slice(1, -1) : hex);
+            }
+          }
+          return null;
         },
         getContextGraphIdOnChain: async (cgId) => {
           const sub = this.subscribedContextGraphs.get(cgId);
@@ -2192,15 +2197,18 @@ export class DKGAgent {
 
     // 6. Resolve identity IDs for each approver before on-chain submission.
     // Each signature must be paired with its signer's own identityId.
-    const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [];
+    // Start with the proposer's own signature (already signed at step 4).
+    const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [
+      {
+        identityId: this.identityId,
+        r: ethers.getBytes(proposerSig.r),
+        vs: ethers.getBytes(proposerSig.yParityAndS),
+      },
+    ];
     for (const a of result.approvals) {
       let id = a.identityId;
       if ((!id || id === 0n) && typeof (this.chain as any).getIdentityIdForAddress === 'function') {
         try { id = await (this.chain as any).getIdentityIdForAddress(a.approverAddress); } catch { /* use 0n */ }
-      }
-      if (!id || id === 0n) {
-        // Last resort: try local identity (only valid if this node is the approver)
-        try { id = await this.chain.getIdentityId(); } catch { /* skip */ }
       }
       if (!id || id === 0n) {
         this.log.warn(ctx, `Cannot resolve identityId for approver ${a.approverAddress} — skipping`);
@@ -2209,7 +2217,7 @@ export class DKGAgent {
       resolvedSignatures.push({ identityId: id, r: a.signatureR, vs: a.signatureVS });
     }
     if (resolvedSignatures.length < requiredSignatures) {
-      throw new Error(`verify_identity_resolution: only ${resolvedSignatures.length}/${requiredSignatures} approvers have resolvable identities`);
+      throw new Error(`verify_identity_resolution: only ${resolvedSignatures.length}/${requiredSignatures} signers have resolvable identities (including proposer)`);
     }
 
     const txResult = await this.chain.verify({
@@ -2254,9 +2262,15 @@ export class DKGAgent {
       return;
     }
     const dataGraph = paranetDataGraphUri(contextGraphId);
-    const entityFilter = rootEntities.map(e => `<${e}>`).join(' ');
+    // Query root entities AND their skolemized children (subjects starting
+    // with the root entity URI, e.g. <root>/.well-known/genid/...).
+    // We use FILTER with STRSTARTS to capture the full closure instead of
+    // an exact VALUES match, which would miss child/blank-node subjects.
+    const filterClauses = rootEntities
+      .map(e => `STRSTARTS(STR(?s), ${JSON.stringify(e)})`)
+      .join(' || ');
     const result = await this.store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o . VALUES ?s { ${entityFilter} } } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
     );
     if (result.type !== 'bindings') return;
 

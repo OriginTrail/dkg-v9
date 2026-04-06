@@ -20,26 +20,20 @@
  */
 
 export const TURN_VALIDATION_POLICY_NAME = 'turn-validation';
-export const TURN_VALIDATION_POLICY_VERSION = '1.2.0';
+export const TURN_VALIDATION_POLICY_VERSION = '1.3.0';
 
 export const TURN_VALIDATION_POLICY_BODY = `policy: ${TURN_VALIDATION_POLICY_NAME}
 version: ${TURN_VALIDATION_POLICY_VERSION}
 rules:
-  # NOTE: CCL v0.1 cannot do "count >= $Required" (no variable comparison
-  # in count_distinct). The actual M-of-N threshold is enforced by the
-  # coordinator's quorumVoted() check BEFORE CCL evaluation runs.
-  # This rule is a minimum safety floor: at least 2 votes required.
+  # Quorum check: buildTurnFacts() pre-computes whether the M-of-N threshold
+  # is met and emits quorum_met(Swarm, Turn) only when votes >= requiredSignatures.
+  # This approach avoids the CCL v0.1 limitation of not supporting variable
+  # comparison in count_distinct, while ensuring the actual threshold is used.
   - name: has_quorum
     params: [Swarm, Turn]
     all:
       - atom: { pred: turn_proposal, args: ["$Swarm", "$Turn"] }
-      - atom: { pred: required_signatures, args: ["$Swarm", "$Required"] }
-      - count_distinct:
-          vars: [Voter]
-          where:
-            - atom: { pred: vote, args: ["$Swarm", "$Turn", "$Voter"] }
-          op: ">="
-          value: 2
+      - atom: { pred: quorum_met, args: ["$Swarm", "$Turn"] }
 
   - name: game_is_active
     params: [Swarm]
@@ -97,6 +91,7 @@ export function buildTurnFacts(params: {
   // We emit the caller's winningAction as majority_winner — both leader
   // and follower run tallyVotes() on the same votes, so they will produce
   // the same winner. The CCL policy then just checks winning_action matches.
+  const distinctVoters = new Set(votes.map(v => v.peerId)).size;
   const facts: Array<[string, ...unknown[]]> = [
     ['turn_proposal', swarmId, turn],
     ['game_status', swarmId, gameStatus],
@@ -107,6 +102,13 @@ export function buildTurnFacts(params: {
     ['majority_winner', swarmId, turn, winningAction],
     ['resolution_type', swarmId, turn, resolution],
   ];
+
+  // Emit quorum_met only when the actual M-of-N threshold is met.
+  // This is the pre-computed quorum check that the CCL policy relies on,
+  // replacing the hardcoded "value: 2" that CCL v0.1 required.
+  if (distinctVoters >= requiredSignatures) {
+    facts.push(['quorum_met', swarmId, turn]);
+  }
 
   for (const vote of votes) {
     facts.push(['vote', swarmId, turn, vote.peerId]);

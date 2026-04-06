@@ -167,12 +167,11 @@ export class ChainEventPoller {
       }
     }
 
-    // Gate event types on deployed-contract capabilities to avoid
-    // throwing on V10-only deployments missing legacy event ABIs.
-    const eventTypes: string[] = [];
-    const isV10 = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
-    if (!isV10) eventTypes.push('KnowledgeBatchCreated');
-    eventTypes.push('KCCreated');
+    // Always listen for both V9 and V10 events: even when V10 is deployed,
+    // the publisher still falls back to V9 for private publishes and ACK
+    // collection failures. Stopping legacy event polling would leave those
+    // publishes tentative forever on remote nodes.
+    const eventTypes: string[] = ['KnowledgeBatchCreated', 'KCCreated'];
     if (watchParanets) eventTypes.push('ParanetCreated');
     if (this.onCollectionUpdated) eventTypes.push('KnowledgeCollectionUpdated');
     if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');

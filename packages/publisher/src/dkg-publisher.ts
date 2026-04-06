@@ -450,6 +450,7 @@ export class DKGPublisher implements Publisher {
       onPhase: options?.onPhase,
       v10ACKProvider: options?.v10ACKProvider,
       contextGraphId: ctxGraphId ?? undefined,
+      fromSharedMemory: true,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
@@ -786,7 +787,7 @@ export class DKGPublisher implements Publisher {
     // Skipped for private publishes because StorageACKHandler cannot
     // recompute private merkle roots from SWM data alone.
     const hasPrivateData = privateRoots.length > 0;
-    const isPublishFromSharedMemory = !!options.contextGraphId;
+    const isPublishFromSharedMemory = !!options.fromSharedMemory;
     const stagingQuads = isPublishFromSharedMemory
       ? undefined
       : new TextEncoder().encode(nquadsStr);

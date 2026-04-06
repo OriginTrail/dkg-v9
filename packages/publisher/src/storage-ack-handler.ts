@@ -143,18 +143,41 @@ export class StorageACKHandler {
       }
     }
 
+    // Recompute kaCount and publicByteSize from verified quads rather than
+    // trusting the publisher's claimed values. Prevents under-reporting attacks
+    // where a publisher collects ACKs over real data but submits cheaper params.
+    const verifiedRootSubjects = new Set(
+      swmQuads.map(q => q.subject).filter(s => !s.includes('/.well-known/genid/')),
+    );
+    const verifiedKACount = verifiedRootSubjects.size;
+    const verifiedByteSize = BigInt(
+      new TextEncoder().encode(
+        swmQuads.map(q => `<${q.subject}> <${q.predicate}> ${q.object} .`).join('\n'),
+      ).byteLength,
+    );
+
+    if (intent.kaCount > 0 && verifiedKACount !== intent.kaCount) {
+      throw new Error(
+        `kaCount mismatch: intent=${intent.kaCount}, verified=${verifiedKACount}`,
+      );
+    }
+    const claimedByteSize = typeof intent.publicByteSize === 'number'
+      ? BigInt(intent.publicByteSize)
+      : BigInt(Number(intent.publicByteSize));
+    if (claimedByteSize > 0n && verifiedByteSize !== claimedByteSize) {
+      throw new Error(
+        `publicByteSize mismatch: intent=${claimedByteSize}, verified=${verifiedByteSize}`,
+      );
+    }
+
     // Derive numeric CG ID the same way the publisher does.
-    // If already numeric (on-chain ID), use directly; otherwise hash the string.
     let contextGraphIdBigInt: bigint;
     try {
       contextGraphIdBigInt = BigInt(cgId);
     } catch {
       contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
     }
-    const publicByteSize = typeof intent.publicByteSize === 'number'
-      ? BigInt(intent.publicByteSize)
-      : BigInt(Number(intent.publicByteSize));
-    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, intent.kaCount, publicByteSize);
+    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, verifiedKACount, verifiedByteSize);
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

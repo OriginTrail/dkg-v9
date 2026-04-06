@@ -1099,7 +1099,13 @@ export class EVMChainAdapter implements ChainAdapter {
     let endKAId = 0n;
     let publisherAddress = txSigner.address;
     const kcs = this.contracts.knowledgeCollectionStorage;
-    if (kcs) {
+    if (!kcs) {
+      throw new Error(
+        `V10 publish tx ${receipt.hash} succeeded but KnowledgeCollectionStorage ` +
+        `contract is not available — cannot parse minted IDs from receipt`,
+      );
+    }
+    {
       let foundKCCreated = false;
       let foundKAMinted = false;
       for (const log of receipt.logs) {

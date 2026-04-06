@@ -40,17 +40,11 @@ export class FinalizationHandler {
         return;
       }
 
-      // Deduplicate: skip if we already processed this UAL
+      // Deduplicate: skip if we already successfully processed this UAL
       const dedupeKey = `${msg.ual}:${msg.txHash}`;
       if (this.processedUals.has(dedupeKey)) {
         this.log.info(ctx, `Finalization: already processed ${msg.ual}, skipping duplicate`);
         return;
-      }
-      this.processedUals.add(dedupeKey);
-      // Cap the dedup set to prevent unbounded growth
-      if (this.processedUals.size > 10_000) {
-        const first = this.processedUals.values().next().value;
-        if (first) this.processedUals.delete(first);
       }
 
       if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
@@ -70,6 +64,7 @@ export class FinalizationHandler {
         : `did:dkg:context-graph:${paranetId}/_meta`;
       const alreadyPromoted = await this.isAlreadyConfirmed(msg.ual, targetMetaGraph);
       if (alreadyPromoted) {
+        this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'paranet'}, skipping`);
         return;
       }
@@ -93,6 +88,7 @@ export class FinalizationHandler {
               msg.publisherAddress, msg.txHash, blockNumber, startKAId, endKAId,
               protoToBigInt(msg.batchId), ctx, ctxGraphId,
             );
+            this.markProcessed(dedupeKey);
             this.log.info(ctx, `Finalization: promoted workspace snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
           }
@@ -113,6 +109,14 @@ export class FinalizationHandler {
       // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
       if (/wire type|index out of range|offset|unexpected tag/i.test(msg)) return;
       this.log.warn(ctx, `Finalization: failed to process message: ${msg}`);
+    }
+  }
+
+  private markProcessed(dedupeKey: string): void {
+    this.processedUals.add(dedupeKey);
+    if (this.processedUals.size > 10_000) {
+      const first = this.processedUals.values().next().value;
+      if (first) this.processedUals.delete(first);
     }
   }
 

@@ -2463,7 +2463,7 @@ export class DKGAgent {
 
   get draft() {
     const agent = this;
-    const agentAddress = this.publisher['publisherAddress'] ?? this.node.peerId?.toString() ?? 'unknown';
+    const agentAddress = this.peerId;
     return {
       async create(contextGraphId: string, draftName: string): Promise<string> {
         return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);

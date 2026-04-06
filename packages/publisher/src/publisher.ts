@@ -97,6 +97,12 @@ export interface PublishOptions {
    * this overrides paranetId as the ACK domain and on-chain contextGraphId.
    */
   contextGraphId?: string;
+  /**
+   * When true, the data is already in peers' SWM via workspace gossip.
+   * V10 ACK collection will NOT send inline staging quads — core nodes
+   * verify against their local SWM copy (storage-attestation guarantee).
+   */
+  fromSharedMemory?: boolean;
 }
 
 export interface PublishResult {

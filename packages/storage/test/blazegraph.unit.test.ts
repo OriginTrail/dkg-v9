@@ -9,7 +9,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   const baseUrl = 'http://blaze.test/sparql';
 
   beforeEach(() => {
-    globalThis.fetch = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {

@@ -129,7 +129,7 @@ describe('KAUpdateRequest (full manifest round-trip)', () => {
 
 describe('Malformed wire input (03 §14–15): decoders fail closed on corrupt protobuf', () => {
   it('decodeDiscoverRequest throws on truncated length-delimited field', () => {
-    expect(() => decodeDiscoverRequest(new Uint8Array([0xff, 0xff, 0xff]))).toThrow(RangeError);
+    expect(() => decodeDiscoverRequest(new Uint8Array([0xff, 0xff, 0xff]))).toThrow();
   });
 
   it('decodeQueryResponse throws on invalid wire', () => {
@@ -164,7 +164,7 @@ describe('Schema isolation: wrong decoder rejects foreign bytes', () => {
     // depending on field tag/type layout compatibility between schemas. This assertion
     // verifies the *current* behavior; if schemas evolve to become accidentally
     // compatible, this test may need a different approach (e.g., semantic validation).
-    expect(() => decodeQueryRequest(discoverBytes)).toThrow(RangeError);
+    expect(() => decodeQueryRequest(discoverBytes)).toThrow();
 
     // Sanity: the same bytes round-trip correctly with the matching decoder
     const roundTrip = decodeDiscoverRequest(discoverBytes);

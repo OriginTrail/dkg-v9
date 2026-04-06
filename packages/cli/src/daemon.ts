@@ -2117,6 +2117,17 @@ async function handleRequest(
     return jsonResponse(res, 200, { id, exists });
   }
 
+  // POST /api/endorse
+  if (req.method === 'POST' && path === '/api/endorse') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
+    if (!contextGraphId || !ual || !agentAddress) {
+      return jsonResponse(res, 400, { error: 'Missing contextGraphId, ual, or agentAddress' });
+    }
+    const result = await agent.endorse({ contextGraphId, knowledgeAssetUal: ual, agentAddress });
+    return jsonResponse(res, 200, { endorsed: true, endorserAddress: agentAddress, ...result });
+  }
+
   // POST /api/ccl/policy/publish
   if (req.method === 'POST' && path === '/api/ccl/policy/publish') {
     const body = await readBody(req, SMALL_BODY_BYTES * 4);

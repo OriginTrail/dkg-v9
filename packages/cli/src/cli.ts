@@ -768,6 +768,28 @@ program
     }
   });
 
+// ─── dkg endorse <ual> ─────────────────────────────────────────────
+
+program
+  .command('endorse <ual>')
+  .description('Endorse a published Knowledge Asset')
+  .requiredOption('--context-graph <id>', 'Context Graph ID')
+  .requiredOption('--agent <address>', 'Agent address (endorser)')
+  .action(async (ual: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.endorse({
+        contextGraphId: opts.contextGraph,
+        ual,
+        agentAddress: opts.agent,
+      });
+      console.log(`Endorsed ${ual} by ${result.endorserAddress}`);
+    } catch (err) {
+      console.error(`Endorse failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg query <context-graph> <sparql> ─────────────────────────────
 
 program

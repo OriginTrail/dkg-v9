@@ -345,7 +345,11 @@ export class GossipPublishHandler {
       const approvedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_BY)?.object;
       const revokedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_AT)?.object;
       const revokedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_BY)?.object;
-      const paranetId = paranetUri?.startsWith('did:dkg:paranet:') ? paranetUri.slice('did:dkg:paranet:'.length) : null;
+      const paranetId = paranetUri?.startsWith('did:dkg:context-graph:')
+        ? paranetUri.slice('did:dkg:context-graph:'.length)
+        : paranetUri?.startsWith('did:dkg:paranet:')
+          ? paranetUri.slice('did:dkg:paranet:'.length)
+          : null;
 
       if (!paranetId) {
         invalidBindings.add(bindingUri);

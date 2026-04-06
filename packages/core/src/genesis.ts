@@ -218,6 +218,8 @@ export const DKG_ONTOLOGY = {
   PROV_ASSOCIATED_WITH: `${PROV}wasAssociatedWith`,
   PROV_AT_TIME: `${PROV}atTime`,
   PROV_ENDED_AT_TIME: `${PROV}endedAtTime`,
+  DKG_ENDORSES: `${DKG}endorses`,
+  DKG_ENDORSED_AT: `${DKG}endorsedAt`,
   SKILL_OFFERS: 'https://dkg.origintrail.io/skill#offersSkill',
   SKILL_FRAMEWORK: 'https://dkg.origintrail.io/skill#framework',
 } as const;

@@ -299,6 +299,14 @@ export class ApiClient {
     return this.contextGraphExists(id);
   }
 
+  async endorse(request: {
+    contextGraphId: string;
+    ual: string;
+    agentAddress: string;
+  }): Promise<{ endorsed: boolean; endorserAddress: string }> {
+    return this.post('/api/endorse', request);
+  }
+
   async publishCclPolicy(request: {
     paranetId: string;
     name: string;

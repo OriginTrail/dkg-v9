@@ -14,6 +14,7 @@ export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler } from './messaging.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
+export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
   parseCclPolicy,

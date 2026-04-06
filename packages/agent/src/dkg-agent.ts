@@ -2037,6 +2037,29 @@ export class DKGAgent {
     }
   }
 
+  // ── ENDORSE ─���────────────────────────────────────────────────────────
+
+  /**
+   * Endorse a published Knowledge Asset. Publishes a `dkg:endorses` triple
+   * to the Context Graph's data graph. Endorsements ride regular PUBLISH
+   * batches — no separate chain transaction required.
+   */
+  async endorse(opts: {
+    contextGraphId: string;
+    knowledgeAssetUal: string;
+    agentAddress: string;
+  }): Promise<PublishResult> {
+    const { buildEndorsementQuads } = await import('./endorse.js');
+    const quads = buildEndorsementQuads(
+      opts.agentAddress,
+      opts.knowledgeAssetUal,
+      opts.contextGraphId,
+    );
+    return this.publish(opts.contextGraphId, quads);
+  }
+
+  // ── CCL ──────────────────────────────────���──────────────────────────
+
   async publishCclPolicy(opts: {
     paranetId: string;
     name: string;
@@ -2158,7 +2181,7 @@ export class DKGAgent {
   } = {}): Promise<CclPolicyRecord[]> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const filters: string[] = [];
-    if (opts.paranetId) filters.push(`?paranet = <did:dkg:paranet:${opts.paranetId}>`);
+    if (opts.paranetId) filters.push(`?paranet = <did:dkg:context-graph:${opts.paranetId}>`);
     if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
     if (opts.contextType) filters.push(`?contextType = ${sparqlString(opts.contextType)}`);
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
@@ -2195,7 +2218,7 @@ export class DKGAgent {
     if (result.type === 'bindings') {
       for (const row of result.bindings as Record<string, string>[]) {
         const paranetUri = row['paranet'];
-        const paranetId = paranetUri.startsWith('did:dkg:paranet:') ? paranetUri.slice('did:dkg:paranet:'.length) : paranetUri;
+        const paranetId = paranetUri.startsWith('did:dkg:context-graph:') ? paranetUri.slice('did:dkg:context-graph:'.length) : paranetUri;
         const name = stripLiteral(row['name']);
         const defaultActive = latestByScope.get(`${paranetId}|${name}|`);
         const activeContexts = Array.from(latestByScope.values())
@@ -2634,7 +2657,7 @@ export class DKGAgent {
 
   private async getContextGraphOwner(paranetId: string): Promise<string | null> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const paranetUri = `did:dkg:paranet:${paranetId}`;
+    const paranetUri = `did:dkg:context-graph:${paranetId}`;
     const result = await this.store.query(`
       SELECT ?owner WHERE {
         GRAPH <${ontologyGraph}> {
@@ -2653,7 +2676,7 @@ export class DKGAgent {
   } = {}): Promise<PolicyApprovalBinding[]> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const filters: string[] = [];
-    if (opts.paranetId) filters.push(`?paranet = <did:dkg:paranet:${opts.paranetId}>`);
+    if (opts.paranetId) filters.push(`?paranet = <did:dkg:context-graph:${opts.paranetId}>`);
     if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
     const result = await this.store.query(`
@@ -2683,7 +2706,7 @@ export class DKGAgent {
       const next: PolicyApprovalBinding = {
         bindingUri,
         policyUri: row['policy'],
-        paranetId: row['paranet'].startsWith('did:dkg:paranet:') ? row['paranet'].slice('did:dkg:paranet:'.length) : row['paranet'],
+        paranetId: row['paranet'].startsWith('did:dkg:context-graph:') ? row['paranet'].slice('did:dkg:context-graph:'.length) : row['paranet'],
         name: stripLiteral(row['name']),
         contextType: row['contextType'] ? stripLiteral(row['contextType']) : undefined,
         status: revokedAt || (row['bindingStatus'] && stripLiteral(row['bindingStatus']) === 'revoked') ? 'revoked' : 'approved',

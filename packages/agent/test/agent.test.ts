@@ -673,7 +673,7 @@ describe('Genesis Knowledge', () => {
     });
     await agent.start();
 
-    await agent.createParanet({ id: 'ops-policy', name: 'Ops Policy' });
+    await agent.createContextGraph({ id: 'ops-policy', name: 'Ops Policy' });
 
     const published = await agent.publishCclPolicy({
       paranetId: 'ops-policy',
@@ -720,7 +720,7 @@ decisions: []
     expect(publishedEval.publish.status).toBeDefined();
 
     const storedEval = await store.query(
-      `SELECT ?hash WHERE { GRAPH <did:dkg:paranet:ops-policy> { <${publishedEval.evaluationUri}> <https://dkg.network/ontology#factSetHash> ?hash } }`,
+      `SELECT ?hash WHERE { GRAPH <did:dkg:context-graph:ops-policy> { <${publishedEval.evaluationUri}> <https://dkg.network/ontology#factSetHash> ?hash } }`,
     );
     expect(storedEval.type).toBe('bindings');
     if (storedEval.type === 'bindings') {
@@ -747,7 +747,7 @@ decisions: []
     });
     await agent.start();
 
-    await agent.createParanet({ id: 'ops-context', name: 'Ops Context' });
+    await agent.createContextGraph({ id: 'ops-context', name: 'Ops Context' });
 
     const base = await agent.publishCclPolicy({
       paranetId: 'ops-context',
@@ -815,7 +815,7 @@ decisions: []
     });
     await agent.start();
 
-    await agent.createParanet({ id: 'ops-revoke-default', name: 'Ops Revoke Default' });
+    await agent.createContextGraph({ id: 'ops-revoke-default', name: 'Ops Revoke Default' });
 
     const v1 = await agent.publishCclPolicy({
       paranetId: 'ops-revoke-default',
@@ -869,7 +869,7 @@ decisions: []
     });
     await agent.start();
 
-    await agent.createParanet({ id: 'ops-revoke-context', name: 'Ops Revoke Context' });
+    await agent.createContextGraph({ id: 'ops-revoke-context', name: 'Ops Revoke Context' });
 
     const base = await agent.publishCclPolicy({
       paranetId: 'ops-revoke-context',
@@ -928,7 +928,7 @@ decisions: []
 
     await owner.start();
     await other.start();
-    await owner.createParanet({ id: 'ops-owner', name: 'Ops Owner' });
+    await owner.createContextGraph({ id: 'ops-owner', name: 'Ops Owner' });
 
     const published = await owner.publishCclPolicy({
       paranetId: 'ops-owner',
@@ -966,7 +966,7 @@ decisions: []
 
     await owner.start();
     await other.start();
-    await owner.createParanet({ id: 'ops-owner-revoke', name: 'Ops Owner Revoke' });
+    await owner.createContextGraph({ id: 'ops-owner-revoke', name: 'Ops Owner Revoke' });
 
     const published = await owner.publishCclPolicy({
       paranetId: 'ops-owner-revoke',
@@ -998,7 +998,7 @@ decisions: []
       chainAdapter: new MockChainAdapter(),
     });
     await agent.start();
-    await agent.createParanet({ id: 'ops-validate', name: 'Ops Validate' });
+    await agent.createContextGraph({ id: 'ops-validate', name: 'Ops Validate' });
 
     await expect(agent.publishCclPolicy({
       paranetId: 'ops-validate',
@@ -1029,7 +1029,7 @@ decisions: []
       chainAdapter: new MockChainAdapter(),
     });
     await agent.start();
-    await agent.createParanet({ id: 'ops-collision', name: 'Ops Collision' });
+    await agent.createContextGraph({ id: 'ops-collision', name: 'Ops Collision' });
 
     await agent.publishCclPolicy({
       paranetId: 'ops-collision',
@@ -1068,7 +1068,7 @@ decisions: []
       chainAdapter: new MockChainAdapter(),
     });
     await agent.start();
-    await agent.createParanet({ id: 'ops-snapshot', name: 'Ops Snapshot' });
+    await agent.createContextGraph({ id: 'ops-snapshot', name: 'Ops Snapshot' });
 
     const published = await agent.publishCclPolicy({
       paranetId: 'ops-snapshot',

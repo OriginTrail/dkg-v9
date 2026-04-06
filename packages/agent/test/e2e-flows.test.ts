@@ -202,9 +202,9 @@ describe('CCL snapshot-resolved evaluation (two agents)', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'ccl-snapshot-e2e', name: 'CCL Snapshot', description: '' });
-    agentA.subscribeToParanet('ccl-snapshot-e2e');
-    agentB.subscribeToParanet('ccl-snapshot-e2e');
+    await agentA.createContextGraph({ id: 'ccl-snapshot-e2e', name: 'CCL Snapshot', description: '' });
+    agentA.subscribeToContextGraph('ccl-snapshot-e2e');
+    agentB.subscribeToContextGraph('ccl-snapshot-e2e');
     await sleep(1000);
 
     const published = await agentA.publishCclPolicy({

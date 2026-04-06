@@ -66,7 +66,7 @@ export function buildCclPolicyQuads(input: PublishCclPolicyInput, creator: strin
 } {
   const hash = hashCclPolicy(input.content);
   const policyUri = policyUriFor(input.paranetId, hash);
-  const paranetUri = `did:dkg:paranet:${input.paranetId}`;
+  const paranetUri = `did:dkg:context-graph:${input.paranetId}`;
   const quads: Quad[] = [
     { subject: policyUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CCL_POLICY, graph },
     { subject: policyUri, predicate: DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET, object: paranetUri, graph },
@@ -112,7 +112,7 @@ export function buildPolicyApprovalQuads(opts: {
   contextType?: string;
 }): { bindingUri: string; quads: Quad[] } {
   const bindingUri = policyBindingUriFor(opts.paranetId, opts.policyName, opts.contextType);
-  const paranetUri = `did:dkg:paranet:${opts.paranetId}`;
+  const paranetUri = `did:dkg:context-graph:${opts.paranetId}`;
   const quads: Quad[] = [
     { subject: bindingUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_POLICY_BINDING, graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET, object: paranetUri, graph: opts.graph },

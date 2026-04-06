@@ -950,12 +950,10 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     if (contextGraphId === undefined) {
-      return {
-        hash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-        success: false,
-        contextGraphId: 0n,
-      };
+      throw new Error(
+        `createContextGraph tx succeeded (${receipt.hash}) but no ContextGraphCreated event found in logs — ` +
+        `the on-chain call may have silently failed or the contract ABI is out of date`,
+      );
     }
 
     return {

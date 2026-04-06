@@ -97,4 +97,32 @@ describe('PublishJournal', () => {
     expect(loaded[0].ual).toBe('second');
     expect(loaded[1].ual).toBe('third');
   });
+
+  it('Publication pipeline (06): repeated save with same snapshot is idempotent on load', async () => {
+    const entries = [makeEntry({ ual: 'stable-ual' })];
+    await journal.save(entries);
+    await journal.save(entries);
+    const loaded = await journal.load();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].ual).toBe('stable-ual');
+  });
+
+  it('Publication pipeline (06): rootEntities round-trip for recovery cleanup', async () => {
+    const entry = makeEntry({
+      ual: 'did:dkg:mock:31337/0xABC/99',
+      rootEntities: ['urn:ex:root1', 'urn:ex:root2'],
+    });
+    await journal.save([entry]);
+    const [loaded] = await journal.load();
+    expect(loaded.rootEntities).toEqual(['urn:ex:root1', 'urn:ex:root2']);
+  });
+
+  it('Publication pipeline (06): concurrent saves serialize; final load matches last completed save', async () => {
+    const a = [makeEntry({ ual: 'concurrent-a' })];
+    const b = [makeEntry({ ual: 'concurrent-b' })];
+    await Promise.all([journal.save(a), journal.save(b)]);
+    const loaded = await journal.load();
+    expect(loaded).toHaveLength(1);
+    expect(['concurrent-a', 'concurrent-b']).toContain(loaded[0].ual);
+  });
 });

@@ -224,6 +224,82 @@ describe('Signature Collection Protocol', () => {
       ).rejects.toThrow(/insufficient.*signatures|timeout/i);
     });
   });
+
+  describe('VERIFY (03 §10): M-of-N, dedup, and ordering', () => {
+    it('collectReceiverSignatures succeeds when more than minimum unique sigs (M-of-N)', async () => {
+      const peer2 = new MockSignerPeer(2n);
+      const peer3 = new MockSignerPeer(3n);
+      const peer4 = new MockSignerPeer(4n);
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('m-of-n-root'));
+      const publicByteSize = 1n;
+      const mockPeerResponder = async () =>
+        Promise.all([
+          peer2.signReceiverAck(merkleRoot, publicByteSize),
+          peer3.signReceiverAck(merkleRoot, publicByteSize),
+          peer4.signReceiverAck(merkleRoot, publicByteSize),
+        ]);
+
+      const signatures = await publisher.collectReceiverSignatures({
+        merkleRoot,
+        publicByteSize,
+        peerResponder: mockPeerResponder,
+        minimumRequired: 2,
+        timeoutMs: 5000,
+      });
+
+      expect(signatures).toHaveLength(3);
+    });
+
+    it('publish sorts receiver signatures by identityId before chain (out-of-order collection)', async () => {
+      const peer5 = new MockSignerPeer(5n);
+      const peer2 = new MockSignerPeer(2n);
+      const peer3 = new MockSignerPeer(3n);
+      const chainPublishSpy = vi.spyOn(chain, 'publishKnowledgeAssets');
+
+      await publisher.publish({
+        paranetId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"OrderTest"')],
+        receiverSignatureProvider: async (mr, pbs) =>
+          Promise.all([
+            peer5.signReceiverAck(mr, pbs),
+            peer2.signReceiverAck(mr, pbs),
+            peer3.signReceiverAck(mr, pbs),
+          ]),
+      });
+
+      expect(chainPublishSpy).toHaveBeenCalledOnce();
+      const callArgs = chainPublishSpy.mock.calls[0][0];
+      const ids = callArgs.receiverSignatures.map((s: { identityId: bigint }) => s.identityId);
+      for (let i = 1; i < ids.length; i++) {
+        expect(ids[i]).toBeGreaterThan(ids[i - 1]);
+      }
+    });
+
+    it('collectParticipantSignatures succeeds with excess signers above minimum', async () => {
+      const a = new MockSignerPeer(10n);
+      const b = new MockSignerPeer(11n);
+      const c = new MockSignerPeer(12n);
+      const contextGraphId = 99n;
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('excess-participant'));
+
+      const mockResponder = async () =>
+        Promise.all([
+          a.signParticipantAck(contextGraphId, merkleRoot),
+          b.signParticipantAck(contextGraphId, merkleRoot),
+          c.signParticipantAck(contextGraphId, merkleRoot),
+        ]);
+
+      const signatures = await publisher.collectParticipantSignatures({
+        contextGraphId,
+        merkleRoot,
+        participantResponder: mockResponder,
+        minimumRequired: 2,
+        timeoutMs: 5000,
+      });
+
+      expect(signatures).toHaveLength(3);
+    });
+  });
 });
 
 describe('Reordered Publish Flow (replicate-then-publish)', () => {

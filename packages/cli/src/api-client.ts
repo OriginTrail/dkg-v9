@@ -299,6 +299,15 @@ export class ApiClient {
     return this.contextGraphExists(id);
   }
 
+  async verify(request: {
+    contextGraphId: string;
+    verifiedMemoryId: string;
+    batchId: string;
+    timeoutMs?: number;
+  }): Promise<{ txHash: string; blockNumber: number; verifiedMemoryId: string; signers: string[] }> {
+    return this.post('/api/verify', request);
+  }
+
   async endorse(request: {
     contextGraphId: string;
     ual: string;

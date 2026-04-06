@@ -1,9 +1,11 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
+  contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
+  computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
@@ -17,6 +19,7 @@ import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
+  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK,
@@ -423,6 +426,37 @@ export class DKGAgent {
       }
     } else {
       this.log.info(ctx, `Node role is '${effectiveRole}' — skipping StorageACK handler registration (core-only)`);
+    }
+
+    // Register VERIFY proposal handler — responds to incoming M-of-N proposals.
+    // Agents on the allowList sign the verify digest when they agree with the data.
+    // Uses the ACK signer key (core nodes) or first operational key (edge nodes).
+    const verifySignerKey = this.config.ackSignerKey
+      ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined)
+      ?? this.config.chainConfig?.operationalKeys?.[0];
+    if (verifySignerKey) {
+      const verifyWallet = new ethers.Wallet(verifySignerKey);
+      const verifyHandler = new VerifyProposalHandler({
+        store: this.store,
+        agentPrivateKey: verifySignerKey,
+        agentAddress: verifyWallet.address,
+        getBatchMerkleRoot: async (cgId, batchId) => {
+          const metaGraph = paranetMetaGraphUri(cgId);
+          const result = await this.store.query(
+            `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> "${batchId}" } } LIMIT 1`,
+          );
+          if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+          const hex = (result.bindings[0] as Record<string, string>)['root'];
+          if (!hex) return null;
+          return ethers.getBytes(hex.startsWith('"') ? hex.slice(1, -1) : hex);
+        },
+        getContextGraphIdOnChain: async (cgId) => {
+          const sub = this.subscribedContextGraphs.get(cgId);
+          return sub?.onChainId ? BigInt(sub.onChainId) : null;
+        },
+      });
+      this.router.register(PROTOCOL_VERIFY_PROPOSAL, verifyHandler.handler);
+      this.log.info(ctx, 'Registered VERIFY proposal handler');
     }
 
     // Start chain event poller for trustless confirmation of tentative publishes
@@ -2058,7 +2092,170 @@ export class DKGAgent {
     return this.publish(opts.contextGraphId, quads);
   }
 
-  // ── CCL ──────────────────────────────────���──────────────────────────
+  // ── VERIFY ────────────────────────────────────────────────────────
+
+  /**
+   * Propose verification for a published batch: collect M-of-N approvals,
+   * anchor on-chain, and promote triples to Verified Memory.
+   */
+  async verify(opts: {
+    contextGraphId: string;
+    verifiedMemoryId: string;
+    batchId: bigint;
+    requiredSignatures?: number;
+    timeoutMs?: number;
+  }): Promise<{
+    txHash: string;
+    blockNumber: number;
+    verifiedMemoryId: string;
+    signers: string[];
+  }> {
+    const ctx = createOperationContext('verify');
+
+    // 1. Look up batch merkle root from local metadata
+    const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
+    const rootResult = await this.store.query(
+      `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> "${opts.batchId}" } } LIMIT 1`,
+    );
+    if (rootResult.type !== 'bindings' || rootResult.bindings.length === 0) {
+      throw new Error(`Batch ${opts.batchId} not found in context graph ${opts.contextGraphId}`);
+    }
+    const rootHex = (rootResult.bindings[0] as Record<string, string>)['root'];
+    const merkleRoot = ethers.getBytes(rootHex.startsWith('"') ? rootHex.slice(1, -1) : rootHex);
+
+    // 2. Look up context graph on-chain config
+    const sub = this.subscribedContextGraphs.get(opts.contextGraphId);
+    const contextGraphIdOnChain = sub?.onChainId ? BigInt(sub.onChainId) : null;
+    if (!contextGraphIdOnChain) {
+      throw new Error(`Context graph ${opts.contextGraphId} not found on-chain`);
+    }
+
+    // 3. Get required signatures (from opts or default to 1)
+    const requiredSignatures = opts.requiredSignatures ?? 1;
+
+    // 4. Sign the verify digest as proposer
+    const signerKey = this.config.ackSignerKey
+      ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined)
+      ?? this.config.chainConfig?.operationalKeys?.[0];
+    if (!signerKey) throw new Error('No signer key available for verify');
+
+    const digest = computeACKDigest(contextGraphIdOnChain, merkleRoot);
+    const prefixedHash = ethers.hashMessage(digest);
+    const signingKey = new ethers.SigningKey(signerKey);
+    const proposerSig = signingKey.sign(prefixedHash);
+
+    // 5. Collect M-of-N approvals
+    const collector = new VerifyCollector({
+      sendP2P: async (peerId, protocol, data) => this.router.send(peerId, protocol, data),
+      getParticipantPeers: () => {
+        // Return all connected peers (participants filter via signature recovery)
+        return this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
+      },
+      log: (msg) => this.log.info(ctx, msg),
+    });
+
+    const entities = await this.getRootEntities(opts.contextGraphId, opts.batchId);
+
+    const result = await collector.collect({
+      contextGraphId: opts.contextGraphId,
+      contextGraphIdOnChain,
+      verifiedMemoryId: BigInt(opts.verifiedMemoryId),
+      batchId: opts.batchId,
+      merkleRoot,
+      entities,
+      proposerSignature: { r: ethers.getBytes(proposerSig.r), vs: ethers.getBytes(proposerSig.yParityAndS) },
+      requiredSignatures,
+      timeoutMs: opts.timeoutMs ?? 30 * 60 * 1000, // 30 min default
+    });
+
+    // 6. Submit on-chain
+    if (typeof this.chain.verify !== 'function') {
+      throw new Error('Chain adapter does not support verify');
+    }
+
+    const identityId = await this.chain.getIdentityId();
+    const txResult = await this.chain.verify({
+      contextGraphId: contextGraphIdOnChain,
+      batchId: opts.batchId,
+      merkleRoot,
+      signerSignatures: result.approvals.map(a => ({
+        identityId: a.identityId || identityId,
+        r: a.signatureR,
+        vs: a.signatureVS,
+      })),
+    });
+
+    // 7. Promote triples to Verified Memory
+    await this.promoteToVerifiedMemory(
+      opts.contextGraphId,
+      opts.verifiedMemoryId,
+      opts.batchId,
+      txResult.hash,
+      txResult.blockNumber,
+      result.approvals.map(a => a.approverAddress),
+    );
+
+    this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
+
+    return {
+      txHash: txResult.hash,
+      blockNumber: txResult.blockNumber,
+      verifiedMemoryId: opts.verifiedMemoryId,
+      signers: result.approvals.map(a => a.approverAddress),
+    };
+  }
+
+  private async promoteToVerifiedMemory(
+    contextGraphId: string,
+    verifiedMemoryId: string,
+    batchId: bigint,
+    txHash: string,
+    blockNumber: number,
+    signers: string[],
+  ): Promise<void> {
+    // Query LTM for all triples in this batch
+    const dataGraph = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'bindings') return;
+
+    const vmGraph = contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId);
+    const vmQuads: Quad[] = (result.bindings as Record<string, string>[]).map(row => ({
+      subject: row['s'],
+      predicate: row['p'],
+      object: row['o'],
+      graph: vmGraph,
+    }));
+    if (vmQuads.length > 0) {
+      await this.store.insert(vmQuads);
+    }
+
+    // Write verification metadata
+    const vmMetaGraph = contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
+    const metaQuads = buildVerificationMetadata({
+      contextGraphId,
+      verifiedMemoryId,
+      batchId,
+      txHash,
+      blockNumber,
+      signers,
+      verifiedAt: new Date(),
+      graph: vmMetaGraph,
+    });
+    await this.store.insert(metaQuads);
+  }
+
+  private async getRootEntities(contextGraphId: string, batchId: bigint): Promise<string[]> {
+    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <https://dkg.network/ontology#rootEntity> ?entity . ?ka <https://dkg.network/ontology#batchId> "${batchId}" } }`,
+    );
+    if (result.type !== 'bindings') return [];
+    return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+  }
+
+  // ── CCL ──────────────────────────────────────────────────────────────
 
   async publishCclPolicy(opts: {
     paranetId: string;

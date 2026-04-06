@@ -2117,6 +2117,22 @@ async function handleRequest(
     return jsonResponse(res, 200, { id, exists });
   }
 
+  // POST /api/verify
+  if (req.method === 'POST' && path === '/api/verify') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, verifiedMemoryId, batchId, timeoutMs } = JSON.parse(body);
+    if (!contextGraphId || !verifiedMemoryId || !batchId) {
+      return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
+    }
+    const result = await agent.verify({
+      contextGraphId,
+      verifiedMemoryId,
+      batchId: BigInt(batchId),
+      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+    });
+    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+  }
+
   // POST /api/endorse
   if (req.method === 'POST' && path === '/api/endorse') {
     const body = await readBody(req, SMALL_BODY_BYTES);

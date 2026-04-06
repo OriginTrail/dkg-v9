@@ -768,6 +768,33 @@ program
     }
   });
 
+// ─── dkg verify <batchId> ──────────────────────────────────────────
+
+program
+  .command('verify <batchId>')
+  .description('Propose M-of-N verification for a published batch')
+  .requiredOption('--context-graph <id>', 'Context Graph ID')
+  .requiredOption('--verified-graph <id>', 'Verified Graph ID')
+  .option('--timeout <ms>', 'Timeout in milliseconds (default: 30 min)')
+  .action(async (batchId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.verify({
+        contextGraphId: opts.contextGraph,
+        verifiedMemoryId: opts.verifiedGraph,
+        batchId,
+        timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+      });
+      console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
+      console.log(`  TX: ${result.txHash}`);
+      console.log(`  Block: ${result.blockNumber}`);
+      console.log(`  Signers: ${result.signers.join(', ')}`);
+    } catch (err) {
+      console.error(`Verify failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg endorse <ual> ─────────────────────────────────────────────
 
 program

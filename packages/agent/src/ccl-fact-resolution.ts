@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, contextGraphDataUri, contextGraphSharedMemoryUri, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { DKG_ENDORSES } from './endorse.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { CclFactTuple } from './ccl-evaluator.js';
 
@@ -93,6 +94,15 @@ export async function resolveFactsFromSnapshot(
       next.args.set(argIndex, parseFactArg(stripLiteral(row['argVal'])));
       factsByNode.set(factId, next);
     }
+  }
+
+  // Resolve endorsement counts from dkg:endorses triples
+  const endorsementFacts = await resolveEndorsementFacts(store, graph);
+  for (const ef of endorsementFacts) {
+    factsByNode.set(`endorsement:${ef[1]}`, {
+      predicate: ef[0] as string,
+      args: new Map(ef.slice(1).map((v, i) => [i, v])),
+    });
   }
 
   const deduped = new Map<string, CclFactTuple>();
@@ -203,4 +213,43 @@ function unescapeLiteralContent(value: string): string {
     .replace(/\\t/g, '\t')
     .replace(/\\"/g, '"')
     .replace(/\\\\/g, '\\');
+}
+
+/**
+ * Query endorsement triples and produce CCL facts:
+ *   endorsement(agent, ual)       — one per endorsement
+ *   endorsement_count(ual, N)     — aggregate count per KA
+ */
+async function resolveEndorsementFacts(
+  store: TripleStore,
+  graph: string,
+): Promise<CclFactTuple[]> {
+  const query = `
+    SELECT ?endorser ?ual (COUNT(DISTINCT ?endorser) AS ?count) WHERE {
+      GRAPH <${graph}> {
+        ?endorser <${DKG_ENDORSES}> ?ual .
+      }
+    }
+    GROUP BY ?ual ?endorser
+  `;
+  const result = await store.query(query);
+  if (result.type !== 'bindings') return [];
+
+  const facts: CclFactTuple[] = [];
+  const counts = new Map<string, number>();
+
+  for (const row of result.bindings as Record<string, string>[]) {
+    const endorser = row['endorser'] ?? '';
+    const ual = row['ual'] ?? '';
+    if (!endorser || !ual) continue;
+
+    facts.push(['endorsement', endorser, ual]);
+    counts.set(ual, (counts.get(ual) ?? 0) + 1);
+  }
+
+  for (const [ual, count] of counts) {
+    facts.push(['endorsement_count', ual, count]);
+  }
+
+  return facts;
 }

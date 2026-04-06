@@ -567,7 +567,7 @@ export class DKGAgent {
       }
     }
 
-    // On new peer connection, request sync of system paranets so we discover
+    // On new peer connection, request sync of system context graphs so we discover
     // agents that published their profiles before we came online.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
@@ -609,7 +609,7 @@ export class DKGAgent {
   }
 
   /**
-   * Pull all triples for the given paranets from a remote peer and merge
+   * Pull all triples for the given context graphs from a remote peer and merge
    * them into our local store. Used on peer:connect for initial catch-up,
    * with a per-peer guard to avoid overlapping sync storms.
    */
@@ -645,12 +645,12 @@ export class DKGAgent {
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
-      // After syncing ONTOLOGY, discover and auto-subscribe to any new paranets
+      // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
 
-      const wsParanets = this.config.syncContextGraphs ?? [];
-      if (wsParanets.length > 0) {
-        const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsParanets);
+      const wsContextGraphIds = this.config.syncContextGraphs ?? [];
+      if (wsContextGraphIds.length > 0) {
+        const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
         this.log.info(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
       }
     } finally {
@@ -2264,9 +2264,9 @@ export class DKGAgent {
       return 0;
     }
 
-    let onChainParanets;
+    let onChainContextGraphs;
     try {
-      onChainParanets = await this.chain.listContextGraphsFromChain();
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain();
     } catch (err) {
       this.log.warn(ctx, `Chain context graph scan failed: ${err instanceof Error ? err.message : String(err)}`);
       return 0;
@@ -2281,7 +2281,7 @@ export class DKGAgent {
     }
 
     let discovered = 0;
-    for (const p of onChainParanets) {
+    for (const p of onChainContextGraphs) {
       if (knownOnChainIds.has(p.contextGraphId)) continue;
 
       if (!p.name) {

@@ -36,7 +36,7 @@ export class FinalizationHandler {
       }
 
       if (msg.paranetId && msg.paranetId !== contextGraphId) {
-        this.log.warn(ctx, `Finalization: paranetId "${msg.paranetId}" does not match topic "${contextGraphId}", ignoring`);
+        this.log.warn(ctx, `Finalization: contextGraphId "${msg.paranetId}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
 

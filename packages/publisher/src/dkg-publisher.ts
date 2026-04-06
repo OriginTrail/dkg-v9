@@ -822,7 +822,7 @@ export class DKGPublisher implements Publisher {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        // For SWM publishes, always use contextGraphId (paranet) because that's
+        // For SWM publishes, always use contextGraphId because that's
         // where data lives. The sub-CG association happens via addBatchToContextGraph later.
         const ackDomain = isPublishFromSharedMemory
           ? contextGraphId

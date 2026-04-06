@@ -52,11 +52,10 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const OP_TYPE_COLORS: Record<string, string> = {
-  publish: '#3b82f6',
+  publish: '#22c55e',
   update: '#14b8a6',
   query: '#8b5cf6',
   workspace: '#f59e0b',
-  enshrine: '#22c55e',
   connect: '#06b6d4',
   sync: '#ec4899',
   gossip: '#f97316',
@@ -64,11 +63,10 @@ const OP_TYPE_COLORS: Record<string, string> = {
 };
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish: 'Create a new Knowledge Asset on the DKG',
+  publish: 'Publish a Knowledge Collection on-chain to a context graph',
   update: 'Update an existing Knowledge Asset',
   query: 'Run a SPARQL query against the knowledge graph',
   workspace: 'Manage shared memory for staging changes',
-  enshrine: 'Anchor a Knowledge Collection on-chain to a context graph',
   connect: 'Establish a connection with a network peer',
   sync: 'Synchronize knowledge data with remote peers',
   gossip: 'Propagate updates across the peer-to-peer network',

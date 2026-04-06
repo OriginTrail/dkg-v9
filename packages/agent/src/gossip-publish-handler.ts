@@ -60,7 +60,7 @@ export class GossipPublishHandler {
           // different message type (e.g. finalization) that was decoded as a publish
           // request. Silently skip to avoid spammy WARN logs.
           if (/[^\x20-\x7E]/.test(request.paranetId)) return;
-          this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic contextGraphId "${contextGraphId}", ignoring`);
+          this.log.warn(ctx, `Gossip: request contextGraphId "${request.paranetId}" does not match topic "${contextGraphId}", ignoring`);
           return;
         }
       } finally {

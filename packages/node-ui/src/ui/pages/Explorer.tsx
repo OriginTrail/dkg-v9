@@ -1466,9 +1466,9 @@ function ContextGraphsTab() {
           <div className="empty-state-desc">Subscribe to a context graph in the Integrations page, then its data will be explorable here.</div>
         </div>
       ) : (
-        <div className="paranet-list">
+        <div className="context-graph-list">
           {contextGraphs.map((p: any) => (
-            <div key={p.id} className="paranet-card" onClick={() => {
+            <div key={p.id} className="context-graph-card" onClick={() => {
               navigate(`/explorer?contextGraph=${encodeURIComponent(p.id)}`);
             }}>
               <h3>{p.name}</h3>

@@ -42,9 +42,9 @@ export function IntegrationsPage() {
             <div className="empty-state-desc">Enable adapters in your node config to connect with external frameworks like ElizaOS or OpenClaw.</div>
           </div>
         ) : (
-          <div className="paranet-list">
+          <div className="context-graph-list">
             {adapters.map((a: any) => (
-              <div key={a.id} className="paranet-card">
+              <div key={a.id} className="context-graph-card">
                 <h3>{a.name}</h3>
                 <p>{a.description ?? a.id}</p>
                 <span className={`badge ${a.enabled ? 'badge-success' : 'badge-warning'}`}>

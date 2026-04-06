@@ -851,14 +851,14 @@ function ErrorHotspotsCard() {
 
   if (hotspots.length === 0) {
     return (
-      <div className="paranet-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
+      <div className="context-graph-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
         <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>No errors in 7 days</span>
       </div>
     );
   }
 
   return (
-    <div className="paranet-card" style={{ padding: 12 }}>
+    <div className="context-graph-card" style={{ padding: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', marginBottom: 6 }}>Error Hotspots (7d)</div>
       {hotspots.map((h: any, i: number) => (
         <div key={`${h.operation_name}-${h.phase}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', color: 'var(--text-muted)' }}>
@@ -882,7 +882,7 @@ function SpendingCard() {
   if (!latest) return null;
 
   return (
-    <div className="paranet-card" style={{ padding: 12 }}>
+    <div className="context-graph-card" style={{ padding: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 6 }}>Spending ({latest.label})</div>
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
         <div>
@@ -991,9 +991,9 @@ export function DashboardPage() {
           Context Graphs
           {!isLiveContextGraphs && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
         </div>
-        <div className="paranet-list">
+        <div className="context-graph-list">
           {displayContextGraphs.map((p: any, i: number) => (
-            <div key={p.id ?? `fallback-${i}`} className="paranet-card" onClick={() => p.id && navigate(`/explorer?contextGraph=${encodeURIComponent(p.id)}`)}>
+            <div key={p.id ?? `fallback-${i}`} className="context-graph-card" onClick={() => p.id && navigate(`/explorer?contextGraph=${encodeURIComponent(p.id)}`)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                 <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
                 <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>{p.name}</h3>

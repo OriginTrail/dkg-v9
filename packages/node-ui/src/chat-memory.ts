@@ -988,7 +988,7 @@ export class ChatMemoryManager {
       }
       ?s ?p ?o
     }`;
-    const workspaceCountResult = await this.tools.query(countQuery, {
+    const swmCountResult = await this.tools.query(countQuery, {
       contextGraphId: MEMORY_CONTEXT_GRAPH,
       graphSuffix: '_shared_memory',
     });
@@ -1001,7 +1001,7 @@ export class ChatMemoryManager {
       { contextGraphId: MEMORY_CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
 
-    const sharedMemoryTripleCount = sumBindingValues(workspaceCountResult.bindings, 'c');
+    const sharedMemoryTripleCount = sumBindingValues(swmCountResult.bindings, 'c');
     const dataTripleCount = sumBindingValues(dataCountResult.bindings, 'c');
     const rootEntityCount = (rootEntityResult.bindings ?? []).length;
     const scope: SessionPublicationStatus['scope'] =

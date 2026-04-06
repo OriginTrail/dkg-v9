@@ -1841,7 +1841,7 @@ async function handleRequest(
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
-      const result = await tracker.trackPhase(ctx, 'read-workspace', () =>
+      const result = await tracker.trackPhase(ctx, 'read-shared-memory', () =>
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
@@ -1872,7 +1872,7 @@ async function handleRequest(
 
   // POST /api/context-graph/create — on-chain context graph creation (V10)
   // When the body has `participantIdentityIds`, this is the on-chain multisig creation.
-  // Otherwise, fall through to the paranet-style create handler below.
+  // Otherwise, fall through to the context-graph-style create handler below.
   if (req.method === 'POST' && path === '/api/context-graph/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
@@ -1919,7 +1919,7 @@ async function handleRequest(
         return jsonResponse(res, 500, { error: err.message });
       }
     }
-    // Body has `id` + `name` → paranet-style context graph definition create (handled below)
+    // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
     const { id, name, description } = parsed;
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     await agent.createContextGraph({ id, name, description });
@@ -1986,14 +1986,14 @@ async function handleRequest(
     const { includeWorkspace, includeSharedMemory } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or legacy "paranetId")' });
-    const shouldSyncWorkspace = (includeSharedMemory ?? includeWorkspace) !== false;
+    const shouldSyncSharedMemory = (includeSharedMemory ?? includeWorkspace) !== false;
     agent.subscribeToContextGraph(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
       jobId,
       paranetId,
-      includeWorkspace: shouldSyncWorkspace,
+      includeWorkspace: shouldSyncSharedMemory,
       status: 'queued',
       queuedAt: Date.now(),
     };
@@ -2022,7 +2022,7 @@ async function handleRequest(
       job.startedAt = Date.now();
       try {
         const result = await agent.syncContextGraphFromConnectedPeers(paranetId, {
-          includeSharedMemory: shouldSyncWorkspace,
+          includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
         job.status = 'done';
@@ -2038,7 +2038,7 @@ async function handleRequest(
       subscribed: paranetId,
       catchup: {
         status: 'queued',
-        includeWorkspace: shouldSyncWorkspace,
+        includeWorkspace: shouldSyncSharedMemory,
         jobId,
       },
     });

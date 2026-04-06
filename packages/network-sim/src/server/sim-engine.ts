@@ -116,7 +116,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 const OP_TIMEOUT_MS: Record<string, number> = {
   publish: 60_000,
-  workspace: 60_000,
+  sharedMemory: 60_000,
   query: 30_000,
   chat: 10_000,
 };
@@ -353,7 +353,7 @@ async function execWorkspace(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
       body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
-      signal: opSignal(signal, 'workspace'),
+      signal: opSignal(signal, 'sharedMemory'),
     });
     const body = (await res.json()) as { shareOperationId?: string; phases?: Record<string, number> };
     const dur = Date.now() - t0;
@@ -373,7 +373,7 @@ async function execWorkspace(
       nodeId: node.id,
       success: false,
       durationMs: Date.now() - t0,
-      detail: fmtError(err, 'workspace'),
+      detail: fmtError(err, 'sharedMemory'),
       phases: {},
     };
   }

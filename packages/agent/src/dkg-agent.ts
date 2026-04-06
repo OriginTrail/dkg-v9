@@ -2048,8 +2048,8 @@ export class DKGAgent {
     format?: string;
   }): Promise<{ policyUri: string; hash: string; status: 'proposed' }> {
     const ctx = createOperationContext('system');
-    if (!(await this.paranetExists(opts.paranetId))) {
-      throw new Error(`Paranet "${opts.paranetId}" does not exist. Create it first with createParanet().`);
+    if (!(await this.contextGraphExists(opts.paranetId))) {
+      throw new Error(`Context Graph "${opts.paranetId}" does not exist. Create it first.`);
     }
 
     validateCclPolicy(opts.content, { expectedName: opts.name, expectedVersion: opts.version });

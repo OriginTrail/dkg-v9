@@ -38,6 +38,8 @@ describe('Finalization (03 §10–11): malformed wire', () => {
     await gm.ensureParanet(PARANET);
     const handler = new FinalizationHandler(store, undefined);
     const insertSpy = vi.spyOn(store, 'insert');
+    const querySpy = vi.spyOn(store, 'query');
+    const INJECTED_ENTITY = 'not-a-valid-http-iri';
 
     const data = encodeFinalizationMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
@@ -49,13 +51,17 @@ describe('Finalization (03 §10–11): malformed wire', () => {
       startKAId: 1,
       endKAId: 1,
       publisherAddress: '0x1111111111111111111111111111111111111111',
-      rootEntities: ['not-a-valid-http-iri'],
+      rootEntities: [INJECTED_ENTITY],
       timestampMs: Date.now(),
     });
 
     await handler.handleFinalizationMessage(data, PARANET);
 
     expect(insertSpy).not.toHaveBeenCalled();
+    // Verify the injected entity never appeared in any SPARQL query
+    for (const call of querySpy.mock.calls) {
+      expect(String(call[0])).not.toContain(INJECTED_ENTITY);
+    }
   });
 });
 

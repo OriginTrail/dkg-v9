@@ -159,6 +159,15 @@ describe('Schema isolation: wrong decoder rejects foreign bytes', () => {
       paranetId: 'p',
       limit: 1,
     });
+    // NOTE: Protobuf decoding is not a fully reliable schema-isolation boundary.
+    // Foreign payloads can sometimes decode as garbage/defaults rather than throwing,
+    // depending on field tag/type layout compatibility between schemas. This assertion
+    // verifies the *current* behavior; if schemas evolve to become accidentally
+    // compatible, this test may need a different approach (e.g., semantic validation).
     expect(() => decodeQueryRequest(discoverBytes)).toThrow(RangeError);
+
+    // Sanity: the same bytes round-trip correctly with the matching decoder
+    const roundTrip = decodeDiscoverRequest(discoverBytes);
+    expect(roundTrip.query).toBe('q');
   });
 });

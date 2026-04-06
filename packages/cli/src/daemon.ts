@@ -2459,6 +2459,7 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
         rejected = true;
         req.removeListener('data', onData);
         req.resume();
+        setTimeout(() => req.destroy(), 5_000); // close after giving time for 413 response
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
@@ -2500,10 +2501,13 @@ function resolveCorsOrigin(req: IncomingMessage, allowlist: CorsAllowlist): stri
 }
 
 function corsHeaders(origin?: string | null): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': origin ?? '*',
+  if (!origin) return {};
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
+  if (origin !== '*') headers['Vary'] = 'Origin';
+  return headers;
 }
 
 class HttpRateLimiter {

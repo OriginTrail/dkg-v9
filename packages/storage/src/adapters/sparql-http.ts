@@ -284,8 +284,9 @@ function w3cTermToString(t: W3CTerm): string {
 
 function formatTerm(term: string): string {
   if (term.startsWith('"')) {
-    // Wrap bare datatype IRIs in angle brackets: "val"^^http://... → "val"^^<http://...>
-    return term.replace(/\^\^(?!<)(\S+)/, '^^<$1>');
+    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
+    if (m) return `${m[1]}^^<${m[2]}>`;
+    return term;
   }
   if (term.startsWith('_:')) return term;
   if (term.startsWith('<')) return term;

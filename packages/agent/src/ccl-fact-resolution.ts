@@ -248,9 +248,10 @@ async function resolveEndorsementFacts(
   const snapshotJoin = scope?.snapshotId
     ? `?ual <${DKG_ONTOLOGY.DKG_SNAPSHOT_ID}> ?sid . FILTER(STR(?sid) = ${JSON.stringify(scope.snapshotId)})`
     : '';
-  if (scope?.view) {
-    filters.push(`FILTER(EXISTS { GRAPH <${graph}${scope.view}> { ?ual ?_vp ?_vo } })`);
-  }
+  // NOTE: view-based filtering of endorsement KAs requires resolving the
+  // view's named-graph URI (e.g. contextGraphVerifiedMemoryUri). The view
+  // value is included in factQueryHash via the caller, ensuring snapshot
+  // determinism. Full view-graph filtering deferred to CCL v1.0.
   const query = `
     SELECT ?endorser ?ual WHERE {
       GRAPH <${graph}> {

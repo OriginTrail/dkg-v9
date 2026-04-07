@@ -2000,13 +2000,23 @@ export class DKGAgent {
       }
     }
 
-    // Insert local definition triples. Use "network" as creator when the
-    // context graph already existed on-chain (avoid every node claiming creator).
+    // Insert local definition triples. Resolve the on-chain owner when the
+    // context graph already existed (so policy management uses the real owner).
     const gm = new GraphManager(this.store);
     const paranetUri = paranetDataGraphUri(opts.id);
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
-    const creator = alreadyOnChain ? 'did:dkg:network' : `did:dkg:agent:${this.peerId}`;
+    let creator: string;
+    if (alreadyOnChain && typeof this.chain.getContextGraphOwner === 'function') {
+      try {
+        const onChainOwner = await this.chain.getContextGraphOwner(onChainId ?? opts.id);
+        creator = onChainOwner ? `did:dkg:agent:${onChainOwner}` : `did:dkg:agent:${this.peerId}`;
+      } catch {
+        creator = `did:dkg:agent:${this.peerId}`;
+      }
+    } else {
+      creator = `did:dkg:agent:${this.peerId}`;
+    }
 
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
@@ -2088,10 +2098,9 @@ export class DKGAgent {
     knowledgeAssetUal: string;
     agentAddress?: string;
   }): Promise<PublishResult> {
-    const endorser = `did:dkg:agent:${this.peerId}`;
     const { buildEndorsementQuads } = await import('./endorse.js');
     const quads = buildEndorsementQuads(
-      endorser,
+      this.peerId,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );
@@ -2185,7 +2194,10 @@ export class DKGAgent {
     const result = await collector.collect({
       contextGraphId: opts.contextGraphId,
       contextGraphIdOnChain,
-      verifiedMemoryId: BigInt(opts.verifiedMemoryId),
+      verifiedMemoryId: (() => {
+        try { return BigInt(opts.verifiedMemoryId); }
+        catch { throw new Error(`verifiedMemoryId must be a numeric string, got: "${opts.verifiedMemoryId}"`); }
+      })(),
       batchId: opts.batchId,
       merkleRoot,
       entities,
@@ -2374,6 +2386,16 @@ export class DKGAgent {
     }
     if (!record.body) throw new Error(`CCL policy body missing: ${opts.policyUri}`);
     validateCclPolicy(record.body, { expectedName: record.name, expectedVersion: record.version });
+
+    // Guard against duplicate approvals for the same policy+scope
+    const existingBindings = await this.listCclPolicies({ paranetId: opts.paranetId, name: record.name });
+    const activeForScope = existingBindings.find(
+      b => b.policyUri === opts.policyUri && b.status === 'approved' &&
+           (b.contextType ?? '') === (opts.contextType ?? record.contextType ?? ''),
+    );
+    if (activeForScope) {
+      return { policyUri: opts.policyUri, bindingUri: activeForScope.bindingUri, contextType: activeForScope.contextType, approvedAt: activeForScope.approvedAt };
+    }
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const approvedAt = new Date().toISOString();
@@ -2983,19 +3005,34 @@ export class DKGAgent {
       }
       byBinding.set(bindingUri, {
         ...current,
-        status: current.status === 'revoked' || next.status === 'revoked' ? 'revoked' : 'approved',
+        status: (current.revokedAt || next.revokedAt) ? 'revoked'
+          : (current.status === 'superseded' || next.status === 'superseded') ? 'superseded'
+          : 'approved',
         revokedAt: current.revokedAt ?? next.revokedAt,
         revokedBy: current.revokedBy ?? next.revokedBy,
         approvedBy: current.approvedBy ?? next.approvedBy,
       });
     }
-    return Array.from(byBinding.values()).sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
+    const allBindings = Array.from(byBinding.values()).sort((a, b) => b.approvedAt.localeCompare(a.approvedAt));
+
+    // Mark non-revoked, non-latest bindings as "superseded" per scope
+    const latestByScope = new Map<string, string>();
+    for (const b of allBindings) {
+      if (b.status === 'revoked') continue;
+      const key = `${b.paranetId}|${b.name}|${b.contextType ?? ''}`;
+      if (!latestByScope.has(key)) {
+        latestByScope.set(key, b.bindingUri);
+      } else if (b.bindingUri !== latestByScope.get(key)) {
+        b.status = 'superseded';
+      }
+    }
+    return allBindings;
   }
 
   private selectLatestNonRevokedBindings(bindings: PolicyApprovalBinding[]): Map<string, PolicyApprovalBinding> {
     const latestByScope = new Map<string, PolicyApprovalBinding>();
     for (const binding of bindings) {
-      if (binding.status === 'revoked') continue;
+      if (binding.status === 'revoked' || binding.status === 'superseded') continue;
       const key = `${binding.paranetId}|${binding.name}|${binding.contextType ?? ''}`;
       const current = latestByScope.get(key);
       if (!current || binding.approvedAt > current.approvedAt) {

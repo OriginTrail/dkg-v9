@@ -39,7 +39,7 @@ export interface PolicyApprovalBinding {
   paranetId: string;
   name: string;
   contextType?: string;
-  status: 'approved' | 'revoked';
+  status: 'approved' | 'revoked' | 'superseded';
   approvedAt: string;
   approvedBy?: string;
   revokedAt?: string;

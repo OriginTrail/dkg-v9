@@ -404,7 +404,17 @@ export class GossipPublishHandler {
     }
 
     if (invalidBindings.size === 0) return quads;
-    return quads.filter(q => !invalidBindings.has(q.subject));
+    // Also collect policy URIs referenced by rejected bindings so we drop
+    // any policy-level quads (policyStatus, approvedBy, etc.) that rode
+    // the same gossip message.
+    const relatedPolicyUris = new Set<string>();
+    for (const bindingUri of invalidBindings) {
+      const policyRef = quads.find(
+        q => q.subject === bindingUri && q.predicate === DKG_ONTOLOGY.DKG_ACTIVE_POLICY,
+      )?.object;
+      if (policyRef) relatedPolicyUris.add(policyRef);
+    }
+    return quads.filter(q => !invalidBindings.has(q.subject) && !relatedPolicyUris.has(q.subject));
   }
 }
 

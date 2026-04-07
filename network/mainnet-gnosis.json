@@ -1,0 +1,13 @@
+{
+  "chain": {
+    "name": "gnosis",
+    "type": "evm",
+    "chainId": "gnosis:100",
+    "rpcUrl": "https://rpc.gnosischain.com",
+    "hubAddress": ""
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "branch": "v10-rc"
+  }
+}

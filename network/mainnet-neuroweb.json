@@ -1,0 +1,13 @@
+{
+  "chain": {
+    "name": "neuroweb",
+    "type": "evm",
+    "chainId": "neuroweb:2043",
+    "rpcUrl": "https://astrosat-parachain-rpc.origin-trail.network",
+    "hubAddress": ""
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "branch": "v10-rc"
+  }
+}

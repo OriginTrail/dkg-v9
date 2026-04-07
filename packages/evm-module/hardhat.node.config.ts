@@ -65,6 +65,30 @@ const config: HardhatUserConfig = {
       accounts: accounts('BASE_SEPOLIA_V9'),
       saveDeployments: false,
     },
+    base_mainnet: {
+      environment: 'mainnet',
+      chainId: 8453,
+      url: rpc('BASE_MAINNET') || 'https://mainnet.base.org',
+      gasPrice: 1_000_000_000,
+      accounts: accounts('BASE_MAINNET'),
+      saveDeployments: false,
+    },
+    gnosis_mainnet: {
+      environment: 'mainnet',
+      chainId: 100,
+      url: rpc('GNOSIS_MAINNET') || 'https://rpc.gnosischain.com',
+      gasPrice: 3_000_000_000,
+      accounts: accounts('GNOSIS_MAINNET'),
+      saveDeployments: false,
+    },
+    neuroweb_mainnet: {
+      environment: 'mainnet',
+      chainId: 2043,
+      url: rpc('NEUROWEB_MAINNET') || 'https://astrosat-parachain-rpc.origin-trail.network',
+      gasPrice: 1_000_000_000,
+      accounts: accounts('NEUROWEB_MAINNET'),
+      saveDeployments: false,
+    },
   },
   solidity: {
     compilers: [

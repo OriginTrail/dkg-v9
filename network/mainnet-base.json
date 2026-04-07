@@ -1,0 +1,13 @@
+{
+  "chain": {
+    "name": "base",
+    "type": "evm",
+    "chainId": "base:8453",
+    "rpcUrl": "https://mainnet.base.org",
+    "hubAddress": ""
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "branch": "v10-rc"
+  }
+}

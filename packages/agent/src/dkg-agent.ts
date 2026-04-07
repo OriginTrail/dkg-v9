@@ -2159,10 +2159,14 @@ export class DKGAgent {
       try {
         const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
         const raw = cgConfig?.requiredSignatures;
-        requiredSignatures = raw != null ? Number(raw) : 0;
-        if (!Number.isFinite(requiredSignatures) || requiredSignatures < 0) {
+        const parsed = raw != null ? Number(raw) : 0;
+        if (!Number.isFinite(parsed) || parsed < 0) {
           throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw}`);
         }
+        if (parsed < 1) {
+          throw new Error(`getContextGraphConfig returned non-positive requiredSignatures (${parsed}) — context graph may be misconfigured`);
+        }
+        requiredSignatures = parsed;
       } catch (err: any) {
         throw new Error(
           `Cannot determine requiredSignatures for context graph ${contextGraphIdOnChain}: ${err?.message ?? err}. ` +

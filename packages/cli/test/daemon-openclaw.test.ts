@@ -213,9 +213,12 @@ describe('OpenClaw persist-turn validation', () => {
 });
 
 describe('parseRequiredSignatures', () => {
-  it('returns 0 (omitted) for undefined and null', () => {
+  it('returns 0 (omitted) for undefined', () => {
     expect(parseRequiredSignatures(undefined)).toEqual({ value: 0 });
-    expect(parseRequiredSignatures(null)).toEqual({ value: 0 });
+  });
+
+  it('rejects explicit null (serialized NaN/Infinity)', () => {
+    expect(parseRequiredSignatures(null)).toEqual({ error: 'requiredSignatures must be a number' });
   });
 
   it('accepts valid positive integers', () => {

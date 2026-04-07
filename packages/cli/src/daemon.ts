@@ -84,7 +84,7 @@ export const DAEMON_EXIT_CODE_RESTART = 75;
  * Returns `{ value }` on success or `{ error }` on failure.
  */
 export function parseRequiredSignatures(raw: unknown): { value: number } | { error: string } {
-  if (raw === undefined || raw === null) return { value: 0 };
+  if (raw === undefined) return { value: 0 };
   if (typeof raw !== 'number') return { error: 'requiredSignatures must be a number' };
   if (!Number.isInteger(raw) || raw < 1) return { error: 'requiredSignatures must be a positive integer (>= 1)' };
   return { value: raw };

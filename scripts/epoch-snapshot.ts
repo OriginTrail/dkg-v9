@@ -174,11 +174,13 @@ async function main() {
       stakingStorage.getNodeStake(id, { blockTag: blockNumber }),
     );
 
-    if (stake === 0n) return;
-
     const delegatorAddresses: string[] = await retry(() =>
       delegatorsInfo.getDelegators(id, { blockTag: blockNumber }),
     ).catch(() => [] as string[]);
+
+    // Include nodes with stake OR delegators (zero-stake nodes may still
+    // have delegator state the migrator needs: rolling rewards, claim flags)
+    if (stake === 0n && delegatorAddresses.length === 0) return;
 
     const delegators: DelegatorEntry[] = [];
     for (const addr of delegatorAddresses) {
@@ -194,7 +196,7 @@ async function main() {
     totalDelegators += delegators.length;
 
     if (id % 20 === 0 || id === lastId) {
-      console.log(`  Processed ${id}/${lastId} (${nodes.length} staked nodes, ${totalDelegators} delegators)`);
+      console.log(`  Processed ${id}/${lastId} (${nodes.length} nodes, ${totalDelegators} delegators)`);
     }
   });
 

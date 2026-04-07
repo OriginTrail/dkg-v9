@@ -6,7 +6,7 @@ import { lazyObject } from 'hardhat/plugins';
 import { HardhatRuntimeEnvironment, HardhatUserConfig } from 'hardhat/types';
 
 import { Helpers } from './utils/helpers';
-import { rpc, accounts } from './utils/network';
+import { rpc, accounts, mainnetAccounts } from './utils/network';
 
 extendEnvironment((hre: HardhatRuntimeEnvironment) => {
   hre.helpers = lazyObject(() => new Helpers(hre));
@@ -70,7 +70,7 @@ const config: HardhatUserConfig = {
       chainId: 8453,
       url: rpc('BASE_MAINNET') || 'https://mainnet.base.org',
       gasPrice: 1_000_000_000,
-      accounts: accounts('BASE_MAINNET'),
+      accounts: mainnetAccounts('BASE_MAINNET'),
       saveDeployments: false,
     },
     gnosis_mainnet: {
@@ -78,7 +78,7 @@ const config: HardhatUserConfig = {
       chainId: 100,
       url: rpc('GNOSIS_MAINNET') || 'https://rpc.gnosischain.com',
       gasPrice: 3_000_000_000,
-      accounts: accounts('GNOSIS_MAINNET'),
+      accounts: mainnetAccounts('GNOSIS_MAINNET'),
       saveDeployments: false,
     },
     neuroweb_mainnet: {
@@ -86,7 +86,7 @@ const config: HardhatUserConfig = {
       chainId: 2043,
       url: rpc('NEUROWEB_MAINNET') || 'https://astrosat-parachain-rpc.origin-trail.network',
       gasPrice: 1_000_000_000,
-      accounts: accounts('NEUROWEB_MAINNET'),
+      accounts: mainnetAccounts('NEUROWEB_MAINNET'),
       saveDeployments: false,
     },
   },

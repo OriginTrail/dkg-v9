@@ -136,22 +136,22 @@ async function main() {
 
   const hub = new Contract(hubAddress, HUB_ABI, provider);
 
-  // Resolve contract addresses from Hub
+  // Pin to a specific block for consistent snapshot — all reads use this blockTag
+  const blockNumber = await provider.getBlockNumber();
+
+  // Resolve contract addresses from Hub at the pinned block
   const [stakingStorageAddr, delegatorsInfoAddr, chronosAddr, identityStorageAddr] =
     await Promise.all([
-      hub.getContractAddress('StakingStorage'),
-      hub.getContractAddress('DelegatorsInfo'),
-      hub.getContractAddress('Chronos'),
-      hub.getContractAddress('IdentityStorage'),
+      hub.getContractAddress('StakingStorage', { blockTag: blockNumber }),
+      hub.getContractAddress('DelegatorsInfo', { blockTag: blockNumber }),
+      hub.getContractAddress('Chronos', { blockTag: blockNumber }),
+      hub.getContractAddress('IdentityStorage', { blockTag: blockNumber }),
     ]);
 
   const stakingStorage = new Contract(stakingStorageAddr, STAKING_STORAGE_ABI, provider);
   const delegatorsInfo = new Contract(delegatorsInfoAddr, DELEGATORS_INFO_ABI, provider);
   const chronos = new Contract(chronosAddr, CHRONOS_ABI, provider);
   const identityStorage = new Contract(identityStorageAddr, IDENTITY_STORAGE_ABI, provider);
-
-  // Pin to a specific block for consistent snapshot
-  const blockNumber = await provider.getBlockNumber();
   const block = await provider.getBlock(blockNumber);
   const blockDate = new Date((block?.timestamp ?? 0) * 1000).toISOString();
 
@@ -197,6 +197,8 @@ async function main() {
       console.log(`  Processed ${id}/${lastId} (${nodes.length} staked nodes, ${totalDelegators} delegators)`);
     }
   });
+
+  nodes.sort((a, b) => a.identityId - b.identityId);
 
   console.log(`\nFound ${nodes.length} staked nodes, ${totalDelegators} total delegators`);
 

@@ -118,10 +118,10 @@ export const kosavaGraphVizCoverage: CoverageThresholds = {
 
 /** `src/connection.ts` only (stdio entrypoint excluded from coverage scope). */
 export const kosavaMcpServerCoverage: CoverageThresholds = {
-  lines: 50,
-  functions: 45,
-  branches: 40,
-  statements: 45,
+  lines: 95,
+  functions: 90,
+  branches: 85,
+  statements: 95,
 };
 
 export const kosavaAdapterOpenclawCoverage: CoverageThresholds = {

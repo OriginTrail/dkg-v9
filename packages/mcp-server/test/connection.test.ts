@@ -44,14 +44,14 @@ describe('DkgClient', () => {
     it('throws when daemon is not running', async () => {
       vi.mocked(readDkgApiPort).mockResolvedValue(undefined as unknown as number);
       vi.mocked(readDaemonPid).mockResolvedValue(undefined);
-      vi.mocked(isProcessAlive).mockResolvedValue(false);
+      vi.mocked(isProcessAlive).mockReturnValue(false);
       await expect(DkgClient.connect()).rejects.toThrow(/not running/);
     });
 
     it('throws when port unreadable but process alive', async () => {
       vi.mocked(readDkgApiPort).mockResolvedValue(undefined as unknown as number);
       vi.mocked(readDaemonPid).mockResolvedValue(42);
-      vi.mocked(isProcessAlive).mockResolvedValue(true);
+      vi.mocked(isProcessAlive).mockReturnValue(true);
       vi.mocked(loadAuthToken).mockResolvedValue(undefined);
       await expect(DkgClient.connect()).rejects.toThrow(/Cannot read API port/);
     });

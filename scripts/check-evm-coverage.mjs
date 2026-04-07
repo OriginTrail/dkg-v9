@@ -48,9 +48,12 @@ function aggregateLcov(text) {
     m = b.match(/^FNH:(\d+)/m);
     if (m) FNH += Number(m[1]);
   }
-  const linesPct = LF > 0 ? (100 * LH) / LF : 100;
-  const branchesPct = BRF > 0 ? (100 * BRH) / BRF : 100;
-  const funcsPct = FNF > 0 ? (100 * FNH) / FNF : 100;
+  if (LF === 0 && BRF === 0 && FNF === 0) {
+    throw new Error('LCOV contains no coverage data — the file may be empty or malformed');
+  }
+  const linesPct = LF > 0 ? (100 * LH) / LF : 0;
+  const branchesPct = BRF > 0 ? (100 * BRH) / BRF : 0;
+  const funcsPct = FNF > 0 ? (100 * FNH) / FNF : 0;
   return { LF, LH, linesPct, BRF, BRH, branchesPct, FNF, FNH, funcsPct };
 }
 

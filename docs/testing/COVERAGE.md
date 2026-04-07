@@ -1,6 +1,6 @@
 # Test coverage (tier-based)
 
-Coverage gates are aligned with the `CRITICALITY_CATEGORIZATION.md` spec from the `dkgv10-spec` repository (TORNADO / BURA / KOSAVA).
+Coverage gates are aligned with the TORNADO / BURA / KOSAVA criticality tiers defined in `vitest.coverage.ts` (see `criticalityTargets`).
 
 ## Where thresholds live
 

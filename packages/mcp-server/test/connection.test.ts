@@ -25,12 +25,15 @@ function jsonRes(data: unknown, ok = true): Response {
 }
 
 describe('DkgClient', () => {
+  const originalFetch = globalThis.fetch;
+
   beforeEach(() => {
     globalThis.fetch = vi.fn();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    globalThis.fetch = originalFetch;
   });
 
   describe('connect', () => {

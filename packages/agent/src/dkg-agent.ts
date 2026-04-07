@@ -2160,13 +2160,17 @@ export class DKGAgent {
         const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
         requiredSignatures = cgConfig?.requiredSignatures ?? 0;
       } catch (err: any) {
-        this.log.warn(ctx, `Could not read on-chain requiredSignatures for context graph ${contextGraphIdOnChain}: ${err?.message ?? err}`);
+        // Adapter supports config lookup but it failed — don't silently degrade to 1-of-N
+        throw new Error(
+          `Cannot determine requiredSignatures for context graph ${contextGraphIdOnChain}: ${err?.message ?? err}. ` +
+          `Pass opts.requiredSignatures explicitly or fix the chain adapter connection.`,
+        );
       }
     }
     if (requiredSignatures === 0) {
       requiredSignatures = 1;
-      this.log.warn(ctx, `requiredSignatures not set by caller or on-chain config — defaulting to 1. ` +
-        `Pass opts.requiredSignatures or ensure getContextGraphConfig is available for M-of-N thresholds.`);
+      this.log.warn(ctx, `requiredSignatures defaults to 1 (adapter does not implement getContextGraphConfig). ` +
+        `For M-of-N context graphs, pass --required-signatures via CLI or requiredSignatures in the API body.`);
     }
 
     // 4. Sign the verify digest as proposer

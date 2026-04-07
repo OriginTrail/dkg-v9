@@ -2179,12 +2179,20 @@ async function handleRequest(
     if (!contextGraphId || !verifiedMemoryId || !batchId) {
       return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
     }
+    let validatedRequiredSigs: number | undefined;
+    if (requiredSignatures !== undefined && requiredSignatures !== null) {
+      const n = Number(requiredSignatures);
+      if (!Number.isInteger(n) || n < 1) {
+        return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
+      }
+      validatedRequiredSigs = n;
+    }
     const result = await agent.verify({
       contextGraphId,
       verifiedMemoryId,
       batchId: BigInt(batchId),
       timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
-      requiredSignatures: requiredSignatures ? Number(requiredSignatures) : undefined,
+      requiredSignatures: validatedRequiredSigs,
     });
     return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
   }

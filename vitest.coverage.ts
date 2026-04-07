@@ -116,17 +116,12 @@ export const kosavaGraphVizCoverage: CoverageThresholds = {
   statements: 82,
 };
 
-/**
- * Covers all `src/` files. `connection.ts` is well-tested (~96%);
- * `index.ts` (stdio MCP entrypoint with tool registrations) is at 0%
- * because it requires a running MCP transport. Raise thresholds as
- * tool-registration tests are added.
- */
+/** Scoped to `src/connection.ts` only — the stdio entrypoint (`index.ts`) requires a live MCP transport. */
 export const kosavaMcpServerCoverage: CoverageThresholds = {
-  lines: 18,
-  functions: 34,
-  branches: 14,
-  statements: 17,
+  lines: 90,
+  functions: 85,
+  branches: 80,
+  statements: 90,
 };
 
 export const kosavaAdapterOpenclawCoverage: CoverageThresholds = {

@@ -2175,7 +2175,7 @@ async function handleRequest(
   // POST /api/verify
   if (req.method === 'POST' && path === '/api/verify') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, verifiedMemoryId, batchId, timeoutMs } = JSON.parse(body);
+    const { contextGraphId, verifiedMemoryId, batchId, timeoutMs, requiredSignatures } = JSON.parse(body);
     if (!contextGraphId || !verifiedMemoryId || !batchId) {
       return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
     }
@@ -2184,6 +2184,7 @@ async function handleRequest(
       verifiedMemoryId,
       batchId: BigInt(batchId),
       timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+      requiredSignatures: requiredSignatures ? Number(requiredSignatures) : undefined,
     });
     return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
   }

@@ -2181,11 +2181,13 @@ async function handleRequest(
     }
     let validatedRequiredSigs: number | undefined;
     if (requiredSignatures !== undefined && requiredSignatures !== null) {
-      const n = Number(requiredSignatures);
-      if (!Number.isInteger(n) || n < 1) {
+      if (typeof requiredSignatures !== 'number') {
+        return jsonResponse(res, 400, { error: 'requiredSignatures must be a number' });
+      }
+      if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
         return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
       }
-      validatedRequiredSigs = n;
+      validatedRequiredSigs = requiredSignatures;
     }
     const result = await agent.verify({
       contextGraphId,

@@ -2171,10 +2171,9 @@ export class DKGAgent {
       }
     }
     if (requiredSignatures === 0) {
-      throw new Error(
-        `requiredSignatures is unknown for context graph ${contextGraphIdOnChain}. ` +
-        `Pass --required-signatures via CLI or requiredSignatures in the API body.`,
-      );
+      requiredSignatures = 1;
+      this.log.warn(ctx, `requiredSignatures defaults to 1 — adapter does not implement getContextGraphConfig. ` +
+        `For M-of-N context graphs, pass --required-signatures via CLI or requiredSignatures in the API body.`);
     }
 
     // 4. Sign the verify digest as proposer

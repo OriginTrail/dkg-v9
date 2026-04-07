@@ -4,6 +4,7 @@ import {
   buildOpenClawChannelHeaders,
   getOpenClawChannelTargets,
   isValidOpenClawPersistTurnPayload,
+  parseRequiredSignatures,
   pipeOpenClawStream,
 } from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
@@ -208,5 +209,31 @@ describe('OpenClaw persist-turn validation', () => {
       userMessage: '',
       assistantReply: '',
     })).toBe(false);
+  });
+});
+
+describe('parseRequiredSignatures', () => {
+  it('returns 0 (omitted) for undefined and null', () => {
+    expect(parseRequiredSignatures(undefined)).toEqual({ value: 0 });
+    expect(parseRequiredSignatures(null)).toEqual({ value: 0 });
+  });
+
+  it('accepts valid positive integers', () => {
+    expect(parseRequiredSignatures(1)).toEqual({ value: 1 });
+    expect(parseRequiredSignatures(3)).toEqual({ value: 3 });
+    expect(parseRequiredSignatures(100)).toEqual({ value: 100 });
+  });
+
+  it('rejects non-number types (boolean, string, array)', () => {
+    expect(parseRequiredSignatures(true)).toEqual({ error: 'requiredSignatures must be a number' });
+    expect(parseRequiredSignatures('3')).toEqual({ error: 'requiredSignatures must be a number' });
+    expect(parseRequiredSignatures([2])).toEqual({ error: 'requiredSignatures must be a number' });
+  });
+
+  it('rejects zero, negative, and fractional numbers', () => {
+    expect(parseRequiredSignatures(0)).toEqual({ error: 'requiredSignatures must be a positive integer (>= 1)' });
+    expect(parseRequiredSignatures(-1)).toEqual({ error: 'requiredSignatures must be a positive integer (>= 1)' });
+    expect(parseRequiredSignatures(1.5)).toEqual({ error: 'requiredSignatures must be a positive integer (>= 1)' });
+    expect(parseRequiredSignatures(NaN)).toEqual({ error: 'requiredSignatures must be a positive integer (>= 1)' });
   });
 });

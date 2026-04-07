@@ -79,6 +79,17 @@ import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
 
+/**
+ * Validate and parse a `requiredSignatures` value from an API request body.
+ * Returns `{ value }` on success or `{ error }` on failure.
+ */
+export function parseRequiredSignatures(raw: unknown): { value: number } | { error: string } {
+  if (raw === undefined || raw === null) return { value: 0 };
+  if (typeof raw !== 'number') return { error: 'requiredSignatures must be a number' };
+  if (!Number.isInteger(raw) || raw < 1) return { error: 'requiredSignatures must be a positive integer (>= 1)' };
+  return { value: raw };
+}
+
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
 
@@ -2179,16 +2190,11 @@ async function handleRequest(
     if (!contextGraphId || !verifiedMemoryId || !batchId) {
       return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
     }
-    let validatedRequiredSigs: number | undefined;
-    if (requiredSignatures !== undefined && requiredSignatures !== null) {
-      if (typeof requiredSignatures !== 'number') {
-        return jsonResponse(res, 400, { error: 'requiredSignatures must be a number' });
-      }
-      if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
-        return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
-      }
-      validatedRequiredSigs = requiredSignatures;
+    const parsedSigs = parseRequiredSignatures(requiredSignatures);
+    if ('error' in parsedSigs) {
+      return jsonResponse(res, 400, { error: parsedSigs.error });
     }
+    const validatedRequiredSigs = parsedSigs.value || undefined;
     const result = await agent.verify({
       contextGraphId,
       verifiedMemoryId,

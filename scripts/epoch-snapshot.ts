@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * epoch-snapshot.ts
  *

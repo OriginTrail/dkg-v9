@@ -514,5 +514,26 @@ describe('@unit V10 Conviction System', function () {
       expect(lockEpochs).to.equal(0);
       expect(lockStartEpoch).to.equal(0);
     });
+
+    it('migrateNode is idempotent (safe to re-run)', async () => {
+      const identityId = 99;
+      const delegatorA = accounts[3].address;
+      const delegatorB = accounts[4].address;
+
+      await oldDI.addDelegator(identityId, delegatorA);
+      await oldDI.addDelegator(identityId, delegatorB);
+      await oldDI.setLastClaimedEpoch(identityId, delegatorA, 10);
+      await oldDI.setDelegatorRollingRewards(identityId, delegatorB, 2000);
+
+      await Migrator.migrateNode(identityId, 1, 1);
+      await Migrator.migrateNode(identityId, 1, 1);
+
+      const delegators = await DelegatorsInfo.getDelegators(identityId);
+      expect(delegators.length).to.equal(2);
+      expect(await DelegatorsInfo.isNodeDelegator(identityId, delegatorA)).to.be.true;
+      expect(await DelegatorsInfo.isNodeDelegator(identityId, delegatorB)).to.be.true;
+      expect(await DelegatorsInfo.getLastClaimedEpoch(identityId, delegatorA)).to.equal(10);
+      expect(await DelegatorsInfo.getDelegatorRollingRewards(identityId, delegatorB)).to.equal(2000);
+    });
   });
 });

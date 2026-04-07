@@ -64,7 +64,9 @@ contract MigratorV10Staking is ContractStatus {
         for (uint256 i = 0; i < delegators.length; ) {
             address delegator = delegators[i];
 
-            newDelegatorsInfo.addDelegator(identityId, delegator);
+            if (!newDelegatorsInfo.isDelegatorMap(identityId, delegator)) {
+                newDelegatorsInfo.addDelegator(identityId, delegator);
+            }
 
             uint256 claimed = oldDelegatorsInfo.lastClaimedEpoch(identityId, delegator);
             if (claimed != 0) {

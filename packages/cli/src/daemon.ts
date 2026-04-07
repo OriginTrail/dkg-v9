@@ -1877,11 +1877,11 @@ async function handleRequest(
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { selection, clearAfter, contextGraphId: bodyCgId } = parsed;
+    const { selection, clearAfter, publishContextGraphId } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', contextGraphId: bodyCgId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
@@ -1889,7 +1889,7 @@ async function handleRequest(
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
-          ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
+          ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
       const chain = result.onChainResult;
@@ -1905,7 +1905,7 @@ async function handleRequest(
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-        ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
+        ...(publishContextGraphId != null ? { publishContextGraphId: String(publishContextGraphId) } : {}),
         ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
       });
     } catch (err) {

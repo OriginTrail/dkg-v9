@@ -31,7 +31,7 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 /**
  * @title KnowledgeAssetsV10
  * @notice V10 publish contract — evolves V8 KnowledgeCollection with:
- *   - V10 ACK digest: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize)))
+ *   - V10 ACK digest: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount)))
  *   - Dynamic signature count from ParametersStorage.minimumRequiredSignatures()
  *   - Conviction account payment (PublishingConvictionAccount integration)
  *   - Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility
@@ -107,7 +107,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /**
      * @notice Publish Knowledge Assets using V10 ACK verification.
      *
-     * Core nodes sign: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize))).
+     * Core nodes sign: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount))).
      * Signature count is read from ParametersStorage.minimumRequiredSignatures().
      * Payment via conviction account (discounted) or market rate (V8 path).
      * Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility.
@@ -150,12 +150,21 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ) external returns (uint256) {
         _verifySignature(
             publisherNodeIdentityId,
-            ECDSA.toEthSignedMessageHash(keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))),
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
+            ),
             publisherNodeR,
             publisherNodeVS
         );
 
-        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount, uint256(byteSize)));
+        bytes32 ackDigest = keccak256(abi.encodePacked(
+            contextGraphId,
+            merkleRoot,
+            knowledgeAssetsAmount,
+            uint256(byteSize),
+            uint256(epochs),
+            uint256(tokenAmount)
+        ));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
 
         if (address(contextGraphs) != address(0) && contextGraphId > 0) {

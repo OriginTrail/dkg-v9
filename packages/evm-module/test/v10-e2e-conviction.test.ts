@@ -227,8 +227,8 @@ describe('V10 E2E Conviction System', function () {
         const epoch = await Chronos.getCurrentEpoch();
         try {
           await Staking.connect(staker).claimDelegatorRewards(identityId, epoch - 1n, staker.address);
-        } catch {
-          // May revert if no rewards — safe to ignore
+        } catch (err: any) {
+          expect(err.message).to.include('No rewards');
         }
       }
 

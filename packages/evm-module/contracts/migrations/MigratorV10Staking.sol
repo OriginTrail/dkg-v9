@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 import {DelegatorsInfo} from "../storage/DelegatorsInfo.sol";
 import {ContractStatus} from "../abstract/ContractStatus.sol";
-import {ICustodian} from "../interfaces/ICustodian.sol";
+
 
 // V8 DelegatorsInfo: same fields as V10 except no delegatorLockEpochs / delegatorLockStartEpoch.
 // Public mappings generate getter functions; getDelegators() is an explicit view returning address[].
@@ -46,10 +46,12 @@ contract MigratorV10Staking is ContractStatus {
     }
 
     function setOldDelegatorsInfo(address _oldDelegatorsInfo) external onlyOwnerOrMultiSigOwner {
+        require(_oldDelegatorsInfo != address(0), "Zero address");
         oldDelegatorsInfo = IOldDelegatorsInfo(_oldDelegatorsInfo);
     }
 
     function setNewDelegatorsInfo(address _newDelegatorsInfo) external onlyOwnerOrMultiSigOwner {
+        require(_newDelegatorsInfo != address(0), "Zero address");
         newDelegatorsInfo = DelegatorsInfo(_newDelegatorsInfo);
     }
 
@@ -140,24 +142,11 @@ contract MigratorV10Staking is ContractStatus {
         }
     }
 
-    function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
-        try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
-            for (uint256 i = 0; i < multiSigOwners.length; i++) {
-                if (msg.sender == multiSigOwners[i]) {
-                    return true;
-                }
-            }
-        } catch {
-            // Not a multisig or call reverted; treat as not owner.
-        }
-
-        return false;
-    }
-
     function _checkOwnerOrMultiSigOwner() internal view virtual {
         address hubOwner = hub.owner();
-        if (msg.sender != hubOwner && msg.sender != address(hub) && !_isMultiSigOwner(hubOwner)) {
-            revert("Only Hub Owner, Hub, or Multisig Owner can call");
-        }
+        require(
+            msg.sender == hubOwner || msg.sender == address(hub),
+            "Only Hub Owner or Hub can call"
+        );
     }
 }

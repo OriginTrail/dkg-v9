@@ -2153,17 +2153,29 @@ export class DKGAgent {
       throw new Error(`Context graph ${opts.contextGraphId} not found on-chain`);
     }
 
-    // 3. Get required signatures from chain config or opts (never silently default to 1)
+    // 3. Get required signatures from chain config or opts
     let requiredSignatures = opts.requiredSignatures ?? 0;
     if (requiredSignatures === 0 && typeof (this.chain as any).getContextGraphConfig === 'function') {
       try {
         const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
-        requiredSignatures = cgConfig?.requiredSignatures ?? 1;
-      } catch {
-        requiredSignatures = 1;
+        const raw = cgConfig?.requiredSignatures;
+        const parsed = raw != null ? Number(raw) : 0;
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw} (must be a positive integer)`);
+        }
+        requiredSignatures = parsed;
+      } catch (err: any) {
+        throw new Error(
+          `Cannot determine requiredSignatures for context graph ${contextGraphIdOnChain}: ${err?.message ?? err}. ` +
+          `Pass opts.requiredSignatures explicitly or fix the chain adapter connection.`,
+        );
       }
     }
-    if (requiredSignatures === 0) requiredSignatures = 1;
+    if (requiredSignatures === 0) {
+      requiredSignatures = 1;
+      this.log.warn(ctx, `requiredSignatures defaults to 1 — adapter does not implement getContextGraphConfig. ` +
+        `For M-of-N context graphs, pass --required-signatures via CLI or requiredSignatures in the API body.`);
+    }
 
     // 4. Sign the verify digest as proposer
     const signerKey = this.config.ackSignerKey

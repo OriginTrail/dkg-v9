@@ -304,6 +304,7 @@ export class ApiClient {
     verifiedMemoryId: string;
     batchId: string;
     timeoutMs?: number;
+    requiredSignatures?: number;
   }): Promise<{ txHash: string; blockNumber: number; verifiedMemoryId: string; signers: string[] }> {
     return this.post('/api/verify', request);
   }

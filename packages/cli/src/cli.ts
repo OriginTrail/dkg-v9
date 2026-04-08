@@ -776,6 +776,7 @@ program
   .requiredOption('--context-graph <id>', 'Context Graph ID')
   .requiredOption('--verified-graph <id>', 'Verified Graph ID')
   .option('--timeout <ms>', 'Timeout in milliseconds (default: 30 min)')
+  .option('--required-signatures <n>', 'M-of-N quorum threshold (default: on-chain config, or 1 if adapter lacks getContextGraphConfig)')
   .action(async (batchId: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -784,6 +785,7 @@ program
         verifiedMemoryId: opts.verifiedGraph,
         batchId,
         timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+        requiredSignatures: opts.requiredSignatures ? Number(opts.requiredSignatures) : undefined,
       });
       console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
       console.log(`  TX: ${result.txHash}`);

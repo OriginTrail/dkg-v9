@@ -145,6 +145,13 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         // Top-ups increase the spendable epoch allowance but do NOT count toward
         // committedTRAC (which determines the discount tier). Increasing the tier
         // without a fresh 12-epoch lock would break conviction economics.
+        //
+        // Extend the expiry by 12 epochs from now so the top-up has a full
+        // spending window. Without this, near-expiry top-ups would strand TRAC.
+        uint40 newExpiry = currentEpoch + uint40(LOCK_DURATION_EPOCHS);
+        if (newExpiry > acct.expiresAtEpoch) {
+            acct.expiresAtEpoch = newExpiry;
+        }
         acct.epochAllowance += amount / uint96(LOCK_DURATION_EPOCHS);
 
         if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {

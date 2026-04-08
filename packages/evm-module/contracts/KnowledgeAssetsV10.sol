@@ -364,9 +364,13 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      * @notice Update an existing knowledge collection. Only the latest publisher
      *         (the address that pushed the most recent merkle root) may call this.
      *
+     * NOTE: This function currently does not charge an update fee. The V9 update
+     * fee model (10% + excess-byte cost) is tightly coupled to V9 epoch/reward
+     * accounting. A V10-native fee model will be added before mainnet launch.
+     *
      * @param id Knowledge collection ID (from createKnowledgeAssets)
      * @param newMerkleRoot New merkle root for the updated data
-     * @param newByteSize Updated byte size
+     * @param newByteSize Updated byte size (must not exceed original)
      * @param mintAmount Number of new KA tokens to mint (0 if unchanged)
      * @param burnTokenIds Token IDs to burn (empty if unchanged)
      */

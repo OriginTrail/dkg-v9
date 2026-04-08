@@ -1216,19 +1216,23 @@ export class EVMChainAdapter implements ChainAdapter {
 
     let signer: Wallet | undefined;
 
-    // Look up the on-chain publisher to select the correct signer from the pool.
-    // The V10 contract's updateKnowledgeCollection requires msg.sender == latestPublisher.
+    // Verify the KC exists in V10's KnowledgeCollectionStorage before attempting update.
+    // If it doesn't exist, this is a V9 batch and should not be updated via V10 path.
     const kcs = this.contracts.knowledgeCollectionStorage;
     if (kcs) {
       try {
         const onChainPublisher: string = await kcs.getLatestMerkleRootPublisher(params.kcId);
-        if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
-          signer = this.signerPool.find(
-            (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+        if (!onChainPublisher || onChainPublisher === ethers.ZeroAddress) {
+          throw new Error(
+            `KC ${params.kcId} not found in KnowledgeCollectionStorage — likely a V9 batch`,
           );
         }
-      } catch {
-        // Fall through to hint-based or round-robin
+        signer = this.signerPool.find(
+          (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+        );
+      } catch (e: any) {
+        if (e.message?.includes('not found in KnowledgeCollectionStorage')) throw e;
+        // Other errors (contract not ready, etc.) — fall through
       }
     }
 

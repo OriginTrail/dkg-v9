@@ -1172,13 +1172,27 @@ export class DKGPublisher implements Publisher {
       && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
 
     if (v10UpdateAvailable) {
-      this.log.info(ctx, `Using V10 updateKnowledgeCollection path for kcId=${kcId}`);
-      txResult = await this.chain.updateKnowledgeCollectionV10!({
-        kcId,
-        newMerkleRoot: kcMerkleRoot,
-        newByteSize: BigInt(allSkolemizedQuads.length * 100),
-        publisherAddress: this.publisherAddress,
-      });
+      try {
+        this.log.info(ctx, `Trying V10 updateKnowledgeCollection for kcId=${kcId}`);
+        txResult = await this.chain.updateKnowledgeCollectionV10!({
+          kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newByteSize: BigInt(allSkolemizedQuads.length * 100),
+          publisherAddress: this.publisherAddress,
+        });
+      } catch (v10Err: any) {
+        if (v10Err?.message?.includes('not found in KnowledgeCollectionStorage')) {
+          this.log.info(ctx, `KC ${kcId} is a V9 batch, using V9 update path`);
+          txResult = await this.chain.updateKnowledgeAssets({
+            batchId: kcId,
+            newMerkleRoot: kcMerkleRoot,
+            newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
+            publisherAddress: this.publisherAddress,
+          });
+        } else {
+          throw v10Err;
+        }
+      }
     } else {
       txResult = await this.chain.updateKnowledgeAssets({
         batchId: kcId,

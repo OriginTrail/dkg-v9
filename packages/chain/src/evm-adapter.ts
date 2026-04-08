@@ -24,6 +24,7 @@ import type {
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
+  V10UpdateKCParams,
   ConvictionAccountInfo,
 } from './chain-adapter.js';
 
@@ -941,6 +942,8 @@ export class EVMChainAdapter implements ChainAdapter {
       identityIds,
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
+      params.publishPolicy ?? 1,
+      params.publishAuthority ?? ethers.ZeroAddress,
     );
     const receipt = await tx.wait();
 
@@ -1197,6 +1200,45 @@ export class EVMChainAdapter implements ChainAdapter {
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
+    };
+  }
+
+  // =====================================================================
+  // V10 Update (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
+  // =====================================================================
+
+  async updateKnowledgeCollectionV10(params: V10UpdateKCParams): Promise<TxResult> {
+    await this.init();
+
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed — cannot update via V10 path.');
+    }
+
+    let signer: Wallet | undefined;
+
+    if (params.publisherAddress) {
+      signer = this.signerPool.find(
+        (s) => s.address.toLowerCase() === params.publisherAddress!.toLowerCase(),
+      );
+    }
+    if (!signer) signer = this.nextSigner();
+
+    const ka = this.contracts.knowledgeAssetsV10.connect(signer) as Contract;
+
+    const tx = await ka.updateKnowledgeCollection(
+      params.kcId,
+      ethers.hexlify(params.newMerkleRoot),
+      params.newByteSize,
+      params.mintAmount ?? 0,
+      params.burnTokenIds ?? [],
+    );
+
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
     };
   }
 

@@ -817,17 +817,27 @@ export class DKGPublisher implements Publisher {
     const stagingQuads = isPublishFromSharedMemory
       ? undefined
       : new TextEncoder().encode(nquadsStr);
+
+    // Pre-compute tokenAmount and epochs so they can be included in the 6-field ACK digest.
+    const publishEpochs = 1;
+    let precomputedTokenAmount =
+      this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function'
+        ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs)
+        : 1n;
+    if (precomputedTokenAmount <= 0n) precomputedTokenAmount = 1n;
+
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        // For SWM publishes, always use contextGraphId because that's
-        // where data lives. The sub-CG association happens via addBatchToContextGraph later.
         const ackDomain = isPublishFromSharedMemory
           ? contextGraphId
           : (options.publishContextGraphId ?? contextGraphId);
-        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads);
+        v10ACKs = await options.v10ACKProvider(
+          kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
+          publishEpochs, precomputedTokenAmount,
+        );
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -886,58 +896,36 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:sign', 'start');
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
 
-      let tokenAmount =
-        typeof this.chain.getRequiredPublishTokenAmount === 'function'
-          ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, 1)
-          : 1n;
-      if (tokenAmount <= 0n) tokenAmount = 1n;
+      const tokenAmount = precomputedTokenAmount;
+      const useV10 = v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function';
 
-      // Publisher signature: sign keccak256(abi.encodePacked(uint72 identityId, bytes32 merkleRoot))
-      const pubMsgHash = ethers.solidityPackedKeccak256(
-        ['uint72', 'bytes32'],
-        [identityId, merkleRootHex],
-      );
-      const pubSig = ethers.Signature.from(
-        await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
-      );
-
-      let receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
-      if (collectedReceiverSigs && collectedReceiverSigs.length > 0) {
-        receiverSignatures = [...collectedReceiverSigs]
-          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
-      } else {
-        const rcvMsgHash = ethers.solidityPackedKeccak256(
-          ['bytes32', 'uint64'],
-          [merkleRootHex, publicByteSize],
-        );
-        const rcvSig = ethers.Signature.from(
-          await this.publisherWallet.signMessage(ethers.getBytes(rcvMsgHash)),
-        );
-        receiverSignatures = [{
-          identityId,
-          r: ethers.getBytes(rcvSig.r),
-          vs: ethers.getBytes(rcvSig.yParityAndS),
-        }];
+      // Resolve contextGraphId for V10 signature (must match on-chain digest)
+      const ackDomainForSig = isPublishFromSharedMemory
+        ? contextGraphId
+        : (options.publishContextGraphId ?? contextGraphId);
+      let cgIdForSig: bigint;
+      try {
+        cgIdForSig = BigInt(ackDomainForSig);
+      } catch {
+        cgIdForSig = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomainForSig)));
       }
 
       onPhase?.('chain:sign', 'end');
       onPhase?.('chain:submit', 'start');
       this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
-        if (v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function') {
-          const ackDomain = isPublishFromSharedMemory
-            ? contextGraphId
-            : (options.publishContextGraphId ?? contextGraphId);
-          let contextGraphIdBigInt: bigint;
-          try {
-            contextGraphIdBigInt = BigInt(ackDomain);
-          } catch {
-            contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomain)));
-          }
+        if (useV10) {
+          // V10 publisher signature: keccak256(abi.encodePacked(uint256 contextGraphId, uint72 identityId, bytes32 merkleRoot))
+          const pubMsgHash = ethers.solidityPackedKeccak256(
+            ['uint256', 'uint72', 'bytes32'],
+            [cgIdForSig, identityId, merkleRootHex],
+          );
+          const pubSig = ethers.Signature.from(
+            await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
+          );
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
-            contextGraphId: contextGraphIdBigInt,
+            contextGraphId: cgIdForSig,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
             byteSize: publicByteSize,
@@ -951,13 +939,42 @@ export class DKGPublisher implements Publisher {
               r: ethers.getBytes(pubSig.r),
               vs: ethers.getBytes(pubSig.yParityAndS),
             },
-            ackSignatures: v10ACKs.map(ack => ({
+            ackSignatures: v10ACKs!.map(ack => ({
               identityId: ack.nodeIdentityId,
               r: ack.signatureR,
               vs: ack.signatureVS,
             })),
           });
         } else {
+          // V9 publisher signature: keccak256(abi.encodePacked(uint72 identityId, bytes32 merkleRoot))
+          const pubMsgHashV9 = ethers.solidityPackedKeccak256(
+            ['uint72', 'bytes32'],
+            [identityId, merkleRootHex],
+          );
+          const pubSigV9 = ethers.Signature.from(
+            await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHashV9)),
+          );
+
+          let receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+          if (collectedReceiverSigs && collectedReceiverSigs.length > 0) {
+            receiverSignatures = [...collectedReceiverSigs]
+              .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
+              .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
+          } else {
+            const rcvMsgHash = ethers.solidityPackedKeccak256(
+              ['bytes32', 'uint64'],
+              [merkleRootHex, publicByteSize],
+            );
+            const rcvSig = ethers.Signature.from(
+              await this.publisherWallet.signMessage(ethers.getBytes(rcvMsgHash)),
+            );
+            receiverSignatures = [{
+              identityId,
+              r: ethers.getBytes(rcvSig.r),
+              vs: ethers.getBytes(rcvSig.yParityAndS),
+            }];
+          }
+
           onChainResult = await this.chain.publishKnowledgeAssets({
             kaCount,
             publisherNodeIdentityId: identityId,
@@ -966,8 +983,8 @@ export class DKGPublisher implements Publisher {
             epochs: 1,
             tokenAmount,
             publisherSignature: {
-              r: ethers.getBytes(pubSig.r),
-              vs: ethers.getBytes(pubSig.yParityAndS),
+              r: ethers.getBytes(pubSigV9.r),
+              vs: ethers.getBytes(pubSigV9.yParityAndS),
             },
             receiverSignatures,
           });
@@ -1147,12 +1164,23 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
-    const txResult = await this.chain.updateKnowledgeAssets({
-      batchId: kcId,
-      newMerkleRoot: kcMerkleRoot,
-      newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
-      publisherAddress: this.publisherAddress,
-    });
+    let txResult;
+    if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
+      this.log.info(ctx, `Using V10 updateKnowledgeCollection path for kcId=${kcId}`);
+      txResult = await this.chain.updateKnowledgeCollectionV10({
+        kcId,
+        newMerkleRoot: kcMerkleRoot,
+        newByteSize: BigInt(allSkolemizedQuads.length * 100),
+        publisherAddress: this.publisherAddress,
+      });
+    } else {
+      txResult = await this.chain.updateKnowledgeAssets({
+        batchId: kcId,
+        newMerkleRoot: kcMerkleRoot,
+        newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
+        publisherAddress: this.publisherAddress,
+      });
+    }
 
     if (!txResult.success) {
       onPhase?.('chain:submit', 'end');

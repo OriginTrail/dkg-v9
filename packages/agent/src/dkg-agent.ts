@@ -3424,6 +3424,8 @@ export class DKGAgent {
       rootEntities: string[],
       publicByteSize: bigint,
       stagingQuads?: Uint8Array,
+      epochs?: number,
+      tokenAmount?: bigint,
     ) => {
       let cgIdBigInt: bigint;
       try {
@@ -3447,6 +3449,8 @@ export class DKGAgent {
         rootEntities,
         requiredACKs,
         stagingQuads,
+        epochs,
+        tokenAmount,
       });
       return result.acks;
     };

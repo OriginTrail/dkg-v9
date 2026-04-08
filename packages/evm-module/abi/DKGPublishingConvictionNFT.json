@@ -14,44 +14,75 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAt",
+        "type": "uint40"
+      }
+    ],
+    "name": "AccountExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
         "type": "uint256"
       }
     ],
-    "name": "ContextGraphNotActive",
+    "name": "AccountNotFound",
     "type": "error"
   },
   {
     "inputs": [
       {
         "internalType": "address",
-        "name": "custodian",
+        "name": "agent",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "existingAccountId",
+        "type": "uint256"
       }
     ],
-    "name": "CustodianHasNoOwners",
+    "name": "AgentAlreadyRegistered",
     "type": "error"
   },
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "custodian",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "cap",
+        "type": "uint256"
       }
     ],
-    "name": "CustodianNotAContract",
+    "name": "AgentCapReached",
     "type": "error"
   },
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
         "internalType": "address",
-        "name": "custodian",
+        "name": "agent",
         "type": "address"
       }
     ],
-    "name": "CustodianWithoutOwnersFunction",
+    "name": "AgentNotRegistered",
     "type": "error"
   },
   {
@@ -179,67 +210,82 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "EtherTransferFailed",
-    "type": "error"
-  },
-  {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "reason",
-        "type": "string"
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
       }
     ],
-    "name": "InvalidContextGraphConfig",
+    "name": "EpochAlreadyReleased",
     "type": "error"
   },
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint96",
+        "name": "required",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "available",
+        "type": "uint96"
+      }
+    ],
+    "name": "InsufficientAllowance",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
         "internalType": "address",
-        "name": "tokenContractAddress",
+        "name": "caller",
         "type": "address"
       }
     ],
-    "name": "InvalidTokenContract",
+    "name": "NotAccountOwner",
     "type": "error"
   },
   {
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
       },
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
       }
     ],
-    "name": "ParticipantAlreadyExists",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "ParticipantNotFound",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "TokenTransferFailed",
+    "name": "NotAuthorizedAgent",
     "type": "error"
   },
   {
@@ -255,13 +301,102 @@
   },
   {
     "inputs": [],
-    "name": "ZeroAddressCustodian",
+    "name": "ZeroAddressHub",
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ZeroAddressHub",
-    "type": "error"
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "owner",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "committedTRAC",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "epochAllowance",
+        "type": "uint96"
+      }
+    ],
+    "name": "AccountCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentDeregistered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentRegistered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "thresholdPercent",
+        "type": "uint8"
+      }
+    ],
+    "name": "AllowanceThresholdReached",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -319,47 +454,29 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "owner",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint72[]",
-        "name": "participantIdentityIds",
-        "type": "uint72[]"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "requiredSignatures",
-        "type": "uint8"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "metadataBatchId",
+        "name": "accountId",
         "type": "uint256"
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
       },
       {
         "indexed": false,
-        "internalType": "address",
-        "name": "publishAuthority",
-        "type": "address"
+        "internalType": "uint96",
+        "name": "baseCost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "discountedCost",
+        "type": "uint96"
       }
     ],
-    "name": "ContextGraphCreated",
+    "name": "CostCovered",
     "type": "event"
   },
   {
@@ -368,175 +485,17 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
-      }
-    ],
-    "name": "ContextGraphDeactivated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      }
-    ],
-    "name": "ContextGraphExpanded",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "custodian",
-        "type": "address"
       },
       {
         "indexed": false,
-        "internalType": "address",
-        "name": "tokenContract",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
+        "internalType": "uint96",
         "name": "amount",
-        "type": "uint256"
+        "type": "uint96"
       }
     ],
-    "name": "MisplacedERC20Withdrawn",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "custodian",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "amount",
-        "type": "uint256"
-      }
-    ],
-    "name": "MisplacedEtherWithdrawn",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "ParticipantAdded",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "ParticipantRemoved",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "publishAuthority",
-        "type": "address"
-      }
-    ],
-    "name": "PublishPolicyUpdated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "requiredSignatures",
-        "type": "uint8"
-      }
-    ],
-    "name": "QuorumUpdated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "custodian",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "amount",
-        "type": "uint256"
-      }
-    ],
-    "name": "TokenTransferred",
+    "name": "TopUp",
     "type": "event"
   },
   {
@@ -565,39 +524,107 @@
     "type": "event"
   },
   {
+    "anonymous": false,
     "inputs": [
       {
+        "indexed": true,
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
       },
       {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "UnspentTRACReleased",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "BPS_DENOMINATOR",
+    "outputs": [
+      {
         "internalType": "uint256",
-        "name": "batchId",
+        "name": "",
         "type": "uint256"
       }
     ],
-    "name": "addBatchToContextGraph",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "LOCK_DURATION_EPOCHS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
       }
     ],
-    "name": "addParticipant",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "name": "accounts",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "committedTRAC",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "epochAllowance",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "createdAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAtEpoch",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "agentToAccountId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -638,43 +665,60 @@
     "type": "function"
   },
   {
-    "inputs": [
+    "inputs": [],
+    "name": "chronosAddress",
+    "outputs": [
       {
         "internalType": "address",
-        "name": "owner_",
-        "type": "address"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "participantIdentityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "uint8",
-        "name": "requiredSignatures",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "metadataBatchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
-      },
-      {
-        "internalType": "address",
-        "name": "publishAuthority",
+        "name": "",
         "type": "address"
       }
     ],
-    "name": "createContextGraph",
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "baseCost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "coverPublishingCost",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "createAccount",
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
       }
     ],
@@ -685,13 +729,104 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "deregisterAgent",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "name": "epochSpent",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "epochStorageAddress",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
         "type": "uint256"
       }
     ],
-    "name": "deactivateContextGraph",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "name": "getAccountInfo",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "owner_",
+        "type": "address"
+      },
+      {
+        "internalType": "uint96",
+        "name": "committedTRAC",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "epochAllowance",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "createdAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "discountBps",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "agentCount",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -717,89 +852,11 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
+        "name": "accountId",
         "type": "uint256"
       }
     ],
-    "name": "getAttestedRoot",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getContextGraph",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "owner_",
-        "type": "address"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "participantIdentityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "uint8",
-        "name": "requiredSignatures",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "metadataBatchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint256",
-        "name": "createdAt",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
-      },
-      {
-        "internalType": "address",
-        "name": "publishAuthority",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getContextGraphBatchCount",
+    "name": "getDiscount",
     "outputs": [
       {
         "internalType": "uint256",
@@ -813,111 +870,108 @@
   {
     "inputs": [
       {
+        "internalType": "uint96",
+        "name": "committedTRAC",
+        "type": "uint96"
+      }
+    ],
+    "name": "getDiscountBps",
+    "outputs": [
+      {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "",
         "type": "uint256"
       }
     ],
-    "name": "getContextGraphBatches",
-    "outputs": [
-      {
-        "internalType": "uint256[]",
-        "name": "",
-        "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "view",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
-      }
-    ],
-    "name": "getContextGraphOwner",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getContextGraphParticipants",
-    "outputs": [
-      {
-        "internalType": "uint72[]",
-        "name": "",
-        "type": "uint72[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getContextGraphRequiredSignatures",
-    "outputs": [
-      {
-        "internalType": "uint8",
-        "name": "",
-        "type": "uint8"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "getLatestContextGraphId",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getPublishPolicy",
-    "outputs": [
-      {
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
       },
       {
-        "internalType": "address",
-        "name": "publishAuthority",
-        "type": "address"
+        "internalType": "uint96",
+        "name": "baseCost",
+        "type": "uint96"
+      }
+    ],
+    "name": "getDiscountedCost",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "getEpochSpent",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getRegisteredAgents",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "getRemainingAllowance",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
       }
     ],
     "stateMutability": "view",
@@ -968,43 +1022,13 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      }
-    ],
-    "name": "isContextGraphActive",
+    "inputs": [],
+    "name": "maxAgentsPerAccount",
     "outputs": [
       {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "isParticipant",
-    "outputs": [
-      {
-        "internalType": "bool",
         "name": "",
-        "type": "bool"
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1046,16 +1070,34 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "accountId",
         "type": "uint256"
       },
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
       }
     ],
-    "name": "removeParticipant",
+    "name": "registerAgent",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "releaseUnspentTRAC",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1133,23 +1175,52 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "cap",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
       }
     ],
-    "name": "setAttestedRoot",
+    "name": "setMaxAgentsPerAccount",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "_status",
+        "type": "bool"
+      }
+    ],
+    "name": "setStatus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "stakingStorageAddress",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "status",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1260,6 +1331,24 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "topUp",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "totalSupply",
     "outputs": [
@@ -1296,104 +1385,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address payable",
-        "name": "custodian",
-        "type": "address"
-      }
-    ],
-    "name": "transferTokens",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint8",
-        "name": "publishPolicy",
-        "type": "uint8"
-      },
-      {
-        "internalType": "address",
-        "name": "publishAuthority",
-        "type": "address"
-      }
-    ],
-    "name": "updatePublishPolicy",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint8",
-        "name": "requiredSignatures",
-        "type": "uint8"
-      }
-    ],
-    "name": "updateQuorum",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "tripleHash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "leafIndex",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "siblings",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "address",
-        "name": "kaStorageAddress",
-        "type": "address"
-      }
-    ],
-    "name": "verifyTripleInclusion",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "valid",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "version",
     "outputs": [
@@ -1404,26 +1395,6 @@
       }
     ],
     "stateMutability": "pure",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "withdrawMisplacedEther",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "tokenContractAddress",
-        "type": "address"
-      }
-    ],
-    "name": "withdrawMisplacedTokens",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   }
 ]

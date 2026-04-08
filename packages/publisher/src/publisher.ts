@@ -46,6 +46,8 @@ export type V10ACKProvider = (
   rootEntities: string[],
   publicByteSize: bigint,
   stagingQuads?: Uint8Array,
+  epochs?: number,
+  tokenAmount?: bigint,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**

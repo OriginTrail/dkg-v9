@@ -144,6 +144,8 @@ export interface CreateOnChainContextGraphParams {
   participantIdentityIds: bigint[];
   requiredSignatures: number;
   metadataBatchId?: bigint;
+  publishPolicy?: number;
+  publishAuthority?: string;
 }
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
@@ -202,6 +204,15 @@ export interface V10PublishParams {
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
+export interface V10UpdateKCParams {
+  kcId: bigint;
+  newMerkleRoot: Uint8Array;
+  newByteSize: bigint;
+  mintAmount?: number;
+  burnTokenIds?: bigint[];
+  publisherAddress?: string;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
@@ -337,6 +348,9 @@ export interface ChainAdapter {
 
   /** @deprecated Use signACKDigest instead. Will be removed in V10.1. */
   getACKSignerKey?(): string | undefined;
+
+  /** V10 update (works with KnowledgeCollectionStorage). */
+  updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
 
   /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
   isV10Ready?(): boolean;

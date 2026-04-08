@@ -356,6 +356,63 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
     }
 
+    // ========================================================================
+    // V10 Update (works with KnowledgeCollectionStorage, not V9 KnowledgeAssetsStorage)
+    // ========================================================================
+
+    /**
+     * @notice Update an existing knowledge collection. Only the latest publisher
+     *         (the address that pushed the most recent merkle root) may call this.
+     *
+     * @param id Knowledge collection ID (from createKnowledgeAssets)
+     * @param newMerkleRoot New merkle root for the updated data
+     * @param newByteSize Updated byte size
+     * @param mintAmount Number of new KA tokens to mint (0 if unchanged)
+     * @param burnTokenIds Token IDs to burn (empty if unchanged)
+     */
+    function updateKnowledgeCollection(
+        uint256 id,
+        bytes32 newMerkleRoot,
+        uint88 newByteSize,
+        uint256 mintAmount,
+        uint256[] calldata burnTokenIds
+    ) external {
+        KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
+
+        address latestPublisher = kcs.getLatestMerkleRootPublisher(id);
+        require(latestPublisher != address(0), "Knowledge collection does not exist");
+        if (latestPublisher != msg.sender) {
+            revert KnowledgeAssetsLib.NotBatchPublisher(id, msg.sender);
+        }
+
+        (, , , , , uint40 endEpoch, uint96 existingTokenAmount, bool isImmutable) =
+            kcs.getKnowledgeCollectionMetadata(id);
+
+        if (isImmutable) {
+            revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(id);
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (currentEpoch > endEpoch) {
+            revert KnowledgeCollectionLib.KnowledgeCollectionExpired(id, currentEpoch, endEpoch);
+        }
+
+        kcs.updateKnowledgeCollection(
+            msg.sender,
+            id,
+            "",
+            newMerkleRoot,
+            mintAmount,
+            burnTokenIds,
+            newByteSize,
+            existingTokenAmount
+        );
+    }
+
+    // ========================================================================
+    // Internal: Token Distribution
+    // ========================================================================
+
     function _distributeTokens(uint96 tokenAmount, uint256 epochs, uint40 currentEpoch) internal {
         require(epochs > 0, "epochs must be > 0");
 

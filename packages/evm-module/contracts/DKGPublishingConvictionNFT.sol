@@ -140,11 +140,11 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         acct.committedTRAC += amount;
         acct.epochAllowance = acct.committedTRAC / uint96(LOCK_DURATION_EPOCHS);
 
-        if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, amount)) {
+        // Funds stay in this contract (same as createAccount) so coverPublishingCost
+        // can transfer from the contract's balance when applying discounted costs.
+        if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
             revert InvalidAmount();
         }
-
-        _distributeToEpochs(amount);
 
         emit TopUp(accountId, amount);
     }
@@ -245,7 +245,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
      *         distributed equally across the next 12 epochs via EpochStorage.
      */
     function releaseUnspentTRAC(uint256 accountId, uint40 epoch) external {
-        _requireExists(accountId);
+        _requireOwner(accountId);
         Account storage acct = accounts[accountId];
         uint40 currentEpoch = _getCurrentEpoch();
 

@@ -898,7 +898,9 @@ export class DKGPublisher implements Publisher {
 
       const tokenAmount = precomputedTokenAmount;
       const v10Ready = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
-      const useV10 = v10ACKs && v10ACKs.length > 0 && v10Ready;
+      // V10 KC path is incompatible with fromSharedMemory flow because the
+      // verify step calls addBatchToContextGraph which queries KnowledgeAssetsStorage (V9).
+      const useV10 = v10ACKs && v10ACKs.length > 0 && v10Ready && !isPublishFromSharedMemory;
 
       // Resolve contextGraphId for V10 signature (must match on-chain digest)
       const ackDomainForSig = isPublishFromSharedMemory

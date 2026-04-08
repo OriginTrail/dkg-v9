@@ -149,6 +149,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32[] calldata signatureRs,
         bytes32[] calldata signatureVss
     ) external {
+        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) {
+            revert KnowledgeAssetsLib.ContextGraphNotActive(contextGraphId);
+        }
+        (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
+        if (policy == 0) {
+            require(msg.sender == authority, "Unauthorized: curated CG");
+        }
         require(contextGraphStorage.getAttestedRoot(contextGraphId, batchId) == bytes32(0), "Batch already registered");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
         bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);

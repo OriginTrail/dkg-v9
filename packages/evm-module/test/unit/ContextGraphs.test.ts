@@ -535,7 +535,7 @@ describe('@unit ContextGraphs', () => {
           contextGraphId, batchId, merkleRoot,
           [identityId], [sig.r], [sig.yParityAndS],
         ),
-      ).to.be.revertedWithCustomError(ContextGraphStorageContract, 'ContextGraphNotActive');
+      ).to.be.revertedWithCustomError(ContextGraphsContract, 'ContextGraphNotActive');
     });
   });
 

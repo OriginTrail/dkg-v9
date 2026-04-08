@@ -2160,11 +2160,8 @@ export class DKGAgent {
         const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
         const raw = cgConfig?.requiredSignatures;
         const parsed = raw != null ? Number(raw) : 0;
-        if (!Number.isFinite(parsed) || parsed < 0) {
-          throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw}`);
-        }
-        if (parsed < 1) {
-          throw new Error(`getContextGraphConfig returned non-positive requiredSignatures (${parsed}) — context graph may be misconfigured`);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw} (must be a positive integer)`);
         }
         requiredSignatures = parsed;
       } catch (err: any) {

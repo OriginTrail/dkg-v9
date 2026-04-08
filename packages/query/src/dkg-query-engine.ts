@@ -5,6 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
   assertSafeIri, escapeSparqlLiteral,
   type GetView,
+  LEGACY_VIEW_MAP,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
@@ -34,7 +35,8 @@ export function resolveViewGraphs(
   contextGraphId: string,
   opts?: { agentAddress?: string; verifiedGraph?: string; draftName?: string },
 ): ViewResolution {
-  switch (view) {
+  const resolved = LEGACY_VIEW_MAP[view] ?? view;
+  switch (resolved) {
     case 'working-memory': {
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
@@ -67,6 +69,8 @@ export function resolveViewGraphs(
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
+    default:
+      throw new Error(`Unknown view: ${String(resolved)}`);
   }
 }
 

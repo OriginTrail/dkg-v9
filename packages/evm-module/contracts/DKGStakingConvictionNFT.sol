@@ -52,6 +52,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     error InvalidAmount();
     error InvalidLockEpochs();
     error LockNotExpired(uint256 positionId, uint40 expiresAtEpoch);
+    error PositionExpired(uint256 positionId, uint40 expiresAtEpoch);
     error InsufficientStake(uint256 positionId, uint96 requested, uint96 available);
 
     constructor(address hubAddress) ContractStatus(hubAddress) ERC721("DKG Staking Conviction", "DKGSC") {}
@@ -123,7 +124,14 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         _requireOwner(positionId);
         if (addedAmount == 0) revert InvalidAmount();
 
-        positions[positionId].stakedAmount += addedAmount;
+        Position storage pos = positions[positionId];
+        uint40 currentEpoch = _getCurrentEpoch();
+        uint40 expiresAt = pos.createdAtEpoch + pos.lockEpochs;
+        if (currentEpoch >= expiresAt) {
+            revert PositionExpired(positionId, expiresAt);
+        }
+
+        pos.stakedAmount += addedAmount;
 
         if (!tokenContract.transferFrom(msg.sender, address(this), addedAmount)) {
             revert InvalidAmount();

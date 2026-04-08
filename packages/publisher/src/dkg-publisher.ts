@@ -827,7 +827,7 @@ export class DKGPublisher implements Publisher {
     if (precomputedTokenAmount <= 0n) precomputedTokenAmount = 1n;
 
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
-    if (options.v10ACKProvider && !hasPrivateData) {
+    if (options.v10ACKProvider && !hasPrivateData && !isPublishFromSharedMemory) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
@@ -1172,23 +1172,13 @@ export class DKGPublisher implements Publisher {
       && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
 
     if (v10UpdateAvailable) {
-      try {
-        this.log.info(ctx, `Trying V10 updateKnowledgeCollection path for kcId=${kcId}`);
-        txResult = await this.chain.updateKnowledgeCollectionV10!({
-          kcId,
-          newMerkleRoot: kcMerkleRoot,
-          newByteSize: BigInt(allSkolemizedQuads.length * 100),
-          publisherAddress: this.publisherAddress,
-        });
-      } catch (v10Err: any) {
-        this.log.info(ctx, `V10 update failed (${v10Err?.message?.slice(0, 80)}), falling back to V9 path`);
-        txResult = await this.chain.updateKnowledgeAssets({
-          batchId: kcId,
-          newMerkleRoot: kcMerkleRoot,
-          newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
-          publisherAddress: this.publisherAddress,
-        });
-      }
+      this.log.info(ctx, `Using V10 updateKnowledgeCollection path for kcId=${kcId}`);
+      txResult = await this.chain.updateKnowledgeCollectionV10!({
+        kcId,
+        newMerkleRoot: kcMerkleRoot,
+        newByteSize: BigInt(allSkolemizedQuads.length * 100),
+        publisherAddress: this.publisherAddress,
+      });
     } else {
       txResult = await this.chain.updateKnowledgeAssets({
         batchId: kcId,

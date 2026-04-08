@@ -137,6 +137,10 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         if (amount == 0) revert InvalidAmount();
 
         Account storage acct = accounts[accountId];
+        uint40 currentEpoch = _getCurrentEpoch();
+        if (currentEpoch >= acct.expiresAtEpoch) {
+            revert AccountExpired(accountId, acct.expiresAtEpoch);
+        }
         acct.committedTRAC += amount;
         acct.epochAllowance = acct.committedTRAC / uint96(LOCK_DURATION_EPOCHS);
 
@@ -421,6 +425,18 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         uint256 tokenId,
         address auth
     ) internal virtual override(ERC721Enumerable) returns (address) {
-        return super._update(to, tokenId, auth);
+        address from = super._update(to, tokenId, auth);
+
+        // Clear agent registrations on transfer (not mint/burn)
+        if (from != address(0) && to != address(0) && from != to) {
+            address[] storage agents = _registeredAgents[tokenId];
+            for (uint256 i; i < agents.length; i++) {
+                _isRegisteredAgent[tokenId][agents[i]] = false;
+                agentToAccountId[agents[i]] = 0;
+            }
+            delete _registeredAgents[tokenId];
+        }
+
+        return from;
     }
 }

@@ -5,7 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
   assertSafeIri, escapeSparqlLiteral,
   type GetView,
-  LEGACY_VIEW_MAP,
+  REMOVED_VIEWS,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
@@ -35,8 +35,13 @@ export function resolveViewGraphs(
   contextGraphId: string,
   opts?: { agentAddress?: string; verifiedGraph?: string; draftName?: string },
 ): ViewResolution {
-  const resolved = LEGACY_VIEW_MAP[view] ?? view;
-  switch (resolved) {
+  if (REMOVED_VIEWS.includes(view as string)) {
+    throw new Error(
+      `View '${view}' was removed in V10. Use 'verified-memory' for on-chain anchored data. ` +
+      `See migration guide for details.`,
+    );
+  }
+  switch (view) {
     case 'working-memory': {
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
@@ -69,8 +74,6 @@ export function resolveViewGraphs(
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
-    default:
-      throw new Error(`Unknown view: ${String(resolved)}`);
   }
 }
 

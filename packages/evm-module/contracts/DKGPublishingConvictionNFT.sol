@@ -141,11 +141,12 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         if (currentEpoch >= acct.expiresAtEpoch) {
             revert AccountExpired(accountId, acct.expiresAtEpoch);
         }
-        acct.committedTRAC += amount;
-        acct.epochAllowance = acct.committedTRAC / uint96(LOCK_DURATION_EPOCHS);
 
-        // Funds stay in this contract (same as createAccount) so coverPublishingCost
-        // can transfer from the contract's balance when applying discounted costs.
+        // Top-ups increase the spendable epoch allowance but do NOT count toward
+        // committedTRAC (which determines the discount tier). Increasing the tier
+        // without a fresh 12-epoch lock would break conviction economics.
+        acct.epochAllowance += amount / uint96(LOCK_DURATION_EPOCHS);
+
         if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
             revert InvalidAmount();
         }

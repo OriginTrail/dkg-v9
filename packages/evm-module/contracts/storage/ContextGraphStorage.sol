@@ -202,6 +202,7 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint72 identityId
     ) external onlyContracts {
         _requireExists(contextGraphId);
+        require(identityId != 0, "Identity ID cannot be zero");
         uint72[] storage participants = _contextGraphs[contextGraphId].participantIdentityIds;
         uint256 len = participants.length;
 

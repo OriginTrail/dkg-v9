@@ -112,15 +112,10 @@ export interface Publication {
 export type GetView =
   | 'working-memory'
   | 'shared-working-memory'
-  | 'verified-memory'
-  | 'long-term-memory'
-  | 'authoritative';
+  | 'verified-memory';
 
-/** @deprecated Use 'verified-memory' instead. Maps legacy views to their V10 equivalents. */
-export const LEGACY_VIEW_MAP: Readonly<Record<string, GetView>> = {
-  'long-term-memory': 'verified-memory',
-  'authoritative': 'verified-memory',
-};
+/** @deprecated Legacy V9 views removed in V10. Listed here for migration error messages. */
+export const REMOVED_VIEWS: readonly string[] = ['long-term-memory', 'authoritative'] as const;
 
 /**
  * Valid memory layer transitions. The protocol enforces a strict

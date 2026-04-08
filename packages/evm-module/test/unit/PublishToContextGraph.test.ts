@@ -238,7 +238,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [id1, id2],
         2,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
       const contextGraphId = 1n;
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-data-root'));
@@ -273,7 +273,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [identityId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const contextGraphId = 1n;
@@ -312,7 +312,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [id1, id2],
         2,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const contextGraphId = 1n;
@@ -356,7 +356,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [participantId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const contextGraphId = 1n;
@@ -399,7 +399,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [publisherId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
       const contextGraphId = 1n;
 
@@ -470,7 +470,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [publisherId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const kcCreator = getDefaultKCCreator(accounts);
@@ -540,7 +540,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [publisherId, participant2Id],
         2,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const kcCreator = getDefaultKCCreator(accounts);
@@ -604,7 +604,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [publisherId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
       const contextGraphId = 1n;
 
@@ -676,7 +676,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [edgeId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
       const contextGraphId = 1n;
 
@@ -717,7 +717,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [edgeId],
         1,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('edge-only'));
@@ -757,7 +757,7 @@ describe('@unit PublishToContextGraph', () => {
       await ContextGraphsContract.connect(accounts[0]).createContextGraph(
         [coreId, edgeId],
         2,
-        0,
+        0, 1, ethers.ZeroAddress,
       );
 
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('mixed-node'));

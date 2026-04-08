@@ -12,6 +12,8 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {PublishingConvictionAccount} from "./PublishingConvictionAccount.sol";
+import {ContextGraphs} from "./ContextGraphs.sol";
+import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
 import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
 import {ParanetsRegistry} from "./storage/paranets/ParanetsRegistry.sol";
@@ -51,6 +53,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
     PublishingConvictionAccount public convictionAccount;
+    ContextGraphs public contextGraphs;
 
     error ConvictionAccountNotConfigured();
 
@@ -80,6 +83,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             convictionAccount = PublishingConvictionAccount(addr);
         } catch {
             // conviction not yet deployed — convictionAccountId > 0 will revert
+        }
+
+        try hub.getContractAddress("ContextGraphs") returns (address addr) {
+            contextGraphs = ContextGraphs(addr);
+        } catch {
+            // ContextGraphs not yet deployed
         }
     }
 
@@ -148,6 +157,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
         bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount, uint256(byteSize)));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
+
+        if (address(contextGraphs) != address(0) && contextGraphId > 0) {
+            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, msg.sender)) {
+                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, msg.sender);
+            }
+        }
 
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());

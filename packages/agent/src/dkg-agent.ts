@@ -782,8 +782,13 @@ export class DKGAgent {
 
         if (dataQuads.length === 0 && metaQuads.length === 0) continue;
 
-        onPhase?.('verify', 'start');
         const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+        if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
+          this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
+          continue;
+        }
+
+        onPhase?.('verify', 'start');
         const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemContextGraph);
         onPhase?.('verify', 'end');
 
@@ -857,11 +862,12 @@ export class DKGAgent {
 
       const quads = parseNQuads(nquadsText);
       if (quads.length === 0) break;
-      allQuads.push(...quads);
 
-      const pageCount = quads.filter(q => q.graph === graphUri).length;
-      offset += pageCount;
-      if (pageCount < SYNC_PAGE_SIZE) break;
+      const validQuads = quads.filter(q => q.graph === graphUri);
+      allQuads.push(...validQuads);
+
+      offset += validQuads.length;
+      if (validQuads.length < SYNC_PAGE_SIZE) break;
     }
     return allQuads;
   }
@@ -1902,7 +1908,7 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.accessPolicy === 1 || opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
     ];
 
     const creatorIdentityId = await this.chain.getIdentityId();
@@ -2927,6 +2933,12 @@ export class DKGAgent {
     responderPeerId: string,
     phase: 'data' | 'meta' = 'data',
   ): Promise<Uint8Array> {
+    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+      const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
+      const phaseSuffix = phase === 'meta' ? '|meta' : '';
+      return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
+    }
+
     const request: SyncRequestEnvelope = {
       contextGraphId,
       offset,
@@ -2935,28 +2947,26 @@ export class DKGAgent {
       phase,
     };
 
-    if (await this.isPrivateContextGraph(contextGraphId)) {
-      request.targetPeerId = responderPeerId;
-      request.requesterPeerId = this.peerId;
-      request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      request.issuedAtMs = Date.now();
-      const identityId = await this.chain.getIdentityId();
-      if (identityId > 0n && typeof this.chain.signMessage === 'function') {
-        const digest = this.computeSyncDigest(
-          contextGraphId,
-          offset,
-          limit,
-          includeSharedMemory,
-          responderPeerId,
-          request.requesterPeerId,
-          request.requestId,
-          request.issuedAtMs,
-        );
-        const signature = await this.chain.signMessage(digest);
-        request.requesterIdentityId = identityId.toString();
-        request.requesterSignatureR = ethers.hexlify(signature.r);
-        request.requesterSignatureVS = ethers.hexlify(signature.vs);
-      }
+    request.targetPeerId = responderPeerId;
+    request.requesterPeerId = this.peerId;
+    request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    request.issuedAtMs = Date.now();
+    const identityId = await this.chain.getIdentityId();
+    if (identityId > 0n && typeof this.chain.signMessage === 'function') {
+      const digest = this.computeSyncDigest(
+        contextGraphId,
+        offset,
+        limit,
+        includeSharedMemory,
+        responderPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const signature = await this.chain.signMessage(digest);
+      request.requesterIdentityId = identityId.toString();
+      request.requesterSignatureR = ethers.hexlify(signature.r);
+      request.requesterSignatureVS = ethers.hexlify(signature.vs);
     }
 
     return new TextEncoder().encode(JSON.stringify(request));

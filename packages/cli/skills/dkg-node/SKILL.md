@@ -42,120 +42,116 @@ discover other agents on the network.
 
 ## 3. Quick Start
 
-**Step 1 — Register** (if not already registered):
+**Step 1 — Create a Context Graph:**
 
 ```bash
-curl -X POST $BASE_URL/api/agent/register \
-  -H "Authorization: Bearer $NODE_TOKEN" \
+curl -X POST $BASE_URL/api/context-graph/create \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-agent", "framework": "cursor"}'
+  -d '{"name": "my-context-graph"}'
 ```
 
-Save the returned `authToken` — use it as `$AGENT_TOKEN` for all subsequent calls.
-
-**Step 2 — Create a draft:**
+**Step 2 — Write to Shared Memory:**
 
 ```bash
-curl -X POST $BASE_URL/api/draft/create \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-draft", "contextGraph": "my-context-graph"}'
-```
-
-**Step 3 — Write triples:**
-
-```bash
-curl -X PUT $BASE_URL/api/draft/my-draft \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
+curl -X POST $BASE_URL/api/shared-memory/write \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "contextGraph": "my-context-graph",
+    "paranetId": "my-context-graph",
     "quads": [
-      {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person"},
-      {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "Alice"}
+      {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person", "graph": "urn:default"},
+      {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "Alice", "graph": "urn:default"}
     ]
   }'
 ```
 
-**Step 4 — Share to team:**
+**Step 3 — Publish to Verified Memory:**
 
 ```bash
-curl -X POST $BASE_URL/api/draft/my-draft/promote \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
+curl -X POST $BASE_URL/api/publish \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"contextGraph": "my-context-graph"}'
+  -d '{"paranetId": "my-context-graph", "quads": [...]}'
+```
+
+**Step 4 — Query:**
+
+```bash
+curl -X POST $BASE_URL/api/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "view": "shared-working-memory"}'
 ```
 
 ## 4. Authentication
 
-**Two modes:**
-- **Custodial** (default): register without a `publicKey` — node generates and holds keys, signs on your behalf.
-- **Self-sovereign**: register with your own `publicKey` — you sign protocol operations externally via prepare/submit handshake.
-
-**Token usage:** Include `Authorization: Bearer $AGENT_TOKEN` on all requests.
-Agent tokens are prefixed `dkg_at_`.
+**Token usage:** Include `Authorization: Bearer $TOKEN` on all requests.
+The token is configured in the node's config file or provided at startup.
 
 **Public endpoints (no auth):** `GET /api/status`, `GET /api/chain/rpc-health`,
-`GET /.well-known/skill.md`, `GET /context-oracle`, `GET /ui/*`, `GET /apps/*`.
+`GET /.well-known/skill.md`.
+
+> **Planned:** Multi-agent registration (`POST /api/agent/register`) with custodial
+> and self-sovereign key modes will be available in a future release.
 
 ## 5. Memory Model
 
-### Working Memory (WM) — Private drafts
-
-- `POST /api/draft/create` — create a named draft
-- `PUT /api/draft/{name}` — write triples (additive)
-- `POST /api/draft/{name}/import` — import N-Triples/Turtle/JSON-LD
-- `POST /api/draft/{name}/import-file` — import PDF/DOCX/Markdown (multipart)
-- `GET /api/draft/{name}` — read draft contents
-- `DELETE /api/draft/{name}` — delete draft
-
 ### Shared Working Memory (SWM) — Team-visible
 
-- `POST /api/draft/{name}/promote` — SHARE: promote draft to SWM (triggers gossip)
-- `POST /api/swm/write` — write directly to SWM (skip WM)
-- `GET /api/swm/entities` — list SWM entities
+- `POST /api/shared-memory/write` — write triples to SWM (gossip-replicated)
+- `POST /api/shared-memory/publish` — promote SWM triples to Verified Memory
 
 ### Verified Memory (VM) — Permanent, on-chain
 
-- `POST /api/publish` — PUBLISH: promote SWM triples to VM (costs TRAC)
-- `POST /api/update` — UPDATE: modify existing Knowledge Asset
-- `POST /api/endorse` — ENDORSE: social signal ("I vouch for this")
-- `POST /api/verify/propose` — propose M-of-N consensus verification
-- `POST /api/verify/approve` — approve/reject verification proposal
+- `POST /api/publish` — publish triples to VM (costs TRAC)
+- `POST /api/update` — update an existing Knowledge Asset
+- `POST /api/endorse` — endorse a Knowledge Asset ("I vouch for this")
+- `POST /api/verify` — propose or approve M-of-N consensus verification
 
 ### Querying
 
 - `POST /api/query` — SPARQL query with `view` parameter (`working-memory`, `shared-working-memory`, `verified-memory`), optional `minTrust` and `verifiedGraph` filters
 - `POST /api/query-remote` — query a remote peer via P2P
 
+### Working Memory (WM) — Private drafts (🚧 Planned)
+
+> The following WM draft endpoints are planned for a future release:
+
+- `POST /api/draft/create` — create a named private draft
+- `PUT /api/draft/{name}` — write triples to a draft
+- `POST /api/draft/{name}/import` — import N-Triples/Turtle/JSON-LD
+- `POST /api/draft/{name}/import-file` — import PDF/DOCX/Markdown (multipart)
+- `GET /api/draft/{name}` — read draft contents
+- `DELETE /api/draft/{name}` — delete draft
+- `POST /api/draft/{name}/promote` — promote draft to SWM
+
 ## 6. Context Graphs
 
 Context Graphs are scoped knowledge domains with configurable access and governance.
 
-- `POST /api/context-graph/create` — create (set access, publishPolicy, quorum)
-- `GET /api/context-graph/list` — list subscribed CGs
-- `GET /api/context-graph/{id}` — CG details
-- `POST /api/context-graph/{id}/subscribe` — subscribe to a CG
-- `POST /api/context-graph/{id}/ontology` — add ontology
-- `GET /api/context-graph/{id}/ontology` — list ontologies
+- `POST /api/context-graph/create` — create a context graph
+- `GET /api/context-graph/list` — list subscribed context graphs
+- `POST /api/context-graph/subscribe` — subscribe to a context graph
+- `GET /api/context-graph/exists` — check if a context graph exists
+- 🚧 `GET /api/context-graph/{id}` — CG details *(planned)*
+- 🚧 `POST /api/context-graph/{id}/ontology` — add ontology *(planned)*
+- 🚧 `GET /api/context-graph/{id}/ontology` — list ontologies *(planned)*
 
-## 7. File Ingestion
+## 7. File Ingestion (🚧 Planned)
 
-Upload documents and get automatic triple extraction:
+> File ingestion via `import-file` depends on the Working Memory draft API (§5)
+> and will be available when those endpoints ship. The extraction pipeline
+> infrastructure (MarkItDown converter) is already in place on the node.
+
+Supported formats depend on available extraction pipelines (see Node Info §1).
+When available, usage will be:
 
 ```bash
 curl -X POST $BASE_URL/api/draft/my-draft/import-file \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -F "file=@paper.pdf" \
   -F "contextGraph=my-context-graph"
-```
-
-Supported formats depend on available extraction pipelines (see Node Info §1).
-For large files, poll extraction status:
-
-```bash
-curl "$BASE_URL/api/draft/my-draft/extraction-status?contextGraph=my-context-graph" \
-  -H "Authorization: Bearer $AGENT_TOKEN"
 ```
 
 ## 8. Node Administration
@@ -163,10 +159,11 @@ curl "$BASE_URL/api/draft/my-draft/extraction-status?contextGraph=my-context-gra
 - `GET /api/status` (PUBLIC) — node status, peer ID, version, connections
 - `GET /api/info` — lightweight health check
 - `GET /api/agents` — list known agents
-- `GET /api/agent/profile` — your agent profile
 - `GET /api/connections` — transport details
 - `GET /api/wallets/balances` — TRAC and ETH balances
 - `GET /api/chain/rpc-health` (PUBLIC) — RPC health
+- `GET /api/identity` — node identity (DID, identity ID)
+- 🚧 `GET /api/agent/profile` — your agent profile *(planned)*
 
 ## 9. Error Reference
 
@@ -197,7 +194,7 @@ the supporting files in the skill directory:
 |------------|---------------|
 | Paranet | Context Graph |
 | Workspace | Shared Working Memory |
-| Enshrine | SHARE (promote draft) |
-| `POST /api/workspace/write` | `PUT /api/draft/{name}` |
-| `POST /api/workspace/enshrine` | `POST /api/draft/{name}/promote` |
+| Enshrine | Publish (promote to Verified Memory) |
+| `POST /api/workspace/write` | `POST /api/shared-memory/write` |
+| `POST /api/workspace/enshrine` | `POST /api/shared-memory/publish` |
 | `POST /api/paranet/create` | `POST /api/context-graph/create` |

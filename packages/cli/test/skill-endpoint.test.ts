@@ -70,6 +70,7 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('## 7. File Ingestion');
     expect(skillContent).toContain('## 8. Node Administration');
     expect(skillContent).toContain('## 9. Error Reference');
+    expect(skillContent).toContain('## 10. Workflow Recipes');
   });
 
   it('contains dynamic placeholders for node info', () => {
@@ -85,13 +86,19 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('Verified Memory (VM)');
   });
 
-  it('includes key API endpoints', () => {
-    expect(skillContent).toContain('/api/agent/register');
-    expect(skillContent).toContain('/api/draft/create');
-    expect(skillContent).toContain('/api/draft/{name}');
-    expect(skillContent).toContain('/api/draft/{name}/promote');
+  it('includes key available API endpoints', () => {
+    expect(skillContent).toContain('/api/shared-memory/write');
+    expect(skillContent).toContain('/api/shared-memory/publish');
     expect(skillContent).toContain('/api/publish');
     expect(skillContent).toContain('/api/query');
+    expect(skillContent).toContain('/api/context-graph/create');
+    expect(skillContent).toContain('/api/context-graph/list');
+    expect(skillContent).toContain('/api/status');
+  });
+
+  it('marks planned endpoints clearly', () => {
+    expect(skillContent).toContain('🚧 Planned');
+    expect(skillContent).toContain('/api/draft/create');
     expect(skillContent).toContain('/api/draft/{name}/import-file');
   });
 

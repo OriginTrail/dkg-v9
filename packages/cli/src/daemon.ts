@@ -100,7 +100,6 @@ function buildSkillMd(opts: {
   peerId: string;
   nodeRole: string;
   extractionPipelines: string[];
-  contextGraphs: string[];
 }): string {
   const template = loadSkillTemplate();
   const dynamicSection = [
@@ -109,7 +108,7 @@ function buildSkillMd(opts: {
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'text/markdown'}`,
-    `- **Subscribed Context Graphs:** ${opts.contextGraphs.length > 0 ? opts.contextGraphs.join(', ') : '(none)'}`,
+    `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
   ].join('\n');
 
   const staticPlaceholder =
@@ -1228,8 +1227,6 @@ async function handleRequest(
     const proto = req.headers['x-forwarded-proto'] ?? 'http';
     const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
     const baseUrl = `${proto}://${host}`;
-    const cgMap = agent.getSubscribedContextGraphs();
-    const cgNames = [...cgMap.keys()].filter(n => !n.startsWith('_'));
     const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
     const content = buildSkillMd({
       version: nodeVersion,
@@ -1237,7 +1234,6 @@ async function handleRequest(
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       extractionPipelines: [...new Set(pipelines)],
-      contextGraphs: cgNames,
     });
     const etag = skillEtag(content);
     if (req.headers['if-none-match'] === etag) {

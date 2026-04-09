@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   MemoryLayer,
+  TrustLevel,
   TransitionType,
   isValidTransition,
   VALID_TRANSITIONS,
   PUBLICATION_STATES,
   GET_VIEWS,
+  REMOVED_VIEWS,
   type PublicationState,
   type GetView,
   type Publication,
@@ -16,16 +18,24 @@ import {
 } from '../src/memory-model.js';
 
 describe('MemoryLayer enum', () => {
-  it('has exactly four layers', () => {
+  it('has exactly three layers', () => {
     const values = Object.values(MemoryLayer);
-    expect(values).toHaveLength(4);
+    expect(values).toHaveLength(3);
   });
 
   it('abbreviations match spec', () => {
     expect(MemoryLayer.WorkingMemory).toBe('WM');
     expect(MemoryLayer.SharedWorkingMemory).toBe('SWM');
-    expect(MemoryLayer.LongTermMemory).toBe('LTM');
     expect(MemoryLayer.VerifiedMemory).toBe('VM');
+  });
+});
+
+describe('TrustLevel enum', () => {
+  it('has four levels ordered by ascending trust', () => {
+    expect(TrustLevel.SelfAttested).toBe(0);
+    expect(TrustLevel.Endorsed).toBe(1);
+    expect(TrustLevel.PartiallyVerified).toBe(2);
+    expect(TrustLevel.ConsensusVerified).toBe(3);
   });
 });
 
@@ -41,32 +51,16 @@ describe('isValidTransition', () => {
     expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory)).toBe(true);
   });
 
-  it('SWM → LTM is valid', () => {
-    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.LongTermMemory)).toBe(true);
-  });
-
-  it('LTM → VM is valid', () => {
-    expect(isValidTransition(MemoryLayer.LongTermMemory, MemoryLayer.VerifiedMemory)).toBe(true);
-  });
-
-  it('WM → LTM is invalid (skip not allowed)', () => {
-    expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.LongTermMemory)).toBe(false);
+  it('SWM → VM is valid', () => {
+    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiedMemory)).toBe(true);
   });
 
   it('WM → VM is invalid (skip not allowed)', () => {
     expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.VerifiedMemory)).toBe(false);
   });
 
-  it('SWM → VM is invalid (skip not allowed)', () => {
-    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiedMemory)).toBe(false);
-  });
-
   it('VM → WM is invalid (no backward transitions)', () => {
     expect(isValidTransition(MemoryLayer.VerifiedMemory, MemoryLayer.WorkingMemory)).toBe(false);
-  });
-
-  it('LTM → WM is invalid (no backward transitions)', () => {
-    expect(isValidTransition(MemoryLayer.LongTermMemory, MemoryLayer.WorkingMemory)).toBe(false);
   });
 
   it('SWM → WM is invalid (no backward transitions)', () => {
@@ -81,8 +75,8 @@ describe('isValidTransition', () => {
 });
 
 describe('VALID_TRANSITIONS map', () => {
-  it('has entries for 3 source layers (VM has no outgoing)', () => {
-    expect(VALID_TRANSITIONS.size).toBe(3);
+  it('has entries for 2 source layers (VM has no outgoing)', () => {
+    expect(VALID_TRANSITIONS.size).toBe(2);
     expect(VALID_TRANSITIONS.has(MemoryLayer.VerifiedMemory)).toBe(false);
   });
 });
@@ -98,12 +92,25 @@ describe('PublicationState type', () => {
 });
 
 describe('GetView type', () => {
-  it('GET_VIEWS contains all 5 views in trust order', () => {
-    expect(GET_VIEWS).toHaveLength(5);
+  it('GET_VIEWS contains all 3 views in trust order', () => {
+    expect(GET_VIEWS).toHaveLength(3);
     const expected: GetView[] = [
-      'working-memory', 'shared-working-memory', 'long-term-memory', 'verified-memory', 'authoritative',
+      'working-memory', 'shared-working-memory', 'verified-memory',
     ];
     expect([...GET_VIEWS]).toEqual(expected);
+  });
+});
+
+describe('regression: REMOVED_VIEWS lists legacy V9 views', () => {
+  it('contains long-term-memory and authoritative', () => {
+    expect(REMOVED_VIEWS).toContain('long-term-memory');
+    expect(REMOVED_VIEWS).toContain('authoritative');
+  });
+
+  it('does not contain any current V10 views', () => {
+    for (const v of GET_VIEWS) {
+      expect(REMOVED_VIEWS).not.toContain(v);
+    }
   });
 });
 

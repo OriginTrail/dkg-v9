@@ -95,10 +95,12 @@ async function getV10SignaturesData(
   knowledgeAssetsAmount: number = 10,
   byteSize: number = 1000,
   merkleRoot: string = ethers.keccak256(ethers.toUtf8Bytes('test-merkle-root')),
+  epochs: number = 2,
+  tokenAmount: bigint = ethers.parseEther('100'),
 ) {
   const publisherMessageHash = ethers.solidityPackedKeccak256(
-    ['uint72', 'bytes32'],
-    [publisherIdentityId, merkleRoot],
+    ['uint256', 'uint72', 'bytes32'],
+    [contextGraphId, publisherIdentityId, merkleRoot],
   );
 
   const { r: publisherR, vs: publisherVS } = await signMessage(
@@ -107,8 +109,8 @@ async function getV10SignaturesData(
   );
 
   const ackDigest = ethers.solidityPackedKeccak256(
-    ['uint256', 'bytes32', 'uint256', 'uint256'],
-    [contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize],
+    ['uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
+    [contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize, epochs, tokenAmount],
   );
 
   const receiverRs = [];
@@ -352,7 +354,7 @@ describe('V10 E2E Conviction System', function () {
       await PCA.connect(publisher).createAccount(LOCK_AMOUNT, LOCK_EPOCHS);
       await PCA.connect(publisher).addAuthorizedKey(1, accounts[9].address);
 
-      const CONTEXT_GRAPH_ID = 42n;
+      const CONTEXT_GRAPH_ID = 0n;
       const STAKE_AMOUNT = ethers.parseEther('50000');
 
       const publishingNode = getDefaultPublishingNode(accounts);

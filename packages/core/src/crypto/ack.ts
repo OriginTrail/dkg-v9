@@ -29,7 +29,7 @@ function uint256ToBytesValue(value: bigint): Uint8Array {
 /**
  * Compute the ACK digest that core nodes sign to attest data integrity.
  *
- * ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize)))
+ * V10 6-field: keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
  *
  * This function computes the inner digest (before EIP-191 prefix).
  * The EIP-191 prefix is applied by the signing function (e.g. ethers signMessage).
@@ -38,18 +38,30 @@ function uint256ToBytesValue(value: bigint): Uint8Array {
  * @param merkleRoot - The 32-byte merkle root of the triple set
  * @param kaCount - Optional number of knowledge assets
  * @param byteSize - Optional public byte size (uint88 on-chain, packed as uint256)
+ * @param epochs - Optional number of epochs (default 1)
+ * @param tokenAmount - Optional TRAC token amount
  * @returns 32-byte keccak256 digest
  */
-export function computeACKDigest(contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint): Uint8Array {
+export function computeACKDigest(
+  contextGraphId: bigint,
+  merkleRoot: Uint8Array,
+  kaCount?: number,
+  byteSize?: bigint,
+  epochs?: number,
+  tokenAmount?: bigint,
+): Uint8Array {
   if (merkleRoot.length !== 32) {
     throw new Error(`merkleRoot must be 32 bytes, got ${merkleRoot.length}`);
   }
   if (kaCount !== undefined) {
-    const packed = new Uint8Array(128);
+    // 6-field V10 digest: contextGraphId + merkleRoot + kaCount + byteSize + epochs + tokenAmount
+    const packed = new Uint8Array(192);
     packed.set(uint256ToBytes(contextGraphId), 0);
     packed.set(merkleRoot, 32);
     packed.set(uint256ToBytesValue(BigInt(kaCount)), 64);
     packed.set(uint256ToBytesValue(byteSize ?? 0n), 96);
+    packed.set(uint256ToBytesValue(BigInt(epochs ?? 1)), 128);
+    packed.set(uint256ToBytesValue(tokenAmount ?? 0n), 160);
     return keccak256(packed);
   }
   const packed = new Uint8Array(64);

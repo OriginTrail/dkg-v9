@@ -11,6 +11,17 @@
     "type": "constructor"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "CannotUpdateImmutableKnowledgeCollection",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ConvictionAccountNotConfigured",
     "type": "error"
@@ -92,6 +103,22 @@
       }
     ],
     "name": "MinSignaturesRequirementNotMet",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "batchId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotBatchPublisher",
     "type": "error"
   },
   {
@@ -190,6 +217,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
+      }
+    ],
+    "name": "UnauthorizedPublisher",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
@@ -213,6 +256,19 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "contextGraphs",
+    "outputs": [
+      {
+        "internalType": "contract ContextGraphs",
         "name": "",
         "type": "address"
       }
@@ -428,6 +484,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "originalByteSize",
+    "outputs": [
+      {
+        "internalType": "uint88",
+        "name": "",
+        "type": "uint88"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "parametersStorage",
     "outputs": [
@@ -542,6 +617,39 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "newMerkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint88",
+        "name": "newByteSize",
+        "type": "uint88"
+      },
+      {
+        "internalType": "uint256",
+        "name": "mintAmount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256[]",
+        "name": "burnTokenIds",
+        "type": "uint256[]"
+      }
+    ],
+    "name": "updateKnowledgeCollection",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

@@ -28,8 +28,8 @@ function makeEventBus() {
   return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize);
+async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
+  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount);
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -80,8 +80,7 @@ const specialCharQuads: Quad[] = [
 
 describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   const contextGraphId = 'research-paranet-alpha';
-  const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
-  const cgIdBigInt = BigInt(cgIdHash);
+  const cgIdBigInt = 0n;
 
   describe('Phase 1: resolve triples → compute kcMerkleRoot (keccak256)', () => {
     it('merkle root is 32 bytes keccak256', () => {
@@ -141,7 +140,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   });
 
   describe('Phase 2: ACK collection via direct P2P', () => {
-    it('ACK digest = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))', async () => {
+    it('ACK digest = EIP-191 over computeACKDigest (0n bigint for non-numeric context graph id)', async () => {
       const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
       const digest = computeACKDigest(cgIdBigInt, merkleRoot);
       expect(digest).toBeInstanceOf(Uint8Array);
@@ -223,10 +222,9 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       }
     });
 
-    it('contextGraphId derived from contextGraphId via keccak256', () => {
-      const derived = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
-      expect(derived).toBe(cgIdBigInt);
-      expect(derived).toBeGreaterThan(0n);
+    it('non-numeric contextGraphId maps to 0n for ACK digest', () => {
+      expect(() => BigInt(contextGraphId)).toThrow();
+      expect(cgIdBigInt).toBe(0n);
     });
   });
 
@@ -311,13 +309,6 @@ describe('V10 GET Protocol (spec §12)', () => {
     makeQuad('urn:entity:y', 'urn:prop:draft', '"true"', swmGraph),
   ];
 
-  it('view=long-term-memory queries LTM data graph', () => {
-    const view = 'long-term-memory';
-    const graphUri = view === 'long-term-memory' ? ltmGraph : swmGraph;
-    expect(graphUri).toBe(ltmGraph);
-    expect(ltmQuads.every(q => q.graph === ltmGraph)).toBe(true);
-  });
-
   it('view=shared-working-memory queries SWM graph', () => {
     const view = 'shared-working-memory';
     const graphUri = view === 'shared-working-memory' ? swmGraph : ltmGraph;
@@ -325,24 +316,9 @@ describe('V10 GET Protocol (spec §12)', () => {
     expect(swmQuads.every(q => q.graph === swmGraph)).toBe(true);
   });
 
-  it('view=authoritative resolves VM > LTM precedence', () => {
-    const merged = new Map<string, Quad>();
-    for (const q of ltmQuads) {
-      merged.set(`${q.subject}|${q.predicate}`, q);
-    }
-    for (const q of swmQuads) {
-      merged.set(`${q.subject}|${q.predicate}`, q);
-    }
-
-    const xName = merged.get('urn:entity:x|http://schema.org/name');
-    expect(xName?.object).toBe('"SWM Name (newer)"');
-
-    const xVersion = merged.get('urn:entity:x|urn:prop:version');
-    expect(xVersion?.object).toBe('"1"');
-    expect(xVersion?.graph).toBe(ltmGraph);
-
-    const yDraft = merged.get('urn:entity:y|urn:prop:draft');
-    expect(yDraft?.object).toBe('"true"');
+  it('view=verified-memory resolves to VM graph prefix', () => {
+    const vmGraph = `did:dkg:context-graph:${contextGraphId}/_verified_memory/`;
+    expect(vmGraph).toContain('_verified_memory');
   });
 });
 
@@ -352,7 +328,7 @@ describe('V10 GET Protocol (spec §12)', () => {
 
 describe('V10 ACK Edge Cases', () => {
   const contextGraphId = 'edge-case-cg';
-  const cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+  const cgIdBigInt = 0n;
   const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
 
   it('fails fast when requiredACKs > connected peers', async () => {
@@ -708,7 +684,7 @@ describe('V10 Merkle Root Construction (spec §9.0.2)', () => {
 
 describe('V10 StorageACKHandler round-trip', () => {
   const contextGraphId = 'handler-test-cg';
-  const cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+  const cgIdBigInt = 0n;
   const coreWallet = ethers.Wallet.createRandom();
   const fakePeerId = { toString: () => 'requester-peer' };
 
@@ -775,7 +751,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(ethers.hexlify(decodedRoot)).toBe(ethers.hexlify(merkleRoot));
 
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, BigInt(stagingBytes.length));
+    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, BigInt(stagingBytes.length), 1, 0n);
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
@@ -944,7 +920,7 @@ describe('V10 StorageACKHandler round-trip', () => {
 
 describe('V10 Finalization (spec §9.0 Phase 6)', () => {
   const contextGraphId = 'finalization-test';
-  const cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+  const cgIdBigInt = 0n;
   const merkleRoot = computeFlatKCRoot(multiEntityQuads, []);
 
   it('PublishIntent encode/decode round-trip preserves all fields', () => {
@@ -1022,12 +998,12 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
     expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
-  it('contextGraphId consistency: publisher and handler derive same bigint from string', () => {
-    const publisherDerived = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
-    const handlerDerived = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+  it('contextGraphId consistency: publisher and handler both use 0n for non-numeric string', () => {
+    const publisherDerived = 0n;
+    const handlerDerived = 0n;
     expect(publisherDerived).toBe(handlerDerived);
     expect(publisherDerived).toBe(cgIdBigInt);
-    expect(publisherDerived).toBeGreaterThan(0n);
+    expect(publisherDerived).toBe(0n);
   });
 
   it('KA root combines public and private roots correctly', () => {

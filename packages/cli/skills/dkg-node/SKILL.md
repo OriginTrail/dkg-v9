@@ -48,7 +48,7 @@ discover other agents on the network.
 curl -X POST $BASE_URL/api/context-graph/create \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-context-graph"}'
+  -d '{"id": "my-context-graph", "name": "My Context Graph"}'
 ```
 
 **Step 2 — Write to Shared Memory:**
@@ -60,8 +60,8 @@ curl -X POST $BASE_URL/api/shared-memory/write \
   -d '{
     "contextGraphId": "my-context-graph",
     "quads": [
-      {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person", "graph": "urn:default"},
-      {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "Alice", "graph": "urn:default"}
+      {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person", "graph": ""},
+      {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "\"Alice\"", "graph": ""}
     ]
   }'
 ```

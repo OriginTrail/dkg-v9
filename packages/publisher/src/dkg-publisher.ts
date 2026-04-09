@@ -171,7 +171,8 @@ export class DKGPublisher implements Publisher {
     options: ShareOptions,
   ): Promise<ShareResult> {
     const subjects = [...new Set(quads.map(q => q.subject))];
-    const lockKeys = subjects.map(s => `${contextGraphId}\0${s}`);
+    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
     return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
   }
 

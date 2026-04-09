@@ -10,6 +10,7 @@ import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {KnowledgeAssetsStorageLike} from "./interfaces/KnowledgeAssetsStorageLike.sol";
+import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
@@ -25,6 +26,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     ContextGraphStorage public contextGraphStorage;
     IdentityStorage public identityStorage;
     KnowledgeAssetsStorageLike public knowledgeAssetsStorage;
+    KnowledgeCollectionStorage public knowledgeCollectionStorage;
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -37,6 +39,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         );
         knowledgeAssetsStorage = KnowledgeAssetsStorageLike(
             hub.getAssetStorageAddress("KnowledgeAssetsStorage")
+        );
+        knowledgeCollectionStorage = KnowledgeCollectionStorage(
+            hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
     }
 
@@ -158,7 +163,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         }
         require(contextGraphStorage.getAttestedRoot(contextGraphId, batchId) == bytes32(0), "Batch already registered");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
+        // Check V9 storage first (KnowledgeAssetsStorage), then V10 (KnowledgeCollectionStorage)
         bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
+        if (onChainRoot == bytes32(0) && address(knowledgeCollectionStorage) != address(0)) {
+            onChainRoot = knowledgeCollectionStorage.getLatestMerkleRoot(batchId);
+        }
         require(onChainRoot != bytes32(0), "Batch does not exist");
         require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
         contextGraphStorage.setAttestedRoot(contextGraphId, batchId, merkleRoot);

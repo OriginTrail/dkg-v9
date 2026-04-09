@@ -852,10 +852,14 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
-    // If no v10ACKProvider was given (single-node mode / tests), self-sign an ACK
-    // so the on-chain V10 contract receives at least one valid signature.
+    // Self-sign ACK as last resort: single-node mode (no provider), or when
+    // ACK collection was skipped for private data, or when collection failed.
+    // On networks requiring > 1 signature, a single self-signed ACK will be
+    // rejected on-chain by minimumRequiredSignatures — this is intentional:
+    // the contract is the ultimate gatekeeper.
     if (!v10ACKs && this.publisherWallet && this.publisherNodeIdentityId > 0n) {
-      this.log.info(ctx, `No v10ACKProvider — self-signing ACK (single-node mode)`);
+      const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
+      this.log.info(ctx, `Self-signing ACK — ${reason}`);
       const cgIdForACK = (() => {
         const raw = options.publishContextGraphId ?? contextGraphId;
         try { return BigInt(raw); } catch { return 0n; }
@@ -1136,16 +1140,40 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
-    if (typeof this.chain.updateKnowledgeCollectionV10 !== 'function') {
-      throw new Error('Chain adapter does not support V10 update (updateKnowledgeCollectionV10 not available)');
+    let txResult: { success: boolean; hash: string; blockNumber?: number };
+    if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
+      try {
+        txResult = await this.chain.updateKnowledgeCollectionV10({
+          kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newByteSize: updateByteSize,
+          publisherAddress: this.publisherAddress,
+          v10Origin: true,
+        });
+      } catch (v10Err) {
+        // V10 update failed — KC may live in V9 storage. Try legacy path.
+        if (typeof this.chain.updateKnowledgeAssets === 'function') {
+          this.log.info(ctx, `V10 update failed, trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+          txResult = await this.chain.updateKnowledgeAssets({
+            batchId: kcId,
+            newMerkleRoot: kcMerkleRoot,
+            newPublicByteSize: updateByteSize,
+            publisherAddress: this.publisherAddress,
+          });
+        } else {
+          throw v10Err;
+        }
+      }
+    } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+      txResult = await this.chain.updateKnowledgeAssets({
+        batchId: kcId,
+        newMerkleRoot: kcMerkleRoot,
+        newPublicByteSize: updateByteSize,
+        publisherAddress: this.publisherAddress,
+      });
+    } else {
+      throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
     }
-    const txResult = await this.chain.updateKnowledgeCollectionV10({
-      kcId,
-      newMerkleRoot: kcMerkleRoot,
-      newByteSize: updateByteSize,
-      publisherAddress: this.publisherAddress,
-      v10Origin: true,
-    });
 
     if (!txResult.success) {
       onPhase?.('chain:submit', 'end');
@@ -1197,7 +1225,7 @@ export class DKGPublisher implements Publisher {
       onChainResult: {
         batchId: kcId,
         txHash: txResult.hash,
-        blockNumber: txResult.blockNumber,
+        blockNumber: txResult.blockNumber ?? 0,
         blockTimestamp: Math.floor(Date.now() / 1000),
         publisherAddress: this.publisherAddress,
       },

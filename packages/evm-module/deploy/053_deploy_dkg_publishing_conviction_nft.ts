@@ -9,4 +9,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ['DKGPublishingConvictionNFT', 'v10'];
-func.dependencies = ['Hub', 'Token'];
+func.dependencies = ['Hub', 'Token', 'StakingStorage', 'EpochStorage', 'Chronos'];

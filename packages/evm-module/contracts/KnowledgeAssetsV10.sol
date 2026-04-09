@@ -171,16 +171,17 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         ));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
 
+        // Recover the publisher's wallet from the publisher signature — not msg.sender,
+        // because the tx may be submitted by a different operational wallet (round-robin).
+        address publisherWallet = ECDSA.recover(
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
+            ),
+            publisherNodeR,
+            publisherNodeVS
+        );
+
         if (address(contextGraphs) != address(0) && contextGraphId > 0) {
-            // Recover the publisher's wallet from the publisher signature — not msg.sender,
-            // because the tx may be submitted by a different operational wallet (round-robin).
-            address publisherWallet = ECDSA.recover(
-                ECDSA.toEthSignedMessageHash(
-                    keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
-                ),
-                publisherNodeR,
-                publisherNodeVS
-            );
             // V10.0: curated CGs require the publishAuthority to be an EOA whose
             // signature matches publisherWallet. Contract authorities (multisigs, PCAs)
             // require ERC-1271 verification or a delegation registry — deferred to V10.x.
@@ -193,7 +194,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
 
         uint256 id = kcs.createKnowledgeCollection(
-            msg.sender,
+            publisherWallet,
             publishOperationId,
             merkleRoot,
             knowledgeAssetsAmount,

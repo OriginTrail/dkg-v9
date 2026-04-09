@@ -284,6 +284,19 @@
   },
   {
     "inputs": [],
+    "name": "knowledgeCollectionStorage",
+    "outputs": [
+      {
+        "internalType": "contract KnowledgeCollectionStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "name",
     "outputs": [
       {

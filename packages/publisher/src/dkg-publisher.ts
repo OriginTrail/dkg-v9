@@ -1562,6 +1562,17 @@ export class DKGPublisher implements Publisher {
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.dropGraph(graphUri);
   }
+
+  /** @deprecated Use assertionCreate. Will be removed in V10.1. */
+  async draftCreate(...args: Parameters<DKGPublisher['assertionCreate']>) { return this.assertionCreate(...args); }
+  /** @deprecated Use assertionWrite. Will be removed in V10.1. */
+  async draftWrite(...args: Parameters<DKGPublisher['assertionWrite']>) { return this.assertionWrite(...args); }
+  /** @deprecated Use assertionQuery. Will be removed in V10.1. */
+  async draftQuery(...args: Parameters<DKGPublisher['assertionQuery']>) { return this.assertionQuery(...args); }
+  /** @deprecated Use assertionPromote. Will be removed in V10.1. */
+  async draftPromote(...args: Parameters<DKGPublisher['assertionPromote']>) { return this.assertionPromote(...args); }
+  /** @deprecated Use assertionDiscard. Will be removed in V10.1. */
+  async draftDiscard(...args: Parameters<DKGPublisher['assertionDiscard']>) { return this.assertionDiscard(...args); }
 }
 
 /**

@@ -2112,7 +2112,13 @@ async function handleRequest(
     } catch (err: any) {
       tracker.fail(ctx, err);
       const msg = err?.message ?? '';
-      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
+      if (
+        msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') ||
+        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
+        msg.includes('was removed in V10') ||
+        msg.includes('requires agentAddress') || msg.includes('requires contextGraphId') ||
+        msg.includes('cannot be combined with')
+      ) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

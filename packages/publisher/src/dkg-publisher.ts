@@ -861,7 +861,10 @@ export class DKGPublisher implements Publisher {
       const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
       this.log.info(ctx, `Self-signing ACK — ${reason}`);
       const cgIdForACK = (() => {
-        const raw = options.publishContextGraphId ?? contextGraphId;
+        // Must match the ackDomain used by the provider path and publisher signature
+        const raw = isPublishFromSharedMemory
+          ? contextGraphId
+          : (options.publishContextGraphId ?? contextGraphId);
         try { return BigInt(raw); } catch { return 0n; }
       })();
       const ackDigest = computeACKDigest(

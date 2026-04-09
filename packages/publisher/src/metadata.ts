@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { validateSubGraphName } from '@origintrail-official/dkg-core';
+import { validateSubGraphName, isSafeIri } from '@origintrail-official/dkg-core';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
@@ -471,7 +471,9 @@ export function generateSubGraphRegistration(reg: SubGraphRegistration): Quad[] 
 
   if (reg.authorizedWriters && reg.authorizedWriters.length > 0) {
     for (const writer of reg.authorizedWriters) {
-      quads.push(mq(subGraphUri, `${DKG}authorizedWriter`, `did:dkg:agent:${writer}`, metaGraph));
+      const writerUri = `did:dkg:agent:${writer}`;
+      if (!isSafeIri(writerUri)) continue;
+      quads.push(mq(subGraphUri, `${DKG}authorizedWriter`, writerUri, metaGraph));
     }
   }
 

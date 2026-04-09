@@ -3,10 +3,10 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm, validateSubGraphName, contextGraphSubGraphUri } from '@origintrail-official/dkg-core';
 import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
-import { generateShareMetadata, generateOwnershipQuads } from './metadata.js';
+import { generateShareMetadata, generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
 
@@ -143,6 +143,26 @@ export class SharedMemoryHandler {
       }
 
       await this.graphManager.ensureContextGraph(contextGraphId);
+
+      if (subGraphName) {
+        await this.graphManager.ensureSubGraph(contextGraphId, subGraphName);
+
+        const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
+        const alreadyRegistered = await this.store.query(
+          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+        );
+        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+          const regQuads = generateSubGraphRegistration({
+            contextGraphId,
+            subGraphName,
+            createdBy: publisherPeerId || 'swm-discovery',
+            timestamp: new Date(),
+          });
+          await this.store.insert(regQuads);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
+        }
+      }
 
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);

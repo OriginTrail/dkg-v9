@@ -3639,9 +3639,32 @@ export class DKGAgent {
       async create(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<string> {
         return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
-      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>, opts?: { subGraphName?: string }): Promise<void> {
-        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples, opts?.subGraphName);
+
+      /**
+       * Write triples to a WM draft. Accepts:
+       * - `Quad[]` — standard quad array (same as publish/share)
+       * - `JsonLdContent` — JSON-LD document, auto-converted to quads
+       * - `Array<{ subject, predicate, object }>` — legacy triple array (deprecated)
+       */
+      async write(
+        contextGraphId: string,
+        draftName: string,
+        input: import('@origintrail-official/dkg-storage').Quad[] | JsonLdContent | Array<{ subject: string; predicate: string; object: string }>,
+        opts?: { subGraphName?: string },
+      ): Promise<void> {
+        let quads: import('@origintrail-official/dkg-storage').Quad[];
+        if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
+          quads = input as import('@origintrail-official/dkg-storage').Quad[];
+        } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
+          const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
+          quads = [...publicQuads, ...privateQuads];
+        } else {
+          quads = (input as Array<{ subject: string; predicate: string; object: string }>)
+            .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
+        }
+        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, quads, opts?.subGraphName);
       },
+
       async query(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
         return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },

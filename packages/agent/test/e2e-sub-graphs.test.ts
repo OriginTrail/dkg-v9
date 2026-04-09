@@ -379,6 +379,59 @@ describe('Sub-graph across memory layers (single agent)', () => {
     expect(rootResult.bindings).toHaveLength(0);
   }, 15_000);
 
+  it('draft.write accepts Quad[] input', async () => {
+    const agent = await DKGAgent.create({
+      name: 'QuadDraftBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-quad-draft', name: 'Quad Draft', description: '' });
+    await agent.createSubGraph('sg-quad-draft', 'code');
+
+    await agent.draft.create('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+
+    // Write using Quad[] (standard format, same as publish/share)
+    await agent.draft.write('sg-quad-draft', 'quad-test', [
+      { subject: 'urn:fn:main', predicate: 'http://ex.org/sig', object: '"main()"', graph: '' },
+      { subject: 'urn:fn:main', predicate: 'http://ex.org/lang', object: '"TypeScript"', graph: '' },
+    ], { subGraphName: 'code' });
+
+    const quads = await agent.draft.query('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+    expect(quads).toHaveLength(2);
+  }, 15_000);
+
+  it('draft.write accepts JSON-LD input', async () => {
+    const agent = await DKGAgent.create({
+      name: 'JsonLdDraftBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-jsonld-draft', name: 'JSONLD Draft', description: '' });
+    await agent.createSubGraph('sg-jsonld-draft', 'entities');
+
+    await agent.draft.create('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+
+    // Write using JSON-LD (auto-converted to quads)
+    await agent.draft.write('sg-jsonld-draft', 'ld-test', {
+      '@id': 'urn:entity:alice',
+      'http://schema.org/name': 'Alice',
+      'http://schema.org/jobTitle': 'Engineer',
+    }, { subGraphName: 'entities' });
+
+    const quads = await agent.draft.query('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+    expect(quads.length).toBeGreaterThanOrEqual(2);
+    const names = quads.filter(q => q.predicate === 'http://schema.org/name');
+    expect(names).toHaveLength(1);
+  }, 15_000);
+
   it('WM draft with subGraphName → promote to sub-graph SWM', async () => {
     const agent = await DKGAgent.create({
       name: 'DraftSubBot',

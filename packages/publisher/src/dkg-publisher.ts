@@ -1425,12 +1425,17 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
-    triples: Array<{ subject: string; predicate: string; object: string }>,
+    input: Quad[] | Array<{ subject: string; predicate: string; object: string }>,
     subGraphName?: string,
   ): Promise<void> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
-    const quads = triples.map((t) => ({ ...t, graph: graphUri }));
+    const quads = input.map((t) => ({
+      subject: t.subject,
+      predicate: t.predicate,
+      object: t.object,
+      graph: graphUri,
+    }));
     await this.store.insert(quads);
   }
 

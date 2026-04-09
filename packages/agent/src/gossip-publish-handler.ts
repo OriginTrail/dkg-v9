@@ -10,7 +10,7 @@ import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-c
 import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
-  validatePublishRequest, parseSimpleNQuads,
+  validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -80,15 +80,33 @@ export class GossipPublishHandler {
       const graphManager = new GraphManager(this.store);
       await graphManager.ensureParanet(request.paranetId);
 
-      // Sub-graph routing: if the publish specifies a sub-graph, store data there
+      // Sub-graph routing: if the publish specifies a sub-graph, store data there.
+      // Reject (don't reroute) invalid names to prevent polluting the root graph.
       let subGraphName: string | undefined;
       if (request.subGraphName) {
         const sgVal = validateSubGraphName(request.subGraphName);
         if (!sgVal.valid) {
-          this.log.warn(ctx, `Gossip: invalid subGraphName "${request.subGraphName}", storing in root data graph`);
-        } else {
-          subGraphName = request.subGraphName;
-          await graphManager.ensureSubGraph(request.paranetId, subGraphName);
+          this.log.warn(ctx, `Gossip: rejected publish with invalid subGraphName "${request.subGraphName}": ${sgVal.reason}`);
+          return;
+        }
+        subGraphName = request.subGraphName;
+        await graphManager.ensureSubGraph(request.paranetId, subGraphName);
+
+        // Persist discovery registration so listSubGraphs() works on replicas
+        const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${request.paranetId}/_meta`;
+        const alreadyRegistered = await this.store.query(
+          `ASK { GRAPH <${metaGraph}> { <${sgUri}> a <http://dkg.io/ontology/SubGraph> } }`,
+        );
+        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+          const regQuads = generateSubGraphRegistration({
+            contextGraphId: request.paranetId,
+            subGraphName,
+            createdBy: request.publisherAddress || 'gossip-discovery',
+            timestamp: new Date(),
+          });
+          await this.store.insert(regQuads);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.paranetId}" from gossip`);
         }
       }
 

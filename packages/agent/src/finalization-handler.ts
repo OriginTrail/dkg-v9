@@ -59,14 +59,15 @@ export class FinalizationHandler {
 
       const ctxGraphId = msg.contextGraphId || undefined;
 
-      // Validate sub-graph name from gossip
+      // Validate sub-graph name from gossip — reject invalid names entirely
       let subGraphName: string | undefined;
       if (msg.subGraphName) {
         const sgVal = validateSubGraphName(msg.subGraphName);
         if (sgVal.valid) {
           subGraphName = msg.subGraphName;
         } else {
-          this.log.warn(ctx, `Finalization: invalid subGraphName "${msg.subGraphName}", ignoring sub-graph routing`);
+          this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
+          return;
         }
       }
 

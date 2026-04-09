@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -2094,6 +2094,9 @@ async function handleRequest(
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
     if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
+      return jsonResponse(res, 400, { error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(', ')}` });
+    }
     const ctx = createOperationContext('query');
     tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');

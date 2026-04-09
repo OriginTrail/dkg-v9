@@ -3688,9 +3688,6 @@ export class DKGAgent {
     };
   }
 
-  /** @deprecated Use agent.assertion */
-  get draft() { return this.assertion; }
-
 }
 
 function splitNQuadLine(line: string): string[] {

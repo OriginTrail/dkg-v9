@@ -48,8 +48,6 @@ export interface AssertionDescriptor {
   createdAt: string;
 }
 
-/** @deprecated Use AssertionDescriptor */
-export type DraftDescriptor = AssertionDescriptor;
 
 export interface ShareRecord {
   contextGraphId: string;

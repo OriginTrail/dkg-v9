@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -51,6 +52,8 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
@@ -75,6 +78,55 @@ function getCurrentCommitShort(): string {
     } catch { return ''; }
   }
 }
+
+// ---------------------------------------------------------------------------
+// SKILL.MD serving — Agent Skills standard (https://agentskills.io)
+// ---------------------------------------------------------------------------
+
+let cachedSkillMd: string | null = null;
+let cachedSkillEtag: string | null = null;
+
+function loadSkillTemplate(): string {
+  if (cachedSkillMd) return cachedSkillMd;
+  const skillPath = new URL('../skills/dkg-node/SKILL.md', import.meta.url);
+  cachedSkillMd = readFileSync(skillPath, 'utf-8');
+  return cachedSkillMd;
+}
+
+function buildSkillMd(opts: {
+  version: string;
+  baseUrl: string;
+  peerId: string;
+  nodeRole: string;
+  extractionPipelines: string[];
+  contextGraphs: string[];
+}): string {
+  const template = loadSkillTemplate();
+  const dynamicSection = [
+    `- **Node version:** ${opts.version}`,
+    `- **Base URL:** ${opts.baseUrl}`,
+    `- **Peer ID:** ${opts.peerId}`,
+    `- **Node role:** ${opts.nodeRole}`,
+    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'text/markdown'}`,
+    `- **Subscribed Context Graphs:** ${opts.contextGraphs.length > 0 ? opts.contextGraphs.join(', ') : '(none)'}`,
+  ].join('\n');
+
+  const staticPlaceholder =
+    '> This section is dynamically generated from node state at serve-time.\n\n'
+    + '- **Node version:** (dynamic)\n'
+    + '- **Base URL:** (dynamic)\n'
+    + '- **Peer ID:** (dynamic)\n'
+    + '- **Node role:** (dynamic — `core` or `edge`)\n'
+    + '- **Available extraction pipelines:** (dynamic)\n'
+    + '- **Subscribed Context Graphs:** (dynamic)';
+
+  return template.replace(staticPlaceholder, dynamicSection);
+}
+
+function skillEtag(content: string): string {
+  return '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
+}
+
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
@@ -741,11 +793,21 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     latestByParanet: new Map(),
   };
 
+  // --- Extraction Pipelines ---
+
+  const extractionRegistry = new ExtractionPipelineRegistry();
+  if (isMarkItDownAvailable()) {
+    extractionRegistry.register(new MarkItDownConverter());
+    log(`Extraction pipelines: ${extractionRegistry.availableContentTypes().join(', ')}`);
+  } else {
+    log('MarkItDown binary not found — document extraction unavailable (files stored as blobs)');
+  }
+
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
     config.rateLimit?.requestsPerMinute ?? 120,
-    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health'],
+    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health', '/.well-known/skill.md'],
   );
   let corsAllowed: CorsAllowlist = '*';
 
@@ -848,6 +910,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         nodeVersion,
         nodeCommit,
         catchupTracker,
+        extractionRegistry,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -1154,9 +1217,39 @@ async function handleRequest(
   nodeVersion: string,
   nodeCommit: string,
   catchupTracker: CatchupTracker,
+  extractionRegistry: ExtractionPipelineRegistry,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
+
+  // GET /.well-known/skill.md — Agent Skills document (PUBLIC, no auth)
+  if (req.method === 'GET' && path === '/.well-known/skill.md') {
+    const listenPort = config.listenPort ?? 9200;
+    const baseUrl = `http://localhost:${listenPort}`;
+    const cgMap = agent.getSubscribedContextGraphs();
+    const cgNames = [...cgMap.keys()];
+    const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
+    const content = buildSkillMd({
+      version: nodeVersion,
+      baseUrl,
+      peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      extractionPipelines: [...new Set(pipelines)],
+      contextGraphs: cgNames,
+    });
+    const etag = skillEtag(content);
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304).end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'ETag': etag,
+      'Cache-Control': 'public, max-age=300',
+    });
+    res.end(content);
+    return;
+  }
 
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {

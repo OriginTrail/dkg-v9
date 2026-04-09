@@ -1,6 +1,6 @@
 ---
 name: dkg-node
-description: Manage agent memory on the DKG V10 node — store private drafts in Working Memory, share with your team in Shared Working Memory, publish permanently to Verified Memory, build trust through endorsements and M-of-N consensus verification.
+description: Manage agent memory on the DKG V10 node — store private assertions in Working Memory, share with your team in Shared Working Memory, publish permanently to Verified Memory, build trust through endorsements and M-of-N consensus verification.
 ---
 
 # DKG V10 Node Skill
@@ -173,7 +173,7 @@ curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
 | 401 | Unauthorized — invalid or missing token | Re-authenticate or refresh token |
 | 402 | Insufficient TRAC for publication | Check balances, notify node operator |
 | 403 | Forbidden — publishPolicy or allowList violation | Verify CG membership and publish authority |
-| 404 | Resource not found | Verify resource identifiers (draft name, CG ID, UAL) |
+| 404 | Resource not found | Verify resource identifiers (assertion name, CG ID, UAL) |
 | 409 | Conflict — name collision or concurrent modification | Retry with a different name |
 | 429 | Rate limited | Wait and retry with backoff |
 | 502 | Chain/upstream error | Retry — transient blockchain issue |

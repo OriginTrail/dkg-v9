@@ -118,7 +118,7 @@ export function validateSubGraphName(name: string): { valid: boolean; reason?: s
   if (name.startsWith('_')) return { valid: false, reason: 'Sub-graph names starting with "_" are reserved for protocol graphs' };
   if (name.includes('/')) return { valid: false, reason: 'Sub-graph names cannot contain "/"' };
   if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Sub-graph name contains characters unsafe for IRIs' };
-  if (name === 'context' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
+  if (name === 'context' || name === 'assertion' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
   return { valid: true };
 }
 

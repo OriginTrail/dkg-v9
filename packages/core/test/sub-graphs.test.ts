@@ -105,6 +105,7 @@ describe('validateSubGraphName', () => {
 
   it('rejects reserved path segments', () => {
     expect(validateSubGraphName('context').valid).toBe(false);
+    expect(validateSubGraphName('assertion').valid).toBe(false);
     expect(validateSubGraphName('draft').valid).toBe(false);
   });
 });

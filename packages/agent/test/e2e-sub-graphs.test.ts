@@ -385,24 +385,24 @@ describe('Sub-graph across memory layers (single agent)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createContextGraph({ id: 'sg-quad-draft', name: 'Quad Draft', description: '' });
-    await agent.createSubGraph('sg-quad-draft', 'code');
+    await agent.createContextGraph({ id: 'sg-quad-input', name: 'Quad Input', description: '' });
+    await agent.createSubGraph('sg-quad-input', 'code');
 
-    await agent.assertion.create('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+    await agent.assertion.create('sg-quad-input', 'quad-test', { subGraphName: 'code' });
 
     // Write using Quad[] (standard format, same as publish/share)
-    await agent.assertion.write('sg-quad-draft', 'quad-test', [
+    await agent.assertion.write('sg-quad-input', 'quad-test', [
       { subject: 'urn:fn:main', predicate: 'http://ex.org/sig', object: '"main()"', graph: '' },
       { subject: 'urn:fn:main', predicate: 'http://ex.org/lang', object: '"TypeScript"', graph: '' },
     ], { subGraphName: 'code' });
 
-    const quads = await agent.assertion.query('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+    const quads = await agent.assertion.query('sg-quad-input', 'quad-test', { subGraphName: 'code' });
     expect(quads).toHaveLength(2);
   }, 15_000);
 
   it('assertion.write accepts JSON-LD input', async () => {
     const agent = await DKGAgent.create({
-      name: 'JsonLdDraftBot',
+      name: 'JsonLdInputBot',
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
@@ -410,19 +410,19 @@ describe('Sub-graph across memory layers (single agent)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createContextGraph({ id: 'sg-jsonld-draft', name: 'JSONLD Draft', description: '' });
-    await agent.createSubGraph('sg-jsonld-draft', 'entities');
+    await agent.createContextGraph({ id: 'sg-jsonld-input', name: 'JSONLD Input', description: '' });
+    await agent.createSubGraph('sg-jsonld-input', 'entities');
 
-    await agent.assertion.create('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+    await agent.assertion.create('sg-jsonld-input', 'ld-test', { subGraphName: 'entities' });
 
     // Write using JSON-LD (auto-converted to quads)
-    await agent.assertion.write('sg-jsonld-draft', 'ld-test', {
+    await agent.assertion.write('sg-jsonld-input', 'ld-test', {
       '@id': 'urn:entity:alice',
       'http://schema.org/name': 'Alice',
       'http://schema.org/jobTitle': 'Engineer',
     }, { subGraphName: 'entities' });
 
-    const quads = await agent.assertion.query('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+    const quads = await agent.assertion.query('sg-jsonld-input', 'ld-test', { subGraphName: 'entities' });
     expect(quads.length).toBeGreaterThanOrEqual(2);
     const names = quads.filter(q => q.predicate === 'http://schema.org/name');
     expect(names).toHaveLength(1);
@@ -430,7 +430,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
 
   it('WM assertion with subGraphName → promote to sub-graph SWM', async () => {
     const agent = await DKGAgent.create({
-      name: 'DraftSubBot',
+      name: 'AssertionSubBot',
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
@@ -481,7 +481,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     expect(emptyAssertion).toHaveLength(0);
   }, 15_000);
 
-  it('full pipeline: WM draft → SWM → VM (sub-graph scoped)', async () => {
+  it('full pipeline: WM assertion → SWM → VM (sub-graph scoped)', async () => {
     const agent = await DKGAgent.create({
       name: 'PipelineBot',
       listenPort: 0,

@@ -301,7 +301,7 @@ describe('Full extraction pipeline simulation', () => {
 
     // Build the import-file response as the daemon would
     const importFileResponse = {
-      draftUri: 'did:dkg:context-graph:sales/draft/0xSales/q4-report',
+      assertionUri: 'did:dkg:context-graph:sales/assertion/0xSales/q4-report',
       fileHash: 'sha256:abc123',
       detectedContentType: 'text/html',
       extraction: {
@@ -327,7 +327,7 @@ describe('Full extraction pipeline simulation', () => {
 
     // Node would return extraction.status: "skipped"
     const importFileResponse = {
-      draftUri: 'did:dkg:context-graph:test/draft/0xAgent/binary-blob',
+      assertionUri: 'did:dkg:context-graph:test/assertion/0xAgent/binary-blob',
       fileHash: 'sha256:xyz789',
       detectedContentType: 'application/octet-stream',
       extraction: {

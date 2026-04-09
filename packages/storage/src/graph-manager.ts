@@ -117,7 +117,7 @@ export class ContextGraphManager {
     const prefix = `${CG_PREFIX}${contextGraphId}/`;
     const allGraphs = await this.store.listGraphs();
     const subGraphNames = new Set<string>();
-    const reservedPrefixes = ['_', 'draft/', 'context/'];
+    const reservedPrefixes = ['_', 'assertion/', 'draft/', 'context/'];
     for (const g of allGraphs) {
       if (!g.startsWith(prefix)) continue;
       const rest = g.slice(prefix.length);

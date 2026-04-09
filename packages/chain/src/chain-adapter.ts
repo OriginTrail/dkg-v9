@@ -212,6 +212,8 @@ export interface V10UpdateKCParams {
   newByteSize: bigint;
   mintAmount?: number;
   burnTokenIds?: bigint[];
+  /** When true, the caller asserts the KC was created via V10. Skips probing. */
+  v10Origin?: boolean;
   publisherAddress?: string;
 }
 

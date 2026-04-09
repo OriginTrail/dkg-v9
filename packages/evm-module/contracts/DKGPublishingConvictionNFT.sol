@@ -356,7 +356,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         _requireExists(accountId);
         Account storage acct = accounts[accountId];
         uint96 spent = epochSpent[accountId][epoch];
-        return acct.epochAllowance > spent ? acct.epochAllowance - spent : 0;
+        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][epoch];
+        return epochCap > spent ? epochCap - spent : 0;
     }
 
     // ========================================================================

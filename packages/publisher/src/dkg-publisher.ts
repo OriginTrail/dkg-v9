@@ -1171,28 +1171,19 @@ export class DKGPublisher implements Publisher {
     const v10UpdateAvailable = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()
       && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
 
-    if (v10UpdateAvailable) {
-      try {
-        this.log.info(ctx, `Trying V10 updateKnowledgeCollection for kcId=${kcId}`);
-        txResult = await this.chain.updateKnowledgeCollectionV10!({
-          kcId,
-          newMerkleRoot: kcMerkleRoot,
-          newByteSize: BigInt(allSkolemizedQuads.length * 100),
-          publisherAddress: this.publisherAddress,
-        });
-      } catch (v10Err: any) {
-        if (v10Err?.message?.includes('not found in KnowledgeCollectionStorage')) {
-          this.log.info(ctx, `KC ${kcId} is a V9 batch, using V9 update path`);
-          txResult = await this.chain.updateKnowledgeAssets({
-            batchId: kcId,
-            newMerkleRoot: kcMerkleRoot,
-            newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
-            publisherAddress: this.publisherAddress,
-          });
-        } else {
-          throw v10Err;
-        }
-      }
+    // The update API uses the V9 path by default. V10 publishes create entries in
+    // KnowledgeCollectionStorage, but the update caller must explicitly flag v10Origin
+    // to avoid ID collisions between V9 batch IDs and V10 collection IDs.
+    // TODO: Once publish metadata tracks the storage version, use it here.
+    if (false /* v10UpdateAvailable && options.v10Origin */) {
+      // Reserved for future V10-native update path
+      txResult = await this.chain.updateKnowledgeCollectionV10!({
+        kcId,
+        newMerkleRoot: kcMerkleRoot,
+        newByteSize: BigInt(allSkolemizedQuads.length * 100),
+        publisherAddress: this.publisherAddress,
+        v10Origin: true,
+      });
     } else {
       txResult = await this.chain.updateKnowledgeAssets({
         batchId: kcId,

@@ -417,8 +417,13 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
 
         uint88 ceiling = originalByteSize[id];
-        if (ceiling == 0) ceiling = oldByteSize; // Fallback for pre-tracking collections
+        if (ceiling == 0) {
+            // First update for a pre-tracking collection — persist the ceiling
+            ceiling = oldByteSize;
+            originalByteSize[id] = ceiling;
+        }
         require(newByteSize <= ceiling, "Cannot increase byte size without additional payment");
+        require(burnTokenIds.length == 0, "Token burning not yet supported in V10 updates");
 
         kcs.updateKnowledgeCollection(
             msg.sender,

@@ -187,6 +187,7 @@ interface PublishRequestBody {
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
+  subGraphName?: string;
 }
 
 
@@ -1856,13 +1857,14 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: parsed.error });
     }
 
-    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
+    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = parsed.value;
     const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api', subGraphName } });
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
         accessPolicy,
         allowedPeers,
+        subGraphName,
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
       });
@@ -1950,23 +1952,23 @@ async function handleRequest(
   if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { quads } = parsed;
+    const { quads, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
     }
     const ctx = createOperationContext('share');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api', subGraphName } });
     try {
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside share
       });
-      await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { operationCtx: ctx }),
+      const shareResult = await tracker.trackPhase(ctx, 'store', () =>
+        agent.share(paranetId, quads, { subGraphName, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
       const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ok: true, phases: opDetail.phases });
+      return jsonResponse(res, 200, { ok: true, shareOperationId: shareResult?.shareOperationId, phases: opDetail.phases });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
@@ -2077,6 +2079,111 @@ async function handleRequest(
       throw err;
     }
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+  }
+
+  // POST /api/sub-graph/create  { contextGraphId, subGraphName }
+  if (req.method === 'POST' && path === '/api/sub-graph/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, subGraphName } = JSON.parse(body);
+    if (!contextGraphId || !subGraphName) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "subGraphName"' });
+    try {
+      await agent.createSubGraph(contextGraphId, subGraphName);
+      return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
+  if (req.method === 'POST' && path === '/api/assertion/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, name, subGraphName } = JSON.parse(body);
+    if (!contextGraphId || !name) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
+    try {
+      const assertionUri = await agent.assertion.create(contextGraphId, name, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { assertionUri });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
+    const assertionName = path.slice('/api/assertion/'.length, -'/write'.length);
+    const body = await readBody(req);
+    const { contextGraphId, quads, subGraphName } = JSON.parse(body);
+    if (!contextGraphId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
+    try {
+      await agent.assertion.write(contextGraphId, assertionName, quads, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { written: quads.length });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
+    const assertionName = path.slice('/api/assertion/'.length, -'/query'.length);
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, subGraphName } = JSON.parse(body);
+    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    try {
+      const quads = await agent.assertion.query(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { quads, count: quads.length });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
+    const assertionName = path.slice('/api/assertion/'.length, -'/promote'.length);
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, entities, subGraphName } = JSON.parse(body);
+    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    try {
+      const result = await agent.assertion.promote(contextGraphId, assertionName, { entities: entities ?? 'all', subGraphName });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
+    const assertionName = path.slice('/api/assertion/'.length, -'/discard'.length);
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, subGraphName } = JSON.parse(body);
+    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    try {
+      await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { discarded: true });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
+  if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
+    const body = await readBody(req);
+    const parsed = JSON.parse(body);
+    const { quads, conditions, subGraphName } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!paranetId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
+    if (!Array.isArray(conditions)) return jsonResponse(res, 400, { error: 'Missing "conditions" array' });
+    const ctx = createOperationContext('share');
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api-cas', subGraphName } });
+    try {
+      const result = await agent.conditionalShare(paranetId, quads, conditions, { subGraphName, operationCtx: ctx });
+      tracker.complete(ctx, { tripleCount: quads.length });
+      return jsonResponse(res, 200, { ok: true, shareOperationId: result?.shareOperationId });
+    } catch (err: any) {
+      tracker.fail(ctx, err);
+      if (err.name === 'StaleWriteError' || err.message?.includes('stale') || err.message?.includes('condition')) {
+        return jsonResponse(res, 409, { error: err.message });
+      }
+      throw err;
+    }
   }
 
   // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_shared_memory", includeWorkspace?: bool }
@@ -2629,7 +2736,7 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = payload;
   const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
 
   if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
@@ -2660,6 +2767,10 @@ function parsePublishRequestBody(body: string):
     return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
   }
 
+  if (subGraphName !== undefined && (typeof subGraphName !== 'string' || subGraphName.trim().length === 0)) {
+    return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+  }
+
   return {
     ok: true,
     value: {
@@ -2668,6 +2779,7 @@ function parsePublishRequestBody(body: string):
       privateQuads,
       accessPolicy,
       allowedPeers,
+      subGraphName: subGraphName as string | undefined,
     },
   };
 }

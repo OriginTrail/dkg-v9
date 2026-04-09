@@ -887,6 +887,7 @@ export class DKGPublisher implements Publisher {
     let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
 
     const identityId = this.publisherNodeIdentityId;
+    let usedV10Path = false;
 
     if (!this.publisherWallet) {
       this.log.warn(ctx, `No EVM wallet configured — skipping on-chain publish`);
@@ -901,6 +902,7 @@ export class DKGPublisher implements Publisher {
       // V10 KC path is incompatible with fromSharedMemory flow because the
       // verify step calls addBatchToContextGraph which queries KnowledgeAssetsStorage (V9).
       const useV10 = v10ACKs && v10ACKs.length > 0 && v10Ready && !isPublishFromSharedMemory;
+      usedV10Path = !!useV10;
 
       // Resolve contextGraphId for V10 signature (must match on-chain digest)
       const ackDomainForSig = isPublishFromSharedMemory
@@ -1118,6 +1120,7 @@ export class DKGPublisher implements Publisher {
       onChainResult,
       publicQuads: allSkolemizedQuads,
       v10ACKs,
+      v10Origin: usedV10Path,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -1171,12 +1174,10 @@ export class DKGPublisher implements Publisher {
     const v10UpdateAvailable = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()
       && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
 
-    // The update API uses the V9 path by default. V10 publishes create entries in
-    // KnowledgeCollectionStorage, but the update caller must explicitly flag v10Origin
-    // to avoid ID collisions between V9 batch IDs and V10 collection IDs.
-    // TODO: Once publish metadata tracks the storage version, use it here.
-    if (false /* v10UpdateAvailable && options.v10Origin */) {
-      // Reserved for future V10-native update path
+    // V10 publishes write to KnowledgeCollectionStorage; V9 publishes write to
+    // KnowledgeAssetsStorage. The caller must explicitly flag v10Origin to route
+    // updates correctly and avoid ID collisions between the two storage backends.
+    if (v10UpdateAvailable && options.v10Origin) {
       txResult = await this.chain.updateKnowledgeCollectionV10!({
         kcId,
         newMerkleRoot: kcMerkleRoot,

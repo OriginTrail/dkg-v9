@@ -34,7 +34,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         uint96 committedTRAC;
         uint96 epochAllowance;    // committedTRAC / 12
         uint40 createdAtEpoch;
-        uint40 expiresAtEpoch;    // createdAtEpoch + 12
+        uint40 expiresAtEpoch;    // may be extended by topUp
+        uint40 originalExpiresAtEpoch; // createdAtEpoch + 12, never extended
     }
 
     IERC20 public tokenContract;
@@ -111,14 +112,22 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
 
         accountId = _nextAccountId++;
         uint96 allowance = amount / uint96(LOCK_DURATION_EPOCHS);
+        uint96 remainder = amount - (allowance * uint96(LOCK_DURATION_EPOCHS));
         uint40 currentEpoch = _getCurrentEpoch();
 
+        uint40 expiry = currentEpoch + uint40(LOCK_DURATION_EPOCHS);
         accounts[accountId] = Account({
             committedTRAC: amount,
             epochAllowance: allowance,
             createdAtEpoch: currentEpoch,
-            expiresAtEpoch: currentEpoch + uint40(LOCK_DURATION_EPOCHS)
+            expiresAtEpoch: expiry,
+            originalExpiresAtEpoch: expiry
         });
+
+        // Credit truncation remainder to the first epoch so no TRAC is stranded
+        if (remainder > 0) {
+            topUpCredits[accountId][currentEpoch] += remainder;
+        }
 
         _mint(msg.sender, accountId);
 
@@ -158,9 +167,14 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
             ? acct.expiresAtEpoch - currentEpoch
             : 1;
         uint96 perEpochTopUp = amount / uint96(remainingEpochs);
+        uint96 topUpRemainder = amount - (perEpochTopUp * uint96(remainingEpochs));
         // Credit each remaining epoch individually so historical epochs aren't inflated
         for (uint40 e = currentEpoch; e < acct.expiresAtEpoch; e++) {
             topUpCredits[accountId][e] += perEpochTopUp;
+        }
+        // Credit truncation remainder to the current epoch so no TRAC is stranded
+        if (topUpRemainder > 0) {
+            topUpCredits[accountId][currentEpoch] += topUpRemainder;
         }
 
         if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
@@ -194,7 +208,9 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
 
         uint96 discountedCost = _applyDiscount(acct.committedTRAC, baseCost);
         uint96 spent = epochSpent[accountId][currentEpoch];
-        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][currentEpoch];
+        // Base allowance only applies within the original commitment window
+        uint96 baseForEpoch = currentEpoch < acct.originalExpiresAtEpoch ? acct.epochAllowance : 0;
+        uint96 epochCap = baseForEpoch + topUpCredits[accountId][currentEpoch];
         uint96 available = epochCap > spent ? epochCap - spent : 0;
 
         if (discountedCost > available) {
@@ -275,7 +291,9 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         require(epoch >= acct.createdAtEpoch && epoch < acct.expiresAtEpoch, "Epoch out of account range");
 
         uint96 spent = epochSpent[accountId][epoch];
-        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][epoch];
+        // Base allowance only applies within the original commitment window
+        uint96 baseForEpoch = epoch < acct.originalExpiresAtEpoch ? acct.epochAllowance : 0;
+        uint96 epochCap = baseForEpoch + topUpCredits[accountId][epoch];
         uint96 unspent = epochCap > spent ? epochCap - spent : 0;
 
         if (unspent == 0) revert EpochAlreadyReleased(accountId, epoch);
@@ -356,7 +374,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         _requireExists(accountId);
         Account storage acct = accounts[accountId];
         uint96 spent = epochSpent[accountId][epoch];
-        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][epoch];
+        uint96 baseForEpoch = epoch < acct.originalExpiresAtEpoch ? acct.epochAllowance : 0;
+        uint96 epochCap = baseForEpoch + topUpCredits[accountId][epoch];
         return epochCap > spent ? epochCap - spent : 0;
     }
 

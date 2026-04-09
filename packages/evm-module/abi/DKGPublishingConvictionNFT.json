@@ -603,6 +603,11 @@
         "internalType": "uint40",
         "name": "expiresAtEpoch",
         "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "originalExpiresAtEpoch",
+        "type": "uint40"
       }
     ],
     "stateMutability": "view",

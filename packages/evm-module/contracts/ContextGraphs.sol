@@ -132,7 +132,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         address publisher
     ) external view returns (bool authorized) {
         uint256 latestId = contextGraphStorage.getLatestContextGraphId();
-        if (contextGraphId > latestId) return true; // CG doesn't exist — no policy to enforce
+        if (contextGraphId == 0 || contextGraphId > latestId) return false;
         if (!contextGraphStorage.isContextGraphActive(contextGraphId)) return false;
         (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
         if (policy == 1) return true; // open

@@ -3671,17 +3671,7 @@ export class DKGAgent {
           quads = input as import('@origintrail-official/dkg-storage').Quad[];
         } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
           const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
-          const isEnvelope = !Array.isArray(input) && ('public' in (input as Record<string, unknown>) || 'private' in (input as Record<string, unknown>));
-          if (isEnvelope && privateQuads.length > 0) {
-            new Logger('DKGAgent').warn(
-              createOperationContext('system'),
-              `Dropped ${privateQuads.length} private quads from JSON-LD envelope — WM assertions do not support private data; ` +
-              `use publish() with accessPolicy for private triples`,
-            );
-            quads = publicQuads;
-          } else {
-            quads = [...publicQuads, ...privateQuads];
-          }
+          quads = [...publicQuads, ...privateQuads];
         } else {
           quads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));

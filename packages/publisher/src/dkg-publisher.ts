@@ -1138,6 +1138,12 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
+    if (options.subGraphName) {
+      throw new Error(
+        'Updating sub-graph KCs is not yet supported. The update path does not resolve sub-graph data/private graphs. ' +
+        'Publish a new KC instead, or remove and recreate the sub-graph.',
+      );
+    }
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);

@@ -2060,9 +2060,10 @@ export class DKGAgent {
 
     const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
     const metaUri = gm.subGraphMetaUri(contextGraphId, subGraphName);
+    const privateUri = gm.subGraphPrivateUri(contextGraphId, subGraphName);
     const swmUri = gm.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaUri = gm.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    for (const uri of [dataUri, metaUri, swmUri, swmMetaUri]) {
+    for (const uri of [dataUri, metaUri, privateUri, swmUri, swmMetaUri]) {
       try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
     }
 

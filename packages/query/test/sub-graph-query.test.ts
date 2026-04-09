@@ -86,14 +86,10 @@ describe('sub-graph query scoping', () => {
     expect(result.bindings).toHaveLength(0);
   });
 
-  it('verified-memory view ignores subGraphName (deferred to V10.x)', async () => {
-    // Sub-graph scoping within view-based routing is not yet implemented.
-    // The query falls through to normal verified-memory resolution which
-    // reads from _verified_memory/* graphs — those won't contain our test data.
-    const result = await engine.query(
+  it('rejects subGraphName combined with view-based routing', async () => {
+    await expect(engine.query(
       'SELECT ?s ?sig WHERE { ?s <http://ex.org/signature> ?sig }',
       { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code' },
-    );
-    expect(result.bindings).toHaveLength(0);
+    )).rejects.toThrow('subGraphName cannot be combined with view-based routing');
   });
 });

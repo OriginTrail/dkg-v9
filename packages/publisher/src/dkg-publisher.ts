@@ -690,18 +690,16 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    // Sub-graph routing: data is stored in `did:dkg:context-graph:{id}/{subGraph}`.
-    // V10.0 limitation: UAL-based lookups (`resolveKA`) derive the data graph from
-    // `contextGraphId` alone and won't find sub-graph data. Sub-graph queries must
-    // use the `subGraphName` option explicitly. Full sub-graph metadata tracking in
-    // KC manifests is deferred to V10.x.
+    // Sub-graph routing: data triples go to `did:dkg:context-graph:{id}/{subGraph}`.
+    // KC metadata (status, authorship proofs) stays in the root `_meta` graph so that
+    // AccessHandler.lookupKAMeta() and DKGQueryEngine.resolveKA() can still discover
+    // the KC without knowing which sub-graph holds the data triples.
     if (options.subGraphName && !options.targetGraphUri) {
       const sgValidation = validateSubGraphName(options.subGraphName);
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
       options = {
         ...options,
         targetGraphUri: contextGraphSubGraphUri(options.contextGraphId, options.subGraphName),
-        targetMetaGraphUri: options.targetMetaGraphUri ?? contextGraphSubGraphMetaUri(options.contextGraphId, options.subGraphName),
       };
     }
 

@@ -4,7 +4,7 @@ import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
   contextGraphSubGraphUri,
-  assertSafeIri, escapeSparqlLiteral,
+  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -101,14 +101,24 @@ export class DKGQueryEngine implements QueryEngine {
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+
+    if (options?.subGraphName) {
+      const v = validateSubGraphName(options.subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
+    }
+
     if (options?.view) {
       if (!effectiveContextGraphId) {
         throw new Error(
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
         );
       }
-      // Sub-graph scoping within view-based routing is deferred to V10.x.
-      // Verified-memory graphs don't have per-sub-graph partitioning yet.
+      if (options.subGraphName) {
+        throw new Error(
+          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
+          'Sub-graph scoping within views is deferred to V10.x.',
+        );
+      }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
 

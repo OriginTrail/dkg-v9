@@ -1302,6 +1302,10 @@ export class DKGAgent {
     }
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
+    // V10.0: subGraphName routes data locally into the sub-graph named graph.
+    // The gossip broadcast still sends raw triples without sub-graph context;
+    // receivers will store them in the root data graph. Sub-graph-aware
+    // replication is deferred to V10.x.
     const result = await this.publisher.publish({
       contextGraphId,
       quads,
@@ -1958,6 +1962,13 @@ export class DKGAgent {
    * Create a named sub-graph within a context graph.
    * Registers it in the CG's `_meta` graph and creates the named graph in storage.
    * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
+   *
+   * V10.0 limitations:
+   * - Registration triples are stored locally only. Peers discover sub-graphs when
+   *   they receive data via GossipSub or by querying the admin's node.
+   * - GossipSub broadcasts raw triples without sub-graph context; receivers store
+   *   replicated data in the root data graph. The CG admin manages sub-graph
+   *   organization on their own node.
    */
   async createSubGraph(contextGraphId: string, subGraphName: string, opts?: {
     description?: string;

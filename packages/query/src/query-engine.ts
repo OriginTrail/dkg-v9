@@ -27,7 +27,8 @@ export interface QueryOptions {
   /**
    * Scope the query to a specific sub-graph within the context graph.
    * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`
-   * instead of the root data graph. Compatible with both legacy and view-based routing.
+   * instead of the root data graph. Only works with legacy routing (no `view`).
+   * Combining `subGraphName` with `view` throws — deferred to V10.x.
    */
   subGraphName?: string;
   /**

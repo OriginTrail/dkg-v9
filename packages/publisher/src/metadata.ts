@@ -2,6 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+const SCHEMA = 'http://schema.org/';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -419,4 +420,86 @@ export async function updateMetaMerkleRoot(
   if (staleRootQuads.length > 0) {
     await store.delete(staleRootQuads);
   }
+}
+
+// ── Sub-Graph Registration Metadata ────────────────────────────────────
+
+export interface SubGraphRegistration {
+  contextGraphId: string;
+  subGraphName: string;
+  createdBy: string;
+  authorizedWriters?: string[];
+  description?: string;
+  timestamp: Date;
+}
+
+/**
+ * Generate RDF triples that register a sub-graph in the CG's `_meta` graph.
+ * Spec §16.2: Sub-graph registration is recorded in `_meta` for agent discovery.
+ */
+export function generateSubGraphRegistration(reg: SubGraphRegistration): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${reg.contextGraphId}/_meta`;
+  const subGraphUri = `did:dkg:context-graph:${reg.contextGraphId}/${reg.subGraphName}`;
+  const parentUri = `did:dkg:context-graph:${reg.contextGraphId}`;
+
+  const quads: Quad[] = [
+    mq(subGraphUri, `${RDF}type`, `${DKG}SubGraph`, metaGraph),
+    mq(subGraphUri, `${DKG}parentContextGraph`, parentUri, metaGraph),
+    mq(subGraphUri, `${SCHEMA}name`, lit(reg.subGraphName), metaGraph),
+    mq(subGraphUri, `${DKG}createdBy`, `did:dkg:agent:${reg.createdBy}`, metaGraph),
+    mq(subGraphUri, `${DKG}createdAt`, dateLit(reg.timestamp), metaGraph),
+  ];
+
+  if (reg.description) {
+    quads.push(mq(subGraphUri, `${SCHEMA}description`, lit(reg.description), metaGraph));
+  }
+
+  if (reg.authorizedWriters && reg.authorizedWriters.length > 0) {
+    for (const writer of reg.authorizedWriters) {
+      quads.push(mq(subGraphUri, `${DKG}authorizedWriter`, `did:dkg:agent:${writer}`, metaGraph));
+    }
+  }
+
+  return quads;
+}
+
+/**
+ * Generate SPARQL to remove a sub-graph's registration triples from `_meta`.
+ */
+export function subGraphDeregistrationSparql(contextGraphId: string, subGraphName: string): string {
+  assertSafeContextGraphIdForSparql(contextGraphId);
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+  return `DELETE WHERE { GRAPH <${metaGraph}> { <${subGraphUri}> ?p ?o } }`;
+}
+
+/**
+ * SPARQL query to discover registered sub-graphs from `_meta`.
+ */
+export function subGraphDiscoverySparql(contextGraphId: string): string {
+  assertSafeContextGraphIdForSparql(contextGraphId);
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  return `SELECT ?subGraph ?name ?createdBy ?createdAt ?description WHERE {
+  GRAPH <${metaGraph}> {
+    ?subGraph a <${DKG}SubGraph> ;
+              <${SCHEMA}name> ?name ;
+              <${DKG}createdBy> ?createdBy .
+    OPTIONAL { ?subGraph <${DKG}createdAt> ?createdAt }
+    OPTIONAL { ?subGraph <${SCHEMA}description> ?description }
+  }
+}`;
+}
+
+/**
+ * SPARQL query to list authorized writers for a specific sub-graph.
+ */
+export function subGraphWritersSparql(contextGraphId: string, subGraphName: string): string {
+  assertSafeContextGraphIdForSparql(contextGraphId);
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+  return `SELECT ?writer WHERE {
+  GRAPH <${metaGraph}> {
+    <${subGraphUri}> <${DKG}authorizedWriter> ?writer
+  }
+}`;
 }

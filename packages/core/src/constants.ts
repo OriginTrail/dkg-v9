@@ -95,6 +95,23 @@ export function contextGraphSubGraphUri(contextGraphId: string, subGraphName: st
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
 }
 
+export function contextGraphSubGraphMetaUri(contextGraphId: string, subGraphName: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_meta`;
+}
+
+/**
+ * Validates a sub-graph name: must be non-empty, no leading underscore
+ * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.
+ */
+export function validateSubGraphName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Sub-graph name cannot be empty' };
+  if (name.startsWith('_')) return { valid: false, reason: 'Sub-graph names starting with "_" are reserved for protocol graphs' };
+  if (name.includes('/')) return { valid: false, reason: 'Sub-graph names cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Sub-graph name contains characters unsafe for IRIs' };
+  if (name === 'context' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
+  return { valid: true };
+}
+
 // ── Deprecated V9 aliases ──────────────────────────────────────────────
 // These map V9 function signatures to V10 implementations.
 // The URI patterns now use V10 format (did:dkg:context-graph:).

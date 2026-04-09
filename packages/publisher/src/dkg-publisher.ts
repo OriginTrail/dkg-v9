@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -418,6 +418,7 @@ export class DKGPublisher implements Publisher {
       publishContextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -468,7 +469,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}`);
+    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
     const publishResult = await this.publish({
       contextGraphId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
@@ -477,6 +478,7 @@ export class DKGPublisher implements Publisher {
       v10ACKProvider: options?.v10ACKProvider,
       publishContextGraphId: ctxGraphId ?? undefined,
       fromSharedMemory: true,
+      subGraphName: options?.subGraphName,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
@@ -681,6 +683,16 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
+    if (options.subGraphName && !options.targetGraphUri) {
+      const sgValidation = validateSubGraphName(options.subGraphName);
+      if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
+      options = {
+        ...options,
+        targetGraphUri: contextGraphSubGraphUri(options.contextGraphId, options.subGraphName),
+        targetMetaGraphUri: options.targetMetaGraphUri ?? contextGraphSubGraphMetaUri(options.contextGraphId, options.subGraphName),
+      };
+    }
+
     const {
       contextGraphId,
       quads,

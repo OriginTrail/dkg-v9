@@ -70,6 +70,8 @@ interface PublishOpts {
   operationCtx?: OperationContext;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
+  /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+  subGraphName?: string;
 }
 
 type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
@@ -1309,6 +1311,7 @@ export class DKGAgent {
       publisherPeerId: this.peerId,
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
+      subGraphName: opts?.subGraphName,
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
@@ -1444,6 +1447,8 @@ export class DKGAgent {
       contextGraphId?: string | bigint;
       subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1460,6 +1465,7 @@ export class DKGAgent {
       publishContextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
+      subGraphName: options?.subGraphName,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1943,6 +1949,104 @@ export class DKGAgent {
         // No peers subscribed — ok for now
       }
     }
+  }
+
+  // ── Sub-Graph Management ───────────────────────────────────────────────
+
+  /**
+   * Create a named sub-graph within a context graph.
+   * Registers it in the CG's `_meta` graph and creates the named graph in storage.
+   * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
+   */
+  async createSubGraph(contextGraphId: string, subGraphName: string, opts?: {
+    description?: string;
+    authorizedWriters?: string[];
+  }): Promise<{ uri: string }> {
+    const { validateSubGraphName, contextGraphSubGraphUri: sgUri } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) throw new Error(`Context graph "${contextGraphId}" does not exist`);
+
+    const gm = new GraphManager(this.store);
+    const uri = sgUri(contextGraphId, subGraphName);
+
+    const { generateSubGraphRegistration } = await import('@origintrail-official/dkg-publisher');
+    const registrationQuads = generateSubGraphRegistration({
+      contextGraphId,
+      subGraphName,
+      createdBy: this.peerId,
+      authorizedWriters: opts?.authorizedWriters,
+      description: opts?.description,
+      timestamp: new Date(),
+    });
+
+    await gm.ensureSubGraph(contextGraphId, subGraphName);
+    await this.store.insert(registrationQuads);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Created sub-graph "${subGraphName}" in context graph "${contextGraphId}" → ${uri}`,
+    );
+    return { uri };
+  }
+
+  /**
+   * List registered sub-graphs for a context graph.
+   * Queries the CG's `_meta` graph for `dkg:SubGraph` registrations.
+   */
+  async listSubGraphs(contextGraphId: string): Promise<Array<{
+    uri: string;
+    name: string;
+    createdBy: string;
+    createdAt?: string;
+    description?: string;
+  }>> {
+    const { subGraphDiscoverySparql } = await import('@origintrail-official/dkg-publisher');
+    const sparql = subGraphDiscoverySparql(contextGraphId);
+    const result = await this.store.query(sparql);
+    if (result.type !== 'bindings') return [];
+    return result.bindings.map(row => ({
+      uri: row['subGraph'] ?? '',
+      name: (row['name'] ?? '').replace(/^"|"$/g, ''),
+      createdBy: row['createdBy'] ?? '',
+      createdAt: row['createdAt']?.replace(/^"|".*$/g, '') || undefined,
+      description: row['description']?.replace(/^"|"$/g, '') || undefined,
+    }));
+  }
+
+  /**
+   * Remove a sub-graph registration from `_meta` and drop its named graphs.
+   * Does NOT delete on-chain data — this is a local bookkeeping operation.
+   */
+  async removeSubGraph(contextGraphId: string, subGraphName: string): Promise<void> {
+    const { validateSubGraphName } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const gm = new GraphManager(this.store);
+
+    const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    try {
+      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+    } catch {
+      // SPARQL DELETE WHERE may not be supported — delete quads manually
+      const { subGraphDiscoverySparql } = await import('@origintrail-official/dkg-publisher');
+      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+      const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+      await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
+    }
+
+    const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
+    const metaUri = gm.subGraphMetaUri(contextGraphId, subGraphName);
+    try { await this.store.dropGraph(dataUri); } catch { /* graph may not exist */ }
+    try { await this.store.dropGraph(metaUri); } catch { /* graph may not exist */ }
+
+    this.log.info(
+      createOperationContext('system'),
+      `Removed sub-graph "${subGraphName}" from context graph "${contextGraphId}"`,
+    );
   }
 
   /**

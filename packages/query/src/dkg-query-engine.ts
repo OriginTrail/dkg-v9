@@ -3,6 +3,7 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
+  contextGraphSubGraphUri,
   assertSafeIri, escapeSparqlLiteral,
   type GetView,
   REMOVED_VIEWS,
@@ -106,6 +107,10 @@ export class DKGQueryEngine implements QueryEngine {
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
         );
       }
+      if (options.subGraphName && options.view === 'verified-memory' && !options.verifiedGraph) {
+        const subGraphUri = contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName);
+        return this.execAndNormalize(wrapWithGraph(sparql, subGraphUri));
+      }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
 
@@ -113,7 +118,9 @@ export class DKGQueryEngine implements QueryEngine {
     let effectiveSparql = sparql;
 
     if (effectiveContextGraphId && !sparql.toLowerCase().includes('from ')) {
-      const dataGraph = contextGraphDataUri(effectiveContextGraphId);
+      const dataGraph = options?.subGraphName
+        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
+        : contextGraphDataUri(effectiveContextGraphId);
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);

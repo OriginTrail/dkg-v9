@@ -21,7 +21,7 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  */
 contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     string private constant _NAME = "ContextGraphStorage";
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "1.0.0";
 
     uint256 private _contextGraphCounter;
     mapping(uint256 => KnowledgeAssetsLib.ContextGraph) private _contextGraphs;
@@ -419,7 +419,20 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint256 tokenId,
         address auth
     ) internal virtual override(ERC721Enumerable) returns (address) {
-        return super._update(to, tokenId, auth);
+        address from = super._update(to, tokenId, auth);
+
+        // On transfer (not mint/burn): if the curated publishAuthority was the
+        // previous owner, auto-rotate it to the new owner so governance follows
+        // the NFT and the old owner can't keep publishing.
+        if (from != address(0) && to != address(0)) {
+            KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[tokenId];
+            if (cg.publishAuthority == from) {
+                cg.publishAuthority = to;
+                emit PublishPolicyUpdated(tokenId, cg.publishPolicy, to);
+            }
+        }
+
+        return from;
     }
 }
 

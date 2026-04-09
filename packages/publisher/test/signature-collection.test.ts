@@ -248,15 +248,12 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     });
   });
 
-  it('publish() follows replicate-then-chain order with receiver sigs', async () => {
+  it('publish() follows prepare → store → chain order with self-signed V10 ACK', async () => {
     const phases: string[] = [];
 
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"Reorder Test"'),
     ];
-
-    // Mock receiver signatures for the test
-    const peer = new MockSignerPeer(2n);
 
     const result = await publisher.publish({
       contextGraphId: PARANET,
@@ -264,85 +261,63 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
       onPhase: (phase, event) => {
         phases.push(`${phase}:${event}`);
       },
-      /**
-       * receiverSignatureProvider: injected function that publisher calls
-       * AFTER data preparation but BEFORE the on-chain tx.
-       * In real code, this broadcasts data to peers and collects signed acks.
-       */
-      receiverSignatureProvider: async (merkleRoot: string, publicByteSize: bigint) => {
-        phases.push('collect_signatures:start');
-        const sig = await peer.signReceiverAck(merkleRoot, publicByteSize);
-        phases.push('collect_signatures:end');
-        return [sig];
-      },
     });
 
     expect(result.status).toBe('confirmed');
 
-    // Verify phase ordering: prepare → store → collect_signatures → chain
+    // Verify phase ordering: prepare → store → chain
     const prepareIdx = phases.indexOf('prepare:start');
     const storeIdx = phases.indexOf('store:start');
-    const sigStartIdx = phases.indexOf('collect_signatures:start');
-    const sigEndIdx = phases.indexOf('collect_signatures:end');
     const chainIdx = phases.indexOf('chain:start');
 
     expect(prepareIdx).toBeLessThan(storeIdx);
-    expect(storeIdx).toBeLessThan(sigStartIdx);
-    expect(sigEndIdx).toBeLessThan(chainIdx);
+    expect(storeIdx).toBeLessThan(chainIdx);
   });
 
-  it('publish() uses collected receiver signatures (not self-signed) in chain call', async () => {
-    const peer = new MockSignerPeer(2n);
-    const chainPublishSpy = vi.spyOn(chain, 'publishKnowledgeAssets');
+  it('publish() uses V10 createKnowledgeAssetsV10 (not V9 publishKnowledgeAssets)', async () => {
+    const v10Spy = vi.spyOn(chain, 'createKnowledgeAssetsV10');
 
     const quads: Quad[] = [
-      q(ENTITY, 'http://schema.org/name', '"Sig Source Test"'),
+      q(ENTITY, 'http://schema.org/name', '"V10 Path Test"'),
     ];
 
     await publisher.publish({
       contextGraphId: PARANET,
       quads,
-      receiverSignatureProvider: async (merkleRoot, publicByteSize) => {
-        return [await peer.signReceiverAck(merkleRoot, publicByteSize)];
-      },
     });
 
-    expect(chainPublishSpy).toHaveBeenCalledOnce();
-    const callArgs = chainPublishSpy.mock.calls[0][0];
-
-    // The receiver signatures should come from the collected peer, not self-signed
-    expect(callArgs.receiverSignatures).toHaveLength(1);
-    expect(callArgs.receiverSignatures[0].identityId).toBe(2n);
+    expect(v10Spy).toHaveBeenCalledOnce();
+    const callArgs = v10Spy.mock.calls[0][0];
+    expect(callArgs.ackSignatures).toHaveLength(1);
+    expect(callArgs.ackSignatures[0].identityId).toBe(1n);
   });
 
-  it('publish() falls back to self-signed when no receiverSignatureProvider', async () => {
-    const chainPublishSpy = vi.spyOn(chain, 'publishKnowledgeAssets');
+  it('publish() self-signs ACK when no v10ACKProvider (single-node mode)', async () => {
+    const v10Spy = vi.spyOn(chain, 'createKnowledgeAssetsV10');
 
     const quads: Quad[] = [
-      q(ENTITY, 'http://schema.org/name', '"Fallback Test"'),
+      q(ENTITY, 'http://schema.org/name', '"Self-sign ACK Test"'),
     ];
 
-    // No receiverSignatureProvider → should use legacy self-signing
+    // No v10ACKProvider → should auto self-sign
     await publisher.publish({
       contextGraphId: PARANET,
       quads,
     });
 
-    expect(chainPublishSpy).toHaveBeenCalledOnce();
-    const callArgs = chainPublishSpy.mock.calls[0][0];
-
-    // Self-signed: identityId should be the publisher's own
-    expect(callArgs.receiverSignatures).toHaveLength(1);
-    expect(callArgs.receiverSignatures[0].identityId).toBe(1n);
+    expect(v10Spy).toHaveBeenCalledOnce();
+    const callArgs = v10Spy.mock.calls[0][0];
+    // Self-signed ACK: identityId should be the publisher's own
+    expect(callArgs.ackSignatures).toHaveLength(1);
+    expect(callArgs.ackSignatures[0].identityId).toBe(1n);
   });
 
-  it('publish() emits PUBLISH_FAILED event when receiver sigs insufficient', async () => {
+  it('publish() emits PUBLISH_FAILED event when V10 chain call fails', async () => {
     const events: any[] = [];
     eventBus.on(DKGEvent.PUBLISH_FAILED, (data) => events.push(data));
 
     chain = new MockChainAdapter('mock:31337', publisherWallet.address);
-    // Override to simulate chain rejection of insufficient sigs
-    vi.spyOn(chain, 'publishKnowledgeAssets').mockRejectedValue(
+    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValue(
       new Error('MinSignaturesRequirementNotMet'),
     );
 
@@ -363,7 +338,6 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     const result = await publisher.publish({
       contextGraphId: PARANET,
       quads,
-      receiverSignatureProvider: async () => [],
     });
 
     // Should be tentative since on-chain failed
@@ -613,15 +587,15 @@ describe('Regression: complete publish result fields', () => {
   });
 });
 
-describe('Regression: fail-fast when receiver signatures are insufficient', () => {
-  it('publish returns tentative (not crash) when chain rejects insufficient sigs', async () => {
+describe('Regression: fail-fast when chain rejects', () => {
+  it('publish returns tentative (not crash) when V10 chain call rejects', async () => {
     const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', wallet.address);
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    vi.spyOn(chain, 'publishKnowledgeAssets').mockRejectedValueOnce(
+    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValueOnce(
       new Error('MinSignaturesRequirementNotMet'),
     );
 
@@ -637,7 +611,6 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     const result = await publisher.publish({
       contextGraphId: PARANET,
       quads: [q('urn:test:failfast:1', 'http://schema.org/name', '"FailFast"')],
-      receiverSignatureProvider: async () => [],
     });
 
     expect(result.status).toBe('tentative');
@@ -651,7 +624,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    vi.spyOn(chain, 'publishKnowledgeAssets').mockRejectedValueOnce(
+    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValueOnce(
       new Error('InsufficientFunds'),
     );
 

@@ -181,7 +181,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 publisherNodeR,
                 publisherNodeVS
             );
-            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet)) {
+            // Check both the recovered signer and msg.sender — the latter covers
+            // contract authorities (multisigs, PCAs) that can't produce ECDSA signatures.
+            if (
+                !contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet) &&
+                !contextGraphs.isAuthorizedPublisher(contextGraphId, msg.sender)
+            ) {
                 revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, publisherWallet);
             }
         }

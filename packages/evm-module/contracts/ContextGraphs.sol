@@ -20,7 +20,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
  */
 contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "ContextGraphs";
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "1.0.0";
 
     ContextGraphStorage public contextGraphStorage;
     IdentityStorage public identityStorage;

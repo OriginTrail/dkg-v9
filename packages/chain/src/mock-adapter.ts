@@ -23,6 +23,7 @@ import type {
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
+  V10UpdateKCParams,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -264,6 +265,27 @@ export class MockChainAdapter implements ChainAdapter {
     const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
+      newMerkleRoot: toHex(params.newMerkleRoot),
+      publisherAddress: this.signerAddress,
+      txHash,
+      txIndex,
+    });
+
+    return this.txResult(true);
+  }
+
+  async updateKnowledgeCollectionV10(params: V10UpdateKCParams): Promise<TxResult> {
+    const existing = this.batches.get(params.kcId);
+    if (!existing) {
+      return this.txResult(false);
+    }
+
+    existing.merkleRoot = params.newMerkleRoot;
+    const txIndex = this.txIndexInBlock;
+    const blockNumber = this.nextBlock;
+    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
+    this.pushEvent('KnowledgeBatchUpdated', {
+      batchId: params.kcId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
       publisherAddress: this.signerAddress,
       txHash,

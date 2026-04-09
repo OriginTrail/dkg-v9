@@ -1216,12 +1216,6 @@ export class EVMChainAdapter implements ChainAdapter {
 
     let signer: Wallet | undefined;
 
-    if (params.v10Origin === false) {
-      throw new Error(
-        `KC ${params.kcId} was not created via V10 — cannot update via V10 path`,
-      );
-    }
-
     // Look up the on-chain publisher to select the correct signer.
     const kcs = this.contracts.knowledgeCollectionStorage;
     if (kcs) {

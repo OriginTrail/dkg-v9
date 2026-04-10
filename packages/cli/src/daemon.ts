@@ -107,7 +107,7 @@ function buildSkillMd(opts: {
     `- **Base URL:** ${opts.baseUrl}`,
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
-    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'text/markdown'}`,
+    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'none (install markitdown to enable document conversion)'}`,
     `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
   ].join('\n');
 
@@ -1227,7 +1227,7 @@ async function handleRequest(
     const proto = req.headers['x-forwarded-proto'] ?? 'http';
     const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
     const baseUrl = `${proto}://${host}`;
-    const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
+    const pipelines = extractionRegistry.availableContentTypes();
     const content = buildSkillMd({
       version: nodeVersion,
       baseUrl,
@@ -1244,6 +1244,7 @@ async function handleRequest(
       'Content-Type': 'text/markdown; charset=utf-8',
       'ETag': etag,
       'Cache-Control': 'public, max-age=300',
+      'Vary': 'Host, X-Forwarded-Host, X-Forwarded-Proto',
     });
     res.end(content);
     return;
@@ -2116,7 +2117,7 @@ async function handleRequest(
         msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') ||
         /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
         msg.includes('was removed in V10') ||
-        msg.includes('requires agentAddress') || msg.includes('requires contextGraphId') ||
+        msg.includes('agentAddress is required') || msg.includes('requires a contextGraphId') ||
         msg.includes('cannot be combined with')
       ) {
         return jsonResponse(res, 400, { error: msg });

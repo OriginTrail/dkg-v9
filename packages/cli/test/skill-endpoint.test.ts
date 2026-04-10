@@ -70,7 +70,7 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('## 7. File Ingestion');
     expect(skillContent).toContain('## 8. Node Administration');
     expect(skillContent).toContain('## 9. Error Reference');
-    expect(skillContent).toContain('## 10. Workflow Recipes');
+    expect(skillContent).toContain('## 10. Common Workflows');
   });
 
   it('contains dynamic placeholders for node info', () => {

@@ -111,7 +111,8 @@ The token is configured in the node's config file or provided at startup.
 
 ### Querying
 
-- `POST /api/query` — SPARQL query with optional `view` (`working-memory`, `shared-working-memory`, `verified-memory`), `agentAddress`, `assertionName`, `verifiedGraph`, `subGraphName`, `includeSharedMemory`, `contextGraphId` parameters
+- `POST /api/query` — SPARQL query with optional `contextGraphId`, `includeSharedMemory`, `view` (`working-memory`, `shared-working-memory`, `verified-memory`), `agentAddress`, `assertionName`, `verifiedGraph` parameters
+  - **Note:** `subGraphName` is supported for legacy routing only and cannot be combined with `view`
 - `POST /api/query-remote` — query a remote peer via P2P
 
 ### Working Memory (WM) — Private assertions (🚧 Planned)
@@ -179,14 +180,19 @@ curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
 | 502 | Chain/upstream error | Retry — transient blockchain issue |
 | 503 | Service unavailable | Node is starting up or shutting down |
 
-## 10. Workflow Recipes
+## 10. Common Workflows
 
-For detailed step-by-step workflow recipes and the full endpoint reference, see
-the supporting files in the skill directory:
+**Write → Share → Publish:**
 
-- `workflows.md` — 10 workflow recipes with curl examples
-- `api-reference.md` — full endpoint reference grouped by workflow
-- `examples/sparql-recipes.md` — SPARQL query patterns
+1. Create a context graph (`POST /api/context-graph/create`)
+2. Write triples to shared memory (`POST /api/shared-memory/write`)
+3. Publish to verified memory (`POST /api/publish`)
+
+**Query across layers:**
+
+- Shared memory: `{"sparql": "...", "contextGraphId": "...", "includeSharedMemory": true}`
+- Verified memory: `{"sparql": "...", "contextGraphId": "..."}`
+- Working memory (planned): `{"sparql": "...", "view": "working-memory", "agentAddress": "..."}`
 
 ## Appendix: V9 → V10 Migration
 

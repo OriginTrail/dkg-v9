@@ -818,8 +818,15 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   const extractionRegistry = new ExtractionPipelineRegistry();
   if (isMarkItDownAvailable()) {
     extractionRegistry.register(new MarkItDownConverter());
-    log(`Extraction pipelines: ${extractionRegistry.availableContentTypes().join(', ')}`);
-  } else {
+  }
+  // text/markdown is always natively handled by the import-file route
+  // regardless of converter registration; report the full effective set so
+  // operators see the same list that /.well-known/skill.md advertises.
+  const supportedIngestionTypes = [
+    ...new Set(['text/markdown', ...extractionRegistry.availableContentTypes()]),
+  ];
+  log(`Extraction pipelines: ${supportedIngestionTypes.join(', ')}`);
+  if (!isMarkItDownAvailable()) {
     log('MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)');
   }
 
@@ -1261,13 +1268,18 @@ async function handleRequest(
     const proto = req.headers['x-forwarded-proto'] ?? 'http';
     const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
     const baseUrl = `${proto}://${host}`;
+    // text/markdown is always handled natively by the import-file route
+    // (skip Phase 1, run the Phase 2 markdown extractor directly), even when
+    // no Phase 1 converter is registered. Surface it in the discovery list so
+    // skill-driven clients see Markdown ingestion as supported regardless of
+    // converter availability.
     const pipelines = extractionRegistry.availableContentTypes();
     const content = buildSkillMd({
       version: nodeVersion,
       baseUrl,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
-      extractionPipelines: [...new Set(pipelines)],
+      extractionPipelines: [...new Set(['text/markdown', ...pipelines])],
     });
     const etag = skillEtag(content);
     if (req.headers['if-none-match'] === etag) {
@@ -2271,7 +2283,15 @@ async function handleRequest(
       return f ? f.content.toString('utf-8') : undefined;
     };
     const contextGraphId = textField('contextGraphId');
-    const contentTypeOverride = textField('contentType');
+    const contentTypeOverrideRaw = textField('contentType');
+    // Treat blank (`contentType=` with empty/whitespace value) as absent so we
+    // fall through to the file part's own Content-Type header instead of
+    // downgrading a real text/markdown / application/pdf upload to
+    // application/octet-stream and silently skipping extraction.
+    const contentTypeOverride =
+      contentTypeOverrideRaw && contentTypeOverrideRaw.trim().length > 0
+        ? contentTypeOverrideRaw
+        : undefined;
     const ontologyRef = textField('ontologyRef');
     const subGraphName = textField('subGraphName');
 

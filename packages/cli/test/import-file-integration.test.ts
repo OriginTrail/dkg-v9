@@ -175,7 +175,12 @@ async function runImportFileOrchestration(params: {
     return f ? f.content.toString('utf-8') : undefined;
   };
   const contextGraphId = textField('contextGraphId')!;
-  const contentTypeOverride = textField('contentType');
+  const contentTypeOverrideRaw = textField('contentType');
+  // Mirror the daemon: blank `contentType=` is treated as absent.
+  const contentTypeOverride =
+    contentTypeOverrideRaw && contentTypeOverrideRaw.trim().length > 0
+      ? contentTypeOverrideRaw
+      : undefined;
   const ontologyRef = textField('ontologyRef');
   const subGraphName = textField('subGraphName');
   const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
@@ -816,6 +821,43 @@ describe('import-file orchestration — happy paths', () => {
     expect(record?.status).toBe('failed');
     expect(record?.error).toBe('Invalid triple object');
     expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('treats a blank contentType form field as absent and falls back to the file part Content-Type', async () => {
+    // A client that submits `contentType=` (empty string) must NOT downgrade
+    // a real text/markdown upload to application/octet-stream — the empty
+    // override should be ignored and the file part's own Content-Type used.
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'text', name: 'contentType', value: '' },
+      { kind: 'file', name: 'file', filename: 'note.md', contentType: 'text/markdown', content: Buffer.from('# Heading\n\nBody text.\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'blank-override',
+    });
+
+    expect(result.detectedContentType).toBe('text/markdown');
+    expect(result.extraction.status).toBe('completed');
+    expect(result.extraction.pipelineUsed).toBe('text/markdown');
+    expect(result.extraction.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('treats a whitespace-only contentType form field as absent', async () => {
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'text', name: 'contentType', value: '   ' },
+      { kind: 'file', name: 'file', filename: 'note.md', contentType: 'text/markdown', content: Buffer.from('# Heading\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'whitespace-override',
+    });
+
+    expect(result.detectedContentType).toBe('text/markdown');
+    expect(result.extraction.status).toBe('completed');
   });
 
   it('records failed extraction status when assertion.write throws an unexpected error', async () => {

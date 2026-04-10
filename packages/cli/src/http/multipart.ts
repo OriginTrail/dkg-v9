@@ -120,11 +120,15 @@ export function parseMultipart(body: Buffer, boundary: string): MultipartField[]
     if (!disposition) {
       throw new MultipartParseError('Malformed part: missing Content-Disposition');
     }
-    const nameMatch = disposition.match(/name\s*=\s*(?:"([^"]*)"|([^;]+))/i);
+    // Anchor parameter matches to a real `;` boundary (or start of string) so
+    // `name=` doesn't accidentally match the `name=` substring inside `filename=`,
+    // and vice versa. Without this, a part with only `filename="x"` (no `name`)
+    // would be silently mis-routed as `name="x"`.
+    const nameMatch = disposition.match(/(?:^|;)\s*name\s*=\s*(?:"([^"]*)"|([^;]+))/i);
     if (!nameMatch) {
       throw new MultipartParseError('Malformed part: Content-Disposition without name');
     }
-    const filenameMatch = disposition.match(/filename\s*=\s*(?:"([^"]*)"|([^;]+))/i);
+    const filenameMatch = disposition.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]+))/i);
     fields.push({
       name: (nameMatch[1] ?? nameMatch[2] ?? '').trim(),
       filename: filenameMatch ? (filenameMatch[1] ?? filenameMatch[2] ?? '').trim() : undefined,

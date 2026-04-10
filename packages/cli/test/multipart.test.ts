@@ -67,6 +67,47 @@ describe('parseBoundary', () => {
   });
 });
 
+describe('parseMultipart — Content-Disposition parameter parsing', () => {
+  it('rejects a part that has only filename= and no name=', () => {
+    // The `name=` parameter regex must be anchored to a real `;` boundary so
+    // it does not silently match the `name=` substring inside `filename=`.
+    // A part with only `filename="x"` should be rejected, not mis-routed as
+    // a field named "x".
+    const malformed = Buffer.concat([
+      Buffer.from(`--${BOUNDARY}${CRLF}`),
+      Buffer.from(`Content-Disposition: form-data; filename="lonely.txt"${CRLF}${CRLF}contents`),
+      Buffer.from(CRLF),
+      Buffer.from(`--${BOUNDARY}--${CRLF}`),
+    ]);
+    expect(() => parseMultipart(malformed, BOUNDARY)).toThrow(MultipartParseError);
+    expect(() => parseMultipart(malformed, BOUNDARY)).toThrow(/without name/);
+  });
+
+  it('parses name= and filename= independently when both are present', () => {
+    const body = buildBody(filePart('attachment', 'doc.pdf', 'application/pdf', Buffer.from('PDF', 'utf-8')));
+    const fields = parseMultipart(body, BOUNDARY);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].name).toBe('attachment');
+    expect(fields[0].filename).toBe('doc.pdf');
+  });
+
+  it('parses name= when filename= comes first in the Content-Disposition', () => {
+    // Order-independence: filename before name should still work because the
+    // anchored regex looks for `;\s*name=` (or start-of-string) regardless of
+    // position.
+    const body = Buffer.concat([
+      Buffer.from(`--${BOUNDARY}${CRLF}`),
+      Buffer.from(`Content-Disposition: form-data; filename="doc.pdf"; name="attachment"${CRLF}${CRLF}body`),
+      Buffer.from(CRLF),
+      Buffer.from(`--${BOUNDARY}--${CRLF}`),
+    ]);
+    const fields = parseMultipart(body, BOUNDARY);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].name).toBe('attachment');
+    expect(fields[0].filename).toBe('doc.pdf');
+  });
+});
+
 describe('parseMultipart — text fields', () => {
   it('extracts a single text field', () => {
     const body = buildBody(textPart('greeting', 'hello'));

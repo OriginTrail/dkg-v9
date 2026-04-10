@@ -17,4 +17,4 @@ packages/evm-module/typechain/
 .devnet/
 
 packages/evm-module/deployments/hardhat_contracts.json
-packages/evm-module/deployments/localhost_contracts.json
+packages/evm-module/deployments/localhost_contracts.jsonsnapshots/_cache_phase1_neuroweb_epoch16.json

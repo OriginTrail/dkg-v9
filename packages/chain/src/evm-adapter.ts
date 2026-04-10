@@ -1108,8 +1108,12 @@ export class EVMChainAdapter implements ChainAdapter {
         ? await this.parseV9PublishReceipt(receipt)
         : null;
       return v9;
-    } catch {
-      return null;
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('could not find') || msg.includes('not found') || msg.includes('unknown transaction')) {
+        return null;
+      }
+      throw err;
     }
   }
 

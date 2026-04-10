@@ -96,17 +96,34 @@ function splitEntityBatch(
   quads: PublishQuad[],
   options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads' | 'splitOversizedEntities'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
 ): PublishQuad[][] {
-  if (!options.splitOversizedEntities || quads.length <= options.maxBatchQuads) {
+  const needsQuadSplit = quads.length > options.maxBatchQuads;
+  const needsByteSplit = options.maxBatchBytes && options.estimateBatchBytes
+    ? options.estimateBatchBytes(quads) > options.maxBatchBytes
+    : false;
+
+  if (!options.splitOversizedEntities || (!needsQuadSplit && !needsByteSplit)) {
     validateSingleBatch(quads, options);
     return [quads];
   }
 
   const batches: PublishQuad[][] = [];
-  for (let i = 0; i < quads.length; i += options.maxBatchQuads) {
-    const batch = quads.slice(i, i + options.maxBatchQuads);
-    validateSingleBatch(batch, options);
-    batches.push(batch);
+  let batch: PublishQuad[] = [];
+
+  for (const q of quads) {
+    const next = [...batch, q];
+    const overQuads = next.length > options.maxBatchQuads;
+    const overBytes = options.maxBatchBytes && options.estimateBatchBytes
+      ? options.estimateBatchBytes(next) > options.maxBatchBytes
+      : false;
+
+    if ((overQuads || overBytes) && batch.length > 0) {
+      batches.push(batch);
+      batch = [q];
+    } else {
+      batch = next;
+    }
   }
 
+  if (batch.length > 0) batches.push(batch);
   return batches;
 }

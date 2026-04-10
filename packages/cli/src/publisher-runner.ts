@@ -204,8 +204,13 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     );
   }
 
+  const hasChainRecovery = [...publishers.values()].some((p) => {
+    const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
+    return typeof chain?.resolvePublishByTxHash === 'function';
+  });
+
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainRecoveryResolver: createChainRecoveryResolver(publishers),
+    chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {

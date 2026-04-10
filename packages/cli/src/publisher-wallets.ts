@@ -118,9 +118,9 @@ async function reapStaleLock(lockPath: string): Promise<boolean> {
     const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
     const createdAt = Number(parsed.createdAt);
     const pid = Number(parsed.pid);
-    const staleByAge = Number.isFinite(createdAt) ? Date.now() - createdAt > LOCK_STALE_MS : true;
-    const staleByPid = Number.isFinite(pid) ? !isProcessRunning(pid) : true;
-    if (staleByAge || staleByPid) {
+    const pidDead = Number.isFinite(pid) ? !isProcessRunning(pid) : true;
+    const aged = Number.isFinite(createdAt) ? Date.now() - createdAt > LOCK_STALE_MS : true;
+    if (pidDead || (aged && !Number.isFinite(pid))) {
       await unlink(lockPath).catch(() => {});
       return true;
     }

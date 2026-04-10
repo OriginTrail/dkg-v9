@@ -81,7 +81,7 @@ curl -X POST $BASE_URL/api/shared-memory/publish \
 curl -X POST $BASE_URL/api/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "view": "shared-memory"}'
+  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "view": "shared-working-memory"}'
 ```
 
 ## 4. Authentication
@@ -190,7 +190,7 @@ curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
 
 **Query across layers:**
 
-- Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-memory"}`
+- Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-working-memory"}`
 - Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory"}`
 - Working memory (planned): `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
 

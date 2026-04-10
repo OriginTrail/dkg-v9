@@ -80,6 +80,7 @@ interface PublisherRuntimeBaseArgs {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   ackTransportFactory?: () => ACKTransportFactory;
+  v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   closeStoreOnStop: boolean;
 }
 
@@ -143,6 +144,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   ackTransportFactory?: () => ACKTransportFactory;
+  v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -151,7 +153,8 @@ export async function createPublisherRuntimeFromAgent(args: {
     chainBase: args.chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
-      ackTransportFactory: args.ackTransportFactory,
+    ackTransportFactory: args.ackTransportFactory,
+    v10ACKProviderFactory: args.v10ACKProviderFactory,
     closeStoreOnStop: false,
   });
 }
@@ -209,6 +212,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         throw new Error(`No publisher configured for wallet ${walletId}`);
       }
       const v10ACKProvider = publishOptions.v10ACKProvider
+        ?? args.v10ACKProviderFactory?.()
         ?? createV10ACKProviderForPublisher(publisher, args.ackTransportFactory?.());
       const publishOptionsWithACKs = v10ACKProvider
         ? { ...publishOptions, v10ACKProvider }

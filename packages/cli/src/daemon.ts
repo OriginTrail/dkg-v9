@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1979,11 +1979,11 @@ async function handleRequest(
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { selection, clearAfter, publishContextGraphId } = parsed;
+    const { selection, clearAfter, publishContextGraphId, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId, subGraphName } });
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
@@ -1991,6 +1991,7 @@ async function handleRequest(
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
+          subGraphName,
           ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
@@ -2086,6 +2087,8 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { contextGraphId, subGraphName } = JSON.parse(body);
     if (!contextGraphId || !subGraphName) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "subGraphName"' });
+    const sgVal = validateSubGraphName(subGraphName);
+    if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
     try {
       await agent.createSubGraph(contextGraphId, subGraphName);
       return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
@@ -2109,7 +2112,7 @@ async function handleRequest(
 
   // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
-    const assertionName = path.slice('/api/assertion/'.length, -'/write'.length);
+    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length));
     const body = await readBody(req);
     const { contextGraphId, quads, subGraphName } = JSON.parse(body);
     if (!contextGraphId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
@@ -2123,7 +2126,7 @@ async function handleRequest(
 
   // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
-    const assertionName = path.slice('/api/assertion/'.length, -'/query'.length);
+    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length));
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { contextGraphId, subGraphName } = JSON.parse(body);
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
@@ -2137,7 +2140,7 @@ async function handleRequest(
 
   // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
-    const assertionName = path.slice('/api/assertion/'.length, -'/promote'.length);
+    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length));
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { contextGraphId, entities, subGraphName } = JSON.parse(body);
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
@@ -2151,7 +2154,7 @@ async function handleRequest(
 
   // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
-    const assertionName = path.slice('/api/assertion/'.length, -'/discard'.length);
+    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length));
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { contextGraphId, subGraphName } = JSON.parse(body);
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
@@ -2767,8 +2770,14 @@ function parsePublishRequestBody(body: string):
     return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
   }
 
-  if (subGraphName !== undefined && (typeof subGraphName !== 'string' || subGraphName.trim().length === 0)) {
-    return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+  if (subGraphName !== undefined) {
+    if (typeof subGraphName !== 'string' || subGraphName.trim().length === 0) {
+      return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+    }
+    const sgValidation = validateSubGraphName(subGraphName);
+    if (!sgValidation.valid) {
+      return { ok: false, error: `Invalid "subGraphName": ${sgValidation.reason}` };
+    }
   }
 
   return {

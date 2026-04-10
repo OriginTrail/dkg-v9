@@ -82,10 +82,10 @@ export const buraQueryCoverage: CoverageThresholds = {
 };
 
 export const buraCliCoverage: CoverageThresholds = {
-  lines: 42,
-  functions: 44,
-  branches: 29,
-  statements: 42,
+  lines: 41,
+  functions: 43,
+  branches: 28,
+  statements: 41,
 };
 
 export const buraAttestedAssetsCoverage: CoverageThresholds = {

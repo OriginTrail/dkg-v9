@@ -202,6 +202,7 @@ PUB1_KAS=$(echo "$PUB1" | python3 -c "import sys,json; print(len(json.load(sys.s
 echo "  status=$PUB1_ST kcId=$PUB1_KC tx=$PUB1_TX block=$PUB1_BN KAs=$PUB1_KAS"
 [[ "$PUB1_ST" == "confirmed" || "$PUB1_ST" == "finalized" ]] && ok "Publish from SWM succeeded ($PUB1_ST)" || fail "Publish status=$PUB1_ST: $PUB1"
 [[ "$PUB1_TX" != "__NONE__" ]] && ok "On-chain tx: $PUB1_TX" || fail "No txHash"
+[[ "$PUB1_KAS" == "2" ]] && ok "Published 2 KAs (both selected roots)" || fail "Expected 2 KAs, got $PUB1_KAS"
 
 echo ""
 echo "--- 3b: Query Verified Memory for cities on publisher ---"
@@ -418,8 +419,10 @@ BATCH_SELECTION="[${BATCH_SELECTION%,}]"
 BATCH=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":$BATCH_SELECTION}")
 B_ST=$(json_get "$BATCH" status)
 B_TX=$(json_get "$BATCH" txHash)
+B_KAS=$(echo "$BATCH" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 [[ "$B_ST" == "confirmed" || "$B_ST" == "finalized" ]] && ok "Batch(50) publish OK ($B_ST)" || fail "Batch publish=$B_ST: $BATCH"
 [[ "$B_TX" != "__NONE__" ]] && ok "Batch tx: $B_TX" || fail "No batch txHash"
+[[ "$B_KAS" == "50" ]] && ok "Batch published 50 KAs" || warn "Expected 50 KAs, got $B_KAS"
 
 echo ""
 echo "--- 9b: Batch entities replicate to ALL nodes ---"

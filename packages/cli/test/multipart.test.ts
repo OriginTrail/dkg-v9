@@ -57,6 +57,14 @@ describe('parseBoundary', () => {
   it('returns null when boundary parameter is missing', () => {
     expect(parseBoundary('multipart/form-data')).toBeNull();
   });
+
+  it('returns null for an array value (duplicated Content-Type headers)', () => {
+    // Node may deliver IncomingHttpHeaders['content-type'] as string[] when
+    // the client sends duplicated headers. Reject as ambiguous so the route
+    // handler returns a clean 400 instead of crashing in toLowerCase().
+    expect(parseBoundary(['multipart/form-data; boundary=abc', 'application/json'])).toBeNull();
+    expect(parseBoundary([] as unknown as string[])).toBeNull();
+  });
 });
 
 describe('parseMultipart — text fields', () => {

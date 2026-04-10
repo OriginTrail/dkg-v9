@@ -2471,12 +2471,17 @@ async function handleRequest(
         );
       }
     } catch (err: any) {
-      if (err.message?.includes('has not been registered')) {
-        return respondWithFailedExtraction(400, err.message, triples.length);
+      const message = err?.message ?? String(err);
+      if (message.includes('has not been registered')) {
+        return respondWithFailedExtraction(400, message, triples.length);
       }
-      if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
-        return respondWithFailedExtraction(400, err.message, triples.length);
+      if (message.includes('Invalid') || message.includes('Unsafe')) {
+        return respondWithFailedExtraction(400, message, triples.length);
       }
+      // Unexpected write-stage failure: record the failure on the extraction
+      // status map before rethrowing so /extraction-status doesn't stay stuck
+      // at in_progress when the top-level 500 handler takes over.
+      recordFailedExtraction(message, triples.length);
       throw err;
     }
 

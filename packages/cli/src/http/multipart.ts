@@ -38,10 +38,17 @@ export interface MultipartField {
 
 /**
  * Extract the boundary token from a `Content-Type: multipart/form-data; boundary=...` header.
- * Returns null if the header is missing, malformed, or not multipart/form-data.
+ * Returns null if the header is missing, malformed, ambiguous, or not multipart/form-data.
+ *
+ * Accepts the full `IncomingHttpHeaders['content-type']` shape (`string | string[] | undefined`)
+ * so that callers can pass `req.headers['content-type']` directly. Array values — which Node
+ * can deliver when a client sends duplicated Content-Type headers — are rejected as ambiguous
+ * rather than coerced, so the route handler returns a clean 400 instead of crashing inside
+ * `.toLowerCase()`.
  */
-export function parseBoundary(contentTypeHeader: string | undefined): string | null {
-  if (!contentTypeHeader) return null;
+export function parseBoundary(contentTypeHeader: string | string[] | undefined): string | null {
+  if (contentTypeHeader === undefined) return null;
+  if (Array.isArray(contentTypeHeader)) return null;
   const lower = contentTypeHeader.toLowerCase();
   if (!lower.startsWith('multipart/form-data')) return null;
   const match = contentTypeHeader.match(/boundary\s*=\s*(?:"([^"]+)"|([^\s;]+))/i);

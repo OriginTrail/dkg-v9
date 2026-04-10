@@ -321,6 +321,10 @@ async function runImportFileOrchestration(params: {
     if (err.message?.includes('has not been registered') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
       fail(400, err.message, triples.length);
     }
+    // Unexpected write-stage failure: mirror the daemon by recording the
+    // failure before rethrowing, so the extraction status map doesn't stay
+    // stuck at in_progress.
+    recordFailed(err?.message ?? String(err), triples.length);
     throw err;
   }
 
@@ -812,6 +816,34 @@ describe('import-file orchestration — happy paths', () => {
     expect(record?.status).toBe('failed');
     expect(record?.error).toBe('Invalid triple object');
     expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('records failed extraction status when assertion.write throws an unexpected error', async () => {
+    // Errors that don't match the known has-not-been-registered / Invalid / Unsafe
+    // patterns must still update the extraction status record from in_progress to
+    // failed before the orchestration rethrows. Otherwise /extraction-status would
+    // stay stuck reporting in_progress even though the import already failed.
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      writeError: new Error('Connection refused'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'unexpected-write',
+    })).rejects.toThrow('Connection refused');
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'unexpected-write');
+    const record = status.get(assertionUri);
+    expect(record).toBeDefined();
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toBe('Connection refused');
+    expect(record?.tripleCount).toBeGreaterThan(0);
+    expect(record?.completedAt).toBeDefined();
   });
 
   it('returns the full import-file envelope for write-stage validation failures', async () => {

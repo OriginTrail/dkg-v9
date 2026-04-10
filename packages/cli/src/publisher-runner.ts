@@ -197,10 +197,17 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   if (invalidWallets.length > 0) {
-    const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
-    throw new Error(
-      `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-      'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
+    if (publishers.size === 0) {
+      const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
+      throw new Error(
+        `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
+        'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
+      );
+    }
+    const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';
+    console.warn(
+      `[publisher] Skipping ${invalidWallets.length} ${noun} missing on-chain identity: ${invalidWallets.join(', ')}. ` +
+      `Continuing with ${publishers.size} valid wallet(s).`,
     );
   }
 

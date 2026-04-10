@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -54,7 +54,9 @@ import {
 import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import { FileStore } from './file-store.js';
+import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
@@ -812,8 +814,17 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     extractionRegistry.register(new MarkItDownConverter());
     log(`Extraction pipelines: ${extractionRegistry.availableContentTypes().join(', ')}`);
   } else {
-    log('MarkItDown binary not found — document extraction unavailable (files stored as blobs)');
+    log('MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)');
   }
+
+  // --- File Store ---
+
+  const fileStore = new FileStore(join(dkgDir(), 'files'));
+
+  // In-memory extraction job status tracker. Synchronous extractions (the V10.0
+  // default) populate this with a completed record on the same request; async
+  // workflows can be layered later without changing the endpoint contract.
+  const extractionStatus = new Map<string, ExtractionStatusRecord>();
 
   // --- HTTP API ---
 
@@ -923,6 +934,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         nodeCommit,
         catchupTracker,
         extractionRegistry,
+        fileStore,
+        extractionStatus,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -1231,6 +1244,8 @@ async function handleRequest(
   nodeCommit: string,
   catchupTracker: CatchupTracker,
   extractionRegistry: ExtractionPipelineRegistry,
+  fileStore: FileStore,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -2196,6 +2211,309 @@ async function handleRequest(
     }
   }
 
+  // POST /api/assertion/:name/import-file  (multipart/form-data)
+  //   file (required):           the uploaded document bytes
+  //   contextGraphId (required): target context graph
+  //   contentType (optional):    override the file part's Content-Type
+  //   ontologyRef (optional):    CG _ontology URI for guided Phase 2 extraction
+  //   subGraphName (optional):   target sub-graph inside the CG
+  //
+  // Orchestration:
+  //   1. Parse multipart, store original file in file store → fileHash
+  //   2. Resolve detectedContentType (explicit field > multipart content-type)
+  //   3. If content type is text/markdown: skip Phase 1, use raw bytes as mdIntermediate
+  //      Else if a converter is registered: run Phase 1, store mdIntermediate → mdIntermediateHash
+  //      Else: graceful degrade — return extraction.status="skipped", no triples written
+  //   4. Run Phase 2 markdown extractor on the mdIntermediate → triples + provenance
+  //   5. Write triples + provenance to the assertion graph via agent.assertion.write
+  //   6. Record the extraction status in the in-memory Map, return ImportFileResponse
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/import-file')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/import-file'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+
+    const boundary = parseBoundary(req.headers['content-type']);
+    if (!boundary) {
+      return jsonResponse(res, 400, { error: 'Request must be multipart/form-data with a boundary' });
+    }
+
+    let body: Buffer;
+    try {
+      body = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
+    } catch (err: any) {
+      if (err instanceof PayloadTooLargeError) throw err;
+      return jsonResponse(res, 400, { error: `Failed to read request body: ${err.message}` });
+    }
+
+    let fields;
+    try {
+      fields = parseMultipart(body, boundary);
+    } catch (err: any) {
+      if (err instanceof MultipartParseError) {
+        return jsonResponse(res, 400, { error: `Malformed multipart body: ${err.message}` });
+      }
+      throw err;
+    }
+
+    const filePart = fields.find(f => f.name === 'file' && f.filename !== undefined);
+    if (!filePart) {
+      return jsonResponse(res, 400, { error: 'Missing required "file" field in multipart body' });
+    }
+    const textField = (name: string): string | undefined => {
+      const f = fields.find(x => x.name === name && x.filename === undefined);
+      return f ? f.content.toString('utf-8') : undefined;
+    };
+    const contextGraphId = textField('contextGraphId');
+    const contentTypeOverride = textField('contentType');
+    const ontologyRef = textField('ontologyRef');
+    const subGraphName = textField('subGraphName');
+
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+
+    const detectedContentType = contentTypeOverride ?? filePart.contentType ?? 'application/octet-stream';
+
+    // Persist the original upload to the file store.
+    let fileStoreEntry;
+    try {
+      fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: `Failed to store uploaded file: ${err.message}` });
+    }
+
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId!,
+      agent.peerId,
+      assertionName,
+      subGraphName,
+    );
+    const startedAt = new Date().toISOString();
+
+    // ── Phase 1: converter lookup + MD intermediate resolution ──
+    // text/markdown is deliberately NOT a registered converter content type.
+    // The raw uploaded bytes ARE the Markdown intermediate, so Phase 1 is skipped.
+    // For any other content type, look up a converter; if none is registered,
+    // gracefully degrade (store the file, skip extraction, return status=skipped).
+    let mdIntermediate: string | null = null;
+    let pipelineUsed: string | null = null;
+    let mdIntermediateHash: string | undefined;
+
+    if (detectedContentType === 'text/markdown') {
+      mdIntermediate = filePart.content.toString('utf-8');
+      pipelineUsed = 'text/markdown';
+    } else {
+      const converter = extractionRegistry.get(detectedContentType);
+      if (converter) {
+        try {
+          const { mdIntermediate: md } = await converter.extract({
+            filePath: fileStoreEntry.path,
+            contentType: detectedContentType,
+            ontologyRef,
+            agentDid: `did:dkg:agent:${agent.peerId}`,
+          });
+          mdIntermediate = md;
+          pipelineUsed = detectedContentType;
+          const mdEntry = await fileStore.put(Buffer.from(md, 'utf-8'), 'text/markdown');
+          mdIntermediateHash = mdEntry.hash;
+        } catch (err: any) {
+          // Phase 1 failure: record in status map, return error response
+          const failedRecord: ExtractionStatusRecord = {
+            status: 'failed',
+            fileHash: fileStoreEntry.hash,
+            detectedContentType,
+            pipelineUsed: detectedContentType,
+            tripleCount: 0,
+            error: `Phase 1 converter failed: ${err.message}`,
+            startedAt,
+            completedAt: new Date().toISOString(),
+          };
+          extractionStatus.set(assertionUri, failedRecord);
+          return jsonResponse(res, 500, {
+            assertionUri,
+            fileHash: fileStoreEntry.hash,
+            detectedContentType,
+            extraction: {
+              status: 'failed' as const,
+              tripleCount: 0,
+              pipelineUsed: detectedContentType,
+              error: `Phase 1 converter failed: ${err.message}`,
+            },
+          });
+        }
+      }
+    }
+
+    // ── Graceful degrade: no converter registered and not text/markdown ──
+    // Store the file blob, return status=skipped, no triples written.
+    if (mdIntermediate === null) {
+      const skippedRecord: ExtractionStatusRecord = {
+        status: 'skipped',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed: null,
+        tripleCount: 0,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+      extractionStatus.set(assertionUri, skippedRecord);
+      return jsonResponse(res, 200, {
+        assertionUri,
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        extraction: {
+          status: 'skipped' as const,
+          tripleCount: 0,
+          pipelineUsed: null,
+        },
+      });
+    }
+
+    // ── Phase 2: markdown → triples + provenance ──
+    let triples;
+    let provenance;
+    try {
+      const result = extractFromMarkdown({
+        markdown: mdIntermediate,
+        agentDid: `did:dkg:agent:${agent.peerId}`,
+        ontologyRef,
+        documentIri: assertionUri,
+      });
+      triples = result.triples;
+      provenance = result.provenance;
+    } catch (err: any) {
+      const failedRecord: ExtractionStatusRecord = {
+        status: 'failed',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed,
+        tripleCount: 0,
+        mdIntermediateHash,
+        error: `Phase 2 extraction failed: ${err.message}`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+      extractionStatus.set(assertionUri, failedRecord);
+      return jsonResponse(res, 500, {
+        assertionUri,
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        extraction: {
+          status: 'failed' as const,
+          tripleCount: 0,
+          pipelineUsed,
+          mdIntermediateHash,
+          error: `Phase 2 extraction failed: ${err.message}`,
+        },
+      });
+    }
+
+    // ── Write triples + provenance to the assertion graph ──
+    // The sub-graph registration check in assertionCreate/Write (finding 4 of #81)
+    // will throw if subGraphName is provided but unregistered — that's intentional.
+    const allTriples = [...triples, ...provenance];
+    if (allTriples.length > 0) {
+      try {
+        // Ensure the assertion graph exists (idempotent — re-running import-file on
+        // the same assertion name simply adds new triples to the existing graph).
+        try {
+          await agent.assertion.create(
+            contextGraphId!,
+            assertionName,
+            subGraphName ? { subGraphName } : undefined,
+          );
+        } catch (err: any) {
+          // create() on an existing graph is idempotent in oxigraph, but if the
+          // error is about the sub-graph not being registered, propagate it.
+          if (err.message?.includes('has not been registered')) {
+            return jsonResponse(res, 400, { error: err.message });
+          }
+          // Other errors from create() can be ignored if the graph already exists.
+        }
+        await agent.assertion.write(
+          contextGraphId!,
+          assertionName,
+          allTriples.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
+          subGraphName ? { subGraphName } : undefined,
+        );
+      } catch (err: any) {
+        if (err.message?.includes('has not been registered')) {
+          return jsonResponse(res, 400, { error: err.message });
+        }
+        if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+          return jsonResponse(res, 400, { error: err.message });
+        }
+        throw err;
+      }
+    }
+
+    const completedRecord: ExtractionStatusRecord = {
+      status: 'completed',
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      pipelineUsed,
+      tripleCount: triples.length,
+      mdIntermediateHash,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+    extractionStatus.set(assertionUri, completedRecord);
+
+    return jsonResponse(res, 200, {
+      assertionUri,
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      extraction: {
+        status: 'completed' as const,
+        tripleCount: triples.length,
+        pipelineUsed,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+      },
+    });
+  }
+
+  // GET /api/assertion/:name/extraction-status?contextGraphId=...&subGraphName=...
+  // Returns the current extraction job state for the given assertion.
+  // Synchronous extractions (V10.0 default) return status="completed" immediately
+  // on the import-file response; this endpoint lets agents re-query the status
+  // later without having to hold the import-file response, and provides the hook
+  // for async extraction workflows in V10.x.
+  if (req.method === 'GET' && path.startsWith('/api/assertion/') && path.endsWith('/extraction-status')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/extraction-status'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const contextGraphId = url.searchParams.get('contextGraphId') ?? url.searchParams.get('paranetId');
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const subGraphName = url.searchParams.get('subGraphName') ?? undefined;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId!,
+      agent.peerId,
+      assertionName,
+      subGraphName,
+    );
+    const record = extractionStatus.get(assertionUri);
+    if (!record) {
+      return jsonResponse(res, 404, {
+        error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,
+      });
+    }
+    return jsonResponse(res, 200, {
+      assertionUri,
+      status: record.status,
+      fileHash: record.fileHash,
+      detectedContentType: record.detectedContentType,
+      pipelineUsed: record.pipelineUsed,
+      tripleCount: record.tripleCount,
+      ...(record.mdIntermediateHash ? { mdIntermediateHash: record.mdIntermediateHash } : {}),
+      ...(record.error ? { error: record.error } : {}),
+      startedAt: record.startedAt,
+      ...(record.completedAt ? { completedAt: record.completedAt } : {}),
+    });
+  }
+
   // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
   if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
     const body = await readBody(req);
@@ -2952,6 +3270,25 @@ function validateConditions(conditions: unknown, res: ServerResponse): boolean {
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
 const SMALL_BODY_BYTES = 256 * 1024; // 256 KB — for settings, connect, chat, and other small payloads
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — for import-file document uploads (PDFs, DOCX, etc.)
+
+/**
+ * In-memory extraction job tracking record. Populated at import-file time
+ * and queried by the extraction-status endpoint. Keyed by the target
+ * assertion URI (which is unique per agent × contextGraph × assertionName
+ * × subGraphName).
+ */
+interface ExtractionStatusRecord {
+  status: 'in_progress' | 'completed' | 'skipped' | 'failed';
+  fileHash: string;
+  detectedContentType: string;
+  pipelineUsed: string | null;
+  tripleCount: number;
+  mdIntermediateHash?: string;
+  error?: string;
+  startedAt: string;
+  completedAt?: string;
+}
 
 
 function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
@@ -2974,6 +3311,34 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
     };
     req.on('data', onData);
     req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
+    req.on('error', (err) => { if (!rejected) reject(err); });
+  });
+}
+
+/**
+ * Buffer variant of `readBody` that returns raw bytes. Use for binary payloads
+ * like multipart/form-data uploads where `.toString()` would corrupt content.
+ */
+function readBodyBuffer(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let rejected = false;
+    const onData = (c: Buffer) => {
+      if (rejected) return;
+      total += c.length;
+      if (total > maxBytes) {
+        rejected = true;
+        req.removeListener('data', onData);
+        req.resume();
+        setTimeout(() => req.destroy(), 5_000);
+        reject(new PayloadTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(c);
+    };
+    req.on('data', onData);
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks)); });
     req.on('error', (err) => { if (!rejected) reject(err); });
   });
 }

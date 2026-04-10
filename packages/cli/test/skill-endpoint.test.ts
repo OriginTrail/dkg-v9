@@ -54,10 +54,10 @@ describe('SKILL.md file', () => {
   });
 
   it('starts with Agent Skills YAML frontmatter', () => {
-    expect(skillContent).toMatch(/^---\n/);
+    expect(skillContent).toMatch(/^---\r?\n/);
     expect(skillContent).toContain('name: dkg-node');
     expect(skillContent).toContain('description:');
-    expect(skillContent).toMatch(/---\n\n/);
+    expect(skillContent).toMatch(/---\r?\n\r?\n/);
   });
 
   it('contains the required DKG V10 sections', () => {

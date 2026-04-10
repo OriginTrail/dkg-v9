@@ -193,3 +193,95 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
   });
 });
+
+describe('Working Memory Assertion sub-graph registration check', () => {
+  const SG_CG_ID = 'sg-check-cg';
+  const SG_NAME = 'code';
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  async function registerSubGraph(): Promise<void> {
+    const metaGraph = `did:dkg:context-graph:${SG_CG_ID}/_meta`;
+    const sgUri = `did:dkg:context-graph:${SG_CG_ID}/${SG_NAME}`;
+    await store.createGraph(metaGraph);
+    await store.insert([
+      {
+        subject: sgUri,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'http://dkg.io/ontology/SubGraph',
+        graph: metaGraph,
+      },
+    ]);
+  }
+
+  it('assertionCreate throws when sub-graph is not registered', async () => {
+    await expect(
+      publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
+  it('assertionWrite throws when sub-graph is not registered', async () => {
+    await expect(
+      publisher.assertionWrite(SG_CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SG_NAME),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
+  it('assertionQuery throws when sub-graph is not registered', async () => {
+    await expect(
+      publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
+  it('assertionPromote throws when sub-graph is not registered', async () => {
+    await expect(
+      publisher.assertionPromote(SG_CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SG_NAME }),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
+  it('assertionDiscard throws when sub-graph is not registered', async () => {
+    await expect(
+      publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
+  it('assertion ops succeed after the sub-graph is registered', async () => {
+    await registerSubGraph();
+
+    const uri = await publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(uri).toContain(`/${SG_NAME}/`);
+
+    await publisher.assertionWrite(SG_CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SG_NAME);
+    const quads = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(quads.length).toBe(3);
+
+    await publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    const afterDiscard = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(afterDiscard.length).toBe(0);
+  });
+
+  it('assertion ops without a sub-graph name still work (guard is opt-in)', async () => {
+    const uri = await publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT);
+    expect(uri).toBe(contextGraphAssertionUri(SG_CG_ID, AGENT, ASSERTION_NAME));
+  });
+
+  it('invalid sub-graph name is rejected before the registration check', async () => {
+    await expect(
+      publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, 'Invalid Name With Spaces'),
+    ).rejects.toThrow(/Invalid sub-graph name/);
+  });
+});

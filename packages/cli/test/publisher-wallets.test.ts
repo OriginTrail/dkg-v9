@@ -192,10 +192,10 @@ describe('publisher wallets', () => {
     ], { publisherPeerId: 'peer-1' });
 
     await inspector.publisher.lift({
-      workspaceId: 'workspace-main',
-      workspaceOperationId: write.workspaceOperationId,
+      swmId: 'swm-main',
+      shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
-      paranetId: 'music-social',
+      contextGraphId: 'music-social',
       namespace: 'aloha',
       scope: 'person-profile',
       transitionType: 'CREATE',
@@ -213,7 +213,7 @@ describe('publisher wallets', () => {
     expect(job?.jobSlug).toContain('/rihana');
 
     const payload = await inspector.publisher.inspectPreparedPayload(jobs[0]!.jobId);
-    expect(payload?.paranetId).toBe('music-social');
+    expect(payload?.contextGraphId).toBe('music-social');
     expect(payload?.publishOptions.quads.length).toBeGreaterThan(0);
     expect(payload?.subtraction?.alreadyPublishedPublicCount).toBe(0);
 

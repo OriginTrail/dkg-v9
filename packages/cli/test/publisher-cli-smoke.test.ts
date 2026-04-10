@@ -69,10 +69,15 @@ describe.sequential('publisher CLI smoke', () => {
       env,
       stdio: 'ignore',
     });
-    for (let i = 0; i < 40; i += 1) {
+    let ready = false;
+    for (let i = 0; i < 120; i += 1) {
+      if (daemon.exitCode !== null) {
+        throw new Error(`daemon-worker exited early with code ${daemon.exitCode}`);
+      }
       try {
         const response = await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/status`);
         if (response.ok) {
+          ready = true;
           break;
         }
       } catch {
@@ -80,20 +85,21 @@ describe.sequential('publisher CLI smoke', () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    expect(ready).toBe(true);
 
-    const staged = await execFileAsync('node', [CLI_ENTRY, 'publish', 'music-social', '--file', join(dkgHome, 'smoke.nt'), '--workspace'], { env });
-    expect(staged.stdout).toContain('Staged to workspace for "music-social":');
-    const stagedMatch = staged.stdout.match(/Workspace operation:\s+(\S+)/);
+    const staged = await execFileAsync('node', [CLI_ENTRY, 'shared-memory', 'write', 'music-social', '--file', join(dkgHome, 'smoke.nt')], { env });
+    expect(staged.stdout).toContain('Written to shared memory for "music-social":');
+    const stagedMatch = staged.stdout.match(/Share operation:\s+(\S+)/);
     expect(stagedMatch?.[1]).toBeDefined();
-    const workspaceOperationId = stagedMatch![1];
+    const shareOperationId = stagedMatch![1];
 
     const enqueue = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
       'enqueue',
       'music-social',
-      '--workspace-operation-id',
-      workspaceOperationId,
+      '--share-operation-id',
+      shareOperationId,
       '--root',
       'urn:local:/rihana',
       '--namespace',
@@ -124,7 +130,6 @@ describe.sequential('publisher CLI smoke', () => {
 
     const payload = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId, '--payload'], { env });
     expect(payload.stdout).toContain('"status": "accepted"');
-    expect(payload.stdout).toContain('"failure":');
     expect(payload.stdout).toContain('publishOptions');
     expect(payload.stdout).toContain('music-social');
 

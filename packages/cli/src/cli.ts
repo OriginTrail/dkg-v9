@@ -20,6 +20,7 @@ import {
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
 import { ApiClient } from './api-client.js';
+import { parsePositiveMsOption } from './publisher-runner.js';
 import {
   runDaemon,
   performUpdateWithStatus,
@@ -1571,6 +1572,100 @@ sharedMemoryCmd
 const publisherCmd = program
   .command('publisher')
   .description('Async publisher job inspection and control');
+
+const publisherWalletCmd = publisherCmd
+  .command('wallet')
+  .description('Manage async publisher wallets');
+
+publisherWalletCmd
+  .command('add <private-key>')
+  .description('Add a publisher wallet private key')
+  .action(async (privateKey: string) => {
+    try {
+      const { addPublisherWallet, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const result = await addPublisherWallet(dkgDir(), privateKey);
+      console.log('Publisher wallet added.');
+      console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
+      console.log(`  Wallets: ${result.wallets.length}`);
+      console.log(`  Address: ${result.wallets[result.wallets.length - 1]?.address}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('list')
+  .description('List configured publisher wallets')
+  .action(async () => {
+    try {
+      const { loadPublisherWallets, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const result = await loadPublisherWallets(dkgDir());
+      console.log(`File: ${publisherWalletsPath(dkgDir())}`);
+      if (result.wallets.length === 0) {
+        console.log('No publisher wallets configured.');
+        return;
+      }
+      for (const wallet of result.wallets) {
+        console.log(wallet.address);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('remove <address>')
+  .description('Remove a publisher wallet by address')
+  .action(async (address: string) => {
+    try {
+      const { removePublisherWallet, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const result = await removePublisherWallet(dkgDir(), address);
+      console.log('Publisher wallet removed.');
+      console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
+      console.log(`  Wallets: ${result.wallets.length}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('enable')
+  .description('Enable async publisher runtime')
+  .option('--poll-interval <ms>', 'Poll interval in milliseconds', '12000')
+  .option('--error-backoff <ms>', 'Error backoff in milliseconds', '5000')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      config.publisher = {
+        enabled: true,
+        pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
+        errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
+      };
+      await saveConfig(config);
+      console.log('Async publisher enabled');
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('disable')
+  .description('Disable async publisher runtime')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      config.publisher = { ...(config.publisher ?? {}), enabled: false };
+      await saveConfig(config);
+      console.log('Async publisher disabled');
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
 
 publisherCmd
   .command('enqueue <context-graph>')

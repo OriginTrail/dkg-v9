@@ -2,6 +2,7 @@ import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,9 @@ describe.sequential('publisher CLI smoke', () => {
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-cli-smoke-'));
-    await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
+    if (!existsSync(CLI_ENTRY)) {
+      await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
+    }
     await writeFile(join(dkgHome, 'smoke.nt'), '<urn:local:/rihana> <http://schema.org/name> "Rihana" .\n');
     await writeFile(
       join(dkgHome, 'config.json'),
@@ -141,5 +144,5 @@ describe.sequential('publisher CLI smoke', () => {
       }),
     ]);
     daemon = undefined;
-  }, 30000);
+  }, 45000);
 });

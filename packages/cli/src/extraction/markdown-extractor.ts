@@ -277,7 +277,37 @@ function extractHeadings(body: string): Array<{ level: number; text: string }> {
 
 /** Strip ``` fenced code blocks (and ~~~ variants) from the markdown. */
 function stripCodeFences(body: string): string {
-  return body.replace(/^(```|~~~)[\s\S]*?^\1\s*$/gm, '');
+  const lines = body.split(/\r?\n/);
+  const keptLines: string[] = [];
+  let activeFence: { char: '`' | '~'; length: number } | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    const fenceMarker = trimmed.match(/^([`~])\1{2,}/)?.[0] ?? null;
+
+    if (!activeFence) {
+      if (fenceMarker) {
+        activeFence = {
+          char: fenceMarker[0] as '`' | '~',
+          length: fenceMarker.length,
+        };
+        continue;
+      }
+      keptLines.push(line);
+      continue;
+    }
+
+    if (
+      fenceMarker
+      && fenceMarker[0] === activeFence.char
+      && fenceMarker.length >= activeFence.length
+      && trimmed.slice(fenceMarker.length).trim().length === 0
+    ) {
+      activeFence = null;
+    }
+  }
+
+  return keptLines.join('\n');
 }
 
 /**

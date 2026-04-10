@@ -126,6 +126,15 @@ describe('parseMultipart — file fields', () => {
     expect(fields[0].content.equals(payload)).toBe(true);
   });
 
+  it('does not treat CRLF-prefixed boundary-like payload bytes as a real boundary unless followed by CRLF or --', () => {
+    const payload = Buffer.from(`prefix${CRLF}--${BOUNDARY}junk${CRLF}suffix`, 'utf-8');
+    const body = buildBody(filePart('file', 'embedded-delimiter.bin', 'application/octet-stream', payload));
+
+    const fields = parseMultipart(body, BOUNDARY);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].content.equals(payload)).toBe(true);
+  });
+
   it('extracts mixed text and file parts in a single body', () => {
     const fileContent = Buffer.from('file body', 'utf-8');
     const body = buildBody(

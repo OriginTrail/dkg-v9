@@ -100,7 +100,7 @@ export function parseMultipart(body: Buffer, boundary: string): MultipartField[]
     // Find the next real multipart boundary. Per RFC 2046, encapsulated boundaries
     // must start on a new line, so raw `--${boundary}` bytes inside the payload do
     // not count unless they are preceded by CRLF.
-    const nextBoundary = body.indexOf(encapsulatedDelimiter, contentStart);
+    const nextBoundary = findNextBoundary(body, encapsulatedDelimiter, contentStart);
     if (nextBoundary < 0) {
       throw new MultipartParseError('Malformed part: no closing boundary');
     }
@@ -129,6 +129,23 @@ export function parseMultipart(body: Buffer, boundary: string): MultipartField[]
   }
 
   throw new MultipartParseError('Unexpected end of body');
+}
+
+function findNextBoundary(body: Buffer, encapsulatedDelimiter: Buffer, start: number): number {
+  let candidate = body.indexOf(encapsulatedDelimiter, start);
+  while (candidate >= 0) {
+    const boundaryEnd = candidate + encapsulatedDelimiter.length;
+    const nextFirstByte = body[boundaryEnd];
+    const nextSecondByte = body[boundaryEnd + 1];
+    const isBoundaryTerminator =
+      (nextFirstByte === 0x0d && nextSecondByte === 0x0a)
+      || (nextFirstByte === 0x2d && nextSecondByte === 0x2d);
+    if (isBoundaryTerminator) {
+      return candidate;
+    }
+    candidate = body.indexOf(encapsulatedDelimiter, candidate + 1);
+  }
+  return -1;
 }
 
 /**

@@ -1968,12 +1968,15 @@ export class DKGAgent {
    * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
    *
    * V10.0 replication behavior:
-   * - Registration triples are stored locally by the admin. Peers discover sub-graphs
-   *   automatically through gossip auto-registration: when a peer receives a VM publish
-   *   or SWM write carrying `subGraphName`, it calls `ensureSubGraph()` and inserts
-   *   a `generateSubGraphRegistration()` record into its own `_meta` graph if one does
-   *   not already exist. See `gossip-publish-handler.ts`, `workspace-handler.ts`, and
-   *   `finalization-handler.ts` for the auto-registration call sites.
+   * - Registration triples are stored locally by the admin. Peers also auto-register
+   *   sub-graphs on gossip publish and SWM write paths: when a peer receives data
+   *   carrying `subGraphName`, `gossip-publish-handler.ts` and `workspace-handler.ts`
+   *   call `ensureSubGraph()` and insert a `generateSubGraphRegistration()` record
+   *   into `_meta` if one does not already exist.
+   * - Finalization replay currently ensures the named graph exists via
+   *   `ensureSubGraph()`, but it does not add a `_meta` registration record by
+   *   itself. `listSubGraphs()` therefore should not be treated as a complete
+   *   inventory on finalized-only replicas.
    * - Because `subGraphName` is carried on the wire (in the workspace publish request
    *   and the N-Quads' named-graph field), replicated data is routed into the correct
    *   sub-graph named graph on receiving nodes — not into the root data graph.

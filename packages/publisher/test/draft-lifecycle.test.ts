@@ -252,6 +252,24 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     ).rejects.toThrow(/Sub-graph "code" has not been registered/);
   });
 
+  it('assertion mutation guard ignores stray _meta triples without the SubGraph type marker', async () => {
+    const metaGraph = `did:dkg:context-graph:${SG_CG_ID}/_meta`;
+    const sgUri = `did:dkg:context-graph:${SG_CG_ID}/${SG_NAME}`;
+    await store.createGraph(metaGraph);
+    await store.insert([
+      {
+        subject: sgUri,
+        predicate: 'http://schema.org/name',
+        object: '"code"',
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(
+      publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
+    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  });
+
   it('assertionQuery and assertionDiscard still work for legacy unregistered sub-graph graphs', async () => {
     const graphUri = contextGraphAssertionUri(SG_CG_ID, AGENT, ASSERTION_NAME, SG_NAME);
     await store.createGraph(graphUri);

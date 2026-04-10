@@ -717,10 +717,7 @@ export class DKGPublisher implements Publisher {
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
 
       const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
-      const registered = await this.store.query(
-        `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(options.contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> ?p ?o } }`,
-      );
-      if (registered.type === 'boolean' && !registered.value) {
+      if (!(await this.isSubGraphRegistered(options.contextGraphId, options.subGraphName))) {
         throw new Error(
           `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
           `Call createSubGraph() first.`,
@@ -1474,6 +1471,14 @@ export class DKGPublisher implements Publisher {
     }
   }
 
+  private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
+    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+    const registered = await this.store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+    );
+    return registered.type === 'boolean' && registered.value;
+  }
+
   /**
    * Throws if `subGraphName` is provided but not registered in the CG's `_meta` graph.
    * Mirrors the registration check in `publish()` for mutation paths that would
@@ -1485,11 +1490,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     if (subGraphName === undefined) return;
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-    const registered = await this.store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> ?p ?o } }`,
-    );
-    if (registered.type === 'boolean' && !registered.value) {
+    if (!(await this.isSubGraphRegistered(contextGraphId, subGraphName))) {
       throw new Error(
         `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". ` +
         `Call createSubGraph() first.`,

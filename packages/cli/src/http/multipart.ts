@@ -58,6 +58,7 @@ export function parseMultipart(body: Buffer, boundary: string): MultipartField[]
     throw new MultipartParseError('Empty boundary');
   }
   const delimiter = Buffer.from(`--${boundary}`);
+  const encapsulatedDelimiter = Buffer.from(`\r\n--${boundary}`);
   const crlf = Buffer.from('\r\n');
   const doubleCrlf = Buffer.from('\r\n\r\n');
 
@@ -96,16 +97,16 @@ export function parseMultipart(body: Buffer, boundary: string): MultipartField[]
     const headers = parseHeaders(headerBytes);
     const contentStart = headerEnd + doubleCrlf.length;
 
-    // Find next boundary — part body runs from contentStart to (next delimiter - CRLF)
-    const nextDelimiter = body.indexOf(delimiter, contentStart);
-    if (nextDelimiter < 0) {
+    // Find the next real multipart boundary. Per RFC 2046, encapsulated boundaries
+    // must start on a new line, so raw `--${boundary}` bytes inside the payload do
+    // not count unless they are preceded by CRLF.
+    const nextBoundary = body.indexOf(encapsulatedDelimiter, contentStart);
+    if (nextBoundary < 0) {
       throw new MultipartParseError('Malformed part: no closing boundary');
     }
-    // Strip the CRLF that precedes the next delimiter (part body ends at the CRLF).
-    let contentEnd = nextDelimiter;
-    if (contentEnd >= 2 && body[contentEnd - 2] === 0x0d && body[contentEnd - 1] === 0x0a) {
-      contentEnd -= 2;
-    }
+    const nextDelimiter = nextBoundary + crlf.length;
+    // Part body ends at the CRLF that introduces the next boundary.
+    const contentEnd = nextBoundary;
     const content = body.subarray(contentStart, contentEnd);
 
     const disposition = headers.get('content-disposition');

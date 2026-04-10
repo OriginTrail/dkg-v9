@@ -2417,39 +2417,39 @@ async function handleRequest(
     // The sub-graph registration check in assertionCreate/Write (finding 4 of #81)
     // will throw if subGraphName is provided but unregistered — that's intentional.
     const allTriples = [...triples, ...provenance];
-    if (allTriples.length > 0) {
+    try {
+      // Ensure the assertion graph exists even when Phase 2 yields zero triples,
+      // so a completed import always materializes the reported assertion URI.
       try {
-        // Ensure the assertion graph exists (idempotent — re-running import-file on
-        // the same assertion name simply adds new triples to the existing graph).
-        try {
-          await agent.assertion.create(
-            contextGraphId!,
-            assertionName,
-            subGraphName ? { subGraphName } : undefined,
-          );
-        } catch (err: any) {
-          // create() on an existing graph is idempotent in oxigraph, but if the
-          // error is about the sub-graph not being registered, propagate it.
-          if (err.message?.includes('has not been registered')) {
-            return jsonResponse(res, 400, { error: err.message });
-          }
-          // Other errors from create() can be ignored if the graph already exists.
+        await agent.assertion.create(
+          contextGraphId!,
+          assertionName,
+          subGraphName ? { subGraphName } : undefined,
+        );
+      } catch (err: any) {
+        // create() on an existing graph is idempotent in oxigraph, but if the
+        // error is about the sub-graph not being registered, propagate it.
+        if (err.message?.includes('has not been registered')) {
+          return jsonResponse(res, 400, { error: err.message });
         }
+        // Other errors from create() can be ignored if the graph already exists.
+      }
+      if (allTriples.length > 0) {
         await agent.assertion.write(
           contextGraphId!,
           assertionName,
           allTriples.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
           subGraphName ? { subGraphName } : undefined,
         );
-      } catch (err: any) {
-        if (err.message?.includes('has not been registered')) {
-          return jsonResponse(res, 400, { error: err.message });
-        }
-        if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
-          return jsonResponse(res, 400, { error: err.message });
-        }
-        throw err;
       }
+    } catch (err: any) {
+      if (err.message?.includes('has not been registered')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
 
     const completedRecord: ExtractionStatusRecord = {

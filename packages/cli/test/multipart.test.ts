@@ -117,6 +117,15 @@ describe('parseMultipart — file fields', () => {
     expect(fields[0].content.equals(binary)).toBe(true);
   });
 
+  it('does not treat boundary bytes inside file payload as the next multipart boundary', () => {
+    const payload = Buffer.from(`prefix--${BOUNDARY}--suffix`, 'utf-8');
+    const body = buildBody(filePart('file', 'embedded-boundary.bin', 'application/octet-stream', payload));
+
+    const fields = parseMultipart(body, BOUNDARY);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].content.equals(payload)).toBe(true);
+  });
+
   it('extracts mixed text and file parts in a single body', () => {
     const fileContent = Buffer.from('file body', 'utf-8');
     const body = buildBody(

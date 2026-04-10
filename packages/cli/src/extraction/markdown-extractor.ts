@@ -148,7 +148,7 @@ function normalizeSchemaLocalName(raw: string, kind: 'property' | 'class'): stri
  *   1. explicit `documentIri` argument, or
  *   2. frontmatter `id` (if it looks like an IRI or a slug), or
  *   3. slugified first H1 heading with an `urn:dkg:md:` prefix, or
- *   4. stable fallback `urn:dkg:md:anonymous-{short-hash}`.
+ *   4. stable fallback `urn:dkg:md:anonymous-{short-hash}` derived from the full body.
  */
 function resolveSubjectIri(
   input: MarkdownExtractInput,
@@ -166,9 +166,7 @@ function resolveSubjectIri(
   const h1 = findFirstH1(body);
   if (h1) return `urn:dkg:md:${slugify(h1)}`;
 
-  // Stable fallback: hash-like suffix derived from content length and first chars
-  const snippet = body.slice(0, 32).replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '');
-  return `urn:dkg:md:anonymous-${snippet.slice(0, 16) || 'empty'}`;
+  return `urn:dkg:md:anonymous-${shortHash(body)}`;
 }
 
 /** Resolve a value from a frontmatter `type` field to a full IRI. */

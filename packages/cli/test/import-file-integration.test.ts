@@ -202,8 +202,8 @@ async function runImportFileOrchestration(params: {
   });
 
   const allTriples = [...triples, ...provenance];
+  await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
   if (allTriples.length > 0) {
-    await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
     await agent.assertion.write(
       contextGraphId,
       assertionName,
@@ -539,6 +539,24 @@ describe('import-file orchestration — happy paths', () => {
 
     expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'decision-1', subGraphName: 'decisions' });
     expect(agent.capturedWrites[0].subGraphName).toBe('decisions');
+  });
+
+  it('creates the assertion graph even when Phase 2 extracts zero triples', async () => {
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'empty.md', contentType: 'text/markdown', content: Buffer.from('', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'empty-doc',
+    });
+
+    expect(result.extraction.status).toBe('completed');
+    expect(result.extraction.tripleCount).toBe(0);
+    expect(agent.createdAssertions).toHaveLength(1);
+    expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'empty-doc', subGraphName: undefined });
+    expect(agent.capturedWrites).toHaveLength(0);
   });
 });
 

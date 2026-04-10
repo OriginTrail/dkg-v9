@@ -310,6 +310,22 @@ describe('extractFromMarkdown — subject IRI resolution', () => {
     });
     expect(subjectIri.startsWith('urn:dkg:md:anonymous-')).toBe(true);
   });
+
+  it('derives anonymous fallback subjects from the full body instead of a shared prefix', () => {
+    const first = extractFromMarkdown({
+      markdown: `Shared prefix line\nBut a different ending A\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    const second = extractFromMarkdown({
+      markdown: `Shared prefix line\nBut a different ending B\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(first.subjectIri).not.toBe(second.subjectIri);
+    expect(first.subjectIri).toMatch(/^urn:dkg:md:anonymous-[0-9a-f]{12}$/);
+    expect(second.subjectIri).toMatch(/^urn:dkg:md:anonymous-[0-9a-f]{12}$/);
+  });
 });
 
 describe('extractFromMarkdown — provenance', () => {

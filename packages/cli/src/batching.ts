@@ -41,7 +41,7 @@ export function batchEntityQuads(
       : [entityQuads];
 
     for (const chunk of entityChunks) {
-      validateSingleBatch(chunk, { maxBatchQuads, maxBatchBytes, estimateBatchBytes });
+      validateSingleBatch(chunk, { maxBatchQuads, maxBatchBytes, estimateBatchBytes, splitOversizedEntities });
 
       const nextBatch = [...batch, ...chunk];
       const exceedsQuadLimit = nextBatch.length > maxBatchQuads;
@@ -97,9 +97,9 @@ function splitEntityQuads(
 
 function validateSingleBatch(
   quads: PublishQuad[],
-  options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
+  options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads' | 'splitOversizedEntities'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
 ): void {
-  if (quads.length > options.maxBatchQuads) {
+  if (options.splitOversizedEntities && quads.length > options.maxBatchQuads) {
     throw new Error(
       `Single entity batch exceeds maxBatchQuads (${quads.length} > ${options.maxBatchQuads}) for subject ${quads[0]?.subject}`,
     );

@@ -1493,6 +1493,7 @@ program
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       }, {
         maxBatchBytes: useSharedMemory ? 240 * 1024 : undefined,
+        splitOversizedEntities: useSharedMemory,
         estimateBatchBytes: useSharedMemory
           ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
           : undefined,
@@ -1532,13 +1533,39 @@ sharedMemoryCmd
       const client = await ApiClient.connect();
       const defaultGraph = `did:dkg:context-graph:${targetContextGraph}`;
       const quads = await loadQuadsFromInput(opts, defaultGraph);
-      const result = await client.sharedMemoryWrite(targetContextGraph, quads);
+      const results: Array<Awaited<ReturnType<typeof client.sharedMemoryWrite>>> = [];
+      await publishEntityBatches(
+        quads,
+        async (batch) => {
+          const result = await client.sharedMemoryWrite(targetContextGraph, batch);
+          results.push(result);
+          return result;
+        },
+        (sent) => {
+          process.stdout.write(`\r  Writing to shared memory: ${sent}/${quads.length} quads`);
+        },
+        {
+          maxBatchBytes: 240 * 1024,
+          splitOversizedEntities: true,
+          estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length,
+        },
+      );
+      const firstResult = results[0];
+      const lastResult = results[results.length - 1];
+      console.log();
       console.log(`Written to shared memory for "${targetContextGraph}":`);
-      console.log(`  Share operation: ${result.workspaceOperationId}`);
-      console.log(`  Triples written: ${result.triplesWritten}`);
-      console.log(`  Graph:           ${result.graph}`);
-      if (result.skolemizedBlankNodes) {
-        console.log(`  Skolemized BNs:  ${result.skolemizedBlankNodes}`);
+      if (results.length === 1) {
+        console.log(`  Share operation: ${firstResult.workspaceOperationId}`);
+      } else {
+        console.log(`  Batches:         ${results.length}`);
+        console.log(`  First share op:  ${firstResult.workspaceOperationId}`);
+        console.log(`  Last share op:   ${lastResult.workspaceOperationId}`);
+      }
+      console.log(`  Triples written: ${results.reduce((sum, result) => sum + result.triplesWritten, 0)}`);
+      console.log(`  Graph:           ${firstResult.graph}`);
+      const totalSkolemized = results.reduce((sum, result) => sum + (result.skolemizedBlankNodes ?? 0), 0);
+      if (totalSkolemized > 0) {
+        console.log(`  Skolemized BNs:  ${totalSkolemized}`);
       }
       console.log(`  Next:            dkg shared-memory publish ${targetContextGraph}`);
     } catch (err) {
@@ -2109,6 +2136,7 @@ async function publishEntityBatches(
   options: {
     maxBatchBytes?: number;
     estimateBatchBytes?: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => number;
+    splitOversizedEntities?: boolean;
   } = {},
 ): Promise<void> {
   let sent = 0;
@@ -2116,6 +2144,7 @@ async function publishEntityBatches(
     maxBatchQuads: 500,
     maxBatchBytes: options.maxBatchBytes,
     estimateBatchBytes: options.estimateBatchBytes,
+    splitOversizedEntities: options.splitOversizedEntities,
   });
 
   for (const batch of batches) {

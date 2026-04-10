@@ -2016,16 +2016,19 @@ async function handleRequest(
   }
 
   // POST /api/publisher/enqueue
+  // Accepts both the old wrapped shape { request: LiftRequest } and the new flat shape.
   if (req.method === 'POST' && path === '/api/publisher/enqueue') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
+    const raw = JSON.parse(body);
+    const parsed = raw.request && typeof raw.request === 'object' ? raw.request : raw;
     const { roots, namespace, scope, authorityProofRef, priorVersion } = parsed;
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
     const shareOperationId = parsed.shareOperationId ?? parsed.workspaceOperationId;
     const swmId = parsed.swmId ?? parsed.workspaceId ?? 'swm-main';
     const transitionType = parsed.transitionType ?? 'CREATE';
-    const authorityType = parsed.authorityType ?? 'owner';
-    if (!contextGraphId || !shareOperationId || !Array.isArray(roots) || roots.length === 0 || !namespace || !scope || !authorityProofRef) {
+    const authorityType = parsed.authorityType ?? parsed.authority?.type ?? 'owner';
+    const proofRef = authorityProofRef ?? parsed.authority?.proofRef;
+    if (!contextGraphId || !shareOperationId || !Array.isArray(roots) || roots.length === 0 || !namespace || !scope || !proofRef) {
       return jsonResponse(res, 400, { error: 'Missing required enqueue fields' });
     }
     const jobId = await publisherControl.lift({
@@ -2036,7 +2039,7 @@ async function handleRequest(
       namespace,
       scope,
       transitionType,
-      authority: { type: authorityType, proofRef: authorityProofRef },
+      authority: { type: authorityType, proofRef },
       ...(priorVersion ? { priorVersion } : {}),
     } as any);
     return jsonResponse(res, 200, { jobId, contextGraphId, shareOperationId, rootsCount: roots.length });
@@ -2049,10 +2052,19 @@ async function handleRequest(
     return jsonResponse(res, 200, { jobs });
   }
 
-  // GET /api/publisher/job?id=...
-  if (req.method === 'GET' && path === '/api/publisher/job') {
-    const jobId = url.searchParams.get('id');
+  // GET /api/publisher/job?id=...  (also /api/publisher/jobs/:id for backward compat)
+  if (req.method === 'GET' && (path === '/api/publisher/job' || path.startsWith('/api/publisher/jobs/'))) {
+    const jobId = path.startsWith('/api/publisher/jobs/')
+      ? path.slice('/api/publisher/jobs/'.length).split('/')[0]
+      : url.searchParams.get('id');
     if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    // Old route: /api/publisher/jobs/:id/payload
+    if (path.endsWith('/payload')) {
+      const job = await publisherControl.getStatus(jobId);
+      if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+      const payload = await publisherControl.inspectPreparedPayload(jobId);
+      return jsonResponse(res, 200, { job, payload });
+    }
     const job = await publisherControl.getStatus(jobId);
     if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
     return jsonResponse(res, 200, { job });

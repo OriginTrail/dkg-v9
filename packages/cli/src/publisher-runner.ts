@@ -238,7 +238,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
-    hasIncludedRecoveryResolver: true,
+    hasIncludedRecoveryResolver: hasChainRecovery,
   });
 
   return {
@@ -322,7 +322,14 @@ function createChainRecoveryResolver(
     if (!publisher) return null;
     const chain = (publisher as unknown as { chain?: { resolvePublishByTxHash?: (txHash: string) => Promise<any> } }).chain;
     if (!chain?.resolvePublishByTxHash) return null;
-    const result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    let result: any;
+    try {
+      result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    } catch {
+      // Transient RPC/provider errors — treat as inconclusive (null) so the
+      // recovery timeout mechanism handles it rather than crashing the daemon.
+      return null;
+    }
     if (!result) return null;
 
     return {

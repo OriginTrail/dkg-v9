@@ -28,7 +28,10 @@ function isDaemonUnreachable(err: unknown): boolean {
   const code = (err as any)?.cause?.code ?? (err as any)?.code;
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
-  if (/HTTP (404|405|501)/.test(msg)) return true;
+  // Older daemon without /api/publisher/* — ApiClient throws body text or HTTP status
+  const lower = msg.toLowerCase();
+  if (lower.includes('not found') || lower.includes('not allowed') || lower.includes('not implemented')
+    || /HTTP (404|405|501)/i.test(msg)) return true;
   return false;
 }
 import { batchEntityQuads } from './batching.js';

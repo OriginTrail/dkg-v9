@@ -414,6 +414,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     let retried = 0;
     for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
       if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+      // Jobs that failed with a recovery-phase resolution must go through recover(),
+      // not retry(), to avoid double-publishing if the original tx eventually lands.
+      if (job.failure.resolution === 'retry_recovery') continue;
 
       const reset = this.resetFailedJobToAccepted(job);
       const retriedAt = this.now();

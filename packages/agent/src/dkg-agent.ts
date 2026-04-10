@@ -3694,12 +3694,7 @@ export class DKGAgent {
           try {
             await agent.gossip.publish(topic, gossipMessage);
           } catch (err: any) {
-            const msg = String(err?.message ?? err);
-            if (msg.includes('no peer') || msg.includes('PublishError') || msg.includes('NoPeersSubscribed')) {
-              agent.log.warn(createOperationContext('share'), `No peers subscribed to ${topic} yet`);
-            } else {
-              throw err;
-            }
+            agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }
         }
         return { promotedCount };

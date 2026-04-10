@@ -96,6 +96,21 @@ describe.sequential('publisher CLI smoke', () => {
     expect(stagedMatch?.[1]).toBeDefined();
     const shareOperationId = stagedMatch![1];
 
+    // Stop the daemon before publisher file-based commands. The daemon's
+    // in-memory Oxigraph store can flush to the same .nq file and overwrite
+    // data written by the CLI's own store instances, causing flaky "not found".
+    // Wait for the store's 50ms debounced flush to persist shared-memory data
+    // before sending SIGTERM (agent.stop() does not flush the store).
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    daemon.kill('SIGTERM');
+    await Promise.race([
+      new Promise((resolve) => daemon?.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 3000)).then(() => {
+        daemon?.kill('SIGKILL');
+      }),
+    ]);
+    daemon = undefined;
+
     const enqueue = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
@@ -135,14 +150,5 @@ describe.sequential('publisher CLI smoke', () => {
     expect(payload.stdout).toContain('"status": "accepted"');
     expect(payload.stdout).toContain('publishOptions');
     expect(payload.stdout).toContain('music-social');
-
-    daemon.kill('SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => daemon?.once('exit', resolve)),
-      new Promise((resolve) => setTimeout(resolve, 3000)).then(() => {
-        daemon?.kill('SIGKILL');
-      }),
-    ]);
-    daemon = undefined;
   }, 45000);
 });

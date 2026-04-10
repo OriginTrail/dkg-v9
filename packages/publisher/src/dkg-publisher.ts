@@ -1540,14 +1540,35 @@ export class DKGPublisher implements Publisher {
 
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Pre-encode gossip message and enforce size limit BEFORE any destructive
-    // SWM/assertion mutations, matching _shareImpl's safety pattern.
+    // Skolemize blank nodes so local SWM and gossip peers store identical data.
+    const kaMap = autoPartition(quadsToPromote);
+    const normalizedQuads = [...kaMap.values()].flat();
+
+    const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
+    await this.store.insert(swmQuads);
+
+    // Delete promoted triples from assertion graph
+    await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
+
+    // Record ShareTransition metadata in _shared_memory_meta (spec §8)
+    const entities = [...new Set(normalizedQuads.map((q) => q.subject))];
+    const shareMetadata = generateShareTransitionMetadata({
+      contextGraphId,
+      operationId,
+      agentAddress,
+      assertionName: name,
+      entities,
+      timestamp: new Date(),
+    });
+    await this.store.insert(shareMetadata);
+
+    // Build gossip message for the caller to broadcast. Best-effort: if the
+    // message exceeds the pubsub limit we skip gossip rather than failing,
+    // since the local promotion has already committed.
     let gossipMessage: Uint8Array | undefined;
     if (opts?.publisherPeerId) {
-      const kaMap = autoPartition(quadsToPromote);
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
-      const skolemizedQuads = [...kaMap.values()].flat();
-      const nquadsStr = skolemizedQuads
+      const nquadsStr = normalizedQuads
         .map(
           (q) =>
             `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
@@ -1558,7 +1579,7 @@ export class DKGPublisher implements Publisher {
         privateMerkleRoot: undefined,
         privateTripleCount: 0,
       }));
-      gossipMessage = encodeWorkspacePublishRequest({
+      const encoded = encodeWorkspacePublishRequest({
         paranetId: contextGraphId,
         nquads: new TextEncoder().encode(nquadsStr),
         manifest: manifestEntries,
@@ -1570,31 +1591,10 @@ export class DKGPublisher implements Publisher {
       });
 
       const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024;
-      if (gossipMessage.length > MAX_GOSSIP_MESSAGE_SIZE) {
-        throw new Error(
-          `Promoted assertion too large for gossip (${(gossipMessage.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
-          `Promote fewer entities per call.`,
-        );
+      if (encoded.length <= MAX_GOSSIP_MESSAGE_SIZE) {
+        gossipMessage = encoded;
       }
     }
-
-    const swmQuads = quadsToPromote.map((q) => ({ ...q, graph: swmGraphUri }));
-    await this.store.insert(swmQuads);
-
-    // Delete promoted triples from assertion graph
-    await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
-
-    // Record ShareTransition metadata in _shared_memory_meta (spec §8)
-    const entities = [...new Set(quadsToPromote.map((q) => q.subject))];
-    const shareMetadata = generateShareTransitionMetadata({
-      contextGraphId,
-      operationId,
-      agentAddress,
-      assertionName: name,
-      entities,
-      timestamp: new Date(),
-    });
-    await this.store.insert(shareMetadata);
 
     return { promotedCount: swmQuads.length, gossipMessage };
   }

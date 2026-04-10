@@ -108,8 +108,8 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
 
 export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
-  if (/[<>"{}|^`\\\s]/.test(id)) return { valid: false, reason: 'Context graph ID contains characters unsafe for IRIs' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
+  if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
   return { valid: true };
 }
 

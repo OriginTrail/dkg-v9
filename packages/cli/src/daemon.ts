@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1953,7 +1953,7 @@ async function handleRequest(
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, subGraphName } = parsed;
+    const { quads, subGraphName, localOnly } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
@@ -1966,7 +1966,7 @@ async function handleRequest(
         // validation happens inside share
       });
       const shareResult = await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { subGraphName, operationCtx: ctx }),
+        agent.share(paranetId, quads, { subGraphName, localOnly: !!localOnly, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
       const opDetail = dashDb.getOperation(ctx.operationId);
@@ -1986,6 +1986,9 @@ async function handleRequest(
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (subGraphName && publishContextGraphId) {
+      return jsonResponse(res, 400, { error: '"subGraphName" and "publishContextGraphId" cannot be used together' });
+    }
     const ctx = createOperationContext('publishFromSWM');
     tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId, subGraphName } });
     try {
@@ -2955,8 +2958,16 @@ function validateConditions(conditions: unknown, res: ServerResponse): boolean {
       jsonResponse(res, 400, { error: `conditions[${i}].subject must be a non-empty string` });
       return false;
     }
+    if (!isSafeIri(c.subject)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject contains characters unsafe for SPARQL IRIs` });
+      return false;
+    }
     if (typeof c.predicate !== 'string' || c.predicate.length === 0) {
       jsonResponse(res, 400, { error: `conditions[${i}].predicate must be a non-empty string` });
+      return false;
+    }
+    if (!isSafeIri(c.predicate)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate contains characters unsafe for SPARQL IRIs` });
       return false;
     }
     if (c.expectedValue !== null && c.expectedValue !== undefined && typeof c.expectedValue !== 'string') {

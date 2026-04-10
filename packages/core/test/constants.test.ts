@@ -83,15 +83,21 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('').valid).toBe(false);
   });
 
-  it('rejects IRI-unsafe characters', () => {
+  it('rejects disallowed characters (whitelist: alphanumeric, _, :, /, ., @, -)', () => {
     expect(validateContextGraphId('foo<bar').valid).toBe(false);
     expect(validateContextGraphId('foo>bar').valid).toBe(false);
     expect(validateContextGraphId('foo bar').valid).toBe(false);
     expect(validateContextGraphId('foo"bar').valid).toBe(false);
     expect(validateContextGraphId('foo{bar').valid).toBe(false);
-    expect(validateContextGraphId('foo}bar').valid).toBe(false);
-    expect(validateContextGraphId('foo\\bar').valid).toBe(false);
-    expect(validateContextGraphId('foo`bar').valid).toBe(false);
+    expect(validateContextGraphId('foo?bar').valid).toBe(false);
+    expect(validateContextGraphId('foo#bar').valid).toBe(false);
+  });
+
+  it('accepts URNs, DIDs, and slug-like identifiers', () => {
+    expect(validateContextGraphId('did:dkg:test').valid).toBe(true);
+    expect(validateContextGraphId('urn:uuid:12345').valid).toBe(true);
+    expect(validateContextGraphId('my-graph_v2').valid).toBe(true);
+    expect(validateContextGraphId('user@domain').valid).toBe(true);
   });
 
   it('rejects IDs exceeding 256 chars', () => {

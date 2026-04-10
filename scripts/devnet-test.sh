@@ -299,7 +299,7 @@ for p in 9201 9202 9203 9204 9205; do
       \"contextGraphId\":\"$CONTEXT_GRAPH\",
       \"view\":\"verified-memory\"
     }")
-    found=$(echo "$R" | python3 -c "import sys,json; print('yes' if json.load(sys.stdin).get('result',{}).get('boolean',False) else 'no')" 2>/dev/null)
+    found=$(echo "$R" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null)
     [[ "$found" == "yes" ]] && ok "Node $p has $entity" || warn "Node $p missing $entity (finalization pending?)"
   done
 done

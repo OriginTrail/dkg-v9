@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-AUTH="${DKG_AUTH:-}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -n "${DKG_AUTH:-}" ]]; then
+  AUTH="$DKG_AUTH"
+elif [[ -f "$SCRIPT_DIR/../.devnet/node1/auth.token" ]]; then
+  AUTH="$(grep -v '^#' "$SCRIPT_DIR/../.devnet/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
+else
+  echo "ERROR: No auth token found. Export DKG_AUTH or start a devnet with ./scripts/devnet.sh start" >&2
+  exit 1
+fi
 CONTEXT_GRAPH="devnet-test"
 PASS=0
 FAIL=0

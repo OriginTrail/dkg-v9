@@ -461,11 +461,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   async clear(status: 'finalized' | 'failed'): Promise<number> {
     await this.ensureGraph();
     const jobs = await this.list({ status });
+    let cleared = 0;
     for (const job of jobs) {
+      // Protect retry_recovery jobs — they may still have a pending on-chain tx
+      // that periodic recovery will finalize. Only explicit cancel can remove them.
+      if (status === 'failed' && isFailedJob(job) && job.failure.resolution === 'retry_recovery') continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
+      cleared += 1;
     }
-    return jobs.length;
+    return cleared;
   }
 
   private async ensureGraph(): Promise<void> {

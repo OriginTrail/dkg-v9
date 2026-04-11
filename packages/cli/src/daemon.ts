@@ -2052,7 +2052,8 @@ async function handleRequest(
   // Accepts both the old wrapped shape { request: LiftRequest } and the new flat shape.
   if (req.method === 'POST' && path === '/api/publisher/enqueue') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const raw = JSON.parse(body);
+    let raw: any;
+    try { raw = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     const parsed = raw.request && typeof raw.request === 'object' ? raw.request : raw;
     const { roots, namespace, scope, authorityProofRef, priorVersion } = parsed;
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
@@ -2127,7 +2128,9 @@ async function handleRequest(
   // POST /api/publisher/cancel
   if (req.method === 'POST' && path === '/api/publisher/cancel') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { jobId } = JSON.parse(body);
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { jobId } = parsed;
     if (!jobId) return jsonResponse(res, 400, { error: 'Missing jobId' });
     await publisherControl.cancel(jobId);
     return jsonResponse(res, 200, { cancelled: jobId });
@@ -2136,7 +2139,9 @@ async function handleRequest(
   // POST /api/publisher/retry
   if (req.method === 'POST' && path === '/api/publisher/retry') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { status } = JSON.parse(body || '{}');
+    let retryParsed: any;
+    try { retryParsed = JSON.parse(body || '{}'); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { status } = retryParsed;
     if (status && status !== 'failed') return jsonResponse(res, 400, { error: 'Only status=failed is supported' });
     const count = await publisherControl.retry({ status: 'failed' });
     return jsonResponse(res, 200, { retried: count });
@@ -2145,7 +2150,9 @@ async function handleRequest(
   // POST /api/publisher/clear
   if (req.method === 'POST' && path === '/api/publisher/clear') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { status } = JSON.parse(body || '{}');
+    let clearParsed: any;
+    try { clearParsed = JSON.parse(body || '{}'); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { status } = clearParsed;
     if (status !== 'failed' && status !== 'finalized') {
       return jsonResponse(res, 400, { error: 'status must be failed or finalized' });
     }

@@ -240,9 +240,11 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     },
   });
 
+  const validWalletIds = [...publishers.keys()];
+
   const runner = new AsyncLiftRunner({
     publisher: asyncPublisher,
-    walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
+    walletIds: validWalletIds,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     hasIncludedRecoveryResolver: hasChainRecovery,
@@ -251,7 +253,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   return {
     runner,
     publisher: asyncPublisher,
-    walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
+    walletIds: validWalletIds,
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {

@@ -1839,9 +1839,11 @@ publisherCmd
       try {
         const client = await ApiClient.connect();
         if (opts.payload) {
-          result = await client.publisherJobPayload(jobId);
+          const resp = await client.publisherJobPayload(jobId);
+          result = { ...resp.job, payload: resp.payload };
         } else {
-          result = await client.publisherJob(jobId);
+          const resp = await client.publisherJob(jobId);
+          result = resp.job;
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;

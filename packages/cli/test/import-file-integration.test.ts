@@ -12,6 +12,8 @@
  *        - registered converter → converter.extract(...)
  *        - neither → graceful degrade, status="skipped"
  *   4. extractFromMarkdown({ markdown, agentDid, ontologyRef, documentIri })
+ *      and, when frontmatter resolves a different `rootEntity`, re-run with
+ *      `documentIri = resolvedRootEntity`
  *   5. mockAgent.assertion.write(contextGraphId, name, triples)
  *   6. record in extractionStatus Map
  *
@@ -510,18 +512,32 @@ async function runImportFileOrchestration(params: {
   const agentDid = `did:dkg:agent:${agent.peerId}`;
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let sourceFileLinkage: ReturnType<typeof extractFromMarkdown>['sourceFileLinkage'];
+  let documentSubjectIri: string;
   let resolvedRootEntity: string;
   try {
-    const result = extractFromMarkdown({
+    let result = extractFromMarkdown({
       markdown: mdIntermediate,
       agentDid,
       ontologyRef,
       documentIri: assertionUri,
       sourceFileIri: fileUri,
     });
+    // Mirror daemon issue #122 behavior: when frontmatter resolves a
+    // different root entity than the assertion container URI, re-run the
+    // extractor with that resolved entity as the document subject.
+    if (result.resolvedRootEntity !== assertionUri) {
+      result = extractFromMarkdown({
+        markdown: mdIntermediate,
+        agentDid,
+        ontologyRef,
+        documentIri: result.resolvedRootEntity,
+        sourceFileIri: fileUri,
+      });
+    }
     triples = result.triples;
     // Round 13 Bug 39: rename mirror — see daemon for rationale.
     sourceFileLinkage = result.sourceFileLinkage;
+    documentSubjectIri = result.subjectIri;
     resolvedRootEntity = result.resolvedRootEntity;
   } catch (err: any) {
     const message = err?.message ?? String(err);
@@ -557,7 +573,8 @@ async function runImportFileOrchestration(params: {
     ...sourceFileLinkage.map(t => ({ ...t, graph: assertionGraph })),
     // Row 2 — daemon-owned. Always the ORIGINAL upload content type, so
     // for PDF this is "application/pdf", not the markdown intermediate.
-    { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+    // Its subject matches rows 1 and 3 on the resolved document entity.
+    { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
     // Rows 4, 5, 8 file descriptor — intrinsic-to-content properties only
     { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
     { subject: fileUri, predicate: 'http://dkg.io/ontology/contentHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: assertionGraph },
@@ -2017,13 +2034,13 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(result.extraction.status).toBe('completed');
   });
 
-  it('Bug 3: frontmatter `rootEntity` override produces row 3 and row 14 pointing at the same IRI', async () => {
-    // Regression guard for Bug 3: a markdown upload with frontmatter
-    // `rootEntity: urn:note:climate-report` must emit BOTH row 3 (data
-    // graph, on the document subject) and row 14 (CG root `_meta`, on
-    // the assertion UAL) pointing at the frontmatter override, NOT the
-    // reflexive assertion UAL. Previously the daemon hardcoded row 14
-    // to `assertionUri`, silently dropping the override.
+  it('Issue 122: frontmatter `rootEntity` override retargets imported content and promote roots to the resolved entity URI', async () => {
+    // Issue #122: the import path used to pin the document subject to the
+    // assertion UAL while only rows 3 and 14 pointed at the frontmatter
+    // override. Promote partitions by actual subjects, so that made the
+    // override informational only. The fix retargets the imported content
+    // and linkage rows to the resolved root entity while keeping `_meta`
+    // keyed by the assertion UAL.
     const ROOT_OVERRIDE = 'urn:note:climate-report';
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
@@ -2041,15 +2058,31 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
     });
 
-    // Row 3: in the data graph, the document subject (= the assertion
-    // UAL because the daemon pins `documentIri: assertionUri`) points
-    // at the override.
     const dataQuads = getDataGraphQuads(agent, 'cg', 'climate');
-    const row3 = dataQuads.find(q => q.predicate === `${DKG}rootEntity` && q.subject === result.assertionUri);
-    expect(row3?.object).toBe(ROOT_OVERRIDE);
+    const fileUri = `urn:dkg:file:${result.fileHash}`;
+    expect(dataQuads).toContainEqual({
+      subject: ROOT_OVERRIDE,
+      predicate: `${DKG}sourceFile`,
+      object: fileUri,
+    });
+    expect(dataQuads).toContainEqual({
+      subject: ROOT_OVERRIDE,
+      predicate: `${DKG}sourceContentType`,
+      object: '"text/markdown"',
+    });
+    expect(dataQuads).toContainEqual({
+      subject: ROOT_OVERRIDE,
+      predicate: `${DKG}rootEntity`,
+      object: ROOT_OVERRIDE,
+    });
+    expect(dataQuads).toContainEqual({
+      subject: ROOT_OVERRIDE,
+      predicate: 'http://schema.org/name',
+      object: '"Climate"',
+    });
+    expect(dataQuads.some(q => q.subject === result.assertionUri && q.predicate === `${DKG}rootEntity`)).toBe(false);
+    expect(dataQuads.some(q => q.subject === result.assertionUri && q.predicate === `${DKG}sourceContentType`)).toBe(false);
 
-    // Row 14: in CG root `_meta`, the assertion UAL also points at the
-    // override — NOT at itself, which was the pre-fix behavior.
     const metaGraph = contextGraphMetaUri('cg');
     const row14 = agent.insertedQuads.find(q =>
       q.graph === metaGraph &&
@@ -2058,9 +2091,19 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     );
     expect(row14?.object).toBe(ROOT_OVERRIDE);
 
-    // Row 3 and Row 14 point at the SAME IRI — the core invariant of
-    // the Bug 3 fix.
-    expect(row3?.object).toBe(row14?.object);
+    // Promote filters only the reserved bookkeeping URNs; after that,
+    // subject identity is what partitioning sees.
+    const promotableSubjects = [...new Set(
+      dataQuads
+        .filter(q => {
+          const lower = q.subject.toLowerCase();
+          return !lower.startsWith('urn:dkg:file:') && !lower.startsWith('urn:dkg:extraction:');
+        })
+        .map(q => q.subject),
+    )];
+    expect(promotableSubjects).toContain(ROOT_OVERRIDE);
+    expect(promotableSubjects).not.toContain(result.assertionUri);
+    expect(row14?.object).toBe(ROOT_OVERRIDE);
   });
 
   it('Bug 5a: re-import replaces (not appends) stale `_meta` rows for the same assertion name', async () => {

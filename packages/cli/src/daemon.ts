@@ -2669,6 +2669,7 @@ async function handleRequest(
     // ── Phase 2: markdown → triples + linkage ──
     let triples;
     let sourceFileLinkage;
+    let documentSubjectIri: string;
     let resolvedRootEntity: string;
     try {
       // The extractor owns rows 1 and 3. Row 2 (dkg:sourceContentType) is
@@ -2676,13 +2677,26 @@ async function handleRequest(
       // target), not the markdown intermediate the extractor processes.
       // Only the daemon has `detectedContentType` here, so it emits row 2
       // itself below alongside the file descriptor block.
-      const result = extractFromMarkdown({
+      let result = extractFromMarkdown({
         markdown: mdIntermediate,
         agentDid,
         ontologyRef,
         documentIri: assertionUri,
         sourceFileIri: fileUri,
       });
+      // Issue #122: if frontmatter resolves a different root entity than
+      // the assertion container URI, re-run extraction with that resolved
+      // entity as the document subject so content triples and later
+      // subject-based promote partitioning align on the same identity.
+      if (result.resolvedRootEntity !== assertionUri) {
+        result = extractFromMarkdown({
+          markdown: mdIntermediate,
+          agentDid,
+          ontologyRef,
+          documentIri: result.resolvedRootEntity,
+          sourceFileIri: fileUri,
+        });
+      }
       triples = result.triples;
       // Round 13 Bug 39: `provenance` renamed to `sourceFileLinkage`.
       // The old name conflicted with its original extraction-run
@@ -2691,6 +2705,7 @@ async function handleRequest(
       // The extractor now only emits rows 1 and 3 of the source-file
       // linkage block, so the field's name reflects that directly.
       sourceFileLinkage = result.sourceFileLinkage;
+      documentSubjectIri = result.subjectIri;
       // §19.10.1:508 precedence: frontmatter `rootEntity` > explicit input >
       // reflexive subject. The extractor has already applied it to row 3;
       // reuse the resolved value for `_meta` row 14 below so row 3 and row
@@ -2762,8 +2777,9 @@ async function handleRequest(
       // Row 2 — daemon-owned. Describes the ORIGINAL upload blob (row 1's
       // target), so for a PDF upload this is "application/pdf" — NOT the
       // markdown intermediate the extractor processes. Extractor never
-      // emits this row; the daemon is the single source of truth.
-      { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+      // emits this row; the daemon is the single source of truth. Its
+      // subject matches rows 1 and 3 on the resolved document entity.
+      { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
       // Row 4 — file descriptor block subject is the content-addressed URN
       { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
       // Row 5 — on-chain canonical hash format is keccak256:<hex>

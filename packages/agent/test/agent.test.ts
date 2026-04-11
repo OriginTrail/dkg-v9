@@ -19,6 +19,7 @@ import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -1390,6 +1391,149 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('builds authenticated sync requests for private context graphs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthRequest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+
+      const chain = (agent as any).chain as MockChainAdapter;
+      const identityId = await chain.ensureProfile();
+      vi.spyOn(chain, 'signMessage').mockResolvedValue({ r: new Uint8Array(32), vs: new Uint8Array(32) });
+
+      const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote');
+      const parsed = JSON.parse(new TextDecoder().decode(encoded));
+
+      expect(parsed.contextGraphId).toBe('private-cg');
+      expect(parsed.targetPeerId).toBe('peer-remote');
+      expect(parsed.requesterPeerId).toBe(agent.peerId);
+      expect(parsed.requestId).toBeDefined();
+      expect(parsed.issuedAtMs).toBeDefined();
+      expect(parsed.requesterIdentityId).toBe(identityId.toString());
+      expect(parsed.requesterSignatureR).toBeDefined();
+      expect(parsed.requesterSignatureVS).toBeDefined();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('denies private sync requests when requester is not an allowed participant', async () => {
+    const chain = new MockChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthDeny',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      await chain.ensureProfile();
+      (chain as any).contextGraphs.set(1n, {
+        manager: chain.signerAddress,
+        participantIdentityIds: [999n],
+        requiredSignatures: 1,
+        metadataBatchId: 0n,
+        active: true,
+        batches: [],
+      });
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+
+      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+
+      const allowed = await (agent as any).authorizeSyncRequest({
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: agent.peerId,
+        requestId: 'req-1',
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '1',
+        requesterSignatureR: '0x' + '00'.repeat(32),
+        requesterSignatureVS: '0x' + '00'.repeat(32),
+      }, agent.peerId);
+
+      expect(allowed).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('rejects replayed private sync requests', async () => {
+    const chain = new MockChainAdapter();
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncReplay',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
+      vi.spyOn(chain, 'getContextGraphParticipants').mockResolvedValue([1n]);
+      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-requester',
+        requestId: 'req-1',
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '1',
+      } as const;
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+
+      const signedRequest = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const first = await (agent as any).authorizeSyncRequest(signedRequest, 'peer-requester');
+      const second = await (agent as any).authorizeSyncRequest(signedRequest, 'peer-requester');
+
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+      vi.restoreAllMocks();
+    }
+  });
+
   it('emits warning when queryAccess.defaultPolicy is explicitly "public"', async () => {
     const { Logger } = await import('@origintrail-official/dkg-core');
     const logs: Array<{ level: string; message: string }> = [];
@@ -1436,6 +1580,171 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     } finally {
       await agent?.stop().catch(() => {});
       Logger.setSink(null);
+    }
+  });
+
+  it('parseSyncRequest falls back to pipe-delimited on malformed JSON', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ParseFallbackTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      const malformedJson = '{not valid json';
+      const result = (agent as any).parseSyncRequest(
+        new TextEncoder().encode(malformedJson),
+      );
+      // Falls back to pipe-delimited: the whole string becomes contextGraphId
+      expect(result.contextGraphId).toBeDefined();
+      expect(result.offset).toBe(0);
+      expect(result.limit).toBeDefined();
+      expect(result.phase).toBe('data');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('parseSyncRequest parses meta phase from pipe-delimited format', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ParseMetaPhase',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      const msg = 'my-context-graph|10|50|meta';
+      const result = (agent as any).parseSyncRequest(
+        new TextEncoder().encode(msg),
+      );
+      expect(result.contextGraphId).toBe('my-context-graph');
+      expect(result.offset).toBe(10);
+      expect(result.limit).toBe(50);
+      expect(result.phase).toBe('meta');
+      expect(result.includeSharedMemory).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('parseSyncRequest handles workspace prefix in pipe-delimited format', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ParseWorkspace',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      const msg = 'workspace:my-cg|0|100|data';
+      const result = (agent as any).parseSyncRequest(
+        new TextEncoder().encode(msg),
+      );
+      expect(result.contextGraphId).toBe('my-cg');
+      expect(result.includeSharedMemory).toBe(true);
+      expect(result.phase).toBe('data');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('canReadContextGraph allows locally subscribed private CGs when identityId is 0n', async () => {
+    const chain = new MockChainAdapter('mock:0');
+    vi.spyOn(chain, 'getIdentityId').mockResolvedValue(0n);
+    const agent = await DKGAgent.create({
+      name: 'CanReadLocal',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('local-private-cg', {
+        name: 'local-private-cg',
+        subscribed: false,
+        synced: true,
+      });
+      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
+      vi.spyOn(agent as any, 'getPrivateContextGraphParticipants').mockResolvedValue([1n]);
+
+      const canRead = await (agent as any).canReadContextGraph('local-private-cg');
+      expect(canRead).toBe(true);
+
+      const cannotRead = await (agent as any).canReadContextGraph('unsubscribed-private-cg');
+      expect(cannotRead).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('authorizeSyncRequest uses verifySyncIdentity when available', async () => {
+    const chain = new MockChainAdapter();
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'SyncIdentityTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+        participantIdentityIds: [1n],
+      });
+      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
+      const syncSpy = vi.spyOn(chain, 'verifySyncIdentity').mockResolvedValue(true);
+      const ackSpy = vi.spyOn(chain, 'verifyACKIdentity');
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-req',
+        requestId: `req-${Date.now()}`,
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '1',
+      };
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId, request.offset, request.limit,
+        request.includeSharedMemory, request.targetPeerId,
+        request.requesterPeerId, request.requestId, request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+
+      const signed = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
+      expect(result).toBe(true);
+      expect(syncSpy).toHaveBeenCalledOnce();
+      expect(ackSpy).not.toHaveBeenCalled();
+    } finally {
+      await agent.stop().catch(() => {});
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('buildSyncRequest uses pipe-delimited format for public CGs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'BuildReqPublic',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
+      const text = new TextDecoder().decode(bytes);
+      expect(text).toBe('public-cg|5|100|meta');
+    } finally {
+      await agent.stop().catch(() => {});
     }
   });
 });

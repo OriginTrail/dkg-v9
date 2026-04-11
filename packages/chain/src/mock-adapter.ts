@@ -664,6 +664,10 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
+  async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    return this.verifyACKIdentity(recoveredAddress, claimedIdentityId);
+  }
+
   private mockACKSigner?: import('ethers').Wallet;
 
   setMockACKSigner(wallet: import('ethers').Wallet) {
@@ -749,6 +753,11 @@ export class MockChainAdapter implements ChainAdapter {
 
   getContextGraph(contextGraphId: bigint) {
     return this.contextGraphs.get(contextGraphId);
+  }
+
+  async getContextGraphParticipants(contextGraphId: bigint): Promise<bigint[] | null> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    return cg ? [...cg.participantIdentityIds] : null;
   }
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---

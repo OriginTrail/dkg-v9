@@ -978,6 +978,20 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
+  async getContextGraphParticipants(contextGraphId: bigint): Promise<bigint[] | null> {
+    await this.init();
+    if (!this.contracts.contextGraphStorage) {
+      return null;
+    }
+
+    try {
+      const participants: bigint[] = await this.contracts.contextGraphStorage.getContextGraphParticipants(contextGraphId);
+      return participants.map((id) => BigInt(id));
+    } catch {
+      return null;
+    }
+  }
+
   async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
     if (!this.contracts.contextGraphs) {
@@ -1575,6 +1589,16 @@ export class EVMChainAdapter implements ChainAdapter {
     if (stake === 0n) return false;
 
     return true;
+  }
+
+  async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    if (!identityStorage) return false;
+
+    const OPERATIONAL_KEY = 2;
+    const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
+    return identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
   }
 
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {

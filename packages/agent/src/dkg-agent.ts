@@ -84,8 +84,24 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
+const SYNC_AUTH_MAX_AGE_MS = 30_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
+
+interface SyncRequestEnvelope {
+  contextGraphId: string;
+  offset: number;
+  limit: number;
+  includeSharedMemory: boolean;
+  phase?: 'data' | 'meta';
+  targetPeerId?: string;
+  requesterPeerId?: string;
+  requestId?: string;
+  issuedAtMs?: number;
+  requesterIdentityId?: string;
+  requesterSignatureR?: string;
+  requesterSignatureVS?: string;
+}
 
 /** Health status of a peer from the last ping round. */
 export interface PeerHealth {
@@ -105,6 +121,8 @@ export interface ContextGraphSub {
   synced: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
+  /** Local participant identities used for private SWM authorization before anchoring. */
+  participantIdentityIds?: bigint[];
 }
 
 /** @deprecated Use ContextGraphSub */
@@ -201,6 +219,7 @@ export class DKGAgent {
   private readonly peerHealth = new Map<string, PeerHealth>();
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
+  private readonly seenPrivateSyncRequestIds = new Map<string, number>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -515,56 +534,37 @@ export class DKGAgent {
       }
     }
 
-    // Register sync handler: responds with a page of data + meta triples.
-    // Request format: "contextGraphId|offset|limit"  (offset/limit default to 0/500)
-    //   or: "workspace:contextGraphId|offset|limit" for shared memory graph sync
-    // Response includes both the data graph and the meta graph so the
-    // receiver can verify merkle roots before inserting.
-    this.router.register(PROTOCOL_SYNC, async (data) => {
-      const text = new TextDecoder().decode(data).trim();
-      const [ctxGraphPart, offsetStr, limitStr] = text.split('|');
-      const offset = parseInt(offsetStr, 10) || 0;
-      const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
-
-      const isWorkspace = ctxGraphPart.startsWith('workspace:');
-      const contextGraphId = isWorkspace ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
+    // Register sync handler: responds with a page of data OR meta triples.
+    // Request: JSON SyncRequestEnvelope (authenticated for private CGs) or
+    //          pipe-delimited "contextGraphId|offset|limit[|meta]".
+    // The "phase" field ('data' or 'meta') controls which graph is queried.
+    // Meta is fetched separately (paginated) to avoid exceeding the 10 MB
+    // stream read limit that occurred when the full meta graph was bundled
+    // with the first data page.
+    this.router.register(PROTOCOL_SYNC, async (data, peerId) => {
+      const request = this.parseSyncRequest(data);
+      const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+      const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : SYNC_PAGE_SIZE, SYNC_PAGE_SIZE));
+      const phase = request.phase ?? 'data';
+      const isWorkspace = request.includeSharedMemory;
+      const contextGraphId = request.contextGraphId;
+      if (!contextGraphId || typeof contextGraphId !== 'string') {
+        return new TextEncoder().encode('');
+      }
       const nquads: string[] = [];
+
+      if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
+        this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
+        return new TextEncoder().encode('');
+      }
 
       if (isWorkspace) {
         const wsGraph = paranetWorkspaceGraphUri(contextGraphId);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
         const wsTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-
-        // Apply TTL/root-entity filter inside SPARQL before pagination so that
-        // we return the first N non-expired triples. Only include exact root subject
-        // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
-        // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
         const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
-        const wsQuery =
-          cutoff != null
-            ? `SELECT DISTINCT ?s ?p ?o WHERE {
-  GRAPH <${wsMetaGraph}> {
-    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-    ?op <http://dkg.io/ontology/publishedAt> ?ts .
-    ?op <http://dkg.io/ontology/rootEntity> ?re .
-    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-  }
-  GRAPH <${wsGraph}> { ?s ?p ?o }
-  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
-} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
-        const wsResult = await this.store.query(wsQuery);
-        if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
-          return new TextEncoder().encode('');
-        }
-        for (const b of wsResult.bindings) {
-          const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-          nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
-        }
-
-        if (offset === 0) {
-          // Only send meta for non-expired operations; reuse same cutoff as data query to avoid boundary skew
+        if (phase === 'meta') {
           const metaQuery = cutoff != null
             ? `SELECT ?s ?p ?o WHERE {
                 GRAPH <${wsMetaGraph}> { ?s ?p ?o }
@@ -574,8 +574,8 @@ export class DKGAgent {
                     FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                   }
                 }
-              } ORDER BY ?s ?p ?o`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsMetaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`;
+              } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
+            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsMetaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
 
           const metaResult = await this.store.query(metaQuery);
           if (metaResult.type === 'bindings') {
@@ -584,6 +584,33 @@ export class DKGAgent {
               nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
             }
           }
+        } else {
+          // Apply TTL/root-entity filter inside SPARQL before pagination so that
+          // we return the first N non-expired triples. Only include exact root subject
+          // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
+          // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
+          const wsQuery =
+            cutoff != null
+              ? `SELECT DISTINCT ?s ?p ?o WHERE {
+  GRAPH <${wsMetaGraph}> {
+    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+    ?op <http://dkg.io/ontology/publishedAt> ?ts .
+    ?op <http://dkg.io/ontology/rootEntity> ?re .
+    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+  }
+  GRAPH <${wsGraph}> { ?s ?p ?o }
+  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
+} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
+              : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
+
+          const wsResult = await this.store.query(wsQuery);
+          if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
+            return new TextEncoder().encode('');
+          }
+          for (const b of wsResult.bindings) {
+            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
+          }
         }
 
         if (nquads.length === 0) return new TextEncoder().encode('');
@@ -591,26 +618,26 @@ export class DKGAgent {
         const dataGraph = paranetDataGraphUri(contextGraphId);
         const metaGraph = paranetMetaGraphUri(contextGraphId);
 
-        const dataResult = await this.store.query(
-          `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-        );
-        if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
-          return new TextEncoder().encode('');
-        }
-        for (const b of dataResult.bindings) {
-          const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-          nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
-        }
-
-        if (offset === 0) {
+        if (phase === 'meta') {
           const metaResult = await this.store.query(
-            `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+            `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
           );
           if (metaResult.type === 'bindings') {
             for (const b of metaResult.bindings) {
               const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
               nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
             }
+          }
+        } else {
+          const dataResult = await this.store.query(
+            `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+          );
+          if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
+            return new TextEncoder().encode('');
+          }
+          for (const b of dataResult.bindings) {
+            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
           }
         }
       }
@@ -729,6 +756,9 @@ export class DKGAgent {
    * Pull triples for the given context graphs from a remote peer in pages,
    * verify merkle roots against the KC metadata, and only insert
    * triples that pass verification.
+   *
+   * Meta and data are fetched in separate pagination loops so that neither
+   * response can exceed the 10 MB stream read limit.
    */
   async syncFromPeer(
     remotePeerId: string,
@@ -744,59 +774,30 @@ export class DKGAgent {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
 
-        const allQuads: Quad[] = [];
-        let offset = 0;
         this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
         onPhase?.('fetch', 'start');
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          if (Date.now() > deadline) {
-            this.log.warn(ctx, `Sync timeout after ${SYNC_TOTAL_TIMEOUT_MS}ms (${allQuads.length} triples received so far)`);
-            break;
-          }
 
-          const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+        const metaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+        this.log.info(ctx, `  meta: ${metaQuads.length} triples fetched`);
 
-          // Cap per-call timeout so ProtocolRouter.send (3 internal retries) stays within deadline
-          const remainingMs = Math.max(0, deadline - Date.now());
-          const timeoutMs = Math.min(
-            SYNC_PAGE_TIMEOUT_MS,
-            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
-          );
+        const dataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
+        this.log.info(ctx, `  data: ${dataQuads.length} triples fetched`);
 
-          const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
-            {
-              maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-              baseDelayMs: 1000,
-              onRetry: (attempt, delay, err) => {
-                this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
-              },
-            },
-          );
-
-          const nquadsText = new TextDecoder().decode(responseBytes).trim();
-          if (!nquadsText) break;
-
-          const quads = parseNQuads(nquadsText);
-          if (quads.length === 0) break;
-          allQuads.push(...quads);
-
-          const dataCount = quads.filter(q => q.graph === dataGraph).length;
-          offset += dataCount;
-          this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
-          if (dataCount < SYNC_PAGE_SIZE) break;
-        }
         onPhase?.('fetch', 'end');
 
-        if (allQuads.length === 0) continue;
-
-        onPhase?.('verify', 'start');
-        const dataQuads = allQuads.filter(q => q.graph === dataGraph);
-        const metaQuads = allQuads.filter(q => q.graph === metaGraph);
+        if (dataQuads.length === 0 && metaQuads.length === 0) continue;
 
         const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+        if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
+          this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
+          continue;
+        }
+        if (!isSystemContextGraph && metaQuads.length > 0 && dataQuads.length === 0) {
+          this.log.warn(ctx, `Sync for "${pid}": received ${metaQuads.length} meta triples but no data — peer may have empty or pruned data graph`);
+        }
+
+        onPhase?.('verify', 'start');
         const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemContextGraph);
         onPhase?.('verify', 'end');
 
@@ -825,6 +826,67 @@ export class DKGAgent {
   }
 
   /**
+   * Paginate through sync pages for a single graph (data or meta).
+   * Uses buildSyncRequest to produce authenticated requests for private CGs.
+   */
+  private async fetchSyncPages(
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    includeSharedMemory: boolean,
+    phase: 'data' | 'meta',
+    graphUri: string,
+    deadline: number,
+  ): Promise<Quad[]> {
+    const allQuads: Quad[] = [];
+    let offset = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (Date.now() > deadline) {
+        this.log.warn(ctx, `Sync timeout (${allQuads.length} triples received so far for ${graphUri})`);
+        break;
+      }
+
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const timeoutMs = Math.min(
+        SYNC_PAGE_TIMEOUT_MS,
+        Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
+      );
+
+      // Build a fresh request (with unique requestId + signature) per attempt
+      // so that authenticated private-sync retries aren't rejected as replays.
+      const curOffset = offset;
+      const responseBytes = await withRetry(
+        async () => {
+          const requestBytes = await this.buildSyncRequest(contextGraphId, curOffset, SYNC_PAGE_SIZE, includeSharedMemory, remotePeerId, phase);
+          return this.router.send(remotePeerId, PROTOCOL_SYNC, requestBytes, timeoutMs);
+        },
+        {
+          maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+          baseDelayMs: 1000,
+          onRetry: (attempt, delay, err) => {
+            this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+          },
+        },
+      );
+
+      const nquadsText = new TextDecoder().decode(responseBytes).trim();
+      if (!nquadsText) break;
+
+      const quads = parseNQuads(nquadsText);
+      if (quads.length === 0) break;
+
+      const validQuads = quads.filter(q => q.graph === graphUri);
+      allQuads.push(...validQuads);
+
+      offset += validQuads.length;
+      if (validQuads.length < SYNC_PAGE_SIZE) break;
+    }
+    return allQuads;
+  }
+
+  /**
    * Pull shared memory triples for the given context graphs from a remote peer.
    * SWM data is not merkle-verified (no chain finality) — it is
    * accepted as-is and merged into the local shared memory + SWM meta graphs.
@@ -843,52 +905,15 @@ export class DKGAgent {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
 
-        const allQuads: Quad[] = [];
-        let offset = 0;
         this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
-        while (true) {
-          if (Date.now() > deadline) {
-            this.log.warn(ctx, `Shared memory sync timeout (${allQuads.length} triples received so far)`);
-            break;
-          }
+        const wsMetaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
+        const wsDataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+        this.log.info(ctx, `  shared memory: ${wsDataQuads.length} data + ${wsMetaQuads.length} meta triples fetched`);
 
-          const payload = new TextEncoder().encode(`workspace:${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+        if (wsDataQuads.length === 0 && wsMetaQuads.length === 0) continue;
 
-          const remainingMs = Math.max(0, deadline - Date.now());
-          const timeoutMs = Math.min(
-            SYNC_PAGE_TIMEOUT_MS,
-            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
-          );
-
-          const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
-            {
-              maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-              baseDelayMs: 1000,
-              onRetry: (attempt, delay, err) => {
-                this.log.warn(ctx, `SWM sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} offset=${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
-              },
-            },
-          );
-
-          const nquadsText = new TextDecoder().decode(responseBytes).trim();
-          if (!nquadsText) break;
-
-          const quads = parseNQuads(nquadsText);
-          if (quads.length === 0) break;
-          allQuads.push(...quads);
-
-          const wsCount = quads.filter(q => q.graph === wsGraph).length;
-          offset += wsCount;
-          this.log.info(ctx, `  shared memory page: ${quads.length} triples (${allQuads.length} total)`);
-          if (wsCount < SYNC_PAGE_SIZE) break;
-        }
-
-        if (allQuads.length === 0) continue;
-
-        const wsQuads = allQuads.filter(q => q.graph === wsGraph);
-        const wsMetaQuads = allQuads.filter(q => q.graph === wsMetaGraph);
+        const wsQuads = wsDataQuads;
 
         // Only accept roots from meta subjects that are valid shared memory operations (type + publishedAt).
         // Rejects fake rootEntity from malicious peers that would poison workspaceOwnedEntities.
@@ -1614,8 +1639,30 @@ export class DKGAgent {
     const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+
+    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
+      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
+      return { bindings: [] };
+    }
+
+    // When no context graph is specified, exclude private CGs the caller cannot
+    // read to prevent data leakage via unscoped or FROM-less SPARQL.
+    let excludeGraphPrefixes: string[] | undefined;
+    if (!opts.contextGraphId) {
+      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes();
+      // Per spec Axiom 1 every shared query must be resolved within a CG.
+      // Reject explicit GRAPH/FROM clauses that reference private CGs the
+      // caller cannot read — post-filtering alone cannot prevent leaks via
+      // aggregates (ASK, COUNT) or projections that omit graph/subject.
+      if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
+        this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
+        return { bindings: [] };
+      }
+    }
+
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.contextGraphId,
+      excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
@@ -1626,6 +1673,64 @@ export class DKGAgent {
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
+  }
+
+  private async canReadContextGraph(contextGraphId: string): Promise<boolean> {
+    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+      return true;
+    }
+
+    const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    if (!participants || participants.length === 0) {
+      return false;
+    }
+
+    const identityId = await this.chain.getIdentityId();
+    // NoChainAdapter returns 0n — allow reads for locally subscribed private
+    // CGs so the creating node can still query its own data.
+    if (identityId === 0n) {
+      return this.subscribedContextGraphs.has(contextGraphId)
+        || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    }
+
+    return participants.some((id) => id === identityId);
+  }
+
+  /**
+   * Returns graph URI prefixes for private CGs the caller cannot read.
+   * Used to exclude them from unscoped queries.
+   */
+  private async getDisallowedGraphPrefixes(): Promise<string[]> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const result = await this.store.query(
+      `SELECT ?cg WHERE {
+        GRAPH <${ontologyGraph}> {
+          ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return [];
+
+    const prefixes: string[] = [];
+    for (const row of result.bindings) {
+      const cgUri = row['cg'];
+      if (!cgUri) continue;
+      // cgUri is like "did:dkg:context-graph:some-id" — extract the ID
+      const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
+      if (!match) continue;
+      const contextGraphId = match[1];
+      if (await this.canReadContextGraph(contextGraphId)) continue;
+      // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
+      prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
+    }
+    return prefixes;
+  }
+
+  private sparqlReferencesPrivateGraphs(sparql: string, disallowedPrefixes: string[]): boolean {
+    if (disallowedPrefixes.length === 0) return false;
+    const upper = sparql.toUpperCase();
+    if (!upper.includes('GRAPH') && !upper.includes('FROM')) return false;
+    return disallowedPrefixes.some(prefix => sparql.includes(prefix));
   }
 
   /**
@@ -1838,6 +1943,7 @@ export class DKGAgent {
     replicationPolicy?: string;
     accessPolicy?: number;
     revealOnChain?: boolean;
+    participantIdentityIds?: bigint[];
     /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
     private?: boolean;
   }): Promise<void> {
@@ -1885,8 +1991,25 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.accessPolicy === 1 || opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
     ];
 
+    const creatorIdentityId = await this.chain.getIdentityId();
+    const participantIdentityIds = new Set<bigint>(opts.participantIdentityIds ?? []);
+    if (creatorIdentityId > 0n) {
+      participantIdentityIds.add(creatorIdentityId);
+    }
+    // Store participant IDs in the CG's meta graph (not the public ontology)
+    // to prevent leaking the allow-list to unauthorized peers.
+    const cgMetaGraph = paranetMetaGraphUri(opts.id);
+    for (const participantIdentityId of participantIdentityIds) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+        object: `"${participantIdentityId.toString()}"`,
+        graph: cgMetaGraph,
+      });
+    }
     if (onChainId) {
       quads.push({
         subject: paranetUri,
@@ -1925,15 +2048,18 @@ export class DKGAgent {
       subscribed: !opts.private,
       synced: true,
       onChainId: onChainId,
+      participantIdentityIds: participantIdentityIds.size > 0 ? [...participantIdentityIds] : undefined,
     });
 
     if (!opts.private) {
       // Auto-subscribe to the new context graph's GossipSub topic
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast via the ontology context graph so other nodes learn about it
+      // Broadcast only the ontology-graph quads (not the private meta-graph
+      // participant IDs) so the allow-list doesn't leak to unauthorized peers.
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const nquads = quads.map(q => {
+      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
+      const nquads = broadcastQuads.map(q => {
         const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
         return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
       }).join('\n');
@@ -2987,6 +3113,266 @@ export class DKGAgent {
       } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
+    const text = new TextDecoder().decode(data).trim();
+    if (text.startsWith('{')) {
+      let parsed: SyncRequestEnvelope;
+      try {
+        parsed = JSON.parse(text) as SyncRequestEnvelope;
+      } catch {
+        // Malformed JSON — fall through to pipe-delimited parsing
+        return this.parsePipeDelimitedSyncRequest(text);
+      }
+      return {
+        contextGraphId: parsed.contextGraphId,
+        offset: parsed.offset ?? 0,
+        limit: Math.min(parsed.limit ?? SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
+        includeSharedMemory: parsed.includeSharedMemory ?? false,
+        phase: parsed.phase === 'meta' ? 'meta' : 'data',
+        targetPeerId: parsed.targetPeerId,
+        requesterPeerId: parsed.requesterPeerId,
+        requestId: parsed.requestId,
+        issuedAtMs: parsed.issuedAtMs,
+        requesterIdentityId: parsed.requesterIdentityId,
+        requesterSignatureR: parsed.requesterSignatureR,
+        requesterSignatureVS: parsed.requesterSignatureVS,
+      };
+    }
+
+    return this.parsePipeDelimitedSyncRequest(text);
+  }
+
+  private parsePipeDelimitedSyncRequest(text: string): SyncRequestEnvelope {
+    const parts = text.split('|');
+    const ctxGraphPart = parts[0] || '';
+    const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
+    const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
+    return {
+      contextGraphId,
+      offset: parseInt(parts[1], 10) || 0,
+      limit: Math.min(parseInt(parts[2], 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
+      includeSharedMemory,
+      phase: parts[3] === 'meta' ? 'meta' : 'data',
+    };
+  }
+
+  private async buildSyncRequest(
+    contextGraphId: string,
+    offset: number,
+    limit: number,
+    includeSharedMemory: boolean,
+    responderPeerId: string,
+    phase: 'data' | 'meta' = 'data',
+  ): Promise<Uint8Array> {
+    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+      const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
+      const phaseSuffix = phase === 'meta' ? '|meta' : '';
+      return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
+    }
+
+    const request: SyncRequestEnvelope = {
+      contextGraphId,
+      offset,
+      limit,
+      includeSharedMemory,
+      phase,
+    };
+
+    request.targetPeerId = responderPeerId;
+    request.requesterPeerId = this.peerId;
+    request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    request.issuedAtMs = Date.now();
+    const identityId = await this.chain.getIdentityId();
+    if (identityId > 0n && typeof this.chain.signMessage === 'function') {
+      const digest = this.computeSyncDigest(
+        contextGraphId,
+        offset,
+        limit,
+        includeSharedMemory,
+        responderPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const signature = await this.chain.signMessage(digest);
+      request.requesterIdentityId = identityId.toString();
+      request.requesterSignatureR = ethers.hexlify(signature.r);
+      request.requesterSignatureVS = ethers.hexlify(signature.vs);
+    }
+
+    return new TextEncoder().encode(JSON.stringify(request));
+  }
+
+  private computeSyncDigest(
+    contextGraphId: string,
+    offset: number,
+    limit: number,
+    includeSharedMemory: boolean,
+    targetPeerId: string,
+    requesterPeerId: string | undefined,
+    requestId: string | undefined,
+    issuedAtMs: number | undefined,
+  ): Uint8Array {
+    return ethers.getBytes(
+      ethers.solidityPackedKeccak256(
+        ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256'],
+        [
+          contextGraphId,
+          BigInt(offset),
+          BigInt(limit),
+          includeSharedMemory,
+          targetPeerId,
+          requesterPeerId ?? '',
+          requestId ?? '',
+          BigInt(issuedAtMs ?? 0),
+        ],
+      ),
+    );
+  }
+
+  private async authorizeSyncRequest(request: SyncRequestEnvelope, remotePeerId: string): Promise<boolean> {
+    const isPrivate = await this.isPrivateContextGraph(request.contextGraphId);
+    if (!isPrivate) {
+      return true;
+    }
+
+    const now = Date.now();
+    for (const [requestId, seenAt] of this.seenPrivateSyncRequestIds) {
+      if (now - seenAt > SYNC_AUTH_MAX_AGE_MS) {
+        this.seenPrivateSyncRequestIds.delete(requestId);
+      }
+    }
+
+    let requesterIdentityId = 0n;
+    try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch { /* malformed — treated as unauthenticated */ }
+    if (
+      request.targetPeerId !== this.peerId ||
+      request.requesterPeerId !== remotePeerId ||
+      !request.requestId ||
+      request.issuedAtMs == null ||
+      now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
+      now < request.issuedAtMs - 5000 ||
+      requesterIdentityId === 0n ||
+      !request.requesterSignatureR ||
+      !request.requesterSignatureVS
+    ) {
+      return false;
+    }
+    // Require at least one identity verification method
+    const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
+    if (typeof verifyIdentity !== 'function') {
+      return false;
+    }
+
+    if (this.seenPrivateSyncRequestIds.has(request.requestId)) {
+      return false;
+    }
+
+    const digest = this.computeSyncDigest(
+      request.contextGraphId,
+      request.offset,
+      request.limit,
+      request.includeSharedMemory,
+      request.targetPeerId,
+      request.requesterPeerId,
+      request.requestId,
+      request.issuedAtMs,
+    );
+
+    let recoveredAddress: string;
+    try {
+      recoveredAddress = ethers.recoverAddress(ethers.hashMessage(digest), {
+        r: request.requesterSignatureR,
+        yParityAndS: request.requesterSignatureVS,
+      });
+    } catch {
+      return false;
+    }
+
+    const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
+    if (!validIdentity) {
+      return false;
+    }
+
+    const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
+    const allowed = participants?.some((id) => id === requesterIdentityId) ?? false;
+    if (allowed) {
+      this.seenPrivateSyncRequestIds.set(request.requestId, now);
+    }
+    return allowed;
+  }
+
+  private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
+    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+      return false;
+    }
+
+    const local = this.subscribedContextGraphs.get(contextGraphId);
+    if (local?.subscribed === false && local?.synced) {
+      return true;
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?policy WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+        }
+      } LIMIT 1`,
+    );
+
+    return result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"';
+  }
+
+  private async getPrivateContextGraphParticipants(contextGraphId: string): Promise<bigint[] | null> {
+    const localParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantIdentityIds;
+    if (localParticipants && localParticipants.length > 0) {
+      return localParticipants;
+    }
+
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+
+    // Look in the CG's meta graph first (where createContextGraph now writes them)
+    const metaResult = await this.store.query(
+      `SELECT ?identityId WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
+        }
+      }`,
+    );
+    if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
+      return metaResult.bindings
+        .map((row) => row['identityId'])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
+    }
+
+    // Backward compat: check ontology graph for data created before this change
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontResult = await this.store.query(
+      `SELECT ?identityId WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
+        }
+      }`,
+    );
+    if (ontResult.type === 'bindings' && ontResult.bindings.length > 0) {
+      return ontResult.bindings
+        .map((row) => row['identityId'])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
+    }
+
+    const onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
+      return null;
+    }
+
+    return this.chain.getContextGraphParticipants(BigInt(onChainId));
   }
 
   /**

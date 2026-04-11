@@ -335,6 +335,7 @@ export interface ChainAdapter {
 
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  getContextGraphParticipants?(contextGraphId: bigint): Promise<bigint[] | null>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
@@ -346,6 +347,13 @@ export interface ChainAdapter {
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+
+  /**
+   * Verify that a recovered signer address owns the claimed identity without
+   * requiring the identity to be a staked core node. Used for private CG sync
+   * auth where participants may be non-staked identities.
+   */
+  verifySyncIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
 
   /**
    * Sign an ACK digest for V10 StorageACK (core nodes only).

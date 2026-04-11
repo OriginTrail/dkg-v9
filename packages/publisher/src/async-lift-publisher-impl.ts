@@ -58,10 +58,12 @@ import {
 
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
   private readonly maxRetries: number;
+  private readonly recoveryLookupTimeoutMs: number;
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
@@ -79,6 +81,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? 3;
+    this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
@@ -362,12 +365,36 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           recovered += 1;
           continue;
         }
+        if (this.hasInconclusiveRecoveryTimedOut(job)) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.failInconclusiveRecovery(job));
+          recovered += 1;
+        }
+        continue;
       }
 
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
         await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
         recovered += 1;
+      }
+    }
+
+    // Revisit failed jobs whose resolution is retry_recovery — re-attempt chain lookup
+    // so that a transient RPC outage past the timeout doesn't strand jobs permanently.
+    if (this.chainRecoveryResolver) {
+      const retryRecoveryJobs = (await this.list({ status: 'failed' }))
+        .filter(isFailedJob)
+        .filter((job) => job.failure.resolution === 'retry_recovery' && 'broadcast' in job && job.broadcast);
+
+      for (const job of retryRecoveryJobs) {
+        const resolved = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
+        if (resolved) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.finalizeRecoveredJob(job as unknown as LiftJobBroadcast, resolved.inclusion, resolved.finalization));
+          recovered += 1;
+        }
+        // If still inconclusive, leave in failed state — next recover() will retry again.
       }
     }
 
@@ -405,6 +432,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     let retried = 0;
     for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
       if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+      // Jobs that failed with a recovery-phase resolution must go through recover(),
+      // not retry(), to avoid double-publishing if the original tx eventually lands.
+      if (job.failure.resolution === 'retry_recovery') continue;
 
       const reset = this.resetFailedJobToAccepted(job);
       const retriedAt = this.now();
@@ -431,11 +461,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   async clear(status: 'finalized' | 'failed'): Promise<number> {
     await this.ensureGraph();
     const jobs = await this.list({ status });
+    let cleared = 0;
     for (const job of jobs) {
+      // Protect retry_recovery jobs — they may still have a pending on-chain tx
+      // that periodic recovery will finalize. Only explicit cancel can remove them.
+      if (status === 'failed' && isFailedJob(job) && job.failure.resolution === 'retry_recovery') continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
+      cleared += 1;
     }
-    return jobs.length;
+    return cleared;
   }
 
   private async ensureGraph(): Promise<void> {
@@ -809,6 +844,27 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         updatedAt: now,
       },
     } as LiftJob;
+  }
+
+  private hasInconclusiveRecoveryTimedOut(job: LiftJobBroadcast | LiftJobIncluded): boolean {
+    const startedAt = job.timestamps.includedAt ?? job.timestamps.broadcastAt ?? job.timestamps.updatedAt;
+    return this.now() - startedAt >= this.recoveryLookupTimeoutMs;
+  }
+
+  private failInconclusiveRecovery(job: LiftJobBroadcast | LiftJobIncluded): LiftJob {
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: job.status,
+      code: 'recovery_lookup_timeout',
+      message: `Chain recovery remained inconclusive for ${this.recoveryLookupTimeoutMs}ms after ${job.status}`,
+      errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:recovery-timeout`,
+      timeout: {
+        timeoutMs: this.recoveryLookupTimeoutMs,
+        timeoutAt: this.now(),
+        handling: 'retry_recovery',
+      },
+    });
+
+    return this.mergeJob(job, 'failed', { failure: failure as any });
   }
 
   private async finalizeNoopPublish(jobId: string): Promise<LiftJob> {

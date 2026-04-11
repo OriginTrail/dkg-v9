@@ -28,7 +28,10 @@ function isDaemonUnreachable(err: unknown): boolean {
   const code = (err as any)?.cause?.code ?? (err as any)?.code;
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
-  if (/HTTP (404|405|501)/.test(msg)) return true;
+  // Older daemon without /api/publisher/* — ApiClient throws body text or HTTP status
+  const lower = msg.toLowerCase();
+  if (lower.includes('not found') || lower.includes('not allowed') || lower.includes('not implemented')
+    || /HTTP (404|405|501)/i.test(msg)) return true;
   return false;
 }
 import { batchEntityQuads } from './batching.js';
@@ -1503,10 +1506,10 @@ program
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       }, {
         maxBatchBytes: useSharedMemory ? 240 * 1024 : undefined,
-        splitOversizedEntities: useSharedMemory,
         estimateBatchBytes: useSharedMemory
           ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
           : undefined,
+        splitOversizedEntities: useSharedMemory ? true : undefined,
       });
 
       if (useSharedMemory) {
@@ -1556,8 +1559,8 @@ sharedMemoryCmd
         },
         {
           maxBatchBytes: 240 * 1024,
-          splitOversizedEntities: true,
           estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length,
+          splitOversizedEntities: true,
         },
       );
       const firstResult = results[0];
@@ -1747,7 +1750,7 @@ publisherCmd
         process.exit(1);
       }
 
-      const request = {
+      const enqueueFields = {
         swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
         shareOperationId,
         roots,
@@ -1755,17 +1758,15 @@ publisherCmd
         namespace: String(opts.namespace),
         scope: String(opts.scope),
         transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
-        authority: {
-          type: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
-          proofRef: String(opts.authorityProofRef),
-        },
+        authorityType: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
+        authorityProofRef: String(opts.authorityProofRef),
         priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
       };
 
       let jobId: string;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherEnqueue(request);
+        const result = await client.publisherEnqueue(enqueueFields);
         jobId = result.jobId;
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
@@ -1773,7 +1774,10 @@ publisherCmd
         const { createPublisherInspector } = await import('./publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          jobId = await inspector.publisher.lift(request);
+          jobId = await inspector.publisher.lift({
+            ...enqueueFields,
+            authority: { type: enqueueFields.authorityType, proofRef: enqueueFields.authorityProofRef },
+          } as any);
         } finally {
           await inspector.stop();
         }
@@ -1818,7 +1822,7 @@ publisherCmd
           await inspector.stop();
         }
       }
-      console.log(JSON.stringify(jobs, null, 2));
+      console.log(JSON.stringify(jobs.map(formatPublisherJobOutput), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1835,9 +1839,11 @@ publisherCmd
       try {
         const client = await ApiClient.connect();
         if (opts.payload) {
-          result = await client.publisherJobPayload(jobId);
+          const resp = await client.publisherJobPayload(jobId);
+          result = { ...resp.job, payload: resp.payload };
         } else {
-          result = await client.publisherJob(jobId);
+          const resp = await client.publisherJob(jobId);
+          result = resp.job;
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
@@ -1864,7 +1870,7 @@ publisherCmd
         console.error(`Publisher job not found: ${jobId}`);
         process.exit(1);
       }
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify(formatPublisherJobOutput(result), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -2226,6 +2232,27 @@ async function publishEntityBatches(
     sent += batch.length;
     onProgress?.(sent);
   }
+}
+
+function formatPublisherJobOutput<T>(value: T): T {
+  return formatPublisherJobValue(value) as T;
+}
+
+function formatPublisherJobValue(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatPublisherJobValue(item));
+  }
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      result[entryKey] = formatPublisherJobValue(entryValue, entryKey);
+    }
+    return result;
+  }
+  if (typeof value === 'number' && key && /At$/.test(key)) {
+    return new Date(value).toISOString();
+  }
+  return value;
 }
 
 function stripQuotes(s: string): string {

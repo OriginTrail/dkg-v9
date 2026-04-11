@@ -5,6 +5,7 @@ export interface AsyncLiftRunnerConfig {
   readonly walletIds: readonly string[];
   readonly pollIntervalMs?: number;
   readonly errorBackoffMs?: number;
+  readonly recoveryIntervalMs?: number;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
   readonly hasIncludedRecoveryResolver?: boolean;
@@ -13,15 +14,18 @@ export interface AsyncLiftRunnerConfig {
 export class AsyncLiftRunner {
   private readonly pollIntervalMs: number;
   private readonly errorBackoffMs: number;
+  private readonly recoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
+  private lastRecoveryAt = 0;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
+    this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
   }
@@ -37,6 +41,7 @@ export class AsyncLiftRunner {
     this.stopped = false;
     try {
       await this.config.publisher.recover();
+      this.lastRecoveryAt = Date.now();
       if (!this.config.hasIncludedRecoveryResolver) {
         const includedJobs = await this.config.publisher.list({ status: 'included' });
         if (includedJobs.length > 0) {
@@ -60,6 +65,7 @@ export class AsyncLiftRunner {
   private async loop(): Promise<void> {
     while (!this.stopped) {
       try {
+        await this.maybeRunRecovery();
         const processed = await this.runCycle();
         if (!processed && !this.stopped) {
           await this.sleep(this.pollIntervalMs);
@@ -75,6 +81,13 @@ export class AsyncLiftRunner {
         }
       }
     }
+  }
+
+  private async maybeRunRecovery(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
+    this.lastRecoveryAt = now;
+    await this.config.publisher.recover();
   }
 
   private async runCycle(): Promise<boolean> {

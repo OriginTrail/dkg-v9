@@ -23,7 +23,7 @@ export function batchEntityQuads(
 
   const byEntity = new Map<string, PublishQuad[]>();
   for (const q of quads) {
-    const key = q.subject;
+    const key = canonicalRootEntity(q.subject);
     let arr = byEntity.get(key);
     if (!arr) {
       arr = [];
@@ -36,14 +36,15 @@ export function batchEntityQuads(
   let batch: PublishQuad[] = [];
 
   for (const entityQuads of byEntity.values()) {
-    const entityChunks = splitOversizedEntities
-      ? splitEntityQuads(entityQuads, { maxBatchQuads, maxBatchBytes, estimateBatchBytes })
-      : [entityQuads];
+    const entityBatches = splitEntityBatch(entityQuads, {
+      maxBatchQuads,
+      maxBatchBytes,
+      estimateBatchBytes,
+      splitOversizedEntities,
+    });
 
-    for (const chunk of entityChunks) {
-      validateSingleBatch(chunk, { maxBatchQuads, maxBatchBytes, estimateBatchBytes, splitOversizedEntities });
-
-      const nextBatch = [...batch, ...chunk];
+    for (const entityBatch of entityBatches) {
+      const nextBatch = [...batch, ...entityBatch];
       const exceedsQuadLimit = nextBatch.length > maxBatchQuads;
       const exceedsByteLimit = maxBatchBytes && estimateBatchBytes
         ? estimateBatchBytes(nextBatch) > maxBatchBytes
@@ -51,7 +52,7 @@ export function batchEntityQuads(
 
       if ((exceedsQuadLimit || exceedsByteLimit) && batch.length > 0) {
         batches.push(batch);
-        batch = [...chunk];
+        batch = [...entityBatch];
         continue;
       }
 
@@ -66,50 +67,82 @@ export function batchEntityQuads(
   return batches;
 }
 
-function splitEntityQuads(
-  entityQuads: PublishQuad[],
-  options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
-): PublishQuad[][] {
-  const chunks: PublishQuad[][] = [];
-  let current: PublishQuad[] = [];
-
-  for (const quad of entityQuads) {
-    const next = [...current, quad];
-    const exceedsQuadLimit = next.length > options.maxBatchQuads;
-    const exceedsByteLimit = options.maxBatchBytes && options.estimateBatchBytes
-      ? options.estimateBatchBytes(next) > options.maxBatchBytes
-      : false;
-
-    if ((exceedsQuadLimit || exceedsByteLimit) && current.length > 0) {
-      chunks.push(current);
-      current = [quad];
-    } else {
-      current = next;
-    }
-  }
-
-  if (current.length > 0) {
-    chunks.push(current);
-  }
-
-  return chunks;
+function canonicalRootEntity(subject: string): string {
+  const marker = '/.well-known/genid/';
+  const index = subject.indexOf(marker);
+  return index >= 0 ? subject.slice(0, index) : subject;
 }
 
 function validateSingleBatch(
   quads: PublishQuad[],
   options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads' | 'splitOversizedEntities'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
 ): void {
-  if (options.splitOversizedEntities && quads.length > options.maxBatchQuads) {
-    throw new Error(
-      `Single entity batch exceeds maxBatchQuads (${quads.length} > ${options.maxBatchQuads}) for subject ${quads[0]?.subject}`,
-    );
+  if (quads.length > options.maxBatchQuads) {
+    if (!options.splitOversizedEntities) {
+      throw new Error(
+        `Single entity batch exceeds maxBatchQuads (${quads.length} > ${options.maxBatchQuads}) for subject ${quads[0]?.subject}`,
+      );
+    }
+    return;
   }
   if (options.maxBatchBytes && options.estimateBatchBytes) {
     const bytes = options.estimateBatchBytes(quads);
     if (bytes > options.maxBatchBytes) {
+      if (!options.splitOversizedEntities) {
+        throw new Error(
+          `Single entity batch exceeds maxBatchBytes (${bytes} > ${options.maxBatchBytes}) for subject ${quads[0]?.subject}`,
+        );
+      }
+    }
+  }
+}
+
+function splitEntityBatch(
+  quads: PublishQuad[],
+  options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads' | 'splitOversizedEntities'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
+): PublishQuad[][] {
+  const needsQuadSplit = quads.length > options.maxBatchQuads;
+  const needsByteSplit = options.maxBatchBytes && options.estimateBatchBytes
+    ? options.estimateBatchBytes(quads) > options.maxBatchBytes
+    : false;
+
+  if (!options.splitOversizedEntities || (!needsQuadSplit && !needsByteSplit)) {
+    validateSingleBatch(quads, options);
+    return [quads];
+  }
+
+  const batches: PublishQuad[][] = [];
+  let batch: PublishQuad[] = [];
+
+  for (const q of quads) {
+    const next = [...batch, q];
+    const overQuads = next.length > options.maxBatchQuads;
+    const overBytes = options.maxBatchBytes && options.estimateBatchBytes
+      ? options.estimateBatchBytes(next) > options.maxBatchBytes
+      : false;
+
+    if ((overQuads || overBytes) && batch.length > 0) {
+      batches.push(batch);
+      batch = [q];
+    } else {
+      batch = next;
+    }
+  }
+
+  if (batch.length > 0) batches.push(batch);
+
+  for (const b of batches) {
+    if (b.length > options.maxBatchQuads) {
       throw new Error(
-        `Single entity batch exceeds maxBatchBytes (${bytes} > ${options.maxBatchBytes}) for subject ${quads[0]?.subject}`,
+        `Single quad exceeds maxBatchQuads (1 > ${options.maxBatchQuads}) for subject ${b[0]?.subject}`,
+      );
+    }
+    if (options.maxBatchBytes && options.estimateBatchBytes && options.estimateBatchBytes(b) > options.maxBatchBytes) {
+      throw new Error(
+        `Single quad exceeds maxBatchBytes for subject ${b[0]?.subject}`,
       );
     }
   }
+
+  return batches;
 }

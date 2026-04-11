@@ -764,7 +764,7 @@ echo "--- 18c: Verify synced SWM data on Node5 ---"
 SYNC_SWM=$(c -X POST "http://127.0.0.1:9205/api/query" -d "{
   \"sparql\":\"SELECT ?name WHERE { <http://example.org/entity/city1> <http://schema.org/name> ?name }\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"shared-memory\"
+  \"view\":\"shared-working-memory\"
 }")
 SYNC_SWM_CT=$(echo "$SYNC_SWM" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
 [[ "$SYNC_SWM_CT" -ge 1 ]] && ok "Node5 synced SWM data (city1 found)" || warn "Node5 SWM data not synced ($SYNC_SWM_CT)"
@@ -787,7 +787,7 @@ echo "--- 19b: Shared memory view ---"
 SWM_VIEW=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a ?type }\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"shared-memory\"
+  \"view\":\"shared-working-memory\"
 }")
 SWM_CT=$(echo "$SWM_VIEW" | python3 -c 'import sys,json;b=json.load(sys.stdin).get("result",{}).get("bindings",[]);print(b[0]["c"].strip(chr(34)).split("^^")[0] if b else "0")' 2>/dev/null || echo "0")
 echo "  SWM entity count: $SWM_CT"
@@ -795,10 +795,11 @@ echo "  SWM entity count: $SWM_CT"
 
 echo "--- 19c: Working memory assertion visible only locally ---"
 WM_NAME="wm-view-test-$(date +%s)"
+WM_SUBJECT="urn:wm-view:${WM_NAME}"
 c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$WM_NAME\"}" > /dev/null
 c -X POST "http://127.0.0.1:9201/api/assertion/$WM_NAME/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"quads\":[$(ql 'urn:wm-view:only' 'http://schema.org/name' 'WM Only Data')]
+  \"quads\":[$(ql "$WM_SUBJECT" 'http://schema.org/name' 'WM Only Data')]
 }" > /dev/null
 
 WM_LOCAL=$(c -X POST "http://127.0.0.1:9201/api/assertion/$WM_NAME/query" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
@@ -807,7 +808,7 @@ WM_LOCAL_CT=$(echo "$WM_LOCAL" | python3 -c 'import sys,json;d=json.load(sys.std
 
 echo "--- 19d: WM data NOT in verified memory ---"
 WM_IN_VM=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"SELECT ?name WHERE { <urn:wm-view:only> <http://schema.org/name> ?name }\",
+  \"sparql\":\"SELECT ?name WHERE { <$WM_SUBJECT> <http://schema.org/name> ?name }\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"view\":\"verified-memory\"
 }")
@@ -816,7 +817,7 @@ WM_IN_VM_CT=$(echo "$WM_IN_VM" | python3 -c 'import sys,json;print(len(json.load
 
 echo "--- 19e: WM data NOT visible on Node2 ---"
 WM_REMOTE=$(c -X POST "http://127.0.0.1:9202/api/query" -d "{
-  \"sparql\":\"SELECT ?name WHERE { <urn:wm-view:only> <http://schema.org/name> ?name }\",
+  \"sparql\":\"SELECT ?name WHERE { <$WM_SUBJECT> <http://schema.org/name> ?name }\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\"
 }")
 WM_REMOTE_CT=$(echo "$WM_REMOTE" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
@@ -857,8 +858,9 @@ TTL_DAYS_NEW=$(json_get "$TTL_NEW" ttlDays)
 check "TTL reads back as 7 days" "$TTL_DAYS_NEW" "7"
 
 echo "--- 20f: Restore original TTL ---"
-curl -s -X PUT -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d "{\"ttlDays\":$TTL_DAYS_ORIG}" > /dev/null 2>&1
-ok "TTL restored to $TTL_DAYS_ORIG days"
+TTL_RESTORE=$(curl -s -X PUT -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d "{\"ttlMs\":$TTL_MS_ORIG}")
+TTL_RESTORE_OK=$(json_get "$TTL_RESTORE" ok)
+[[ "$TTL_RESTORE_OK" == "True" ]] && ok "TTL restored to original ($TTL_MS_ORIG ms)" || fail "TTL restore failed: $TTL_RESTORE"
 
 #------------------------------------------------------------
 echo ""
@@ -1122,10 +1124,10 @@ echo "--- 24e: Root CG query should NOT include sub-graph-only data ---"
 ROOT_ALPHA=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"sparql\":\"SELECT ?name WHERE { <urn:iso:alpha1> <http://schema.org/name> ?name }\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"shared-memory\"
+  \"view\":\"shared-working-memory\"
 }")
 ROOT_ALPHA_CT=$(echo "$ROOT_ALPHA" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-[[ "$ROOT_ALPHA_CT" -eq 0 ]] && ok "Sub-graph alpha data absent from root CG SWM" || warn "Sub-graph data visible in root CG ($ROOT_ALPHA_CT) — may be expected if SWM shares a graph"
+[[ "$ROOT_ALPHA_CT" -eq 0 ]] && ok "Sub-graph alpha data absent from root CG SWM" || fail "Sub-graph data leaked into root CG query ($ROOT_ALPHA_CT) — isolation regression"
 
 echo "--- 24f: Sub-graph data gossips to Node2 ---"
 sleep 5

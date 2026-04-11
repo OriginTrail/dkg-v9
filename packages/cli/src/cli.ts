@@ -28,11 +28,22 @@ function isDaemonUnreachable(err: unknown): boolean {
   const code = (err as any)?.cause?.code ?? (err as any)?.code;
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
-  // If ApiClient set httpStatus, the daemon *is* reachable — it responded.
-  // A 404 from a healthy daemon (e.g. "job not found") must NOT trigger fallback.
-  if (typeof (err as any)?.httpStatus === 'number') return false;
-  // Older daemon without /api/publisher/* — ApiClient without httpStatus throws
-  // raw body text. Only match route-level "not found/allowed/implemented".
+  const httpStatus = (err as any)?.httpStatus as number | undefined;
+  if (typeof httpStatus === 'number') {
+    // 405/501 always indicate a missing route — the daemon is reachable but
+    // doesn't support this API.
+    if (httpStatus === 405 || httpStatus === 501) return true;
+    // 404 is ambiguous: an older daemon returns 404 for a missing route, but
+    // a current daemon also returns 404 for "job not found". Distinguish by
+    // checking the error message — framework-level 404s use generic text.
+    if (httpStatus === 404) {
+      const lower = msg.toLowerCase();
+      return lower === 'not found' || lower === `http ${httpStatus}`;
+    }
+    // Any other status means the route exists and the daemon responded.
+    return false;
+  }
+  // Legacy path: older ApiClient without httpStatus throws raw body text.
   const lower = msg.toLowerCase();
   if (lower.includes('not found') || lower.includes('not allowed') || lower.includes('not implemented')
     || /HTTP (404|405|501)/i.test(msg)) return true;

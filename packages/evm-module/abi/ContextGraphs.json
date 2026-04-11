@@ -11,6 +11,17 @@
     "type": "constructor"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ContextGraphNotActive",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ECDSAInvalidSignature",
     "type": "error"
@@ -35,6 +46,22 @@
       }
     ],
     "name": "ECDSAInvalidSignatureS",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotContextGraphOwner",
     "type": "error"
   },
   {
@@ -92,6 +119,24 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "addParticipant",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "contextGraphStorage",
     "outputs": [
@@ -120,6 +165,16 @@
         "internalType": "uint256",
         "name": "metadataBatchId",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "publishPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "address",
+        "name": "publishAuthority",
+        "type": "address"
       }
     ],
     "name": "createContextGraph",
@@ -191,11 +246,48 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "publisher",
+        "type": "address"
+      }
+    ],
+    "name": "isAuthorizedPublisher",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "authorized",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "knowledgeAssetsStorage",
     "outputs": [
       {
         "internalType": "contract KnowledgeAssetsStorageLike",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "knowledgeCollectionStorage",
+    "outputs": [
+      {
+        "internalType": "contract KnowledgeCollectionStorage",
         "name": "",
         "type": "address"
       }
@@ -214,6 +306,24 @@
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "removeParticipant",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -240,6 +350,47 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "publishPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "address",
+        "name": "publishAuthority",
+        "type": "address"
+      }
+    ],
+    "name": "updatePublishPolicy",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "requiredSignatures",
+        "type": "uint8"
+      }
+    ],
+    "name": "updateQuorum",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

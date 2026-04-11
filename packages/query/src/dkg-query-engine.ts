@@ -2,9 +2,12 @@ import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origin
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
-  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
-  assertSafeIri, escapeSparqlLiteral,
+  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphAssertionUri,
+  contextGraphSubGraphUri,
+  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   type GetView,
+  REMOVED_VIEWS,
+  TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
 
@@ -17,11 +20,9 @@ export interface ViewResolution {
   /**
    * Graph URI prefixes — the engine discovers all named graphs matching
    * each prefix and unions the results. Used for working-memory (multiple
-   * drafts) and verified-memory (multiple quorum graphs).
+   * assertions) and verified-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-  /** When true the engine merges results with VM-wins-on-conflict semantics. */
-  vmWinsOnConflict: boolean;
 }
 
 /**
@@ -33,58 +34,47 @@ export interface ViewResolution {
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
-  opts?: { agentAddress?: string; verifiedGraph?: string; draftName?: string },
+  opts?: { agentAddress?: string; verifiedGraph?: string; assertionName?: string },
 ): ViewResolution {
+  if (REMOVED_VIEWS.includes(view as string)) {
+    throw new Error(
+      `View '${view}' was removed in V10. Use 'verified-memory' for on-chain anchored data. ` +
+      `See migration guide for details.`,
+    );
+  }
   switch (view) {
     case 'working-memory': {
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
       }
-      if (opts.draftName) {
+      if (opts.assertionName) {
         return {
-          graphs: [contextGraphDraftUri(contextGraphId, opts.agentAddress, opts.draftName)],
+          graphs: [contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName)],
           graphPrefixes: [],
-          vmWinsOnConflict: false,
         };
       }
       return {
         graphs: [],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/draft/${opts.agentAddress}/`],
-        vmWinsOnConflict: false,
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/assertion/${opts.agentAddress}/`],
       };
     }
     case 'shared-working-memory':
       return {
         graphs: [contextGraphSharedMemoryUri(contextGraphId)],
         graphPrefixes: [],
-        vmWinsOnConflict: false,
-      };
-    case 'long-term-memory':
-      return {
-        graphs: [contextGraphDataUri(contextGraphId)],
-        graphPrefixes: [],
-        vmWinsOnConflict: false,
       };
     case 'verified-memory': {
       if (opts?.verifiedGraph) {
         return {
           graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
           graphPrefixes: [],
-          vmWinsOnConflict: false,
         };
       }
       return {
         graphs: [],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
-        vmWinsOnConflict: false,
       };
     }
-    case 'authoritative':
-      return {
-        graphs: [contextGraphDataUri(contextGraphId)],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
-        vmWinsOnConflict: true,
-      };
   }
 }
 
@@ -111,10 +101,22 @@ export class DKGQueryEngine implements QueryEngine {
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+
+    if (options?.subGraphName) {
+      const v = validateSubGraphName(options.subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
+    }
+
     if (options?.view) {
       if (!effectiveContextGraphId) {
         throw new Error(
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
+        );
+      }
+      if (options.subGraphName) {
+        throw new Error(
+          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
+          'Sub-graph scoping within views is deferred to V10.x.',
         );
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
@@ -124,8 +126,10 @@ export class DKGQueryEngine implements QueryEngine {
     let effectiveSparql = sparql;
 
     if (effectiveContextGraphId && !sparql.toLowerCase().includes('from ')) {
-      const dataGraph = contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
+      const dataGraph = options?.subGraphName
+        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
+        : contextGraphDataUri(effectiveContextGraphId);
+      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);
         const sharedMemorySparql = wrapWithGraph(sparql, sharedMemoryGraph);
@@ -155,6 +159,7 @@ export class DKGQueryEngine implements QueryEngine {
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
+      assertionName: options.assertionName,
     });
 
     const allGraphs = [...resolution.graphs];
@@ -170,14 +175,6 @@ export class DKGQueryEngine implements QueryEngine {
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(wrapWithGraph(sparql, allGraphs[0]));
-    }
-
-    if (resolution.vmWinsOnConflict) {
-      const ltmGraphs = resolution.graphs;
-      const vmGraphs = allGraphs.filter((g) => !ltmGraphs.includes(g));
-      const ltmResults = await this.queryMultipleGraphs(sparql, ltmGraphs);
-      const vmResults = await this.queryMultipleGraphs(sparql, vmGraphs);
-      return mergeAuthoritativeResults(ltmResults, vmResults);
     }
 
     return this.queryMultipleGraphs(sparql, allGraphs);
@@ -221,13 +218,14 @@ export class DKGQueryEngine implements QueryEngine {
     contextGraphId: string;
     quads: Quad[];
   }> {
-    // Look up KA metadata across all meta graphs
+    // Look up KA metadata across all meta graphs, including subGraphName if recorded
     const metaResult = await this.store.query(
-      `SELECT ?rootEntity ?ctxGraph WHERE {
+      `SELECT ?rootEntity ?ctxGraph ?sgName WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
           <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?ctxGraph .
+          OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }
       }`,
     );
@@ -239,9 +237,14 @@ export class DKGQueryEngine implements QueryEngine {
     const rootEntity = metaResult.bindings[0]['rootEntity'];
     const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
     const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
-    const dataGraph = contextGraphDataUri(contextGraphId);
+    const sgNameRaw = metaResult.bindings[0]['sgName'];
+    const subGraphName = sgNameRaw ? sgNameRaw.replace(/^"(.*)".*$/, '$1') : undefined;
 
-    // Fetch all triples for this entity
+    const dataGraph = subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : contextGraphDataUri(contextGraphId);
+
+    // Fetch all triples for this entity from the correct data graph
     const dataResult = await this.store.query(
       `SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(dataGraph)}> {
@@ -401,65 +404,5 @@ function dedupeQuads(quads: Quad[]): Quad[] {
     out.push(q);
   }
   return out;
-}
-
-/**
- * Merge LTM and VM results for the 'authoritative' view.
- * VM wins on conflict: when the same subject+predicate appears in both
- * result sets, the VM value is kept and the LTM one is dropped.
- *
- * Conflict resolution applies at two levels:
- * 1. Binding rows — when `?s` and `?p` are projected (SELECT queries).
- * 2. Quads — when the result contains quads (CONSTRUCT/DESCRIBE queries),
- *    subject+predicate dedup happens directly on the triples so conflict
- *    resolution works regardless of the projection shape.
- */
-function mergeAuthoritativeResults(
-  ltmResult: QueryResult,
-  vmResult: QueryResult,
-): QueryResult {
-  if (vmResult.bindings.length === 0 && !vmResult.quads?.length) {
-    return ltmResult;
-  }
-
-  // --- Binding-level merge (SELECT queries with ?s/?p projection) ---
-  const vmSubjectPredicates = new Set<string>();
-  for (const row of vmResult.bindings) {
-    if (row['s'] && row['p']) {
-      vmSubjectPredicates.add(`${row['s']}\u0000${row['p']}`);
-    }
-  }
-
-  const filteredLtm = vmSubjectPredicates.size > 0
-    ? ltmResult.bindings.filter((row) => {
-        if (!row['s'] || !row['p']) return true;
-        return !vmSubjectPredicates.has(`${row['s']}\u0000${row['p']}`);
-      })
-    : ltmResult.bindings;
-
-  const mergedBindings = dedupeBindings([...filteredLtm, ...vmResult.bindings]);
-
-  // --- Quad-level merge (CONSTRUCT/DESCRIBE queries) ---
-  const ltmQuads = ltmResult.quads ?? [];
-  const vmQuads = vmResult.quads ?? [];
-  let mergedQuads: Quad[];
-
-  if (vmQuads.length > 0 && ltmQuads.length > 0) {
-    const vmQuadSP = new Set<string>();
-    for (const q of vmQuads) {
-      vmQuadSP.add(`${q.subject}\u0000${q.predicate}`);
-    }
-    const filteredLtmQuads = ltmQuads.filter(
-      (q) => !vmQuadSP.has(`${q.subject}\u0000${q.predicate}`),
-    );
-    mergedQuads = dedupeQuads([...filteredLtmQuads, ...vmQuads]);
-  } else {
-    mergedQuads = dedupeQuads([...ltmQuads, ...vmQuads]);
-  }
-
-  return {
-    bindings: mergedBindings,
-    ...(mergedQuads.length > 0 ? { quads: mergedQuads } : {}),
-  };
 }
 

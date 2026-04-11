@@ -24,6 +24,7 @@ import type {
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
+  V10UpdateKCParams,
   ConvictionAccountInfo,
 } from './chain-adapter.js';
 
@@ -941,6 +942,8 @@ export class EVMChainAdapter implements ChainAdapter {
       identityIds,
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
+      params.publishPolicy ?? 0,
+      params.publishAuthority ?? ethers.ZeroAddress,
     );
     const receipt = await tx.wait();
 
@@ -1103,6 +1106,31 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
+  async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
+    await this.init();
+
+    try {
+      const receipt = await this.provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) return null;
+
+      const v10 = this.contracts.knowledgeCollectionStorage
+        ? await this.parseV10PublishReceipt(receipt)
+        : null;
+      if (v10) return v10;
+
+      const v9 = this.contracts.knowledgeAssetsStorage
+        ? await this.parseV9PublishReceipt(receipt)
+        : null;
+      return v9;
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('could not find') || msg.includes('not found') || msg.includes('unknown transaction')) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   // =====================================================================
   // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
   // =====================================================================
@@ -1211,6 +1239,150 @@ export class EVMChainAdapter implements ChainAdapter {
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
+    };
+  }
+
+  private async parseV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Promise<OnChainPublishResult | null> {
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (!kcs) return null;
+
+    let kcId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = '';
+    let foundKCCreated = false;
+    let foundKAMinted = false;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'KnowledgeCollectionCreated') {
+          kcId = BigInt(parsed.args.id);
+          foundKCCreated = true;
+        }
+        if (parsed?.name === 'KnowledgeAssetsMinted') {
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId) - 1n;
+          publisherAddress = parsed.args.to;
+          foundKAMinted = true;
+        }
+      } catch {
+        // ignore unrelated logs
+      }
+    }
+
+    if (!foundKCCreated || !foundKAMinted) return null;
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId: kcId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+    };
+  }
+
+  private async parseV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Promise<OnChainPublishResult | null> {
+    const storage = this.contracts.knowledgeAssetsStorage;
+    if (!storage) return null;
+
+    let batchId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = '';
+    let foundBatchCreated = false;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+          foundBatchCreated = true;
+        }
+      } catch {
+        // ignore unrelated logs
+      }
+    }
+
+    if (!foundBatchCreated) return null;
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+    };
+  }
+
+  // =====================================================================
+  // V10 Update (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
+  // =====================================================================
+
+  async updateKnowledgeCollectionV10(params: V10UpdateKCParams): Promise<TxResult> {
+    await this.init();
+
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed — cannot update via V10 path.');
+    }
+
+    let signer: Wallet | undefined;
+
+    // Look up the on-chain publisher to select the correct signer.
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (kcs) {
+      try {
+        const onChainPublisher: string = await kcs.getLatestMerkleRootPublisher(params.kcId);
+        if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
+          signer = this.signerPool.find(
+            (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+          );
+        }
+      } catch {
+        // Fall through to hint-based or round-robin
+      }
+    }
+
+    if (!signer && params.publisherAddress) {
+      signer = this.signerPool.find(
+        (s) => s.address.toLowerCase() === params.publisherAddress!.toLowerCase(),
+      );
+    }
+    if (!signer) signer = this.nextSigner();
+
+    const ka = this.contracts.knowledgeAssetsV10.connect(signer) as Contract;
+
+    const tx = await ka.updateKnowledgeCollection(
+      params.kcId,
+      ethers.hexlify(params.newMerkleRoot),
+      params.newByteSize,
+      params.mintAmount ?? 0,
+      params.burnTokenIds ?? [],
+    );
+
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
     };
   }
 

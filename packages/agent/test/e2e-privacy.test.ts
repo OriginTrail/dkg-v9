@@ -9,7 +9,31 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { generateKCMetadata, computeTripleHashV10, computeFlatKCRootV10, type KAMetadata } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+
+/** Insert data quads AND matching meta quads so sync's data/meta guard passes. */
+async function insertWithMeta(
+  store: { insert(quads: any[]): Promise<void> },
+  contextGraphId: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+) {
+  await store.insert(quads);
+  const ual = `did:dkg:test:mock:31337/${Date.now()}`;
+  const kaEntries: KAMetadata[] = quads.map((q, i) => ({
+    rootEntity: q.subject,
+    kcUal: ual,
+    tokenId: BigInt(i + 1),
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+  }));
+  const merkleRoot = computeFlatKCRootV10(quads, []);
+  const meta = generateKCMetadata(
+    { ual, contextGraphId, merkleRoot, kaCount: kaEntries.length, publisherPeerId: 'test', timestamp: new Date() },
+    kaEntries,
+  );
+  await store.insert(meta);
+}
 
 const PRIVATE_PARANET = 'agent-memory-test';
 const PUBLIC_PARANET = 'public-e2e';
@@ -254,7 +278,7 @@ describe('Private context graph sync auth (3 nodes)', () => {
     ];
     await nodeA.share(PRIVATE_PARANET, privateQuads, { localOnly: true });
 
-    await (nodeA as any).store.insert([
+    await insertWithMeta((nodeA as any).store, PRIVATE_PARANET, [
       {
         subject: PRIVATE_ENTITY,
         predicate: 'http://schema.org/name',
@@ -388,8 +412,10 @@ describe('Context graph access matrix (3 nodes)', () => {
       { subject: MATRIX_PRIVATE_SWM_ENTITY, predicate: 'http://schema.org/name', object: '"Private SWM"', graph: '' },
     ], { localOnly: true });
 
-    await (nodeA as any).store.insert([
+    await insertWithMeta((nodeA as any).store, MATRIX_PUBLIC_PARANET, [
       { subject: MATRIX_PUBLIC_DATA_ENTITY, predicate: 'http://schema.org/name', object: '"Public Data"', graph: contextGraphDataUri(MATRIX_PUBLIC_PARANET) },
+    ]);
+    await insertWithMeta((nodeA as any).store, MATRIX_PRIVATE_PARANET, [
       { subject: MATRIX_PRIVATE_DATA_ENTITY, predicate: 'http://schema.org/name', object: '"Private Data"', graph: contextGraphDataUri(MATRIX_PRIVATE_PARANET) },
     ]);
 

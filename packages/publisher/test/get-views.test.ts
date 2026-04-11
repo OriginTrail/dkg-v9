@@ -2,10 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   type GetView,
   GET_VIEWS,
-  contextGraphDataUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri,
-  contextGraphDraftUri,
+  contextGraphAssertionUri,
 } from '@origintrail-official/dkg-core';
 import { resolveViewGraphs, type ViewResolution } from '@origintrail-official/dkg-query';
 
@@ -18,12 +17,11 @@ describe('resolveViewGraphs', () => {
       expect(() => resolveViewGraphs('working-memory', CG)).toThrow('agentAddress is required');
     });
 
-    it('returns a prefix for all agent drafts when no draftName given', () => {
+    it('returns a prefix for all agent assertions when no assertionName given', () => {
       const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
       expect(res.graphs).toHaveLength(0);
       expect(res.graphPrefixes).toHaveLength(1);
-      expect(res.graphPrefixes[0]).toBe(`did:dkg:context-graph:${CG}/draft/${AGENT}/`);
-      expect(res.vmWinsOnConflict).toBe(false);
+      expect(res.graphPrefixes[0]).toBe(`did:dkg:context-graph:${CG}/assertion/${AGENT}/`);
     });
 
     it('includes the agent address in the graph URI prefix', () => {
@@ -31,9 +29,9 @@ describe('resolveViewGraphs', () => {
       expect(res.graphPrefixes[0]).toContain(AGENT);
     });
 
-    it('returns an exact draft URI when draftName is provided', () => {
-      const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT, draftName: 'exp-lr' });
-      expect(res.graphs).toEqual([contextGraphDraftUri(CG, AGENT, 'exp-lr')]);
+    it('returns an exact assertion URI when assertionName is provided', () => {
+      const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT, assertionName: 'exp-lr' });
+      expect(res.graphs).toEqual([contextGraphAssertionUri(CG, AGENT, 'exp-lr')]);
       expect(res.graphPrefixes).toHaveLength(0);
     });
   });
@@ -44,17 +42,6 @@ describe('resolveViewGraphs', () => {
       expect(res.graphs).toEqual([contextGraphSharedMemoryUri(CG)]);
       expect(res.graphs[0]).toBe(`did:dkg:context-graph:${CG}/_shared_memory`);
       expect(res.graphPrefixes).toHaveLength(0);
-      expect(res.vmWinsOnConflict).toBe(false);
-    });
-  });
-
-  describe('long-term-memory', () => {
-    it('maps to the data graph', () => {
-      const res = resolveViewGraphs('long-term-memory', CG);
-      expect(res.graphs).toEqual([contextGraphDataUri(CG)]);
-      expect(res.graphs[0]).toBe(`did:dkg:context-graph:${CG}`);
-      expect(res.graphPrefixes).toHaveLength(0);
-      expect(res.vmWinsOnConflict).toBe(false);
     });
   });
 
@@ -63,7 +50,6 @@ describe('resolveViewGraphs', () => {
       const res = resolveViewGraphs('verified-memory', CG);
       expect(res.graphs).toHaveLength(0);
       expect(res.graphPrefixes).toEqual([`did:dkg:context-graph:${CG}/_verified_memory/`]);
-      expect(res.vmWinsOnConflict).toBe(false);
     });
 
     it('returns an exact URI when verifiedGraph is specified', () => {
@@ -74,31 +60,30 @@ describe('resolveViewGraphs', () => {
     });
   });
 
-  describe('authoritative', () => {
-    it('returns both LTM graph and VM prefix (union query)', () => {
-      const res = resolveViewGraphs('authoritative', CG);
-      expect(res.graphs).toEqual([contextGraphDataUri(CG)]);
-      expect(res.graphPrefixes).toEqual([`did:dkg:context-graph:${CG}/_verified_memory/`]);
+  describe('regression: legacy views throw migration error', () => {
+    it('long-term-memory throws', () => {
+      expect(() => resolveViewGraphs('long-term-memory' as GetView, CG)).toThrow(
+        /removed in V10/,
+      );
     });
 
-    it('sets vmWinsOnConflict to true', () => {
-      const res = resolveViewGraphs('authoritative', CG);
-      expect(res.vmWinsOnConflict).toBe(true);
+    it('authoritative throws', () => {
+      expect(() => resolveViewGraphs('authoritative' as GetView, CG)).toThrow(
+        /removed in V10/,
+      );
     });
   });
 
   describe('GET_VIEWS constant', () => {
-    it('contains all 5 views', () => {
-      expect(GET_VIEWS).toHaveLength(5);
+    it('contains all 3 views', () => {
+      expect(GET_VIEWS).toHaveLength(3);
     });
 
     it('is ordered by trust level (ascending)', () => {
       expect([...GET_VIEWS]).toEqual([
         'working-memory',
         'shared-working-memory',
-        'long-term-memory',
         'verified-memory',
-        'authoritative',
       ]);
     });
 

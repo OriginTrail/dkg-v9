@@ -12,6 +12,8 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {PublishingConvictionAccount} from "./PublishingConvictionAccount.sol";
+import {ContextGraphs} from "./ContextGraphs.sol";
+import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
 import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
 import {ParanetsRegistry} from "./storage/paranets/ParanetsRegistry.sol";
@@ -29,7 +31,7 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 /**
  * @title KnowledgeAssetsV10
  * @notice V10 publish contract — evolves V8 KnowledgeCollection with:
- *   - V10 ACK digest: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize)))
+ *   - V10 ACK digest: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount)))
  *   - Dynamic signature count from ParametersStorage.minimumRequiredSignatures()
  *   - Conviction account payment (PublishingConvictionAccount integration)
  *   - Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility
@@ -51,6 +53,11 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
     PublishingConvictionAccount public convictionAccount;
+    ContextGraphs public contextGraphs;
+
+    // Tracks the original (maximum) byte size paid for at creation time.
+    // Updates can shrink below this but never exceed it without additional payment.
+    mapping(uint256 => uint88) public originalByteSize;
 
     error ConvictionAccountNotConfigured();
 
@@ -81,6 +88,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         } catch {
             // conviction not yet deployed — convictionAccountId > 0 will revert
         }
+
+        try hub.getContractAddress("ContextGraphs") returns (address addr) {
+            contextGraphs = ContextGraphs(addr);
+        } catch {
+            // ContextGraphs not yet deployed
+        }
     }
 
     function name() public pure virtual returns (string memory) {
@@ -98,7 +111,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /**
      * @notice Publish Knowledge Assets using V10 ACK verification.
      *
-     * Core nodes sign: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize))).
+     * Core nodes sign: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount))).
      * Signature count is read from ParametersStorage.minimumRequiredSignatures().
      * Payment via conviction account (discounted) or market rate (V8 path).
      * Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility.
@@ -141,19 +154,47 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ) external returns (uint256) {
         _verifySignature(
             publisherNodeIdentityId,
-            ECDSA.toEthSignedMessageHash(keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))),
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
+            ),
             publisherNodeR,
             publisherNodeVS
         );
 
-        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount, uint256(byteSize)));
+        bytes32 ackDigest = keccak256(abi.encodePacked(
+            contextGraphId,
+            merkleRoot,
+            knowledgeAssetsAmount,
+            uint256(byteSize),
+            uint256(epochs),
+            uint256(tokenAmount)
+        ));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
+
+        // Recover the publisher's wallet from the publisher signature — not msg.sender,
+        // because the tx may be submitted by a different operational wallet (round-robin).
+        address publisherWallet = ECDSA.recover(
+            ECDSA.toEthSignedMessageHash(
+                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
+            ),
+            publisherNodeR,
+            publisherNodeVS
+        );
+
+        if (address(contextGraphs) != address(0) && contextGraphId > 0) {
+            // V10.0: curated CGs require the publishAuthority to be an EOA whose
+            // signature matches publisherWallet. Contract authorities (multisigs, PCAs)
+            // require ERC-1271 verification or a delegation registry — deferred to V10.x.
+            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet)) {
+                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, publisherWallet);
+            }
+        }
 
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
 
         uint256 id = kcs.createKnowledgeCollection(
-            msg.sender,
+            publisherWallet,
             publishOperationId,
             merkleRoot,
             knowledgeAssetsAmount,
@@ -163,6 +204,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             tokenAmount,
             isImmutable
         );
+
+        originalByteSize[id] = byteSize;
 
         _validateTokenAmount(byteSize, epochs, tokenAmount, false);
 
@@ -331,6 +374,76 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             }
         }
     }
+
+    // ========================================================================
+    // V10 Update (works with KnowledgeCollectionStorage, not V9 KnowledgeAssetsStorage)
+    // ========================================================================
+
+    /**
+     * @notice Update an existing knowledge collection. Only the latest publisher
+     *         (the address that pushed the most recent merkle root) may call this.
+     *
+     * NOTE: This function currently does not charge an update fee. The V9 update
+     * fee model (10% + excess-byte cost) is tightly coupled to V9 epoch/reward
+     * accounting. A V10-native fee model will be added before mainnet launch.
+     *
+     * @param id Knowledge collection ID (from createKnowledgeAssets)
+     * @param newMerkleRoot New merkle root for the updated data
+     * @param newByteSize Updated byte size (must not exceed original)
+     * @param mintAmount Number of new KA tokens to mint (0 if unchanged)
+     * @param burnTokenIds Token IDs to burn (empty if unchanged)
+     */
+    function updateKnowledgeCollection(
+        uint256 id,
+        bytes32 newMerkleRoot,
+        uint88 newByteSize,
+        uint256 mintAmount,
+        uint256[] calldata burnTokenIds
+    ) external {
+        KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
+
+        address latestPublisher = kcs.getLatestMerkleRootPublisher(id);
+        require(latestPublisher != address(0), "Knowledge collection does not exist");
+        if (latestPublisher != msg.sender) {
+            revert KnowledgeAssetsLib.NotBatchPublisher(id, msg.sender);
+        }
+
+        (, , , uint88 oldByteSize, , uint40 endEpoch, uint96 existingTokenAmount, bool isImmutable) =
+            kcs.getKnowledgeCollectionMetadata(id);
+
+        if (isImmutable) {
+            revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(id);
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (currentEpoch > endEpoch) {
+            revert KnowledgeCollectionLib.KnowledgeCollectionExpired(id, currentEpoch, endEpoch);
+        }
+
+        uint88 ceiling = originalByteSize[id];
+        if (ceiling == 0) {
+            // First update for a pre-tracking collection — persist the ceiling
+            ceiling = oldByteSize;
+            originalByteSize[id] = ceiling;
+        }
+        require(newByteSize <= ceiling, "Cannot increase byte size without additional payment");
+        require(burnTokenIds.length == 0, "Token burning not yet supported in V10 updates");
+
+        kcs.updateKnowledgeCollection(
+            msg.sender,
+            id,
+            "",
+            newMerkleRoot,
+            mintAmount,
+            burnTokenIds,
+            newByteSize,
+            existingTokenAmount
+        );
+    }
+
+    // ========================================================================
+    // Internal: Token Distribution
+    // ========================================================================
 
     function _distributeTokens(uint96 tokenAmount, uint256 epochs, uint40 currentEpoch) internal {
         require(epochs > 0, "epochs must be > 0");

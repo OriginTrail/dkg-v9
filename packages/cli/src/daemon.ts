@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -50,7 +51,13 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
+import { FileStore } from './file-store.js';
+import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
@@ -75,6 +82,55 @@ function getCurrentCommitShort(): string {
     } catch { return ''; }
   }
 }
+
+// ---------------------------------------------------------------------------
+// SKILL.MD serving — Agent Skills standard (https://agentskills.io)
+// ---------------------------------------------------------------------------
+
+let cachedSkillMd: string | null = null;
+let cachedSkillEtag: string | null = null;
+
+function loadSkillTemplate(): string {
+  if (cachedSkillMd) return cachedSkillMd;
+  const skillPath = new URL('../skills/dkg-node/SKILL.md', import.meta.url);
+  const content = readFileSync(skillPath, 'utf-8');
+  cachedSkillMd = content;
+  return content;
+}
+
+function buildSkillMd(opts: {
+  version: string;
+  baseUrl: string;
+  peerId: string;
+  nodeRole: string;
+  extractionPipelines: string[];
+}): string {
+  const template = loadSkillTemplate();
+  const dynamicSection = [
+    `- **Node version:** ${opts.version}`,
+    `- **Base URL:** ${opts.baseUrl}`,
+    `- **Peer ID:** ${opts.peerId}`,
+    `- **Node role:** ${opts.nodeRole}`,
+    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'none (install markitdown to enable document conversion)'}`,
+    `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
+  ].join('\n');
+
+  const staticPlaceholder =
+    '> This section is dynamically generated from node state at serve-time.\n\n'
+    + '- **Node version:** (dynamic)\n'
+    + '- **Base URL:** (dynamic)\n'
+    + '- **Peer ID:** (dynamic)\n'
+    + '- **Node role:** (dynamic — `core` or `edge`)\n'
+    + '- **Available extraction pipelines:** (dynamic)\n'
+    + '- **Subscribed Context Graphs:** (dynamic)';
+
+  return template.replace(staticPlaceholder, dynamicSection);
+}
+
+function skillEtag(content: string): string {
+  return '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
+}
+
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
@@ -88,6 +144,11 @@ export function parseRequiredSignatures(raw: unknown): { value: number } | { err
   if (typeof raw !== 'number') return { error: 'requiredSignatures must be a number' };
   if (!Number.isInteger(raw) || raw < 1) return { error: 'requiredSignatures must be a positive integer (>= 1)' };
   return { value: raw };
+}
+
+function normalizeDetectedContentType(contentType: string | undefined): string {
+  const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
 }
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
@@ -135,6 +196,7 @@ interface PublishRequestBody {
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
+  subGraphName?: string;
 }
 
 
@@ -284,7 +346,10 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
   });
 
+  let publisherRuntime: PublisherRuntime | null = null;
+
   const networkId = await computeNetworkId();
+  const publisherControl = createPublisherControlFromStore(agent.store);
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network?.networkId && network.networkId !== networkId) {
     log(`FATAL: genesis mismatch! Expected networkId ${network.networkId.slice(0, 16)}... but computed ${networkId.slice(0, 16)}...`);
@@ -315,6 +380,34 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   await agent.start();
   await agent.publishProfile();
+
+  publisherRuntime = await startPublisherRuntimeIfEnabled({
+    dataDir: dkgDir(),
+    config,
+    store: agent.store,
+    keypair: agent.wallet.keypair,
+    chainBase,
+    ackTransportFactory: () => ({
+      publisherPeerId: agent.peerId,
+      gossipPublish: async (topic: string, data: Uint8Array) => {
+        await agent.gossip.publish(topic, data);
+      },
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+        return agent.router.send(peerId, protocol, data);
+      },
+      getConnectedCorePeers: () => {
+        const allPeers = agent.node.libp2p.getPeers().map((p) => p.toString()).filter((id) => id !== agent.peerId);
+        const knownCorePeerIds = (agent as any).knownCorePeerIds as Set<string> | undefined;
+        if (knownCorePeerIds && knownCorePeerIds.size > 0) {
+          const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
+          if (filtered.length > 0) return filtered;
+        }
+        return allPeers;
+      },
+      log,
+    }),
+    log,
+  });
 
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
@@ -741,11 +834,37 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     latestByParanet: new Map(),
   };
 
+  // --- Extraction Pipelines ---
+
+  const extractionRegistry = new ExtractionPipelineRegistry();
+  if (isMarkItDownAvailable()) {
+    extractionRegistry.register(new MarkItDownConverter());
+  }
+  // text/markdown is always natively handled by the import-file route
+  // regardless of converter registration; report the full effective set so
+  // operators see the same list that /.well-known/skill.md advertises.
+  const supportedIngestionTypes = [
+    ...new Set(['text/markdown', ...extractionRegistry.availableContentTypes()]),
+  ];
+  log(`Extraction pipelines: ${supportedIngestionTypes.join(', ')}`);
+  if (!isMarkItDownAvailable()) {
+    log('MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)');
+  }
+
+  // --- File Store ---
+
+  const fileStore = new FileStore(join(dkgDir(), 'files'));
+
+  // In-memory extraction job status tracker. Synchronous extractions (the V10.0
+  // default) populate this with a completed record on the same request; async
+  // workflows can be layered later without changing the endpoint contract.
+  const extractionStatus = new Map<string, ExtractionStatusRecord>();
+
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
     config.rateLimit?.requestsPerMinute ?? 120,
-    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health'],
+    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health', '/.well-known/skill.md'],
   );
   let corsAllowed: CorsAllowlist = '*';
 
@@ -837,6 +956,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         req,
         res,
         agent,
+        publisherControl,
         config,
         startedAt,
         dashDb,
@@ -848,6 +968,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         nodeVersion,
         nodeCommit,
         catchupTracker,
+        extractionRegistry,
+        fileStore,
+        extractionStatus,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -901,6 +1024,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       finally { if (timer) clearTimeout(timer); }
     }));
     metricsCollector.stop();
+    await publisherRuntime?.stop().catch((err: any) => log(`Publisher runtime stop error: ${err?.message ?? String(err)}`));
     server.close();
     appStaticServer?.close();
     await agent.stop();
@@ -1143,6 +1267,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   agent: DKGAgent,
+  publisherControl: ReturnType<typeof createPublisherControlFromStore>,
   config: DkgConfig,
   startedAt: number,
   dashDb: DashboardDB,
@@ -1154,9 +1279,45 @@ async function handleRequest(
   nodeVersion: string,
   nodeCommit: string,
   catchupTracker: CatchupTracker,
+  extractionRegistry: ExtractionPipelineRegistry,
+  fileStore: FileStore,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
+
+  // GET /.well-known/skill.md — Agent Skills document (PUBLIC, no auth)
+  if (req.method === 'GET' && path === '/.well-known/skill.md') {
+    const proto = req.headers['x-forwarded-proto'] ?? 'http';
+    const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
+    const baseUrl = `${proto}://${host}`;
+    // text/markdown is always handled natively by the import-file route
+    // (skip Phase 1, run the Phase 2 markdown extractor directly), even when
+    // no Phase 1 converter is registered. Surface it in the discovery list so
+    // skill-driven clients see Markdown ingestion as supported regardless of
+    // converter availability.
+    const pipelines = extractionRegistry.availableContentTypes();
+    const content = buildSkillMd({
+      version: nodeVersion,
+      baseUrl,
+      peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      extractionPipelines: [...new Set(['text/markdown', ...pipelines])],
+    });
+    const etag = skillEtag(content);
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304).end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'ETag': etag,
+      'Cache-Control': 'public, max-age=300',
+      'Vary': 'Host, X-Forwarded-Host, X-Forwarded-Proto',
+    });
+    res.end(content);
+    return;
+  }
 
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {
@@ -1756,60 +1917,6 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
-  if (req.method === 'POST' && path === '/api/publish') {
-    const serverT0 = Date.now();
-    const body = await readBody(req);
-    const parsed = parsePublishRequestBody(body);
-    if (!parsed.ok) {
-      return jsonResponse(res, 400, { error: parsed.error });
-    }
-
-    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
-    const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
-    try {
-      const result = await agent.publish(paranetId, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-        operationCtx: ctx,
-        onPhase: tracker.phaseCallback(ctx),
-      });
-      const chain = result.onChainResult;
-      if (chain) {
-        tracker.setCost(ctx, {
-          gasUsed: chain.gasUsed,
-          gasPrice: chain.effectiveGasPrice,
-          gasCost: chain.gasCostWei,
-          tracCost: chain.tokenAmount,
-        });
-        const chainId = (config.chain ?? network?.chain)?.chainId;
-        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
-      }
-      tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, {
-        kcId: String(result.kcId),
-        status: result.status,
-        kas: result.kaManifest.map(ka => ({
-          tokenId: String(ka.tokenId),
-          rootEntity: ka.rootEntity,
-        })),
-        ...(result.onChainResult && {
-          txHash: result.onChainResult.txHash,
-          blockNumber: result.onChainResult.blockNumber,
-          batchId: String(result.onChainResult.batchId),
-          publisherAddress: result.onChainResult.publisherAddress,
-        }),
-        phases: opDetail.phases,
-        serverTotal: Date.now() - serverT0,
-      });
-    } catch (err) {
-      tracker.fail(ctx, err);
-      throw err;
-    }
-  }
-
   // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/update') {
     const body = await readBody(req);
@@ -1858,24 +1965,36 @@ async function handleRequest(
   // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
-    const { quads } = parsed;
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { quads, subGraphName } = parsed;
+    const localOnly = parsed.localOnly === true;
+    if (parsed.localOnly !== undefined && typeof parsed.localOnly !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
+    }
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
     }
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('share');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api', subGraphName } });
     try {
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside share
       });
-      await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { operationCtx: ctx }),
+      const result = await tracker.trackPhase(ctx, 'store', () =>
+        agent.share(paranetId, quads, { subGraphName, localOnly, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ok: true, phases: opDetail.phases });
+      return jsonResponse(res, 200, {
+        shareOperationId: result?.shareOperationId,
+        workspaceOperationId: result?.shareOperationId,
+        contextGraphId: paranetId,
+        paranetId,
+        graph: contextGraphSharedMemoryUri(paranetId, subGraphName),
+        triplesWritten: quads.length,
+      });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
@@ -1885,12 +2004,17 @@ async function handleRequest(
   // POST /api/shared-memory/publish (V10) or /api/workspace/enshrine (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
-    const { selection, clearAfter, publishContextGraphId } = parsed;
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { selection, clearAfter, publishContextGraphId, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (subGraphName && publishContextGraphId) {
+      return jsonResponse(res, 400, { error: '"subGraphName" and "publishContextGraphId" cannot be used together' });
+    }
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId, subGraphName } });
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
@@ -1898,6 +2022,7 @@ async function handleRequest(
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
+          subGraphName,
           ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
@@ -1921,6 +2046,118 @@ async function handleRequest(
       tracker.fail(ctx, err);
       throw err;
     }
+  }
+
+  // POST /api/publisher/enqueue
+  // Accepts both the old wrapped shape { request: LiftRequest } and the new flat shape.
+  if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let raw: any;
+    try { raw = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const parsed = raw.request && typeof raw.request === 'object' ? raw.request : raw;
+    const { roots, namespace, scope, authorityProofRef, priorVersion } = parsed;
+    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
+    const shareOperationId = parsed.shareOperationId ?? parsed.workspaceOperationId;
+    const swmId = parsed.swmId ?? parsed.workspaceId ?? 'swm-main';
+    const transitionType = parsed.transitionType ?? 'CREATE';
+    const authorityType = parsed.authorityType ?? parsed.authority?.type ?? 'owner';
+    const proofRef = authorityProofRef ?? parsed.authority?.proofRef;
+    if (!contextGraphId || !shareOperationId || !Array.isArray(roots) || roots.length === 0 || !namespace || !scope || !proofRef) {
+      return jsonResponse(res, 400, { error: 'Missing required enqueue fields' });
+    }
+    const jobId = await publisherControl.lift({
+      swmId,
+      shareOperationId,
+      roots,
+      contextGraphId,
+      namespace,
+      scope,
+      transitionType,
+      authority: { type: authorityType, proofRef },
+      ...(priorVersion ? { priorVersion } : {}),
+    } as any);
+    return jsonResponse(res, 200, { jobId, contextGraphId, shareOperationId, rootsCount: roots.length });
+  }
+
+  // GET /api/publisher/jobs?status=...
+  if (req.method === 'GET' && path === '/api/publisher/jobs') {
+    const status = typeof url.searchParams.get('status') === 'string' ? url.searchParams.get('status')! : undefined;
+    const jobs = await publisherControl.list(status ? { status: status as any } : undefined);
+    return jsonResponse(res, 200, { jobs });
+  }
+
+  // GET /api/publisher/job?id=...  (new route, wrapped response)
+  if (req.method === 'GET' && path === '/api/publisher/job') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    return jsonResponse(res, 200, { job });
+  }
+
+  // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
+  if (req.method === 'GET' && path === '/api/publisher/job-payload') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    const payload = await publisherControl.inspectPreparedPayload(jobId);
+    return jsonResponse(res, 200, { job, payload });
+  }
+
+  // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
+  if (req.method === 'GET' && path.startsWith('/api/publisher/jobs/')) {
+    const segments = path.slice('/api/publisher/jobs/'.length).split('/');
+    const jobId = segments[0];
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    if (segments[1] === 'payload') {
+      const payload = await publisherControl.inspectPreparedPayload(jobId);
+      return jsonResponse(res, 200, { ...job, payload });
+    }
+    return jsonResponse(res, 200, job);
+  }
+
+  // GET /api/publisher/stats — returns the raw status map directly for backward compat
+  if (req.method === 'GET' && path === '/api/publisher/stats') {
+    const stats = await publisherControl.getStats();
+    return jsonResponse(res, 200, stats);
+  }
+
+  // POST /api/publisher/cancel
+  if (req.method === 'POST' && path === '/api/publisher/cancel') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { jobId } = parsed;
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing jobId' });
+    await publisherControl.cancel(jobId);
+    return jsonResponse(res, 200, { cancelled: jobId });
+  }
+
+  // POST /api/publisher/retry
+  if (req.method === 'POST' && path === '/api/publisher/retry') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let retryParsed: any;
+    try { retryParsed = JSON.parse(body || '{}'); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { status } = retryParsed;
+    if (status && status !== 'failed') return jsonResponse(res, 400, { error: 'Only status=failed is supported' });
+    const count = await publisherControl.retry({ status: 'failed' });
+    return jsonResponse(res, 200, { retried: count });
+  }
+
+  // POST /api/publisher/clear
+  if (req.method === 'POST' && path === '/api/publisher/clear') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let clearParsed: any;
+    try { clearParsed = JSON.parse(body || '{}'); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { status } = clearParsed;
+    if (status !== 'failed' && status !== 'finalized') {
+      return jsonResponse(res, 400, { error: 'status must be failed or finalized' });
+    }
+    const count = await publisherControl.clear(status);
+    return jsonResponse(res, 200, { cleared: count, status });
   }
 
   // POST /api/context-graph/create — on-chain context graph creation (V10)
@@ -1988,6 +2225,509 @@ async function handleRequest(
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
+  // POST /api/sub-graph/create  { contextGraphId, subGraphName }
+  if (req.method === 'POST' && path === '/api/sub-graph/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!subGraphName) return jsonResponse(res, 400, { error: 'Missing "subGraphName"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof subGraphName !== 'string') return jsonResponse(res, 400, { error: '"subGraphName" must be a string' });
+    const sgVal = validateSubGraphName(subGraphName);
+    if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
+    try {
+      await agent.createSubGraph(contextGraphId, subGraphName);
+      return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
+    } catch (err: any) {
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
+  if (req.method === 'POST' && path === '/api/assertion/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, name, subGraphName } = parsed;
+    if (!name) return jsonResponse(res, 400, { error: 'Missing "name"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof name !== 'string') return jsonResponse(res, 400, { error: '"name" must be a string' });
+    const nameVal = validateAssertionName(name);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const assertionUri = await agent.assertion.create(contextGraphId, name, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { assertionUri });
+    } catch (err: any) {
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, quads, subGraphName } = parsed;
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      await agent.assertion.write(contextGraphId, assertionName, quads, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { written: quads.length });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const quads = await agent.assertion.query(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { quads, count: quads.length });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entities, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateEntities(entities, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const result = await agent.assertion.promote(contextGraphId, assertionName, { entities: entities ?? 'all', subGraphName });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { discarded: true });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/import-file  (multipart/form-data)
+  //   file (required):           the uploaded document bytes
+  //   contextGraphId (required): target context graph
+  //   contentType (optional):    override the file part's Content-Type
+  //   ontologyRef (optional):    CG _ontology URI for guided Phase 2 extraction
+  //   subGraphName (optional):   target sub-graph inside the CG
+  //
+  // Orchestration:
+  //   1. Parse multipart, store original file in file store → fileHash
+  //   2. Resolve detectedContentType (explicit field > multipart content-type)
+  //   3. If content type is text/markdown: skip Phase 1, use raw bytes as mdIntermediate
+  //      Else if a converter is registered: run Phase 1, store mdIntermediate → mdIntermediateHash
+  //      Else: graceful degrade — return extraction.status="skipped", no triples written
+  //   4. Run Phase 2 markdown extractor on the mdIntermediate → triples + provenance
+  //   5. Write triples + provenance to the assertion graph via agent.assertion.write
+  //   6. Record the extraction status in the in-memory Map, return ImportFileResponse
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/import-file')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/import-file'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+
+    const boundary = parseBoundary(req.headers['content-type']);
+    if (!boundary) {
+      return jsonResponse(res, 400, { error: 'Request must be multipart/form-data with a boundary' });
+    }
+
+    let body: Buffer;
+    try {
+      body = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
+    } catch (err: any) {
+      if (err instanceof PayloadTooLargeError) throw err;
+      return jsonResponse(res, 400, { error: `Failed to read request body: ${err.message}` });
+    }
+
+    let fields;
+    try {
+      fields = parseMultipart(body, boundary);
+    } catch (err: any) {
+      if (err instanceof MultipartParseError) {
+        return jsonResponse(res, 400, { error: `Malformed multipart body: ${err.message}` });
+      }
+      throw err;
+    }
+
+    const filePart = fields.find(f => f.name === 'file' && f.filename !== undefined);
+    if (!filePart) {
+      return jsonResponse(res, 400, { error: 'Missing required "file" field in multipart body' });
+    }
+    const textField = (name: string): string | undefined => {
+      const f = fields.find(x => x.name === name && x.filename === undefined);
+      return f ? f.content.toString('utf-8') : undefined;
+    };
+    const contextGraphId = textField('contextGraphId');
+    const contentTypeOverrideRaw = textField('contentType');
+    // Treat blank (`contentType=` with empty/whitespace value) as absent so we
+    // fall through to the file part's own Content-Type header instead of
+    // downgrading a real text/markdown / application/pdf upload to
+    // application/octet-stream and silently skipping extraction.
+    const contentTypeOverride =
+      contentTypeOverrideRaw && contentTypeOverrideRaw.trim().length > 0
+        ? contentTypeOverrideRaw
+        : undefined;
+    const ontologyRef = textField('ontologyRef');
+    const subGraphName = textField('subGraphName');
+
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+
+    const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
+
+    if (subGraphName) {
+      try {
+        const registeredSubGraphs: Array<{ name: string }> = await agent.listSubGraphs(contextGraphId!);
+        if (!registeredSubGraphs.some(subGraph => subGraph.name === subGraphName)) {
+          return jsonResponse(res, 400, { error: unregisteredSubGraphError(contextGraphId!, subGraphName) });
+        }
+      } catch (err: any) {
+        return jsonResponse(res, 500, { error: `Failed to verify sub-graph registration: ${err.message}` });
+      }
+    }
+
+    // Persist the original upload to the file store.
+    let fileStoreEntry;
+    try {
+      fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: `Failed to store uploaded file: ${err.message}` });
+    }
+
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId!,
+      agent.peerId,
+      assertionName,
+      subGraphName,
+    );
+    const startedAt = new Date().toISOString();
+
+    // ── Phase 1: converter lookup + MD intermediate resolution ──
+    // text/markdown is deliberately NOT a registered converter content type.
+    // The raw uploaded bytes ARE the Markdown intermediate, so Phase 1 is skipped.
+    // For any other content type, look up a converter; if none is registered,
+    // gracefully degrade (store the file, skip extraction, return status=skipped).
+    let mdIntermediate: string | null = null;
+    let pipelineUsed: string | null = null;
+    let mdIntermediateHash: string | undefined;
+    const respondWithImportFileResponse = (statusCode: number, extraction: ImportFileExtractionPayload) =>
+      jsonResponse(
+        res,
+        statusCode,
+        buildImportFileResponse({
+          assertionUri,
+          fileHash: fileStoreEntry.hash,
+          detectedContentType,
+          extraction,
+        }),
+      );
+    const recordInProgressExtraction = (): void => {
+      setExtractionStatusRecord(extractionStatus, assertionUri, {
+        status: 'in_progress',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed,
+        tripleCount: 0,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        startedAt,
+      });
+    };
+    const recordFailedExtraction = (
+      error: string,
+      tripleCount: number,
+      failedPipelineUsed: string | null = pipelineUsed,
+    ): ExtractionStatusRecord => {
+      const failedRecord: ExtractionStatusRecord = {
+        status: 'failed',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed: failedPipelineUsed,
+        tripleCount,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        error,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+      setExtractionStatusRecord(extractionStatus, assertionUri, failedRecord);
+      return failedRecord;
+    };
+    const respondWithFailedExtraction = (
+      statusCode: number,
+      error: string,
+      tripleCount: number,
+      failedPipelineUsed: string | null = pipelineUsed,
+    ) => {
+      const failedRecord = recordFailedExtraction(error, tripleCount, failedPipelineUsed);
+      return respondWithImportFileResponse(statusCode, {
+        status: 'failed',
+        tripleCount,
+        pipelineUsed: failedRecord.pipelineUsed,
+        ...(failedRecord.mdIntermediateHash ? { mdIntermediateHash: failedRecord.mdIntermediateHash } : {}),
+        error,
+      });
+    };
+
+    recordInProgressExtraction();
+
+    if (detectedContentType === 'text/markdown') {
+      mdIntermediate = filePart.content.toString('utf-8');
+      pipelineUsed = 'text/markdown';
+      recordInProgressExtraction();
+    } else {
+      const converter = extractionRegistry.get(detectedContentType);
+      if (converter) {
+        try {
+          const { mdIntermediate: md } = await converter.extract({
+            filePath: fileStoreEntry.path,
+            contentType: detectedContentType,
+            ontologyRef,
+            agentDid: `did:dkg:agent:${agent.peerId}`,
+          });
+          mdIntermediate = md;
+          pipelineUsed = detectedContentType;
+          const mdEntry = await fileStore.put(Buffer.from(md, 'utf-8'), 'text/markdown');
+          mdIntermediateHash = mdEntry.hash;
+          recordInProgressExtraction();
+        } catch (err: any) {
+          return respondWithFailedExtraction(500, `Phase 1 converter failed: ${err.message}`, 0, detectedContentType);
+        }
+      }
+    }
+
+    // ── Graceful degrade: no converter registered and not text/markdown ──
+    // Store the file blob, return status=skipped, no triples written.
+    if (mdIntermediate === null) {
+      const skippedRecord: ExtractionStatusRecord = {
+        status: 'skipped',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed: null,
+        tripleCount: 0,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+      setExtractionStatusRecord(extractionStatus, assertionUri, skippedRecord);
+      return respondWithImportFileResponse(200, {
+        status: 'skipped',
+        tripleCount: 0,
+        pipelineUsed: null,
+      });
+    }
+
+    // ── Phase 2: markdown → triples + provenance ──
+    let triples;
+    let provenance;
+    try {
+      const result = extractFromMarkdown({
+        markdown: mdIntermediate,
+        agentDid: `did:dkg:agent:${agent.peerId}`,
+        ontologyRef,
+        documentIri: assertionUri,
+      });
+      triples = result.triples;
+      provenance = result.provenance;
+    } catch (err: any) {
+      return respondWithFailedExtraction(500, `Phase 2 extraction failed: ${err.message}`, 0);
+    }
+
+    // ── Write triples + provenance to the assertion graph ──
+    // The sub-graph registration check in assertionCreate/Write (finding 4 of #81)
+    // will throw if subGraphName is provided but unregistered — that's intentional.
+    const allTriples = [...triples, ...provenance];
+    try {
+      // Ensure the assertion graph exists even when Phase 2 yields zero triples,
+      // so a completed import always materializes the reported assertion URI.
+      try {
+        await agent.assertion.create(
+          contextGraphId!,
+          assertionName,
+          subGraphName ? { subGraphName } : undefined,
+        );
+      } catch (err: any) {
+        const message = err?.message ?? String(err);
+        if (message.includes('already exists') || message.includes('duplicate') || message.includes('conflict')) {
+          // create() is idempotent when the graph already exists.
+        } else if (
+          message.includes('has not been registered')
+          || message.includes('Invalid')
+          || message.includes('Unsafe')
+        ) {
+          return respondWithFailedExtraction(400, message, triples.length);
+        } else {
+          return respondWithFailedExtraction(500, message, triples.length);
+        }
+      }
+      if (allTriples.length > 0) {
+        await agent.assertion.write(
+          contextGraphId!,
+          assertionName,
+          allTriples.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
+          subGraphName ? { subGraphName } : undefined,
+        );
+      }
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (message.includes('has not been registered')) {
+        return respondWithFailedExtraction(400, message, triples.length);
+      }
+      if (message.includes('Invalid') || message.includes('Unsafe')) {
+        return respondWithFailedExtraction(400, message, triples.length);
+      }
+      // Unexpected write-stage failure: record the failure on the extraction
+      // status map before rethrowing so /extraction-status doesn't stay stuck
+      // at in_progress when the top-level 500 handler takes over.
+      recordFailedExtraction(message, triples.length);
+      throw err;
+    }
+
+    const completedRecord: ExtractionStatusRecord = {
+      status: 'completed',
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      pipelineUsed,
+      tripleCount: triples.length,
+      mdIntermediateHash,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+    setExtractionStatusRecord(extractionStatus, assertionUri, completedRecord);
+
+    return respondWithImportFileResponse(200, {
+      status: 'completed',
+      tripleCount: triples.length,
+      pipelineUsed,
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+    });
+  }
+
+  // GET /api/assertion/:name/extraction-status?contextGraphId=...&subGraphName=...
+  // Returns the current extraction job state for the given assertion.
+  // Synchronous extractions (V10.0 default) return status="completed" immediately
+  // on the import-file response; this endpoint lets agents re-query the status
+  // later without having to hold the import-file response, and provides the hook
+  // for async extraction workflows in V10.x.
+  if (req.method === 'GET' && path.startsWith('/api/assertion/') && path.endsWith('/extraction-status')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/extraction-status'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const contextGraphId = url.searchParams.get('contextGraphId') ?? url.searchParams.get('paranetId');
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const subGraphName = url.searchParams.get('subGraphName') ?? undefined;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId!,
+      agent.peerId,
+      assertionName,
+      subGraphName,
+    );
+    const record = getExtractionStatusRecord(extractionStatus, assertionUri);
+    if (!record) {
+      return jsonResponse(res, 404, {
+        error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,
+      });
+    }
+    return jsonResponse(res, 200, {
+      assertionUri,
+      status: record.status,
+      fileHash: record.fileHash,
+      detectedContentType: record.detectedContentType,
+      pipelineUsed: record.pipelineUsed,
+      tripleCount: record.tripleCount,
+      ...(record.mdIntermediateHash ? { mdIntermediateHash: record.mdIntermediateHash } : {}),
+      ...(record.error ? { error: record.error } : {}),
+      startedAt: record.startedAt,
+      ...(record.completedAt ? { completedAt: record.completedAt } : {}),
+    });
+  }
+
+  // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
+  if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { quads, conditions, subGraphName } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(paranetId, res)) return;
+    if (!validateConditions(conditions, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    const ctx = createOperationContext('share');
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api-cas', subGraphName } });
+    try {
+      const result = await agent.conditionalShare(paranetId, quads, conditions, { subGraphName, operationCtx: ctx });
+      tracker.complete(ctx, { tripleCount: quads.length });
+      return jsonResponse(res, 200, { ok: true, shareOperationId: result?.shareOperationId });
+    } catch (err: any) {
+      tracker.fail(ctx, err);
+      if (err.name === 'StaleWriteError' || err.message?.includes('stale') || err.message?.includes('CAS condition failed')) {
+        return jsonResponse(res, 409, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
   // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_shared_memory", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
     const serverT0 = Date.now();
@@ -1997,7 +2737,15 @@ async function handleRequest(
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
+    const view = parsed.view;
+    const agentAddress = parsed.agentAddress;
+    const verifiedGraph = parsed.verifiedGraph;
+    const assertionName = parsed.assertionName;
+    const subGraphName = parsed.subGraphName;
     if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
+      return jsonResponse(res, 400, { error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(', ')}` });
+    }
     const ctx = createOperationContext('query');
     tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');
@@ -2005,7 +2753,7 @@ async function handleRequest(
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, operationCtx: ctx });
+      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, view, agentAddress, verifiedGraph, assertionName, subGraphName, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
@@ -2013,7 +2761,13 @@ async function handleRequest(
     } catch (err: any) {
       tracker.fail(ctx, err);
       const msg = err?.message ?? '';
-      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
+      if (
+        msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') ||
+        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
+        msg.includes('was removed in V10') ||
+        msg.includes('agentAddress is required') || msg.includes('requires a contextGraphId') ||
+        msg.includes('cannot be combined with')
+      ) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
@@ -2524,7 +3278,7 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = payload;
   const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
 
   if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
@@ -2555,6 +3309,16 @@ function parsePublishRequestBody(body: string):
     return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
   }
 
+  if (subGraphName !== undefined) {
+    if (typeof subGraphName !== 'string' || subGraphName.trim().length === 0) {
+      return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+    }
+    const sgValidation = validateSubGraphName(subGraphName);
+    if (!sgValidation.valid) {
+      return { ok: false, error: `Invalid "subGraphName": ${sgValidation.reason}` };
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -2563,6 +3327,7 @@ function parsePublishRequestBody(body: string):
       privateQuads,
       accessPolicy,
       allowedPeers,
+      subGraphName: subGraphName as string | undefined,
     },
   };
 }
@@ -2580,8 +3345,158 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOr
   res.end(body);
 }
 
+function safeDecodeURIComponent(encoded: string, res: ServerResponse): string | null {
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    jsonResponse(res, 400, { error: 'Malformed percent-encoding in URL path' });
+    return null;
+  }
+}
+
+function safeParseJson(body: string, res: ServerResponse): Record<string, any> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    jsonResponse(res, 400, { error: 'Request body must be a JSON object' });
+    return null;
+  }
+  return parsed as Record<string, any>;
+}
+
+function validateOptionalSubGraphName(subGraphName: unknown, res: ServerResponse): boolean {
+  if (subGraphName === undefined || subGraphName === null) return true;
+  if (typeof subGraphName === 'string' && subGraphName === '') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a non-empty string (omit the field for root graph)' });
+    return false;
+  }
+  if (typeof subGraphName !== 'string') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a string' });
+    return false;
+  }
+  const v = validateSubGraphName(subGraphName);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "subGraphName": ${v.reason}` });
+    return false;
+  }
+  return true;
+}
+
+function validateRequiredContextGraphId(contextGraphId: unknown, res: ServerResponse): boolean {
+  if (!contextGraphId) {
+    jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    return false;
+  }
+  if (typeof contextGraphId !== 'string') {
+    jsonResponse(res, 400, { error: '"contextGraphId" must be a string' });
+    return false;
+  }
+  const v = validateContextGraphId(contextGraphId);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "contextGraphId": ${v.reason}` });
+    return false;
+  }
+  return true;
+}
+
+function validateEntities(entities: unknown, res: ServerResponse): boolean {
+  if (entities === undefined || entities === null || entities === 'all') return true;
+  if (typeof entities === 'string') {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or an array of entity URIs' });
+    return false;
+  }
+  if (!Array.isArray(entities) || entities.length === 0 || !entities.every((e: unknown) => typeof e === 'string' && e.length > 0)) {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or a non-empty array of non-empty strings' });
+    return false;
+  }
+  return true;
+}
+
+function validateConditions(conditions: unknown, res: ServerResponse): boolean {
+  if (!Array.isArray(conditions) || conditions.length === 0) {
+    jsonResponse(res, 400, { error: '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)' });
+    return false;
+  }
+  for (let i = 0; i < conditions.length; i++) {
+    const c = conditions[i];
+    if (typeof c !== 'object' || c === null || Array.isArray(c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}] must be an object` });
+      return false;
+    }
+    if (typeof c.subject !== 'string' || c.subject.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject must be a non-empty string` });
+      return false;
+    }
+    if (!isSafeIri(c.subject)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject contains characters unsafe for SPARQL IRIs` });
+      return false;
+    }
+    if (typeof c.predicate !== 'string' || c.predicate.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate must be a non-empty string` });
+      return false;
+    }
+    if (!isSafeIri(c.predicate)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate contains characters unsafe for SPARQL IRIs` });
+      return false;
+    }
+    if (!('expectedValue' in c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue is required (use null for "must not exist")` });
+      return false;
+    }
+    if (c.expectedValue !== null && typeof c.expectedValue !== 'string') {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue must be a string or null` });
+      return false;
+    }
+  }
+  return true;
+}
+
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
 const SMALL_BODY_BYTES = 256 * 1024; // 256 KB — for settings, connect, chat, and other small payloads
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — for import-file document uploads (PDFs, DOCX, etc.)
+
+/**
+ * In-memory extraction job tracking record. Populated at import-file time
+ * and queried by the extraction-status endpoint. Records are kept in a
+ * bounded, TTL-pruned map keyed by the target assertion URI (which is
+ * unique per agent × contextGraph × assertionName × subGraphName).
+ */
+interface ImportFileExtractionPayload {
+  status: 'completed' | 'skipped' | 'failed';
+  tripleCount: number;
+  pipelineUsed: string | null;
+  mdIntermediateHash?: string;
+  error?: string;
+}
+
+function buildImportFileResponse(args: {
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType: string;
+  extraction: ImportFileExtractionPayload;
+}) {
+  return {
+    assertionUri: args.assertionUri,
+    fileHash: args.fileHash,
+    detectedContentType: args.detectedContentType,
+    extraction: {
+      status: args.extraction.status,
+      tripleCount: args.extraction.tripleCount,
+      pipelineUsed: args.extraction.pipelineUsed,
+      ...(args.extraction.mdIntermediateHash ? { mdIntermediateHash: args.extraction.mdIntermediateHash } : {}),
+      ...(args.extraction.error ? { error: args.extraction.error } : {}),
+    },
+  };
+}
+
+function unregisteredSubGraphError(contextGraphId: string, subGraphName: string): string {
+  return `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". Call createSubGraph() first.`;
+}
 
 
 function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
@@ -2604,6 +3519,34 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
     };
     req.on('data', onData);
     req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
+    req.on('error', (err) => { if (!rejected) reject(err); });
+  });
+}
+
+/**
+ * Buffer variant of `readBody` that returns raw bytes. Use for binary payloads
+ * like multipart/form-data uploads where `.toString()` would corrupt content.
+ */
+function readBodyBuffer(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let rejected = false;
+    const onData = (c: Buffer) => {
+      if (rejected) return;
+      total += c.length;
+      if (total > maxBytes) {
+        rejected = true;
+        req.removeListener('data', onData);
+        req.resume();
+        setTimeout(() => req.destroy(), 5_000);
+        reject(new PayloadTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(c);
+    };
+    req.on('data', onData);
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks)); });
     req.on('error', (err) => { if (!rejected) reject(err); });
   });
 }

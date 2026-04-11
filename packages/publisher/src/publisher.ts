@@ -46,6 +46,8 @@ export type V10ACKProvider = (
   rootEntities: string[],
   publicByteSize: bigint,
   stagingQuads?: Uint8Array,
+  epochs?: number,
+  tokenAmount?: bigint,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**
@@ -82,10 +84,13 @@ export interface PublishOptions {
   /** Override the meta graph URI (used for context graph publishing). */
   targetMetaGraphUri?: string;
   /**
-   * If provided, publisher calls this to collect receiver signatures
-   * from peers BEFORE the on-chain tx (replicate-then-publish).
-   * If absent, falls back to self-signing (legacy behavior).
+   * Target sub-graph name within the context graph. When set, data is stored
+   * in `did:dkg:context-graph:{id}/{subGraphName}` and metadata in
+   * `did:dkg:context-graph:{id}/{subGraphName}/_meta`. Sub-graphs are
+   * convention-based partitions — no on-chain enforcement in V10.0.
    */
+  subGraphName?: string;
+  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
   receiverSignatureProvider?: ReceiverSignatureProvider;
   /**
    * V10 ACK provider: collects core node StorageACKs via P2P.
@@ -103,6 +108,8 @@ export interface PublishOptions {
    * verify against their local SWM copy (storage-attestation guarantee).
    */
   fromSharedMemory?: boolean;
+  /** When true, the KC was created via V10 and updates should use the V10 path. */
+  v10Origin?: boolean;
 }
 
 export interface PublishResult {
@@ -119,6 +126,10 @@ export interface PublishResult {
   contextGraphError?: string;
   /** V10: Core node ACK signatures collected before chain TX (spec §9.0.3). */
   v10ACKs?: V10CoreNodeACK[];
+  /** True when the KC was created via KnowledgeAssetsV10 (V10 storage path). */
+  v10Origin?: boolean;
+  /** Sub-graph the data was published into (for gossip propagation). */
+  subGraphName?: string;
 }
 
 export interface Publisher {

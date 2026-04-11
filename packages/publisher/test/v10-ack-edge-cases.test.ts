@@ -30,8 +30,8 @@ function makeEventBus() {
   return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize);
+async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
+  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount);
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -43,8 +43,7 @@ const testQuads: Quad[] = [
 ];
 const merkleRoot = computeFlatKCRoot(testQuads, []);
 const testCGIdStr = 'test-context-graph';
-const testCGIdHash = ethers.keccak256(ethers.toUtf8Bytes(testCGIdStr));
-const testCGId = BigInt(testCGIdHash);
+const testCGId = 0n;
 
 const coreWallets = Array.from({ length: 6 }, () => ethers.Wallet.createRandom());
 
@@ -676,7 +675,7 @@ describe('StorageACKHandler signature format', () => {
     };
   }
 
-  it('ACK signature matches EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))', async () => {
+  it('ACK signature matches EIP-191 digest (0n context graph id for non-numeric CG)', async () => {
     const store = createMockStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
@@ -693,7 +692,7 @@ describe('StorageACKHandler signature format', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
 
-    const expectedDigest = computeACKDigest(testCGId, merkleRoot, 2, 300n);
+    const expectedDigest = computeACKDigest(testCGId, merkleRoot, 2, 300n, 1, 0n);
     const prefixedHash = ethers.hashMessage(expectedDigest);
 
     const sigR = ack.coreNodeSignatureR instanceof Uint8Array
@@ -730,7 +729,7 @@ describe('StorageACKHandler signature format', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
 
-    const digest = computeACKDigest(testCGId, merkleRoot, 2, BigInt(stagingBytes.length));
+    const digest = computeACKDigest(testCGId, merkleRoot, 2, BigInt(stagingBytes.length), 1, 0n);
     const prefixedHash = ethers.hashMessage(digest);
 
     const sigR = ack.coreNodeSignatureR instanceof Uint8Array

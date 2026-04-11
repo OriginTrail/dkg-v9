@@ -160,9 +160,13 @@ export class StorageACKHandler {
     try {
       contextGraphIdBigInt = BigInt(cgId);
     } catch {
-      contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
+      contextGraphIdBigInt = 0n;
     }
-    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, verifiedKACount, verifiedByteSize);
+    const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
+    const intentTokenAmount = intent.tokenAmountStr
+      ? BigInt(intent.tokenAmountStr)
+      : 0n;
+    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, verifiedKACount, verifiedByteSize, intentEpochs, intentTokenAmount);
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

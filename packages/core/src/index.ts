@@ -44,3 +44,11 @@ export {
   loadAuthTokenSync,
   loadAuthToken,
 } from './dkg-home.js';
+export {
+  type Quad as ExtractionQuad,
+  type ExtractionInput,
+  type ConverterOutput,
+  type ExtractionOutput,
+  type ExtractionPipeline,
+  ExtractionPipelineRegistry,
+} from './extraction-pipeline.js';

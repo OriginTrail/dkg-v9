@@ -70,6 +70,8 @@ interface PublishOpts {
   operationCtx?: OperationContext;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
+  /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+  subGraphName?: string;
 }
 
 type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
@@ -201,7 +203,7 @@ export class DKGAgent {
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   private readonly writeLocks: Map<string, Promise<void>>;
-  private sharedMemoryHandler?: SharedMemoryHandler;
+  private sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
@@ -459,7 +461,7 @@ export class DKGAgent {
         store: this.store,
         agentPrivateKey: verifySignerKey,
         agentAddress: verifyWallet.address,
-        getBatchMerkleRoot: async (cgId, batchId) => {
+        getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
           const metaGraph = paranetMetaGraphUri(cgId);
           // Try typed literal first, fallback to untyped for backward compat
           for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
@@ -474,7 +476,7 @@ export class DKGAgent {
           }
           return null;
         },
-        getContextGraphIdOnChain: async (cgId) => {
+        getContextGraphIdOnChain: async (cgId: string) => {
           const sub = this.subscribedContextGraphs.get(cgId);
           return sub?.onChainId ? BigInt(sub.onChainId) : null;
         },
@@ -549,6 +551,7 @@ export class DKGAgent {
       const nquads: string[] = [];
 
       if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
+        this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
         return new TextEncoder().encode('');
       }
 
@@ -786,6 +789,9 @@ export class DKGAgent {
         if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
           this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
           continue;
+        }
+        if (!isSystemContextGraph && metaQuads.length > 0 && dataQuads.length === 0) {
+          this.log.warn(ctx, `Sync for "${pid}": received ${metaQuads.length} meta triples but no data — peer may have empty or pruned data graph`);
         }
 
         onPhase?.('verify', 'start');
@@ -1286,12 +1292,10 @@ export class DKGAgent {
       return this._publish(contextGraphId, publicQuads, privateQuads, thirdArg as PublishOpts);
     }
     // Quad[]: pass through directly
-    return this._publish(
-      contextGraphId,
-      input as Quad[],
-      Array.isArray(thirdArg) ? thirdArg : undefined,
-      Array.isArray(thirdArg) ? fourthArg : (thirdArg as PublishOpts),
-    );
+    if (Array.isArray(thirdArg)) {
+      return this._publish(contextGraphId, input as Quad[], thirdArg, fourthArg);
+    }
+    return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
   private async _publish(
@@ -1322,6 +1326,7 @@ export class DKGAgent {
       publisherPeerId: this.peerId,
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
+      subGraphName: opts?.subGraphName,
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
@@ -1394,12 +1399,14 @@ export class DKGAgent {
    * When localOnly is false (default), replicates via GossipSub shared memory topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ shareOperationId: string }> {
+  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string }): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
@@ -1421,14 +1428,16 @@ export class DKGAgent {
     contextGraphId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string },
   ): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}${sgLabel}`);
     const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
@@ -1457,6 +1466,8 @@ export class DKGAgent {
       contextGraphId?: string | bigint;
       subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1473,6 +1484,7 @@ export class DKGAgent {
       publishContextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
+      subGraphName: options?.subGraphName,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1492,6 +1504,7 @@ export class DKGAgent {
         timestampMs: Date.now(),
         operationId: ctx.operationId,
         contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+        subGraphName: options?.subGraphName,
       };
 
       const topic = paranetFinalizationTopic(contextGraphId);
@@ -1602,7 +1615,10 @@ export class DKGAgent {
       includeWorkspace?: boolean;
       operationCtx?: OperationContext;
       view?: GetView;
+      agentAddress?: string;
       verifiedGraph?: string;
+      assertionName?: string;
+      subGraphName?: string;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -1612,8 +1628,9 @@ export class DKGAgent {
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
     const ctx = opts.operationCtx ?? createOperationContext('query');
+    const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
-    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
@@ -1625,8 +1642,10 @@ export class DKGAgent {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
-      agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
+      agentAddress: opts.agentAddress ?? (opts.view === 'working-memory' ? this.peerId : undefined),
       verifiedGraph: opts.verifiedGraph,
+      assertionName: opts.assertionName,
+      subGraphName: opts.subGraphName,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -1643,8 +1662,11 @@ export class DKGAgent {
     }
 
     const identityId = await this.chain.getIdentityId();
+    // NoChainAdapter returns 0n — allow reads for locally subscribed private
+    // CGs so the creating node can still query its own data.
     if (identityId === 0n) {
-      return false;
+      return this.subscribedContextGraphs.has(contextGraphId)
+        || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     }
 
     return participants.some((id) => id === identityId);
@@ -1810,7 +1832,7 @@ export class DKGAgent {
     return this.gossipPublishHandler;
   }
 
-  private getOrCreateSharedMemoryHandler(): SharedMemoryHandler {
+  private getOrCreateSharedMemoryHandler(): InstanceType<typeof SharedMemoryHandler> {
     if (!this.sharedMemoryHandler) {
       this.sharedMemoryHandler = new SharedMemoryHandler(this.store, this.eventBus, {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
@@ -1996,6 +2018,141 @@ export class DKGAgent {
         // No peers subscribed — ok for now
       }
     }
+  }
+
+  // ── Sub-Graph Management ───────────────────────────────────────────────
+
+  /**
+   * Create a named sub-graph within a context graph.
+   * Registers it in the CG's `_meta` graph and creates the named graph in storage.
+   * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
+   *
+   * V10.0 replication behavior:
+   * - Registration triples are stored locally by the admin. Peers also auto-register
+   *   sub-graphs on gossip publish, SWM write, and finalization replay paths:
+   *   `gossip-publish-handler.ts`, `workspace-handler.ts`, and
+   *   `finalization-handler.ts` call `ensureSubGraph()` and backfill the full
+   *   `_meta` registration when it is missing.
+   * - Because `subGraphName` is carried on the wire (in the workspace publish request
+   *   and the N-Quads' named-graph field), replicated data is routed into the correct
+   *   sub-graph named graph on receiving nodes — not into the root data graph.
+   * - On-chain contracts are unaware of sub-graphs; enforcement remains convention-based.
+   */
+  async createSubGraph(contextGraphId: string, subGraphName: string, opts?: {
+    description?: string;
+    authorizedWriters?: string[];
+  }): Promise<{ uri: string }> {
+    const { validateSubGraphName, contextGraphSubGraphUri: sgUri } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) throw new Error(`Context graph "${contextGraphId}" does not exist`);
+
+    const gm = new GraphManager(this.store);
+    const uri = sgUri(contextGraphId, subGraphName);
+
+    // Idempotency: check if already registered before inserting
+    const existing = await this.listSubGraphs(contextGraphId);
+    if (existing.some(sg => sg.name === subGraphName)) {
+      this.log.info(
+        createOperationContext('system'),
+        `Sub-graph "${subGraphName}" already exists in context graph "${contextGraphId}" → ${uri}`,
+      );
+      return { uri };
+    }
+
+    const { generateSubGraphRegistration } = await import('@origintrail-official/dkg-publisher');
+    const registrationQuads = generateSubGraphRegistration({
+      contextGraphId,
+      subGraphName,
+      createdBy: this.peerId,
+      authorizedWriters: opts?.authorizedWriters,
+      description: opts?.description,
+      timestamp: new Date(),
+    });
+
+    await gm.ensureSubGraph(contextGraphId, subGraphName);
+    await this.store.insert(registrationQuads);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Created sub-graph "${subGraphName}" in context graph "${contextGraphId}" → ${uri}`,
+    );
+    return { uri };
+  }
+
+  /**
+   * List registered sub-graphs for a context graph.
+   * Queries the CG's `_meta` graph for `dkg:SubGraph` registrations.
+   */
+  async listSubGraphs(contextGraphId: string): Promise<Array<{
+    uri: string;
+    name: string;
+    createdBy: string;
+    createdAt?: string;
+    description?: string;
+  }>> {
+    const { subGraphDiscoverySparql } = await import('@origintrail-official/dkg-publisher');
+    const sparql = subGraphDiscoverySparql(contextGraphId);
+    const result = await this.store.query(sparql);
+    if (result.type !== 'bindings') return [];
+    return result.bindings.map(row => ({
+      uri: row['subGraph'] ?? '',
+      name: stripLiteral(row['name'] ?? ''),
+      createdBy: row['createdBy'] ?? '',
+      createdAt: row['createdAt'] ? stripLiteral(row['createdAt']) : undefined,
+      description: row['description'] ? stripLiteral(row['description']) : undefined,
+    }));
+  }
+
+  /**
+   * Remove a sub-graph registration from `_meta` and drop its named graphs.
+   * Does NOT delete on-chain data — this is a local bookkeeping operation.
+   */
+  async removeSubGraph(contextGraphId: string, subGraphName: string): Promise<void> {
+    const { validateSubGraphName } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const gm = new GraphManager(this.store);
+
+    const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    try {
+      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+    } catch {
+      // SPARQL DELETE WHERE may not be supported — delete quads manually
+      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+      const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+      await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
+    }
+
+    const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
+    const metaUri = gm.subGraphMetaUri(contextGraphId, subGraphName);
+    const privateUri = gm.subGraphPrivateUri(contextGraphId, subGraphName);
+    const swmUri = gm.sharedMemoryUri(contextGraphId, subGraphName);
+    const swmMetaUri = gm.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    for (const uri of [dataUri, metaUri, privateUri, swmUri, swmMetaUri]) {
+      try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
+    }
+
+    // Drop assertion graphs under the sub-graph prefix
+    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`;
+    const allGraphs = await this.store.listGraphs();
+    for (const g of allGraphs) {
+      if (g.startsWith(sgPrefix)) {
+        try { await this.store.dropGraph(g); } catch { /* graph may not exist */ }
+      }
+    }
+
+    // Clear SWM ownership cache for this sub-graph
+    const ownershipKey = `${contextGraphId}\0${subGraphName}`;
+    this.publisher.clearSubGraphOwnership(ownershipKey);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Removed sub-graph "${subGraphName}" from context graph "${contextGraphId}"`,
+    );
   }
 
   /**
@@ -2244,14 +2401,14 @@ export class DKGAgent {
 
     // 5. Collect M-of-N approvals
     const collector = new VerifyCollector({
-      sendP2P: async (peerId, protocol, data) => this.router.send(peerId, protocol, data),
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => this.router.send(peerId, protocol, data),
       getParticipantPeers: (cgId?: string) => {
         const allPeers = this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
         // TODO: Filter by on-chain participant set once getContextGraphParticipants() is available.
         // Currently relies on signature recovery + identityId resolution to reject non-participants.
         return allPeers;
       },
-      log: (msg) => this.log.info(ctx, msg),
+      log: (msg: string) => this.log.info(ctx, msg),
     });
 
     const entities = await this.getRootEntities(opts.contextGraphId, opts.batchId);
@@ -2315,7 +2472,7 @@ export class DKGAgent {
       opts.batchId,
       txResult.hash,
       txResult.blockNumber,
-      [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
+      [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
     );
 
     this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
@@ -2324,7 +2481,7 @@ export class DKGAgent {
       txHash: txResult.hash,
       blockNumber: txResult.blockNumber,
       verifiedMemoryId: opts.verifiedMemoryId,
-      signers: [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
+      signers: [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
     };
   }
 
@@ -2895,7 +3052,13 @@ export class DKGAgent {
   private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
     const text = new TextDecoder().decode(data).trim();
     if (text.startsWith('{')) {
-      const parsed = JSON.parse(text) as SyncRequestEnvelope;
+      let parsed: SyncRequestEnvelope;
+      try {
+        parsed = JSON.parse(text) as SyncRequestEnvelope;
+      } catch {
+        // Malformed JSON — fall through to pipe-delimited parsing
+        return this.parsePipeDelimitedSyncRequest(text);
+      }
       return {
         contextGraphId: parsed.contextGraphId,
         offset: parsed.offset ?? 0,
@@ -2912,6 +3075,10 @@ export class DKGAgent {
       };
     }
 
+    return this.parsePipeDelimitedSyncRequest(text);
+  }
+
+  private parsePipeDelimitedSyncRequest(text: string): SyncRequestEnvelope {
     const parts = text.split('|');
     const ctxGraphPart = parts[0] || '';
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
@@ -3661,10 +3828,10 @@ export class DKGAgent {
     if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
 
     const collector = new ACKCollector({
-      gossipPublish: async (topic, data) => {
+      gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: async (peerId, protocol, data) => {
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
@@ -3690,7 +3857,7 @@ export class DKGAgent {
             }
           }
         : undefined,
-      log: (msg) => {
+      log: (msg: string) => {
         const ctx = createOperationContext('publish');
         this.log.info(ctx, msg);
       },
@@ -3705,12 +3872,16 @@ export class DKGAgent {
       rootEntities: string[],
       publicByteSize: bigint,
       stagingQuads?: Uint8Array,
+      epochs?: number,
+      tokenAmount?: bigint,
     ) => {
       let cgIdBigInt: bigint;
       try {
         cgIdBigInt = BigInt(contextGraphId);
       } catch {
-        cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+        // Non-numeric CG names are off-chain — use 0 so ACK digest matches
+        // the on-chain call which passes 0 for virtual context graphs.
+        cgIdBigInt = 0n;
       }
 
       const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
@@ -3728,6 +3899,8 @@ export class DKGAgent {
         rootEntities,
         requiredACKs,
         stagingQuads,
+        epochs,
+        tokenAmount,
       });
       return result.acks;
     };
@@ -3763,6 +3936,7 @@ export class DKGAgent {
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
+      subGraphName: result.subGraphName,
     });
 
     const topic = paranetPublishTopic(contextGraphId);
@@ -3774,26 +3948,61 @@ export class DKGAgent {
     }
   }
 
-  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+  // ── Working Memory Assertion Operations (spec §6) ───────────────────
 
-  get draft() {
+  get assertion() {
     const agent = this;
     const agentAddress = this.peerId;
     return {
-      async create(contextGraphId: string, draftName: string): Promise<string> {
-        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);
+      async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
+        return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
-      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>): Promise<void> {
-        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples);
+
+      /**
+       * Write triples to a WM assertion. Accepts:
+       * - `Quad[]` — standard quad array (same as publish/share)
+       * - `JsonLdContent` — JSON-LD document, auto-converted to quads
+       * - `Array<{ subject, predicate, object }>` — simple triple array
+       */
+      async write(
+        contextGraphId: string,
+        name: string,
+        input: import('@origintrail-official/dkg-storage').Quad[] | JsonLdContent | Array<{ subject: string; predicate: string; object: string }>,
+        opts?: { subGraphName?: string },
+      ): Promise<void> {
+        let quads: import('@origintrail-official/dkg-storage').Quad[];
+        if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
+          quads = input as import('@origintrail-official/dkg-storage').Quad[];
+        } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
+          const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
+          quads = [...publicQuads, ...privateQuads];
+        } else {
+          quads = (input as Array<{ subject: string; predicate: string; object: string }>)
+            .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
+        }
+        return agent.publisher.assertionWrite(contextGraphId, name, agentAddress, quads, opts?.subGraphName);
       },
-      async query(contextGraphId: string, draftName: string): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
-        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress);
+
+      async query(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.assertionQuery(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
-      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all' }): Promise<{ promotedCount: number }> {
-        return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
+        const { promotedCount, gossipMessage } = await agent.publisher.assertionPromote(
+          contextGraphId, name, agentAddress,
+          { ...opts, publisherPeerId: agent.node.peerId.toString() },
+        );
+        if (gossipMessage) {
+          const topic = paranetWorkspaceTopic(contextGraphId);
+          try {
+            await agent.gossip.publish(topic, gossipMessage);
+          } catch (err: any) {
+            agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
+          }
+        }
+        return { promotedCount };
       },
-      async discard(contextGraphId: string, draftName: string): Promise<void> {
-        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress);
+      async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
+        return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
     };
   }

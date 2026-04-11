@@ -39,12 +39,13 @@ library KnowledgeAssetsLib {
     }
 
     struct ContextGraph {
-        address manager;
         uint72[] participantIdentityIds;
         uint8 requiredSignatures;
         uint256 metadataBatchId;
         bool active;
         uint256 createdAt;
+        uint8 publishPolicy;      // 0 = curated (default), 1 = open
+        address publishAuthority;  // Curator address (EOA, multisig, or PCA)
     }
 
     error PublisherRangeExhausted(address publisher, uint64 needed, uint64 available);
@@ -65,4 +66,8 @@ library KnowledgeAssetsLib {
     error InvalidContextGraphConfig(string reason);
     error ContextGraphNotActive(uint256 contextGraphId);
     error ContextGraphNotFound(uint256 contextGraphId);
+    error UnauthorizedPublisher(uint256 contextGraphId, address publisher);
+    error NotContextGraphOwner(uint256 contextGraphId, address caller);
+    error ParticipantAlreadyExists(uint256 contextGraphId, uint72 identityId);
+    error ParticipantNotFound(uint256 contextGraphId, uint72 identityId);
 }

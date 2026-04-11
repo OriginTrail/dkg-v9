@@ -2,6 +2,7 @@ import {
   decodeFinalizationMessage,
   paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
+  contextGraphSubGraphUri, validateSubGraphName,
   Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type OperationContext,
@@ -11,6 +12,7 @@ import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-c
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateConfirmedFullMetadata, getTentativeStatusQuad,
+  generateSubGraphRegistration,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -58,6 +60,18 @@ export class FinalizationHandler {
 
       const ctxGraphId = msg.contextGraphId || undefined;
 
+      // Validate sub-graph name from gossip — reject invalid names entirely
+      let subGraphName: string | undefined;
+      if (msg.subGraphName) {
+        const sgVal = validateSubGraphName(msg.subGraphName);
+        if (sgVal.valid) {
+          subGraphName = msg.subGraphName;
+        } else {
+          this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
+          return;
+        }
+      }
+
       // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller)
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
@@ -69,10 +83,10 @@ export class FinalizationHandler {
         return;
       }
 
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, msg.rootEntities);
+      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, msg.rootEntities, subGraphName);
 
       if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities);
+        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
         const merkleMatch = this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, msg.kcMerkleRoot);
 
         if (merkleMatch) {
@@ -86,7 +100,7 @@ export class FinalizationHandler {
             await this.promoteSharedMemoryToCanonical(
               contextGraphId, sharedMemoryQuads, msg.ual, msg.rootEntities,
               msg.publisherAddress, msg.txHash, blockNumber, startKAId, endKAId,
-              protoToBigInt(msg.batchId), ctx, ctxGraphId,
+              protoToBigInt(msg.batchId), ctx, ctxGraphId, subGraphName,
             );
             this.markProcessed(dedupeKey);
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
@@ -131,8 +145,11 @@ export class FinalizationHandler {
     }
   }
 
-  private async getSharedMemoryQuadsForRoots(contextGraphId: string, rootEntities: string[]): Promise<Quad[]> {
-    const sharedMemoryGraph = paranetWorkspaceGraphUri(contextGraphId);
+  private async getSharedMemoryQuadsForRoots(contextGraphId: string, rootEntities: string[], subGraphName?: string): Promise<Quad[]> {
+    const graphManager = new GraphManager(this.store);
+    const sharedMemoryGraph = subGraphName
+      ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
+      : paranetWorkspaceGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
@@ -157,8 +174,11 @@ export class FinalizationHandler {
     return ethers.hexlify(computedRoot) === ethers.hexlify(expectedMerkleRoot);
   }
 
-  private async getPrivateRootsFromMeta(contextGraphId: string, rootEntities: string[]): Promise<Uint8Array[]> {
-    const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
+  private async getPrivateRootsFromMeta(contextGraphId: string, rootEntities: string[], subGraphName?: string): Promise<Uint8Array[]> {
+    const graphManager = new GraphManager(this.store);
+    const wsMetaGraph = subGraphName
+      ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
+      : paranetWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
@@ -187,8 +207,11 @@ export class FinalizationHandler {
     return roots;
   }
 
-  private async getPublisherPeerIdFromMeta(contextGraphId: string, rootEntities: string[]): Promise<string | undefined> {
-    const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
+  private async getPublisherPeerIdFromMeta(contextGraphId: string, rootEntities: string[], subGraphName?: string): Promise<string | undefined> {
+    const graphManager = new GraphManager(this.store);
+    const wsMetaGraph = subGraphName
+      ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
+      : paranetWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return undefined;
 
@@ -298,17 +321,41 @@ export class FinalizationHandler {
     batchId: bigint,
     ctx: OperationContext,
     ctxGraphId?: string,
+    subGraphName?: string,
   ): Promise<void> {
     const graphManager = new GraphManager(this.store);
     await graphManager.ensureParanet(contextGraphId);
-    const dataGraph = ctxGraphId
-      ? contextGraphDataUri(contextGraphId, ctxGraphId)
-      : graphManager.dataGraphUri(contextGraphId);
+    if (subGraphName) {
+      await graphManager.ensureSubGraph(contextGraphId, subGraphName);
+      const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+      const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
+      const alreadyRegistered = await this.store.query(
+        `ASK { GRAPH <${metaGraph}> {
+          <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
+            <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
+            <http://dkg.io/ontology/createdBy> ?createdBy .
+        } }`,
+      );
+      if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+        await this.store.insert(generateSubGraphRegistration({
+          contextGraphId,
+          subGraphName,
+          createdBy: publisherAddress || 'finalization-discovery',
+          timestamp: new Date(),
+        }));
+        this.log.info(ctx, `Finalization: auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}"`);
+      }
+    }
+    const dataGraph = subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : ctxGraphId
+        ? contextGraphDataUri(contextGraphId, ctxGraphId)
+        : graphManager.dataGraphUri(contextGraphId);
 
     const canonicalQuads = sharedMemoryQuads.map(q => ({ ...q, graph: dataGraph }));
     await this.store.insert(canonicalQuads);
 
-    const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities);
+    const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities, subGraphName);
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);
@@ -342,7 +389,7 @@ export class FinalizationHandler {
       });
     }
 
-    const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities);
+    const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities, subGraphName);
     const kcMeta: KCMetadata = {
       ual,
       contextGraphId,
@@ -350,6 +397,7 @@ export class FinalizationHandler {
       kaCount: kaMetadata.length,
       publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
+      subGraphName,
     };
 
     let blockTimestamp = Math.floor(Date.now() / 1000);
@@ -391,8 +439,12 @@ export class FinalizationHandler {
     await this.store.insert(metaQuads);
 
     // Clean up promoted shared memory entries
-    const sharedMemoryGraph = paranetWorkspaceGraphUri(contextGraphId);
-    const swmMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
+    const sharedMemoryGraph = subGraphName
+      ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
+      : paranetWorkspaceGraphUri(contextGraphId);
+    const swmMetaGraph = subGraphName
+      ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
+      : paranetWorkspaceMetaGraphUri(contextGraphId);
     for (const rootEntity of rootEntities) {
       await this.store.deleteByPattern({ graph: sharedMemoryGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(sharedMemoryGraph, rootEntity + '/.well-known/genid/');

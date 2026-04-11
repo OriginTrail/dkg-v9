@@ -30,7 +30,7 @@ export interface ACKCollectionResult {
 }
 
 const DEFAULT_REQUIRED_ACKS = 3;
-const ACK_TIMEOUT_MS = 60_000;
+const ACK_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
 
 /**
@@ -60,6 +60,8 @@ export class ACKCollector {
     rootEntities: string[];
     requiredACKs?: number;
     stagingQuads?: Uint8Array;
+    epochs?: number;
+    tokenAmount?: bigint;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -80,6 +82,8 @@ export class ACKCollector {
       kaCount,
       rootEntities,
       stagingQuads: params.stagingQuads,
+      epochs: params.epochs ?? 1,
+      tokenAmountStr: params.tokenAmount != null ? params.tokenAmount.toString() : undefined,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -99,7 +103,7 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const ackDigest = computeACKDigest(contextGraphId, merkleRoot, kaCount, publicByteSize);
+    const ackDigest = computeACKDigest(contextGraphId, merkleRoot, kaCount, publicByteSize, params.epochs, params.tokenAmount);
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();

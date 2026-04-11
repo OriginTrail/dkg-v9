@@ -97,7 +97,14 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId: contextGraphId, quads, privateQuads, ...options });
+    if (privateQuads?.length || options?.accessPolicy || options?.allowedPeers?.length) {
+      throw new Error(
+        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 SWM-first publish flow. ' +
+        'Use sharedMemoryWrite() + publishFromSharedMemory() directly.',
+      );
+    }
+    await this.sharedMemoryWrite(contextGraphId, quads);
+    return this.publishFromSharedMemory(contextGraphId, 'all', true);
   }
 
   /** Write quads to shared memory (formerly workspace). */
@@ -154,6 +161,50 @@ export class ApiClient {
     blockNumber?: number;
   }> {
     return this.publishFromSharedMemory(contextGraphId, selection, clearAfter);
+  }
+
+  async publisherEnqueue(request: {
+    contextGraphId: string;
+    shareOperationId: string;
+    roots: string[];
+    namespace: string;
+    scope: string;
+    authorityProofRef: string;
+    swmId?: string;
+    transitionType?: 'CREATE' | 'MUTATE' | 'REVOKE';
+    authorityType?: 'owner' | 'multisig' | 'quorum' | 'capability';
+    priorVersion?: string;
+  }): Promise<{ jobId: string; contextGraphId: string; shareOperationId: string; rootsCount: number }> {
+    return this.post('/api/publisher/enqueue', request);
+  }
+
+  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.get(`/api/publisher/jobs${qs}`);
+  }
+
+  async publisherJob(jobId: string): Promise<{ job: any }> {
+    return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
+  }
+
+  async publisherJobPayload(jobId: string): Promise<{ job: any; payload: any }> {
+    return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
+  }
+
+  async publisherStats(): Promise<Record<string, number>> {
+    return this.get('/api/publisher/stats');
+  }
+
+  async publisherCancel(jobId: string): Promise<{ cancelled: string }> {
+    return this.post('/api/publisher/cancel', { jobId });
+  }
+
+  async publisherRetry(status: 'failed' = 'failed'): Promise<{ retried: number }> {
+    return this.post('/api/publisher/retry', { status });
+  }
+
+  async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
+    return this.post('/api/publisher/clear', { status });
   }
 
   async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {

@@ -144,6 +144,8 @@ export interface CreateOnChainContextGraphParams {
   participantIdentityIds: bigint[];
   requiredSignatures: number;
   metadataBatchId?: bigint;
+  publishPolicy?: number;
+  publishAuthority?: string;
 }
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
@@ -204,6 +206,17 @@ export interface V10PublishParams {
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
 }
 
+export interface V10UpdateKCParams {
+  kcId: bigint;
+  newMerkleRoot: Uint8Array;
+  newByteSize: bigint;
+  mintAmount?: number;
+  burnTokenIds?: bigint[];
+  /** When true, the caller asserts the KC was created via V10. Skips probing. */
+  v10Origin?: boolean;
+  publisherAddress?: string;
+}
+
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
 
 export interface CreateKCParams {
@@ -241,6 +254,12 @@ export interface ChainAdapter {
 
   // V9 single-tx publish (reserve + mint in one call)
   publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult>;
+
+  /**
+   * Recover a publish transaction by txHash and reconstruct its on-chain publish result.
+   * Returns null when the tx is absent, pending, failed, or not a recognized publish tx.
+   */
+  resolvePublishByTxHash?(txHash: string): Promise<OnChainPublishResult | null>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).
@@ -338,6 +357,9 @@ export interface ChainAdapter {
 
   /** @deprecated Use signACKDigest instead. Will be removed in V10.1. */
   getACKSignerKey?(): string | undefined;
+
+  /** V10 update (works with KnowledgeCollectionStorage). */
+  updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
 
   /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
   isV10Ready?(): boolean;

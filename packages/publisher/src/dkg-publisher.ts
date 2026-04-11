@@ -1629,6 +1629,7 @@ export class DKGPublisher implements Publisher {
     }
 
     // Rule 4: reject roots owned by a different peer before any mutations.
+    const skippedRoots = new Set<string>();
     for (const root of rootEntities) {
       const owner = swmOwned.get(root);
       if (!owner) continue;
@@ -1639,17 +1640,27 @@ export class DKGPublisher implements Publisher {
           );
         }
       } else {
-        // Callers that omit publisherPeerId cannot overwrite foreign-owned
-        // entities. Log a warning and skip the root rather than hard-failing,
-        // keeping backward compat for internal callers operating on unowned roots.
         this.log?.warn?.(`Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
+        skippedRoots.add(root);
       }
+    }
+
+    // Filter out skipped roots so subsequent mutations don't touch foreign-owned data.
+    const effectiveRoots = skippedRoots.size > 0
+      ? rootEntities.filter(r => !skippedRoots.has(r))
+      : rootEntities;
+    const effectiveQuads = skippedRoots.size > 0
+      ? normalizedQuads.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
+      : normalizedQuads;
+
+    if (effectiveRoots.length === 0) {
+      return { promotedCount: 0 };
     }
 
     // Delete-then-insert for existing SWM entities (upsert), matching
     // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
     // Safe after the ownership check above — only self-owned or unowned roots remain.
-    for (const root of rootEntities) {
+    for (const root of effectiveRoots) {
       if (swmOwned.has(root)) {
         await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
         await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
@@ -1657,14 +1668,14 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
+    const swmQuads = effectiveQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
 
     // Delete promoted triples from assertion graph
     await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
-    const entities = [...new Set(normalizedQuads.map((q) => q.subject))];
+    const entities = [...new Set(effectiveQuads.map((q) => q.subject))];
     const shareTransition = generateShareTransitionMetadata({
       contextGraphId,
       operationId,
@@ -1680,7 +1691,7 @@ export class DKGPublisher implements Publisher {
     // promoting node and replicas converge on identical ownership state.
     if (opts?.publisherPeerId) {
       const metaQuads = generateShareMetadata(
-        { shareOperationId: operationId, contextGraphId, rootEntities, publisherPeerId: opts.publisherPeerId, timestamp: new Date() },
+        { shareOperationId: operationId, contextGraphId, rootEntities: effectiveRoots, publisherPeerId: opts.publisherPeerId, timestamp: new Date() },
         swmMetaGraph,
       );
       await this.store.insert(metaQuads);
@@ -1690,7 +1701,7 @@ export class DKGPublisher implements Publisher {
       }
       const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
       const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-      for (const r of rootEntities) {
+      for (const r of effectiveRoots) {
         if (!liveOwned.has(r)) {
           newOwnershipEntries.push({ rootEntity: r, creatorPeerId: opts.publisherPeerId });
         }

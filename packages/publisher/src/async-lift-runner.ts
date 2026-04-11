@@ -86,6 +86,8 @@ export class AsyncLiftRunner {
   private async maybeRunRecovery(): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
+    // Record attempt time *before* calling recover() so that failures are
+    // also throttled by recoveryIntervalMs — prevents hammering during outages.
     this.lastRecoveryAt = now;
     await this.config.publisher.recover();
   }

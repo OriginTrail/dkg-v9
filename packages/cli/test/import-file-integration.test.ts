@@ -306,6 +306,7 @@ function getDataGraphQuads(
 interface ImportFileResult {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: {
     status: 'completed' | 'skipped' | 'failed';
@@ -330,12 +331,14 @@ class ImportFileRouteError extends Error {
 function buildImportFileResponse(args: {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: ImportFileResult['extraction'];
 }): ImportFileResult {
   return {
     assertionUri: args.assertionUri,
     fileHash: args.fileHash,
+    ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
     detectedContentType: args.detectedContentType,
     extraction: {
       status: args.extraction.status,
@@ -350,6 +353,16 @@ function buildImportFileResponse(args: {
 function normalizeDetectedContentType(contentType: string | undefined): string {
   const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
+}
+
+const RESERVED_IMPORT_ROOT_PREFIXES = [
+  'urn:dkg:file:',
+  'urn:dkg:extraction:',
+] as const;
+
+function findReservedImportRootPrefix(subject: string): string | undefined {
+  const lower = subject.toLowerCase();
+  return RESERVED_IMPORT_ROOT_PREFIXES.find(prefix => lower.startsWith(prefix));
 }
 
 async function runImportFileOrchestration(params: {
@@ -414,6 +427,7 @@ async function runImportFileOrchestration(params: {
   let mdIntermediate: string | null = null;
   let pipelineUsed: string | null = null;
   let mdIntermediateHash: string | undefined;
+  let importRootEntity: string | undefined;
   const recordInProgress = async (): Promise<void> => {
     const record: ExtractionStatusRecord = {
       status: 'in_progress',
@@ -433,6 +447,7 @@ async function runImportFileOrchestration(params: {
     extractionStatus.set(assertionUri, {
       status: 'failed',
       fileHash: fileStoreEntry.keccak256,
+      ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed: failedPipelineUsed,
       tripleCount,
@@ -447,6 +462,7 @@ async function runImportFileOrchestration(params: {
     throw new ImportFileRouteError(statusCode, buildImportFileResponse({
       assertionUri,
       fileHash: fileStoreEntry.keccak256,
+      rootEntity: importRootEntity,
       detectedContentType,
       extraction: {
         status: 'failed',
@@ -526,6 +542,14 @@ async function runImportFileOrchestration(params: {
     // different root entity than the assertion container URI, re-run the
     // extractor with that resolved entity as the document subject.
     if (result.resolvedRootEntity !== assertionUri) {
+      const reservedPrefix = findReservedImportRootPrefix(result.resolvedRootEntity);
+      if (reservedPrefix) {
+        fail(
+          400,
+          `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+          0,
+        );
+      }
       result = extractFromMarkdown({
         markdown: mdIntermediate,
         agentDid,
@@ -539,6 +563,7 @@ async function runImportFileOrchestration(params: {
     sourceFileLinkage = result.sourceFileLinkage;
     documentSubjectIri = result.subjectIri;
     resolvedRootEntity = result.resolvedRootEntity;
+    importRootEntity = resolvedRootEntity;
   } catch (err: any) {
     const message = err?.message ?? String(err);
     // Bug 13 + Round 7 Bug 20: invalid frontmatter IRIs AND invalid
@@ -745,6 +770,7 @@ async function runImportFileOrchestration(params: {
   const completedRecord: ExtractionStatusRecord = {
     status: 'completed',
     fileHash: fileStoreEntry.keccak256,
+    ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
     detectedContentType,
     pipelineUsed,
     tripleCount: triples.length,
@@ -757,6 +783,7 @@ async function runImportFileOrchestration(params: {
   return buildImportFileResponse({
     assertionUri,
     fileHash: fileStoreEntry.keccak256,
+    rootEntity: importRootEntity,
     detectedContentType,
     extraction: {
       status: 'completed',
@@ -2058,6 +2085,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
     });
 
+    expect(result.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(status.get(result.assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+
     const dataQuads = getDataGraphQuads(agent, 'cg', 'climate');
     const fileUri = `urn:dkg:file:${result.fileHash}`;
     expect(dataQuads).toContainEqual({
@@ -2104,6 +2134,29 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(promotableSubjects).toContain(ROOT_OVERRIDE);
     expect(promotableSubjects).not.toContain(result.assertionUri);
     expect(row14?.object).toBe(ROOT_OVERRIDE);
+  });
+
+  it('Issue 122: reserved frontmatter `rootEntity` prefixes are rejected before retargeting content subjects', async () => {
+    const RESERVED_ROOT = 'urn:dkg:file:keccak256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'reserved-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: reserved\nrootEntity: ${RESERVED_ROOT}\n---\n\n# Reserved\n`, 'utf-8'),
+      },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'reserved-root',
+    })).rejects.toThrow(/reserved namespace 'urn:dkg:file:\*'/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'reserved-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(agent.insertedQuads).toHaveLength(0);
   });
 
   it('Bug 5a: re-import replaces (not appends) stale `_meta` rows for the same assertion name', async () => {

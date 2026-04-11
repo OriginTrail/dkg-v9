@@ -151,6 +151,16 @@ function normalizeDetectedContentType(contentType: string | undefined): string {
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
 }
 
+const RESERVED_IMPORT_ROOT_PREFIXES = [
+  'urn:dkg:file:',
+  'urn:dkg:extraction:',
+] as const;
+
+function findReservedImportRootPrefix(subject: string): string | undefined {
+  const lower = subject.toLowerCase();
+  return RESERVED_IMPORT_ROOT_PREFIXES.find(prefix => lower.startsWith(prefix));
+}
+
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
 
@@ -2540,6 +2550,7 @@ async function handleRequest(
     let mdIntermediate: string | null = null;
     let pipelineUsed: string | null = null;
     let mdIntermediateHash: string | undefined;
+    let importRootEntity: string | undefined;
     const respondWithImportFileResponse = (statusCode: number, extraction: ImportFileExtractionPayload) =>
       jsonResponse(
         res,
@@ -2547,6 +2558,7 @@ async function handleRequest(
         buildImportFileResponse({
           assertionUri,
           fileHash: fileStoreEntry.keccak256,
+          rootEntity: importRootEntity,
           detectedContentType,
           extraction,
         }),
@@ -2570,6 +2582,7 @@ async function handleRequest(
       const failedRecord: ExtractionStatusRecord = {
         status: 'failed',
         fileHash: fileStoreEntry.keccak256,
+        ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
         detectedContentType,
         pipelineUsed: failedPipelineUsed,
         tripleCount,
@@ -2689,6 +2702,14 @@ async function handleRequest(
       // entity as the document subject so content triples and later
       // subject-based promote partitioning align on the same identity.
       if (result.resolvedRootEntity !== assertionUri) {
+        const reservedPrefix = findReservedImportRootPrefix(result.resolvedRootEntity);
+        if (reservedPrefix) {
+          return respondWithFailedExtraction(
+            400,
+            `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+            0,
+          );
+        }
         result = extractFromMarkdown({
           markdown: mdIntermediate,
           agentDid,
@@ -2711,6 +2732,7 @@ async function handleRequest(
       // reuse the resolved value for `_meta` row 14 below so row 3 and row
       // 14 are guaranteed to agree on the same root entity.
       resolvedRootEntity = result.resolvedRootEntity;
+      importRootEntity = resolvedRootEntity;
     } catch (err: any) {
       // Bug 13 + Round 7 Bug 20: invalid frontmatter IRIs AND invalid
       // programmatic `rootEntityIri` / `sourceFileIri` inputs both
@@ -3065,6 +3087,7 @@ async function handleRequest(
     const completedRecord: ExtractionStatusRecord = {
       status: 'completed',
       fileHash: fileStoreEntry.keccak256,
+      ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed,
       tripleCount: triples.length,
@@ -3129,6 +3152,7 @@ async function handleRequest(
       assertionUri,
       status: record.status,
       fileHash: record.fileHash,
+      ...(record.rootEntity ? { rootEntity: record.rootEntity } : {}),
       detectedContentType: record.detectedContentType,
       pipelineUsed: record.pipelineUsed,
       tripleCount: record.tripleCount,
@@ -3914,12 +3938,14 @@ interface ImportFileExtractionPayload {
 function buildImportFileResponse(args: {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: ImportFileExtractionPayload;
 }) {
   return {
     assertionUri: args.assertionUri,
     fileHash: args.fileHash,
+    ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
     detectedContentType: args.detectedContentType,
     extraction: {
       status: args.extraction.status,

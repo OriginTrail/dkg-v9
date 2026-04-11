@@ -30,8 +30,6 @@ function isDaemonUnreachable(err: unknown): boolean {
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
   const httpStatus = (err as any)?.httpStatus as number | undefined;
   if (typeof httpStatus === 'number') {
-    // 405/501 always indicate a missing route — the daemon is reachable but
-    // doesn't support this API.
     if (httpStatus === 405 || httpStatus === 501) return true;
     // 404 is ambiguous: an older daemon returns 404 for a missing route, but
     // a current daemon also returns 404 for "job not found". Distinguish by
@@ -40,7 +38,6 @@ function isDaemonUnreachable(err: unknown): boolean {
       const lower = msg.toLowerCase();
       return lower === 'not found' || lower === `http ${httpStatus}`;
     }
-    // Any other status means the route exists and the daemon responded.
     return false;
   }
   // Legacy path: older ApiClient without httpStatus throws raw body text.

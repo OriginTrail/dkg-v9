@@ -1629,14 +1629,17 @@ export class DKGPublisher implements Publisher {
     }
 
     // Rule 4: reject roots owned by a different peer before any mutations.
-    if (opts?.publisherPeerId) {
-      for (const root of rootEntities) {
-        const owner = swmOwned.get(root);
-        if (owner && owner !== opts.publisherPeerId) {
-          throw new Error(
-            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
-          );
-        }
+    for (const root of rootEntities) {
+      const owner = swmOwned.get(root);
+      if (owner && opts?.publisherPeerId && owner !== opts.publisherPeerId) {
+        throw new Error(
+          `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
+        );
+      }
+      if (owner && !opts?.publisherPeerId) {
+        throw new Error(
+          `Cannot promote entity <${root}>: already owned by peer ${owner} in SWM. Provide publisherPeerId to verify ownership.`,
+        );
       }
     }
 

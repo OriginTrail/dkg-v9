@@ -40,6 +40,7 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { parseBoundary, parseMultipart } from '../src/http/multipart.js';
@@ -355,16 +356,6 @@ function normalizeDetectedContentType(contentType: string | undefined): string {
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
 }
 
-const RESERVED_IMPORT_ROOT_PREFIXES = [
-  'urn:dkg:file:',
-  'urn:dkg:extraction:',
-] as const;
-
-function findReservedImportRootPrefix(subject: string): string | undefined {
-  const lower = subject.toLowerCase();
-  return RESERVED_IMPORT_ROOT_PREFIXES.find(prefix => lower.startsWith(prefix));
-}
-
 async function runImportFileOrchestration(params: {
   agent: MockAgent;
   fileStore: FileStore;
@@ -542,11 +533,18 @@ async function runImportFileOrchestration(params: {
     // different root entity than the assertion container URI, re-run the
     // extractor with that resolved entity as the document subject.
     if (result.resolvedRootEntity !== assertionUri) {
-      const reservedPrefix = findReservedImportRootPrefix(result.resolvedRootEntity);
+      const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
       if (reservedPrefix) {
         fail(
           400,
           `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+          0,
+        );
+      }
+      if (isSkolemizedUri(result.resolvedRootEntity)) {
+        fail(
+          400,
+          `Frontmatter 'rootEntity' resolves to the skolemized URI '${result.resolvedRootEntity}', but import-file rootEntity must identify a root subject rather than a skolemized child (/.well-known/genid/...).`,
           0,
         );
       }
@@ -565,6 +563,9 @@ async function runImportFileOrchestration(params: {
     resolvedRootEntity = result.resolvedRootEntity;
     importRootEntity = resolvedRootEntity;
   } catch (err: any) {
+    if (err instanceof ImportFileRouteError) {
+      throw err;
+    }
     const message = err?.message ?? String(err);
     // Bug 13 + Round 7 Bug 20: invalid frontmatter IRIs AND invalid
     // programmatic `rootEntityIri` / `sourceFileIri` inputs both
@@ -2149,12 +2150,53 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       },
     ]);
 
-    await expect(runImportFileOrchestration({
-      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
-      multipartBody: body, boundary: BOUNDARY, assertionName: 'reserved-root',
-    })).rejects.toThrow(/reserved namespace 'urn:dkg:file:\*'/);
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'reserved-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/reserved namespace 'urn:dkg:file:\*'/);
 
     const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'reserved-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(agent.insertedQuads).toHaveLength(0);
+  });
+
+  it('Issue 122: skolemized frontmatter `rootEntity` values are rejected before retargeting content subjects', async () => {
+    const SKOLEM_ROOT = 'did:dkg:doc:root/.well-known/genid/child';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'skolem-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: skolem\nrootEntity: ${SKOLEM_ROOT}\n---\n\n# Skolem\n`, 'utf-8'),
+      },
+    ]);
+
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'skolem-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/skolemized URI/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'skolem-root');
     expect(status.get(assertionUri)?.status).toBe('failed');
     expect(agent.insertedQuads).toHaveLength(0);
   });

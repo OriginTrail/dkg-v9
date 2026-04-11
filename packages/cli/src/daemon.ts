@@ -13,6 +13,7 @@ import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -149,16 +150,6 @@ export function parseRequiredSignatures(raw: unknown): { value: number } | { err
 function normalizeDetectedContentType(contentType: string | undefined): string {
   const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
-}
-
-const RESERVED_IMPORT_ROOT_PREFIXES = [
-  'urn:dkg:file:',
-  'urn:dkg:extraction:',
-] as const;
-
-function findReservedImportRootPrefix(subject: string): string | undefined {
-  const lower = subject.toLowerCase();
-  return RESERVED_IMPORT_ROOT_PREFIXES.find(prefix => lower.startsWith(prefix));
 }
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
@@ -2702,11 +2693,18 @@ async function handleRequest(
       // entity as the document subject so content triples and later
       // subject-based promote partitioning align on the same identity.
       if (result.resolvedRootEntity !== assertionUri) {
-        const reservedPrefix = findReservedImportRootPrefix(result.resolvedRootEntity);
+        const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
         if (reservedPrefix) {
           return respondWithFailedExtraction(
             400,
             `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+            0,
+          );
+        }
+        if (isSkolemizedUri(result.resolvedRootEntity)) {
+          return respondWithFailedExtraction(
+            400,
+            `Frontmatter 'rootEntity' resolves to the skolemized URI '${result.resolvedRootEntity}', but import-file rootEntity must identify a root subject rather than a skolemized child (/.well-known/genid/...).`,
             0,
           );
         }

@@ -12,8 +12,10 @@
  *        - registered converter → converter.extract(...)
  *        - neither → graceful degrade, status="skipped"
  *   4. extractFromMarkdown({ markdown, agentDid, ontologyRef, documentIri })
- *      and, when frontmatter resolves a different `rootEntity`, re-run with
- *      `documentIri = resolvedRootEntity`
+ *      using the assertion URI as the pinned import subject; if frontmatter
+ *      resolves a different `rootEntity`, the public import-file path rejects
+ *      that divergent override with a 400 until the broader promote/update
+ *      identity plumbing lands
  *   5. mockAgent.assertion.write(contextGraphId, name, triples)
  *   6. record in extractionStatus Map
  *

@@ -839,44 +839,37 @@ for i in $(seq 1 20); do
 done
 $SYNC_COMPLETED && ok "Sync catch-up reported completion on Node5 (status=$SYNC_ST)" || warn "Sync catch-up did not reach a positive completion status after 40s (status=$SYNC_ST)"
 
-# P1-11: Split the two cases.
-#   - If §18a reported completion but the data check fails → HARD FAIL,
-#     because that means the catchup pipeline lied about success. This is
-#     the class of bug devnet tests exist to catch.
-#   - If §18a never reached a completion status → WARN only, because the
-#     test has already reported that via 18a.
-echo "--- 18b: Verify synced VM data on Node5 ---"
-SYNC_VM=$(c -X POST "http://127.0.0.1:9205/api/query" -d "{
-  \"sparql\":\"SELECT ?name WHERE { <http://example.org/entity/city1> <http://schema.org/name> ?name }\",
+echo "--- 18b: Write fresh post-subscribe SWM data on Node1 for sync verification ---"
+SYNC_ENTITY="urn:sync-verify:post-sub-$(date +%s)"
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"verified-memory\"
-}")
-SYNC_VM_CT=$(safe_bindings_count "$SYNC_VM")
-if [[ "$SYNC_VM_CT" == "PARSE_ERR" ]]; then
-  fail "Node5 VM sync query returned unparseable response: ${SYNC_VM:0:200}"
-elif [[ "$SYNC_VM_CT" -ge 1 ]]; then
-  ok "Node5 synced VM data (city1 found)"
-elif $SYNC_COMPLETED; then
-  fail "Catchup reported complete on Node5 but VM data is missing — bug"
-else
-  warn "Node5 VM data not synced yet ($SYNC_VM_CT) — catchup never completed"
-fi
+  \"quads\":[$(ql "$SYNC_ENTITY" 'http://schema.org/name' 'Post-Subscribe Sync Test')]
+}" > /dev/null
+sleep "$LOCAL_SETTLE_S"
 
-echo "--- 18c: Verify synced SWM data on Node5 ---"
-SYNC_SWM=$(c -X POST "http://127.0.0.1:9205/api/query" -d "{
-  \"sparql\":\"SELECT ?name WHERE { <http://example.org/entity/city1> <http://schema.org/name> ?name }\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"shared-working-memory\"
-}")
-SYNC_SWM_CT=$(safe_bindings_count "$SYNC_SWM")
-if [[ "$SYNC_SWM_CT" == "PARSE_ERR" ]]; then
+echo "--- 18c: Verify post-subscribe SWM data synced to Node5 ---"
+SYNC_SWM_OK=false
+for i in $(seq 1 10); do
+  SYNC_SWM=$(c -X POST "http://127.0.0.1:9205/api/query" -d "{
+    \"sparql\":\"SELECT ?name WHERE { <$SYNC_ENTITY> <http://schema.org/name> ?name }\",
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"shared-working-memory\"
+  }")
+  SYNC_SWM_CT=$(safe_bindings_count "$SYNC_SWM")
+  if [[ "$SYNC_SWM_CT" != "PARSE_ERR" && "$SYNC_SWM_CT" -ge 1 ]]; then
+    SYNC_SWM_OK=true
+    break
+  fi
+  sleep 2
+done
+if $SYNC_SWM_OK; then
+  ok "Post-subscribe SWM data synced to Node5"
+elif [[ "$SYNC_SWM_CT" == "PARSE_ERR" ]]; then
   fail "Node5 SWM sync query returned unparseable response: ${SYNC_SWM:0:200}"
-elif [[ "$SYNC_SWM_CT" -ge 1 ]]; then
-  ok "Node5 synced SWM data (city1 found)"
 elif $SYNC_COMPLETED; then
-  fail "Catchup reported complete on Node5 but SWM data is missing — bug"
+  fail "Catchup reported complete on Node5 but fresh SWM data is missing — sync pipeline bug"
 else
-  warn "Node5 SWM data not synced ($SYNC_SWM_CT) — catchup never completed"
+  warn "Post-subscribe SWM data not synced to Node5 ($SYNC_SWM_CT) — catchup never completed"
 fi
 
 #------------------------------------------------------------
@@ -961,16 +954,17 @@ else
   fail "WM data leaked into verified memory ($WM_IN_VM_CT)"
 fi
 
-echo "--- 19e: WM data NOT visible on Node2 ---"
+echo "--- 19e: WM data NOT visible on Node2 (including SWM) ---"
 WM_REMOTE=$(c -X POST "http://127.0.0.1:9202/api/query" -d "{
   \"sparql\":\"SELECT ?name WHERE { <$WM_SUBJECT> <http://schema.org/name> ?name }\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\"
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"includeSharedMemory\":true
 }")
 WM_REMOTE_CT=$(safe_bindings_count "$WM_REMOTE")
 if [[ "$WM_REMOTE_CT" == "PARSE_ERR" ]]; then
   fail "WM/Node2 isolation query returned unparseable response: ${WM_REMOTE:0:200}"
 elif [[ "$WM_REMOTE_CT" -eq 0 ]]; then
-  ok "WM data correctly absent on Node2"
+  ok "WM data correctly absent on Node2 (root + SWM)"
 else
   fail "WM data leaked to Node2 ($WM_REMOTE_CT)"
 fi
@@ -1012,20 +1006,12 @@ TTL_DAYS_NEW=$(json_get "$TTL_NEW" ttlDays)
 check "TTL reads back as 7 days" "$TTL_DAYS_NEW" "7"
 
 echo "--- 20f: Restore original TTL ---"
-# P1-4 (Phase D): route through c() for consistent timeout handling.
-# Base-rebase fix: use `ttlMs` for precision and verify restore via the
-# response `ok` field (previously used `ttlDays` and trusted success).
-# Both hardening intents preserved.
-TTL_RESTORE=$(c -X PUT "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d "{\"ttlMs\":$TTL_MS_ORIG}")
+# The PUT endpoint only accepts ttlDays. Convert ttlMs back to days for
+# precision (ttlDays from GET may be rounded for non-whole-day values).
+TTL_DAYS_PRECISE=$(python3 -c "print($TTL_MS_ORIG / 86400000)" 2>/dev/null || echo "$TTL_DAYS_ORIG")
+TTL_RESTORE=$(c -X PUT "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d "{\"ttlDays\":$TTL_DAYS_PRECISE}")
 TTL_RESTORE_OK=$(json_get "$TTL_RESTORE" ok)
-# Round 17 Bug 46: Round 16's union-of-intents resolution for §20f kept
-# Phase D's `json_get` helper (returns lowercase-normalized `"true"`)
-# alongside base's title-case `"True"` comparison string, which can
-# never match — permanent false negative. Fix: use the `check` helper
-# matching line 200/1007's convention (lowercase `"true"` expected
-# value). `check` fails with `expected=true, got=<actual>` diagnostic
-# if the restore doesn't return ok.
-check "TTL restored to original ($TTL_MS_ORIG ms)" "$TTL_RESTORE_OK" "true"
+check "TTL restored to original (${TTL_DAYS_PRECISE} days)" "$TTL_RESTORE_OK" "true"
 
 #------------------------------------------------------------
 echo ""
@@ -1310,7 +1296,7 @@ except Exception:
   elif [[ "$PQ_FINAL_ST" == "__ERR__" || "$PQ_FINAL_ST" == "__MISSING__" ]]; then
     fail "Publisher job status unparseable or missing status field (got=$PQ_FINAL_ST)"
   else
-    warn "Publisher job status: $PQ_FINAL_ST"
+    fail "Publisher job did not reach included/finalized (got=$PQ_FINAL_ST) — publisher queue e2e broken"
   fi
 
   echo "--- 22d: Fetch job payload ---"

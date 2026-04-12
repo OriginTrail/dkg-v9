@@ -988,6 +988,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         extractionRegistry,
         fileStore,
         extractionStatus,
+        assertionImportLocks,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -1308,6 +1309,7 @@ async function handleRequest(
   extractionRegistry: ExtractionPipelineRegistry,
   fileStore: FileStore,
   extractionStatus: Map<string, ExtractionStatusRecord>,
+  assertionImportLocks: Map<string, Promise<void>>,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -2240,7 +2242,8 @@ async function handleRequest(
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
-      await agent.createContextGraph({ id, name, description });
+      const skipChain = agent.publisher.getIdentityId() <= 0n;
+      await agent.createContextGraph({ id, name, description, private: skipChain });
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('already exists') || msg.includes('duplicate') || msg.includes('conflict')) {
@@ -3350,7 +3353,8 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createContextGraph({ id, name, description });
+    const skipChain = agent.publisher.getIdentityId() <= 0n;
+    await agent.createContextGraph({ id, name, description, private: skipChain });
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 

@@ -21,7 +21,7 @@ const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
-describe('extractFromMarkdown â€” frontmatter', () => {
+describe('extractFromMarkdown - frontmatter', () => {
   it('extracts rdf:type from frontmatter `type` key (schema.org convention)', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `---\nid: climate-report-2026\ntype: Report\n---\n\n# Climate Report\n`,
@@ -165,7 +165,7 @@ describe('extractFromMarkdown â€” frontmatter', () => {
   });
 });
 
-describe('extractFromMarkdown â€” wikilinks', () => {
+describe('extractFromMarkdown - wikilinks', () => {
   it('extracts bare wikilinks', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# Doc\n\nSee [[Alice]] and [[Bob]] for details.\n`,
@@ -251,7 +251,7 @@ describe('extractFromMarkdown â€” wikilinks', () => {
   });
 });
 
-describe('extractFromMarkdown â€” hashtags', () => {
+describe('extractFromMarkdown - hashtags', () => {
   it('extracts hashtags as schema:keywords', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# Doc\n\nSome text #climate #policy and more.\n`,
@@ -282,7 +282,7 @@ describe('extractFromMarkdown â€” hashtags', () => {
   });
 });
 
-describe('extractFromMarkdown â€” Dataview inline fields', () => {
+describe('extractFromMarkdown - Dataview inline fields', () => {
   it('extracts `key:: value` lines', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# Doc\n\nauthor:: Alice\nstatus:: draft\n`,
@@ -348,7 +348,7 @@ describe('extractFromMarkdown â€” Dataview inline fields', () => {
   });
 });
 
-describe('extractFromMarkdown â€” headings', () => {
+describe('extractFromMarkdown - headings', () => {
   it('preserves heading nesting by attaching deeper headings to their nearest parent section', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# Title\n\n## Intro\n\n## Methods\n\n### Sub-method\n`,
@@ -405,7 +405,7 @@ describe('extractFromMarkdown â€” headings', () => {
   });
 });
 
-describe('extractFromMarkdown â€” subject IRI resolution', () => {
+describe('extractFromMarkdown - subject IRI resolution', () => {
   it('prefers explicit documentIri input', () => {
     const { subjectIri } = extractFromMarkdown({
       markdown: `---\nid: ignored\n---\n\n# H1 Also Ignored\n`,
@@ -413,6 +413,22 @@ describe('extractFromMarkdown â€” subject IRI resolution', () => {
       documentIri: 'did:dkg:context-graph:foo/assertion/0xabc/mydoc',
     });
     expect(subjectIri).toBe('did:dkg:context-graph:foo/assertion/0xabc/mydoc');
+  });
+
+  it('accepts deprecated `now` input without affecting extraction output', () => {
+    const markdown = `---\nid: doc\n---\n\n# Doc\n\nref:: value\n`;
+    const withoutNow = extractFromMarkdown({
+      markdown,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+    });
+    const withNow = extractFromMarkdown({
+      markdown,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      now: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    expect(withNow).toEqual(withoutNow);
   });
 
   it('uses frontmatter id as-is when it looks like an IRI', () => {
@@ -474,7 +490,7 @@ describe('extractFromMarkdown â€” subject IRI resolution', () => {
   });
 });
 
-describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
+describe('extractFromMarkdown - source-file linkage (Section 10.1)', () => {
   it('emits no source-file linkage quads when no sourceFileIri is supplied', () => {
     const { triples, sourceFileLinkage, resolvedRootEntity, subjectIri } = extractFromMarkdown({
       markdown: `# Doc\n\n#tag1\n`,
@@ -501,7 +517,7 @@ describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
     expect(all.some(q => q.predicate === DKG_DERIVED_FROM)).toBe(false);
   });
 
-  it('does not emit row 2 (dkg:sourceContentType) â€” daemon owns that row', () => {
+  it('does not emit row 2 (dkg:sourceContentType) - daemon owns that row', () => {
     // The extractor only ever processes markdown, but row 2 must describe
     // the ORIGINAL upload blob. Only the daemon has the original content
     // type, so the extractor MUST NOT emit row 2 at all. Regression guard
@@ -522,7 +538,7 @@ describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
       sourceFileIri: FILE_URI,
     });
     expect(subjectIri).toBe('urn:dkg:md:research-note');
-    // Row 1 â€” object is the caller-supplied URN. The earlier Round 3
+    // Row 1 - object is the caller-supplied URN. The earlier Round 3
     // blank-node approach was reverted in Round 4 (Option B filter in
     // `assertionPromote` prevents cross-assertion contention).
     expect(sourceFileLinkage).toContainEqual({
@@ -536,7 +552,7 @@ describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
       predicate: DKG_ROOT_ENTITY,
       object: subjectIri,
     });
-    // Only rows 1 and 3 â€” no row 2.
+    // Only rows 1 and 3 - no row 2.
     expect(sourceFileLinkage).toHaveLength(2);
     expect(resolvedRootEntity).toBe(subjectIri);
   });
@@ -588,7 +604,7 @@ describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
   });
 
   it('frontmatter rootEntity resolves even without a sourceFileIri', () => {
-    // Â§19.10.1:508 promises the override works regardless â€” without a
+    // Section 19.10.1:508 promises the override works regardless - without a
     // sourceFileIri there are no quads to emit, but the daemon may still
     // need the resolved value for downstream writes.
     const { sourceFileLinkage, resolvedRootEntity } = extractFromMarkdown({
@@ -662,7 +678,7 @@ describe('extractFromMarkdown â€” source-file linkage (Â§10.1)', () => {
   });
 });
 
-describe('extractFromMarkdown â€” end-to-end', () => {
+describe('extractFromMarkdown - end-to-end', () => {
   it('handles a full document with frontmatter, H1, tags, wikilinks, dataview, and sections', () => {
     const markdown = `---
 id: research-note
@@ -738,10 +754,10 @@ Our method relies on [[SPARQL]] queries.
       `${subjectIri}#section-2-methods`,
     ]);
 
-    // Â§10.1 linkage present: rows 1 (sourceFile) and 3 (rootEntity).
+    // Section 10.1 linkage present: rows 1 (sourceFile) and 3 (rootEntity).
     // Row 1's object is the caller-supplied content-addressed URN
     // (Round 4 Option B after the blank-node approach was reverted).
-    // Row 2 (sourceContentType) is intentionally absent â€” the daemon
+    // Row 2 (sourceContentType) is intentionally absent - the daemon
     // owns that row because only it has the original upload content
     // type.
     expect(sourceFileLinkage).toContainEqual({

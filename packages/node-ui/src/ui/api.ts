@@ -147,7 +147,38 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 };
 
 // --- Context Graphs ---
-export const fetchContextGraphs = () => get<{ contextGraphs: any[] }>('/api/context-graph/list');
+// Use /api/paranet/* which works on both the installed release and dev builds.
+// The V10 aliases (/api/context-graph/*) are only available on the latest dev daemon.
+export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
+  const data = await get<{ paranets?: any[]; contextGraphs?: any[] }>('/api/paranet/list');
+  const list = data.contextGraphs ?? data.paranets ?? [];
+  return { contextGraphs: list.filter((p: any) => !p.isSystem) };
+}
+
+export async function createContextGraph(id: string, name: string, description?: string): Promise<{ created: string; uri: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(`${BASE}/api/paranet/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ id, name, description }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<{ created: string; uri: string }>;
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new Error('Creating project is taking longer than expected — it may still complete in the background. Refresh the page in a moment.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
@@ -170,6 +201,70 @@ export interface CatchupStatusResponse {
 
 export const fetchCatchupStatus = (contextGraphId: string) =>
   get<CatchupStatusResponse>(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+
+// --- File import to Working Memory ---
+export interface ImportFileResult {
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType: string;
+  extraction: {
+    status: 'completed' | 'skipped' | 'error';
+    tripleCount?: number;
+    triplesWritten?: number;
+    provenance?: any;
+    error?: string;
+    pipelineUsed?: string;
+  };
+}
+
+const EXT_TO_MIME: Record<string, string> = {
+  md: 'text/markdown', txt: 'text/plain', csv: 'text/csv',
+  json: 'application/json', xml: 'application/xml',
+  yaml: 'text/yaml', yml: 'text/yaml',
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  doc: 'application/msword',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ttl: 'text/turtle', rdf: 'application/rdf+xml', owl: 'application/rdf+xml',
+  html: 'text/html', htm: 'text/html',
+  py: 'text/x-python', ts: 'text/typescript', js: 'text/javascript',
+  tsx: 'text/typescript', jsx: 'text/javascript',
+  java: 'text/x-java', go: 'text/x-go', rs: 'text/x-rust',
+  c: 'text/x-c', cpp: 'text/x-c++', h: 'text/x-c',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+};
+
+function detectContentType(file: File): string | undefined {
+  if (file.type && file.type !== 'application/octet-stream') return file.type;
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_TO_MIME[ext];
+}
+
+export async function importFile(
+  assertionName: string,
+  contextGraphId: string,
+  file: File,
+  opts?: { ontologyRef?: string; subGraphName?: string },
+): Promise<ImportFileResult> {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('contextGraphId', contextGraphId);
+  const ct = detectContentType(file);
+  if (ct) form.append('contentType', ct);
+  if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
+  if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
+
+  const res = await fetch(`${BASE}/api/assertion/${encodeURIComponent(assertionName)}/import-file`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<ImportFileResult>;
+}
 
 // --- Query ---
 export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>

@@ -2242,8 +2242,7 @@ async function handleRequest(
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
-      const skipChain = agent.publisher.getIdentityId() <= 0n;
-      await agent.createContextGraph({ id, name, description, private: skipChain });
+      await agent.createContextGraph({ id, name, description });
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('already exists') || msg.includes('duplicate') || msg.includes('conflict')) {
@@ -3353,8 +3352,7 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    const skipChain = agent.publisher.getIdentityId() <= 0n;
-    await agent.createContextGraph({ id, name, description, private: skipChain });
+    await agent.createContextGraph({ id, name, description });
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 

@@ -636,7 +636,7 @@ function buildSourceFileLinkage(args: {
   let resolvedRootEntity: string = args.rootEntityIri ?? args.subject;
   const fmRoot = args.frontmatter?.['rootEntity'];
   if (typeof fmRoot === 'string' && fmRoot.length > 0) {
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(fmRoot)) {
+    if (looksLikeAbsoluteIri(fmRoot)) {
       // Looks like an IRI attempt — validate strictly.
       if (!isSafeIri(fmRoot)) {
         throw new Error(

@@ -2855,6 +2855,16 @@ async function handleRequest(
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
+
+      // Re-tag vector store embeddings from swm → vm for published entities
+      if (vectorStore && result.kaManifest?.length) {
+        for (const ka of result.kaManifest) {
+          try {
+            await vectorStore.updateLayer({ sourceUri: ka.rootEntity, contextGraphId: paranetId, newLayer: 'vm' });
+          } catch { /* best-effort */ }
+        }
+      }
+
       const httpStatus = result.contextGraphError ? 207 : 200;
       return jsonResponse(res, httpStatus, {
         kcId: String(result.kcId),
@@ -4722,8 +4732,8 @@ async function handleRequest(
       graph: targetGraph,
     });
 
-    // Session linking (if session URI provided)
-    if (sessionUri && typeof sessionUri === 'string') {
+    // Session linking (if session URI provided and is a valid IRI)
+    if (sessionUri && typeof sessionUri === 'string' && isSafeIri(sessionUri)) {
       quads.push({
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',
@@ -4795,10 +4805,11 @@ async function handleRequest(
     });
   }
 
-  // POST /api/memory/search — tri-modal search across text, graph, and vector stores.
+  // POST /api/memory/search — search across graph and vector stores.
   //
-  // Fans out the query to SPARQL (triple store), text search (file store),
-  // and vector similarity (vector store), then merges and deduplicates results.
+  // Currently fans out to: (1) vector similarity, (2) SPARQL text match.
+  // File-store full-text search leg is NOT yet implemented; callers should
+  // use GET /api/file/:hash directly for source file content retrieval.
   //
   // Spec: 21_TRI_MODAL_MEMORY.md §7
   if (req.method === 'POST' && path === '/api/memory/search') {
@@ -4855,7 +4866,7 @@ async function handleRequest(
     }
 
     // Fan-out 2: SPARQL text search (scoped to the requested CG + layers)
-    const escapedQuery = query.replace(/"/g, '\\"').toLowerCase();
+    const escapedQuery = query.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').toLowerCase();
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
     const graphFilters = memoryLayers.map((l: string) => {
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;

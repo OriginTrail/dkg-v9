@@ -625,6 +625,22 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
     return conn?.targetUri ?? null;
   }, [entity]);
 
+  // Fetch full body from source file if description is truncated
+  const [fullBody, setFullBody] = useState<string | null>(null);
+  useEffect(() => {
+    if (!sourceFile || !desc || desc.length < 1990) { setFullBody(null); return; }
+    let cancelled = false;
+    const hash = sourceFile.replace('urn:dkg:file:', '');
+    const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    fetch(`/api/file/${encodeURIComponent(hash)}`, { headers })
+      .then(r => r.ok ? r.text() : null)
+      .then(text => { if (!cancelled && text) setFullBody(text); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sourceFile, desc]);
+
   const [similar, setSimilar] = useState<Array<{ entityUri: string; label: string | null; similarity: number }>>([]);
   useEffect(() => {
     const label = entity.label;
@@ -686,7 +702,7 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
           </div>
         </div>
 
-        {desc && <p className="v10-dd-desc">{desc}</p>}
+        {(fullBody || desc) && <p className="v10-dd-desc" style={{ whiteSpace: 'pre-wrap' }}>{fullBody ?? desc}</p>}
 
         <div className="v10-dd-uri mono">{entity.uri}</div>
 

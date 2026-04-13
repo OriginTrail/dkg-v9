@@ -156,6 +156,13 @@ export class VectorStore {
     return scored.slice(0, opts.limit);
   }
 
+  async updateLayer(opts: { sourceUri: string; contextGraphId: string; newLayer: 'wm' | 'swm' | 'vm' }): Promise<number> {
+    const info = this.db.prepare(
+      'UPDATE embeddings SET memory_layer = ? WHERE source_uri = ? AND context_graph_id = ?'
+    ).run(opts.newLayer, opts.sourceUri, opts.contextGraphId);
+    return info.changes;
+  }
+
   async delete(opts: { sourceUri?: string; entityUri?: string }): Promise<number> {
     if (opts.sourceUri) {
       const info = this.db.prepare('DELETE FROM embeddings WHERE source_uri = ?').run(opts.sourceUri);

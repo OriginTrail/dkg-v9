@@ -93,6 +93,7 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
       <body>
         <h1>Research Paper</h1>
         <p>This paper discusses <strong>decentralized knowledge graphs</strong>.</p>
+        <p>Unicode canary: čćž 日本語</p>
         <h2>Introduction</h2>
         <p>The DKG protocol enables verifiable AI memory.</p>
         <ul>
@@ -113,7 +114,8 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
     expect(result.mdIntermediate).toBeTruthy();
     expect(result.mdIntermediate).toContain('Research Paper');
     expect(result.mdIntermediate).toContain('decentralized knowledge graphs');
-  });
+    expect(result.mdIntermediate).toContain('čćž 日本語');
+  }, 30_000);
 
   it('converts a CSV file to Markdown', async () => {
     const csvFile = join(tmpDir, 'data.csv');
@@ -129,7 +131,7 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
     expect(result.mdIntermediate).toContain('Alice');
     expect(result.mdIntermediate).toContain('Bob');
     expect(result.mdIntermediate).toContain('Researcher');
-  });
+  }, 30_000);
 
   it('handles empty file gracefully', async () => {
     const emptyFile = join(tmpDir, 'empty.html');
@@ -142,7 +144,7 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
     });
 
     expect(typeof result.mdIntermediate).toBe('string');
-  });
+  }, 30_000);
 
   it('processes file through registry lookup → extract', async () => {
     const registry = new ExtractionPipelineRegistry();
@@ -162,7 +164,7 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
 
     expect(result.mdIntermediate).toContain('Title');
     expect(result.mdIntermediate).toContain('Body text');
-  });
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

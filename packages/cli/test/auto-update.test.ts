@@ -1,5 +1,48 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
+
+const MARKITDOWN_TARGETS_JSON = JSON.stringify([
+  { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
+  { platform: 'darwin', arch: 'arm64', assetName: 'markitdown-darwin-arm64', runner: 'macos-14' },
+  { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe', runner: 'windows-latest' },
+]);
+const CLI_VERSION = '9.0.0-beta.6';
+const MARKITDOWN_BUILD_INFO_JSON = JSON.stringify({
+  markItDownUpstreamVersion: '0.1.5',
+  pyInstallerVersion: '6.19.0',
+});
+const MOCK_MARKITDOWN_ENTRY_SCRIPT = '# mock markitdown entry script\n';
+const MOCK_BUNDLER_SCRIPT = [
+  "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
+  "export const PYINSTALLER_VERSION = '6.19.0';",
+].join('\n');
+let mockBundledCliPackageVersion = CLI_VERSION;
+let mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
+
+function buildFingerprintForTest(): string {
+  return sha256HexForTest([
+    '0.1.5',
+    '6.19.0',
+    sha256HexForTest(MOCK_MARKITDOWN_ENTRY_SCRIPT),
+    sha256HexForTest(MOCK_BUNDLER_SCRIPT),
+  ].join('\n'));
+}
+
+function mockReadFileSyncValue(path: unknown): string {
+  const normalized = String(path).replace(/\\/g, '/');
+  if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
+  if (normalized.endsWith('/markitdown-build-info.json')) return MARKITDOWN_BUILD_INFO_JSON;
+  if (normalized.endsWith('/scripts/markitdown-entry.py')) return MOCK_MARKITDOWN_ENTRY_SCRIPT;
+  if (normalized.endsWith('/scripts/bundle-markitdown-binaries.mjs')) return MOCK_BUNDLER_SCRIPT;
+  if (normalized.includes('/node_modules/@origintrail-official/dkg/package.json')) {
+    return JSON.stringify({ version: mockInstalledPackageVersion });
+  }
+  if (normalized.endsWith('/packages/cli/package.json')) {
+    return JSON.stringify({ version: mockBundledCliPackageVersion });
+  }
+  return 'testtoken';
+}
 
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
@@ -11,7 +54,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    chmod: vi.fn(),
+    copyFile: vi.fn(),
     readFile: vi.fn(),
+    stat: vi.fn(),
     writeFile: vi.fn(),
     mkdir: vi.fn(),
     rm: vi.fn(),
@@ -30,7 +76,7 @@ vi.mock('node:fs', async (importOriginal) => {
     openSync: vi.fn(() => 99),
     closeSync: vi.fn(),
     writeFileSync: vi.fn(),
-    readFileSync: vi.fn(() => `${process.pid}:${Date.now()}:testtoken`),
+    readFileSync: vi.fn((path: unknown) => mockReadFileSyncValue(path)),
     unlinkSync: vi.fn(),
   };
 });
@@ -51,13 +97,16 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { chmod, copyFile, readFile, stat, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
+const mockedChmod = vi.mocked(chmod);
+const mockedCopyFile = vi.mocked(copyFile);
 const mockedReadFile = vi.mocked(readFile);
+const mockedStat = vi.mocked(stat);
 const mockedWriteFile = vi.mocked(writeFile);
 const mockedMkdir = vi.mocked(mkdir);
 const mockedRm = vi.mocked(rm);
@@ -78,6 +127,14 @@ const AU: AutoUpdateConfig = {
   checkIntervalMinutes: 30,
 };
 
+function normalizePathString(value: unknown): string {
+  return String(value).replace(/\\/g, '/');
+}
+
+function sha256HexForTest(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function makeFetchOk(sha: string) {
   fetchMock.mockResolvedValueOnce({
     ok: true,
@@ -88,7 +145,7 @@ function makeFetchOk(sha: string) {
 function getExecCalls() {
   return mockedExec.mock.calls.map(c => ({
     cmd: String(c[0]),
-    cwd: (c[1] as any)?.cwd,
+    cwd: normalizePathString((c[1] as any)?.cwd),
   }));
 }
 
@@ -96,7 +153,7 @@ function getExecFileCalls() {
   return mockedExecFile.mock.calls.map(c => ({
     file: String(c[0]),
     args: (c[1] as string[]) ?? [],
-    cwd: (c[2] as any)?.cwd,
+    cwd: normalizePathString((c[2] as any)?.cwd),
     env: (c[2] as any)?.env,
   }));
 }
@@ -106,12 +163,15 @@ describe('blue-green checkForUpdate', () => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    mockedChmod.mockResolvedValue(undefined as any);
+    mockedCopyFile.mockResolvedValue(undefined as any);
+    mockedStat.mockResolvedValue({ mode: 0o755 } as any);
     mockedMkdir.mockResolvedValue(undefined as any);
     mockedRm.mockResolvedValue(undefined as any);
     mockedOpenSync.mockReturnValue(99 as any);
     mockedCloseSync.mockReturnValue(undefined as any);
     mockedFsWriteFileSync.mockReturnValue(undefined as any);
-    mockedReadFileSync.mockReturnValue(`${process.pid}:${Date.now()}:testtoken` as any);
+    mockedReadFileSync.mockImplementation((path: unknown) => mockReadFileSyncValue(path) as any);
     mockedUnlinkSync.mockReturnValue(undefined as any);
     (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
     (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));
@@ -128,7 +188,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('reinitializes missing target slot git metadata before fetch', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.endsWith('/releases/a')) return true; // active slot path
       if (path.endsWith('/releases/b/.git')) return false; // target slot missing git metadata
       if (path.includes('cli.js')) return true;
@@ -214,10 +274,33 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('--force') && c.cwd === targetDir)).toBe(false);
+    expect(allCmds.some(c => c.cmd.includes('--best-effort') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build') && c.cwd === targetDir)).toBe(false);
 
     const activeDir = '/tmp/dkg-test/releases/a';
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
+  });
+
+  it('continues the update when MarkItDown staging fails inside the best-effort git-update step', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb223';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).includes('bundle-markitdown-binaries.mjs')) {
+        return cb(new Error('markitdown staging spawn failed'), '', '');
+      }
+      return cb(null, '', '');
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('MarkItDown staging failed in slot b'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
   });
 
   it('swaps symlink after successful build', async () => {
@@ -229,10 +312,10 @@ describe('blue-green checkForUpdate', () => {
     await performUpdate(AU, vi.fn());
 
     expect(mockedSwapSlot).toHaveBeenCalledWith('b');
-    expect(mockedWriteFile).toHaveBeenCalledWith(
-      '/tmp/dkg-test/.current-commit',
-      latest,
-    );
+    expect(
+      mockedWriteFile.mock.calls.some((call) =>
+        normalizePathString(call[0]).endsWith('/tmp/dkg-test/.current-commit') && call[1] === latest)
+    ).toBe(true);
   });
 
   it('returns true after swap via checkForUpdate', async () => {
@@ -348,7 +431,7 @@ describe('blue-green checkForUpdate', () => {
 
     // existsSync returns true for dirs but false for cli.js entry file
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.includes('cli.js')) return false;
       return true;
     });
@@ -360,9 +443,92 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
   });
 
+  it('continues the swap when the bundled MarkItDown binary is missing after build', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('newcommit');
+
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(mockedSwapSlot).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('reuses the active-slot MarkItDown binary when staging misses it during git update', async () => {
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.current-commit')) return 'aaa111' as any;
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() }) as any;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile path: ${normalized}`);
+    });
+    makeFetchOk('newcommit');
+
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/packages/cli/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedChmod).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
+  });
+
+  it('continues the update when active-slot MarkItDown reuse copy fails', async () => {
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.current-commit')) return 'aaa111' as any;
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() }) as any;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile path: ${normalized}`);
+    });
+    makeFetchOk('newcommit');
+    mockedCopyFile.mockRejectedValueOnce(new Error('disk full') as any);
+
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/packages/cli/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('failed to reuse bundled MarkItDown binary from the active slot'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
   it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.endsWith('/releases/a')) return true;
       if (path.endsWith('/releases/b/.git')) return false;
       if (path.includes('cli.js')) return true;
@@ -545,7 +711,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('blocks pre-release versions unless allowPrerelease is true', async () => {
     mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
+      const p = normalizePathString(path);
       if (p.endsWith('.current-commit')) return 'aaa111' as any;
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
       if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
@@ -562,7 +728,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('allows pre-release versions when allowPrerelease=true', async () => {
     mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
+      const p = normalizePathString(path);
       if (p.endsWith('.current-commit')) return 'aaa111' as any;
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
       if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
@@ -664,6 +830,8 @@ describe('performNpmUpdate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockActiveSlot = 'a';
+    mockBundledCliPackageVersion = CLI_VERSION;
+    mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
     mockedExistsSync.mockReturnValue(true);
     mockedMkdir.mockResolvedValue(undefined as any);
     mockedRm.mockResolvedValue(undefined as any);
@@ -706,6 +874,205 @@ describe('performNpmUpdate', () => {
     const result = await performNpmUpdate('9.0.0-beta.5', log);
     expect(result).toBe('failed');
     expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('continues when the bundled MarkItDown binary is missing after install', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    });
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedSwapSlot).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('reuses the active-slot MarkItDown binary when npm install leaves it missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.5' }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedChmod).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
+  });
+
+  it('skips active-slot MarkItDown reuse when metadata targets a different npm version', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.4' }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sha256HexForTest(Buffer.from('active-slot-markitdown', 'utf-8'))}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) {
+        return Buffer.from('active-slot-markitdown', 'utf-8') as any;
+      }
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('incompatible metadata'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('skips active-slot MarkItDown reuse when the checksum sidecar is missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && path.endsWith('.sha256')) return false;
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('skipping active-slot bundled MarkItDown binary without a valid checksum sidecar'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('does not probe a source-slot build binary as an npm reuse candidate', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) {
+        throw new Error(`npm update should not inspect source-slot MarkItDown candidates: ${normalized}`);
+      }
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).not.toHaveBeenCalled();
+    expect(mockedExistsSync.mock.calls.some(
+      ([path]) => normalizePathString(path).includes('/releases/a/packages/cli/bin/markitdown-'),
+    )).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('validates npm-installed MarkItDown metadata against the resolved package version instead of the requested spec', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.6' }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('latest', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('.current-version'),
+      '9.0.0-beta.6',
+    );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
+  });
+
+  it('reuses a fingerprint-compatible active-slot MarkItDown binary across CLI version bumps', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'release',
+          cliVersion: '9.0.0-beta.5',
+          buildFingerprint: buildFingerprintForTest(),
+        }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.6', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {

@@ -40,10 +40,28 @@ slot_ready() {
   [ -d "$slot_path/.git" ] && [ -f "$entry_path" ]
 }
 
+stage_markitdown() {
+  slot_path="$1"
+  slot_name="$2"
+  cli_dir="$slot_path/packages/cli"
+  script_path="$cli_dir/scripts/bundle-markitdown-binaries.mjs"
+  if [ ! -d "$cli_dir" ]; then
+    return
+  fi
+  if [ ! -f "$script_path" ]; then
+    info "Skipping MarkItDown staging in slot $slot_name (this checkout predates bundled MarkItDown support)."
+    return
+  fi
+  info "Staging MarkItDown binary in slot $slot_name ..."
+  (cd "$cli_dir" && node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort)
+}
+
 mkdir -p "$RELEASES_DIR"
 
 if [ -L "$RELEASES_DIR/current" ] && slot_ready "$SLOT_A" "$SLOT_A_ENTRY" && slot_ready "$SLOT_B" "$SLOT_B_ENTRY"; then
   green "Blue-green slots already exist. Skipping clone."
+  stage_markitdown "$SLOT_A" "a"
+  stage_markitdown "$SLOT_B" "b"
 else
   if [ -L "$RELEASES_DIR/current" ]; then
     info "Detected incomplete slots. Rebuilding missing/broken slots..."
@@ -61,6 +79,7 @@ else
     info "Building slot a ..."
     (cd "$SLOT_A" && pnpm build)
   fi
+  stage_markitdown "$SLOT_A" "a"
 
   if slot_ready "$SLOT_B" "$SLOT_B_ENTRY"; then
     info "Slot b already exists and is ready."
@@ -73,6 +92,7 @@ else
     info "Building slot b ..."
     (cd "$SLOT_B" && pnpm build)
   fi
+  stage_markitdown "$SLOT_B" "b"
 
   # Ensure current points to a known-good active slot.
   ln -sfn a "$RELEASES_DIR/current"

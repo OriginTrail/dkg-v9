@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -9,7 +9,6 @@ const execFileAsync = promisify(execFile);
 import { join, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -56,11 +55,53 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import {
+  expectedBundledMarkItDownBuildMetadata,
+  readCliPackageVersion,
+  type BundledMarkItDownMetadata,
+} from './extraction/markitdown-bundle-metadata.js';
+import {
+  checksumPathFor as markItDownChecksumPath,
+  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
+  metadataPathFor as markItDownMetadataPath,
+} from '../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
 import { FileStore } from './file-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
+
+type MarkItDownTarget = {
+  platform: string;
+  arch: string;
+  assetName: string;
+  runner?: string;
+};
+
+let cachedMarkItDownTargets: MarkItDownTarget[] | null = null;
+
+function loadMarkItDownTargets(): MarkItDownTarget[] {
+  if (cachedMarkItDownTargets) return cachedMarkItDownTargets;
+  try {
+    const raw = readFileSync(new URL('../markitdown-targets.json', import.meta.url), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      cachedMarkItDownTargets = [];
+      return cachedMarkItDownTargets;
+    }
+    cachedMarkItDownTargets = parsed.filter((entry): entry is MarkItDownTarget => (
+      !!entry
+      && typeof entry === 'object'
+      && typeof entry.platform === 'string'
+      && typeof entry.arch === 'string'
+      && typeof entry.assetName === 'string'
+    ));
+    return cachedMarkItDownTargets;
+  } catch {
+    cachedMarkItDownTargets = [];
+    return cachedMarkItDownTargets;
+  }
+}
 
 function getNodeVersion(): string {
   try {
@@ -150,6 +191,68 @@ export function parseRequiredSignatures(raw: unknown): { value: number } | { err
 function normalizeDetectedContentType(contentType: string | undefined): string {
   const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
+}
+
+function currentBundledMarkItDownAssetName(): string | null {
+  return loadMarkItDownTargets().find((target) => (
+    target.platform === process.platform
+    && target.arch === process.arch
+  ))?.assetName ?? null;
+}
+
+async function carryForwardBundledMarkItDownBinary(opts: {
+  sourceCandidates: string[];
+  targetBinaryPath: string;
+  log: (msg: string) => void;
+  context: string;
+  expectedMetadata: BundledMarkItDownMetadata | null;
+}): Promise<boolean> {
+  for (const sourceBinaryPath of opts.sourceCandidates) {
+    if (!existsSync(sourceBinaryPath)) continue;
+    if (!(await hasVerifiedBundledMarkItDownBinary(sourceBinaryPath))) {
+      opts.log(`${opts.context}: skipping active-slot bundled MarkItDown binary without a valid checksum sidecar (${sourceBinaryPath}).`);
+      continue;
+    }
+    if (!(await hasVerifiedBundledMarkItDownBinary(sourceBinaryPath, opts.expectedMetadata))) {
+      opts.log(`${opts.context}: skipping active-slot bundled MarkItDown binary with incompatible metadata (${sourceBinaryPath}).`);
+      continue;
+    }
+    await mkdir(dirname(opts.targetBinaryPath), { recursive: true });
+
+    const sourceChecksumPath = markItDownChecksumPath(sourceBinaryPath);
+    const sourceMetadataPath = markItDownMetadataPath(sourceBinaryPath);
+    const targetChecksumPath = markItDownChecksumPath(opts.targetBinaryPath);
+    const targetMetadataPath = markItDownMetadataPath(opts.targetBinaryPath);
+    const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tempTargetBinaryPath = `${opts.targetBinaryPath}${tempSuffix}`;
+    const tempTargetChecksumPath = `${targetChecksumPath}${tempSuffix}`;
+    const tempTargetMetadataPath = `${targetMetadataPath}${tempSuffix}`;
+    try {
+      await copyFile(sourceBinaryPath, tempTargetBinaryPath);
+      await copyFile(sourceChecksumPath, tempTargetChecksumPath);
+      await copyFile(sourceMetadataPath, tempTargetMetadataPath);
+      const sourceMode = (await stat(sourceBinaryPath)).mode & 0o777;
+      await chmod(tempTargetBinaryPath, sourceMode || 0o755);
+      await Promise.all([
+        rm(opts.targetBinaryPath, { force: true }),
+        rm(targetChecksumPath, { force: true }),
+        rm(targetMetadataPath, { force: true }),
+      ]);
+      await rename(tempTargetBinaryPath, opts.targetBinaryPath);
+      await rename(tempTargetChecksumPath, targetChecksumPath);
+      await rename(tempTargetMetadataPath, targetMetadataPath);
+      opts.log(`${opts.context}: reused bundled MarkItDown binary from the active slot (${sourceBinaryPath}).`);
+      return true;
+    } catch (err: any) {
+      await Promise.all([
+        rm(tempTargetBinaryPath, { force: true }),
+        rm(tempTargetChecksumPath, { force: true }),
+        rm(tempTargetMetadataPath, { force: true }),
+      ]);
+      opts.log(`${opts.context}: failed to reuse bundled MarkItDown binary from the active slot (${sourceBinaryPath}) - ${err?.message ?? String(err)}.`);
+    }
+  }
+  return false;
 }
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
@@ -4424,6 +4527,7 @@ async function _performNpmUpdateInner(
   }
 
   const active = await activeSlot();
+  const activeDir = join(rDir, active);
   const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
   const targetDir = join(rDir, target);
 
@@ -4462,15 +4566,29 @@ async function _performNpmUpdateInner(
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return 'failed';
   }
-
-  let resolvedVersion = targetVersion;
-  try {
-    const installedPkg = JSON.parse(await readFile(join(npmPkgDir, 'package.json'), 'utf-8'));
-    if (installedPkg.version && typeof installedPkg.version === 'string') {
-      resolvedVersion = installedPkg.version;
-    }
-  } catch {
+  let resolvedVersion = readCliPackageVersion(npmPkgDir);
+  if (!resolvedVersion) {
+    resolvedVersion = targetVersion;
     log(`Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`);
+  }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(npmPkgDir) ?? { cliVersion: resolvedVersion };
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: 'Auto-update (npm)',
+        expectedMetadata,
+      });
+      if (!reused) {
+        log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      }
+    }
   }
 
   await writePendingUpdateState({
@@ -4844,6 +4962,17 @@ async function _performUpdateInner(
         log('Auto-update: no contract folder changes detected; skipping @origintrail-official/dkg-evm-module build.');
       }
     }
+
+    log('Auto-update: staging MarkItDown binary for the inactive slot...');
+    try {
+      await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort', {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 900_000,
+      });
+    } catch (markItDownErr: any) {
+      log(`Auto-update: MarkItDown staging failed in slot ${target} â€” ${markItDownErr.message}. Continuing without document conversion on this node.`);
+    }
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';
@@ -4853,6 +4982,26 @@ async function _performUpdateInner(
   if (!existsSync(entryFile)) {
     log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
     return 'failed';
+  }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(join(targetDir, 'packages', 'cli'));
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),
+          join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: 'Auto-update',
+        expectedMetadata,
+      });
+      if (!reused) {
+        log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      }
+    }
   }
 
   let nextVersion = '';

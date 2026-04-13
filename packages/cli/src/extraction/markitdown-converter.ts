@@ -14,15 +14,52 @@ import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@origintrail-official/dkg-core';
+import {
+  bundledMarkItDownBuildFingerprint,
+  readCliPackageVersion,
+} from './markitdown-bundle-metadata.js';
+import { bundledBinaryValidationFailureSync, hasVerifiedBundledBinarySync } from '../../scripts/markitdown-bundle-validation.mjs';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
+
+const CLI_DIR = fileURLToPath(new URL('../../', import.meta.url));
+
+function expectedBundledMetadataForCurrentPackage(): { buildFingerprint?: string; cliVersion?: string } | null {
+  const buildFingerprint = bundledMarkItDownBuildFingerprint(CLI_DIR);
+  const cliVersion = readCliPackageVersion(CLI_DIR);
+  if (buildFingerprint) return { buildFingerprint, ...(cliVersion ? { cliVersion } : {}) };
+  if (cliVersion) return { cliVersion };
+  return null;
+}
+
+function bundledBinaryValidationFailure(candidate: string): 'checksum' | 'metadata' | null {
+  return bundledBinaryValidationFailureSync(candidate, expectedBundledMetadataForCurrentPackage());
+}
+
+function hasVerifiedBundledBinary(candidate: string): boolean {
+  return hasVerifiedBundledBinarySync(candidate, expectedBundledMetadataForCurrentPackage());
+}
 
 function resolveMarkItDownBin(): string | null {
   const suffix = platform === 'win32' ? '.exe' : '';
   const binaryName = `markitdown-${platform}-${arch}${suffix}`;
   const binDir = resolve(fileURLToPath(new URL('../../bin', import.meta.url)));
   const candidate = join(binDir, binaryName);
-  if (existsSync(candidate)) return candidate;
+  if (hasVerifiedBundledBinary(candidate)) return candidate;
+  if (existsSync(candidate)) {
+    const failure = bundledBinaryValidationFailure(candidate);
+    if (failure === 'metadata') {
+      console.warn(
+        `Ignoring bundled MarkItDown binary with incompatible metadata sidecar (${candidate}). `
+        + 'Rerun the staging flow or remove the stale file to use a bundled converter that matches this package version.',
+      );
+    } else {
+      console.warn(
+        `Ignoring bundled MarkItDown binary without a valid checksum sidecar (${candidate}). `
+        + 'Rerun the staging flow or remove the stale file to use a verified bundled converter.',
+      );
+    }
+  }
 
   // Fallback: check if markitdown is on PATH
   const pathBin = `markitdown${suffix}`;
@@ -52,7 +89,7 @@ async function runMarkItDown(filePath: string): Promise<string> {
   if (!bin) {
     throw new Error(
       'MarkItDown binary not found. Document extraction unavailable. '
-      + 'Install markitdown or place the standalone binary in the node bin/ directory.',
+      + 'Install markitdown on PATH or stage a verified standalone binary with node ./scripts/bundle-markitdown-binaries.mjs.',
     );
   }
 

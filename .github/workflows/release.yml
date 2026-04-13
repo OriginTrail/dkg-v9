@@ -12,16 +12,38 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build, test, and create release
+  markitdown-target-matrix:
+    name: Resolve MarkItDown target matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Node setup
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
+          node-version-file: .nvmrc
+
+      - name: Build MarkItDown matrix from shared target metadata
+        id: matrix
+        shell: bash
+        run: |
+          MATRIX="$(node --input-type=module -e "import { SUPPORTED_TARGETS } from './packages/cli/scripts/bundle-markitdown-binaries.mjs'; const include = SUPPORTED_TARGETS.map(({ runner, assetName }, index) => { if (typeof runner !== 'string' || runner.length === 0) throw new Error(\`SUPPORTED_TARGETS[\${index}] is missing runner\`); if (typeof assetName !== 'string' || assetName.length === 0) throw new Error(\`SUPPORTED_TARGETS[\${index}] is missing assetName\`); return { runner, asset_name: assetName }; }); process.stdout.write(JSON.stringify({ include }));")"
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+  release-preflight:
+    name: Validate release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      is_prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Validate tag format
         run: |
@@ -54,6 +76,15 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
+      - name: Validate CLI package version matches tag
+        run: |
+          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
+          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::packages/cli/package.json version ${PKG_VERSION} does not match pushed tag version ${TAG_VERSION}"
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -63,10 +94,166 @@ jobs:
       - name: Run tests
         run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
 
+  markitdown-assets:
+    needs:
+      - markitdown-target-matrix
+      - release-preflight
+    name: Build MarkItDown binary (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.markitdown-target-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node setup
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build current-platform MarkItDown binary
+        run: node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --force
+
+      - name: Smoke test bundled MarkItDown binary
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          root = Path('packages/cli/bin')
+          root.mkdir(parents=True, exist_ok=True)
+          docx_path = root / 'markitdown-smoke.docx'
+
+          content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+          </Types>
+          """
+
+          rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+          </Relationships>
+          """
+
+          document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:body>
+              <w:p><w:r><w:t>Smoke Docx</w:t></w:r></w:p>
+              <w:p><w:r><w:t>Hello from DOCX smoke test.</w:t></w:r></w:p>
+              <w:sectPr>
+                <w:pgSz w:w="12240" w:h="15840"/>
+                <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+              </w:sectPr>
+            </w:body>
+          </w:document>
+          """
+
+          with ZipFile(docx_path, 'w', ZIP_DEFLATED) as archive:
+            archive.writestr('[Content_Types].xml', content_types)
+            archive.writestr('_rels/.rels', rels)
+            archive.writestr('word/document.xml', document)
+          PY
+
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const { spawnSync } = require('node:child_process');
+          const path = require('node:path');
+
+          const binaryPath = path.resolve('packages/cli/bin', process.env.ASSET_NAME);
+          const htmlFixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.html');
+          const docxFixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.docx');
+          fs.writeFileSync(
+            htmlFixturePath,
+            '<html><body><h1>Smoke Test</h1><p>Hello from MarkItDown smoke test.</p></body></html>',
+            'utf8',
+          );
+
+          const fixtures = [
+            {
+              fixturePath: htmlFixturePath,
+              expected: ['Smoke Test', 'Hello from MarkItDown smoke test.'],
+            },
+            {
+              fixturePath: docxFixturePath,
+              expected: ['Smoke Docx', 'Hello from DOCX smoke test.'],
+            },
+          ];
+
+          for (const fixture of fixtures) {
+            const result = spawnSync(binaryPath, [fixture.fixturePath], { encoding: 'utf8' });
+
+            if (result.error) {
+              throw result.error;
+            }
+            if (result.status !== 0) {
+              throw new Error(
+                `Expected ${binaryPath} to exit with code 0 on the smoke conversion path for ${fixture.fixturePath}, got ${result.status}.\n`
+                + `stdout:\n${result.stdout ?? ''}\n`
+                + `stderr:\n${result.stderr ?? ''}`,
+              );
+            }
+            const output = String(result.stdout ?? '');
+            for (const expectedChunk of fixture.expected) {
+              if (!output.includes(expectedChunk)) {
+                throw new Error(
+                  `Smoke test for ${binaryPath} did not emit the expected Markdown content for ${fixture.fixturePath}.\n`
+                  + `Missing chunk: ${expectedChunk}\n`
+                  + `${output}`,
+                );
+              }
+            }
+          }
+          NODE
+
+      - name: Upload MarkItDown binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: markitdown-${{ matrix.asset_name }}
+          path: |
+            packages/cli/bin/${{ matrix.asset_name }}
+            packages/cli/bin/${{ matrix.asset_name }}.sha256
+            packages/cli/bin/${{ matrix.asset_name }}.meta.json
+          if-no-files-found: error
+
+  release:
+    name: Build, test, and create release
+    needs:
+      - markitdown-assets
+      - release-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download MarkItDown release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: markitdown-*
+          merge-multiple: true
+          path: release-assets
+
       - name: Extract release notes
         id: notes
         run: |
-          V="${{ steps.version.outputs.VERSION }}"
+          V="${{ needs.release-preflight.outputs.version }}"
           if [ -f CHANGELOG.md ]; then
             sed -n "/^## \[$V\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
           fi
@@ -79,10 +266,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ steps.version.outputs.VERSION }}
+          name: v${{ needs.release-preflight.outputs.version }}
           body_path: release_notes.md
           draft: false
-          prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
+          prerelease: ${{ needs.release-preflight.outputs.is_prerelease }}
           generate_release_notes: true
+          files: |
+            release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -336,27 +336,48 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   });
 
   describe('N23 regression: createAccount reverts if EpochStorage address not set at init', () => {
-    it('initialize reverts when EpochStorageV8 is address(0)', async () => {
-      // Deploy a bare Hub + Token but DO NOT register EpochStorageV8; then
-      // manually deploy the NFT contract and call initialize. It must revert
-      // with ZeroAddressDependency("EpochStorageV8") — proving the fail-closed
-      // check is in place regardless of deploy script ordering.
-      await hre.deployments.fixture(['Hub', 'Token']);
-      const Hub = await hre.ethers.getContract<Hub>('Hub');
+    // Each of these negative-init tests needs a clean Hub with only a SUBSET
+    // of the NFT contract's dependencies registered, so that `initialize()`
+    // hits a specific `ZeroAddressDependency(...)` branch. The original
+    // implementation used `hre.deployments.fixture([...])` per-test, which
+    // invokes `hardhat_reset` under the hood and invalidates the
+    // hardhat-network-helpers snapshot manager that every other suite relies
+    // on — the tests passed in isolation but broke the rest of the suite
+    // when run together.
+    //
+    // Fix: never reset the network. Instead, deploy a DISPOSABLE `Hub` via
+    // the contract factory for each test and register only the dependencies
+    // under test. The shared fixture snapshots stay valid because we never
+    // touch `hre.deployments.fixture` or mutate the shared Hub.
+    async function deployDisposableHub(): Promise<Hub> {
+      const HubFactory = await hre.ethers.getContractFactory('Hub');
+      const freshHub = (await HubFactory.deploy()) as unknown as Hub;
+      await freshHub.waitForDeployment();
+      return freshHub;
+    }
 
-      // Register StakingStorage and Chronos stubs so only EpochStorageV8 is missing.
-      const [signer0, signer18, signer19] = await hre.ethers.getSigners();
-      await Hub.setContractAddress('HubOwner', signer0.address);
-      await Hub.setContractAddress('StakingStorage', signer18.address);
-      await Hub.setContractAddress('Chronos', signer19.address);
-
+    async function deployUnregisteredNFT(freshHub: Hub): Promise<DKGPublishingConvictionNFT> {
       const Factory = await hre.ethers.getContractFactory('DKGPublishingConvictionNFT');
-      const nft = await Factory.deploy(await Hub.getAddress());
+      const nft = (await Factory.deploy(await freshHub.getAddress())) as unknown as DKGPublishingConvictionNFT;
       await nft.waitForDeployment();
-      await Hub.setContractAddress('DKGPublishingConvictionNFT', await nft.getAddress());
+      // Register the NFT in the fresh Hub so `onlyHub` accepts the initialize call.
+      await freshHub.setContractAddress('DKGPublishingConvictionNFT', await nft.getAddress());
+      return nft;
+    }
 
+    it('initialize reverts when EpochStorageV8 is address(0)', async () => {
+      const freshHub = await deployDisposableHub();
+      // Register Token + StakingStorage + Chronos stubs (EOA signers are fine —
+      // Hub._isContract skips setStatus for non-contract addresses). Omit
+      // EpochStorageV8 so initialize must revert on that branch.
+      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
+      await freshHub.setContractAddress('Token', signer17.address);
+      await freshHub.setContractAddress('StakingStorage', signer18.address);
+      await freshHub.setContractAddress('Chronos', signer19.address);
+
+      const nft = await deployUnregisteredNFT(freshHub);
       await expect(
-        Hub.forwardCall(
+        freshHub.forwardCall(
           await nft.getAddress(),
           nft.interface.encodeFunctionData('initialize'),
         ),
@@ -364,45 +385,51 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
 
     it('initialize reverts when StakingStorage is address(0)', async () => {
-      await hre.deployments.fixture(['Hub', 'Token', 'EpochStorage', 'Chronos']);
-      const Hub = await hre.ethers.getContract<Hub>('Hub');
-      const [signer0] = await hre.ethers.getSigners();
-      await Hub.setContractAddress('HubOwner', signer0.address);
-      const Factory = await hre.ethers.getContractFactory('DKGPublishingConvictionNFT');
-      const nft = await Factory.deploy(await Hub.getAddress());
-      await nft.waitForDeployment();
-      await Hub.setContractAddress('DKGPublishingConvictionNFT', await nft.getAddress());
+      const freshHub = await deployDisposableHub();
+      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
+      await freshHub.setContractAddress('Token', signer17.address);
+      await freshHub.setContractAddress('EpochStorageV8', signer18.address);
+      await freshHub.setContractAddress('Chronos', signer19.address);
+
+      const nft = await deployUnregisteredNFT(freshHub);
       await expect(
-        Hub.forwardCall(await nft.getAddress(), nft.interface.encodeFunctionData('initialize')),
+        freshHub.forwardCall(
+          await nft.getAddress(),
+          nft.interface.encodeFunctionData('initialize'),
+        ),
       ).to.be.reverted;
     });
 
     it('initialize reverts when Chronos is address(0)', async () => {
-      await hre.deployments.fixture(['Hub', 'Token', 'StakingStorage']);
-      const Hub = await hre.ethers.getContract<Hub>('Hub');
-      const [signer0, signer18] = await hre.ethers.getSigners();
-      await Hub.setContractAddress('HubOwner', signer0.address);
-      await Hub.setContractAddress('EpochStorageV8', signer18.address);
-      const Factory = await hre.ethers.getContractFactory('DKGPublishingConvictionNFT');
-      const nft = await Factory.deploy(await Hub.getAddress());
-      await nft.waitForDeployment();
-      await Hub.setContractAddress('DKGPublishingConvictionNFT', await nft.getAddress());
+      const freshHub = await deployDisposableHub();
+      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
+      await freshHub.setContractAddress('Token', signer17.address);
+      await freshHub.setContractAddress('StakingStorage', signer18.address);
+      await freshHub.setContractAddress('EpochStorageV8', signer19.address);
+
+      const nft = await deployUnregisteredNFT(freshHub);
       await expect(
-        Hub.forwardCall(await nft.getAddress(), nft.interface.encodeFunctionData('initialize')),
+        freshHub.forwardCall(
+          await nft.getAddress(),
+          nft.interface.encodeFunctionData('initialize'),
+        ),
       ).to.be.reverted;
     });
 
     it('initialize reverts when Token is address(0)', async () => {
-      await hre.deployments.fixture(['Hub']);
-      const Hub = await hre.ethers.getContract<Hub>('Hub');
-      const [signer0] = await hre.ethers.getSigners();
-      await Hub.setContractAddress('HubOwner', signer0.address);
-      const Factory = await hre.ethers.getContractFactory('DKGPublishingConvictionNFT');
-      const nft = await Factory.deploy(await Hub.getAddress());
-      await nft.waitForDeployment();
-      await Hub.setContractAddress('DKGPublishingConvictionNFT', await nft.getAddress());
+      const freshHub = await deployDisposableHub();
+      // Register StakingStorage + EpochStorageV8 + Chronos; omit Token.
+      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
+      await freshHub.setContractAddress('StakingStorage', signer17.address);
+      await freshHub.setContractAddress('EpochStorageV8', signer18.address);
+      await freshHub.setContractAddress('Chronos', signer19.address);
+
+      const nft = await deployUnregisteredNFT(freshHub);
       await expect(
-        Hub.forwardCall(await nft.getAddress(), nft.interface.encodeFunctionData('initialize')),
+        freshHub.forwardCall(
+          await nft.getAddress(),
+          nft.interface.encodeFunctionData('initialize'),
+        ),
       ).to.be.reverted;
     });
   });

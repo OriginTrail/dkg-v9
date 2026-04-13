@@ -132,7 +132,8 @@ def register_cli(cli_group):
         for target in dirty_targets:
             entries = cache.get(target, [])
             if not entries:
-                click.echo(f"  Target '{target}' is now empty — skipping write.")
+                click.echo(f"  Target '{target}' is now empty — no remote delete API yet, keeping queued for retry.")
+                failed_targets.add(target)
                 continue
             quads = [{
                 "subject": f"urn:hermes:{assertion_name}:{target}",

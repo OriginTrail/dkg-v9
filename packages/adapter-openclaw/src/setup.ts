@@ -9,14 +9,14 @@
  *  5. Fund wallets via testnet faucet
  *  6. Merge adapter plugin into ~/.openclaw/openclaw.json
  *  7. Write workspace config.json with feature flags
- *  8. Copy skill files into workspace
+ *  8. Prefer node-served skill discovery over copied workspace skills
  *  9. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -555,54 +555,21 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, port
     daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
     memory: { enabled: true, ...dkgNode.memory },
     channel: { enabled: true, ...dkgNode.channel },
-    game: { enabled: true, ...dkgNode.game },
   };
 
   mkdirSync(workspaceDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
-  log(`Wrote workspace config (memory=on, channel=on, game=on)`);
+  log('Wrote workspace config (memory=on, channel=on)');
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: Copy skill files
+// Step 9: Skill discovery note
 // ---------------------------------------------------------------------------
 
 export function copySkills(workspaceDir: string, rootOverride?: string): void {
-  const root = rootOverride ?? adapterRoot();
-  const skillsSource = join(root, 'skills');
-  if (!existsSync(skillsSource)) {
-    warn(`Skills directory not found at ${skillsSource}`);
-    return;
-  }
-
-  const skills = [
-    { dir: 'dkg-node', file: 'SKILL.md' },
-    { dir: 'origin-trail-game', file: 'SKILL.md' },
-  ];
-
-  for (const skill of skills) {
-    const src = join(skillsSource, skill.dir, skill.file);
-    const dest = join(workspaceDir, 'skills', skill.dir, skill.file);
-
-    if (!existsSync(src)) {
-      warn(`Skill file not found: ${src}`);
-      continue;
-    }
-
-    // Skip if already identical
-    if (existsSync(dest)) {
-      const srcContent = readFileSync(src, 'utf-8');
-      const destContent = readFileSync(dest, 'utf-8');
-      if (srcContent === destContent) {
-        log(`Skill ${skill.dir}/${skill.file} already up to date`);
-        continue;
-      }
-    }
-
-    mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
-    log(`Copied ${skill.dir}/${skill.file}`);
-  }
+  const _root = rootOverride ?? adapterRoot();
+  const _workspaceDir = workspaceDir;
+  log('Skipping workspace skill copy: the DKG node serves the canonical SKILL.md at /.well-known/skill.md');
 }
 
 // ---------------------------------------------------------------------------
@@ -763,15 +730,16 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would write workspace config.json');
   }
 
-  // Step 9: Copy skill files
+  // Step 9: Prefer node-served skill discovery over copied workspace skills
   if (!dryRun) {
     copySkills(workspaceDir, resolvedAdapterPath);
   } else {
-    log('[dry-run] Would copy skill files to workspace');
+    log('[dry-run] Would skip workspace skill copy and rely on node-served skill discovery');
   }
 
-  // Prompt to restart gateway
-  log('Restart the OpenClaw gateway to load the adapter');
+  // Prompt to reload gateway. Modern OpenClaw usually auto-restarts shortly
+  // after config changes, but manual restart remains the safe fallback.
+  log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
   // Step 10: Verify
   if (shouldVerify && !dryRun) {

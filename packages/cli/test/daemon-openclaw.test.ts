@@ -2,10 +2,14 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
+  connectLocalAgentIntegration,
+  getLocalAgentIntegration,
   getOpenClawChannelTargets,
   isValidOpenClawPersistTurnPayload,
+  listLocalAgentIntegrations,
   parseRequiredSignatures,
   pipeOpenClawStream,
+  updateLocalAgentIntegration,
 } from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
 
@@ -60,6 +64,33 @@ describe('OpenClaw channel routing helpers', () => {
         name: 'gateway',
         inboundUrl: 'http://gateway.local:3030/api/dkg-channel/inbound',
         healthUrl: 'http://gateway.local:3030/api/dkg-channel/health',
+      },
+    ]);
+  });
+
+  it('prefers the generic local agent integration transport when OpenClaw is connected through the registry', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9401',
+            gatewayUrl: 'http://gateway.local:4040',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9401/inbound',
+        streamUrl: 'http://127.0.0.1:9401/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9401/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://gateway.local:4040/api/dkg-channel/inbound',
+        healthUrl: 'http://gateway.local:4040/api/dkg-channel/health',
       },
     ]);
   });
@@ -209,6 +240,139 @@ describe('OpenClaw persist-turn validation', () => {
       userMessage: '',
       assistantReply: '',
     })).toBe(false);
+  });
+});
+
+describe('local agent integration registry helpers', () => {
+  it('lists built-in local integrations even before they are connected', () => {
+    const integrations = listLocalAgentIntegrations(makeConfig());
+
+    expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw']);
+    expect(integrations.every((integration) => integration.enabled === false)).toBe(true);
+    expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
+  });
+
+  it('merges legacy OpenClaw config into the registry view', () => {
+    const integration = getLocalAgentIntegration(makeConfig({
+      openclawAdapter: true,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9301',
+      },
+    }), 'openclaw');
+
+    expect(integration).not.toBeNull();
+    expect(integration?.enabled).toBe(true);
+    expect(integration?.status).toBe('configured');
+    expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
+    expect(integration?.capabilities.localChat).toBe(true);
+  });
+
+  it('connects OpenClaw through the generic registry and backfills the legacy OpenClaw config', () => {
+    const config = makeConfig();
+
+    const integration = connectLocalAgentIntegration(config, {
+      id: 'openclaw',
+      manifest: {
+        packageName: '@dkg/openclaw-adapter',
+        version: '2026.4.12',
+        setupEntry: './setup-entry.js',
+      },
+      transport: {
+        kind: 'openclaw-channel',
+        gatewayUrl: 'http://gateway.local:3030',
+      },
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+      metadata: {
+        runtimeMode: 'deferred',
+      },
+    }, new Date('2026-04-13T09:00:00.000Z'));
+
+    expect(integration.id).toBe('openclaw');
+    expect(integration.enabled).toBe(true);
+    expect(integration.status).toBe('ready');
+    expect(integration.manifest?.version).toBe('2026.4.12');
+    expect(config.openclawAdapter).toBe(true);
+    expect(config.openclawChannel).toEqual({
+      gatewayUrl: 'http://gateway.local:3030',
+    });
+  });
+
+  it('updates a stored integration without dropping nested metadata', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            source: 'ui',
+            manifestMode: 'setup-entry',
+          },
+          runtime: {
+            status: 'connecting',
+          },
+        },
+      },
+    });
+
+    const integration = updateLocalAgentIntegration(config, 'hermes', {
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+      metadata: {
+        manifestVersion: '1.2.3',
+      },
+    }, new Date('2026-04-13T10:15:00.000Z'));
+
+    expect(integration.status).toBe('ready');
+    expect(integration.runtime.ready).toBe(true);
+    expect(integration.metadata).toEqual({
+      source: 'ui',
+      manifestMode: 'setup-entry',
+      manifestVersion: '1.2.3',
+    });
+  });
+
+  it('replaces stored transport hints so stale OpenClaw gateway URLs do not linger', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            gatewayUrl: 'http://gateway.local:3030',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+        },
+      },
+      openclawAdapter: true,
+      openclawChannel: {
+        gatewayUrl: 'http://gateway.local:3030',
+      },
+    });
+
+    const integration = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        bridgeUrl: 'http://127.0.0.1:9301',
+        healthUrl: 'http://127.0.0.1:9301/health',
+      },
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+    }, new Date('2026-04-13T10:45:00.000Z'));
+
+    expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
+    expect(integration.transport.gatewayUrl).toBeUndefined();
+    expect(config.openclawChannel).toEqual({
+      bridgeUrl: 'http://127.0.0.1:9301',
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -229,7 +229,7 @@ describe('writeWorkspaceConfig', () => {
     expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
     expect(config['dkg-node'].memory.enabled).toBe(true);
     expect(config['dkg-node'].channel.enabled).toBe(true);
-    expect(config['dkg-node'].game.enabled).toBe(true);
+    expect(config['dkg-node'].game).toBeUndefined();
   });
 
   it('preserves existing workspace config keys', () => {
@@ -288,51 +288,27 @@ describe('writeWorkspaceConfig', () => {
 // ---------------------------------------------------------------------------
 
 describe('copySkills', () => {
-  it('copies skill files from adapter root to workspace', () => {
-    // Create fake adapter root with skills
+  it('does not copy workspace skill files anymore', () => {
     const fakeRoot = join(testDir, 'adapter');
     mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    mkdirSync(join(fakeRoot, 'skills', 'origin-trail-game'), { recursive: true });
     writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# DKG Node Skills');
-    writeFileSync(join(fakeRoot, 'skills', 'origin-trail-game', 'SKILL.md'), '# Game Skills');
 
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
 
-    // Use rootOverride to inject the fake adapter root
     copySkills(ws, fakeRoot);
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# DKG Node Skills');
-    expect(readFileSync(join(ws, 'skills', 'origin-trail-game', 'SKILL.md'), 'utf-8')).toBe('# Game Skills');
+    expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
-  it('skips copy when files are already identical', () => {
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
-
+  it('leaves existing workspace skills untouched', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Existing Skill');
 
-    // Should not throw; just skip
-    copySkills(ws, fakeRoot);
+    copySkills(ws, join(testDir, 'adapter'));
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Same Content');
-  });
-
-  it('updates skill files when content differs', () => {
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Updated Content');
-
-    const ws = join(testDir, 'workspace');
-    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Old Content');
-
-    copySkills(ws, fakeRoot);
-
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Updated Content');
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Existing Skill');
   });
 });
 

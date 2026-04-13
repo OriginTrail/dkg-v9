@@ -68,6 +68,58 @@ export interface LlmConfig {
   baseURL?: string;
 }
 
+export type LocalAgentIntegrationStatus =
+  | 'disconnected'
+  | 'configured'
+  | 'connecting'
+  | 'ready'
+  | 'degraded'
+  | 'error';
+
+export interface LocalAgentIntegrationCapabilities {
+  localChat?: boolean;
+  connectFromUi?: boolean;
+  installNode?: boolean;
+  dkgPrimaryMemory?: boolean;
+  wmImportPipeline?: boolean;
+  nodeServedSkill?: boolean;
+}
+
+export interface LocalAgentIntegrationTransport {
+  kind?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  healthUrl?: string;
+}
+
+export interface LocalAgentIntegrationManifest {
+  packageName?: string;
+  version?: string;
+  setupEntry?: string;
+}
+
+export interface LocalAgentIntegrationRuntime {
+  status?: LocalAgentIntegrationStatus;
+  ready?: boolean;
+  lastError?: string | null;
+  updatedAt?: string;
+}
+
+export interface LocalAgentIntegrationConfig {
+  id?: string;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  transport?: LocalAgentIntegrationTransport;
+  capabilities?: LocalAgentIntegrationCapabilities;
+  manifest?: LocalAgentIntegrationManifest;
+  setupEntry?: string;
+  metadata?: Record<string, unknown>;
+  runtime?: LocalAgentIntegrationRuntime;
+  connectedAt?: string;
+  updatedAt?: string;
+}
+
 export interface DkgConfig {
   name: string;
   relay?: string;
@@ -91,6 +143,12 @@ export interface DkgConfig {
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
   store?: { backend: string; options?: Record<string, unknown> };
+  /**
+   * Generic local agent integration registry used by node-owned connect/install
+   * flows. Framework-specific bridges (OpenClaw now, Hermes next) should store
+   * status/capabilities here instead of relying on one-off config flags.
+   */
+  localAgentIntegrations?: Record<string, LocalAgentIntegrationConfig>;
   /** Set to true when this node is used with the OpenClaw adapter. Controls Agent Hub tab visibility. */
   openclawAdapter?: boolean;
   /** Optional OpenClaw bridge/gateway routing hints for the local channel transport. */

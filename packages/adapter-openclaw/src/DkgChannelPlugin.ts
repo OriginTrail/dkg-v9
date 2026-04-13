@@ -31,6 +31,7 @@ import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
@@ -57,6 +58,7 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly pendingTurnPersistence = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> | null }>();
   private readonly port: number;
   private useGatewayRoute = false;
   private inFlight = 0;
@@ -189,6 +191,11 @@ export class DkgChannelPlugin {
       clearTimeout(pending.timer);
       pending.reject(new Error('Channel shutting down'));
       this.pendingRequests.delete(id);
+    }
+
+    for (const [id, job] of this.pendingTurnPersistence) {
+      if (job.timer) clearTimeout(job.timer);
+      this.pendingTurnPersistence.delete(id);
     }
 
     if (this.serverStart) {
@@ -332,9 +339,7 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
-          api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-        });
+        this.queueTurnPersistence(text, reply.text, correlationId, identity);
         return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
@@ -353,9 +358,7 @@ export class DkgChannelPlugin {
         text,
         correlationId,
       });
-      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
-        api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner');
       return reply;
     }
 
@@ -390,7 +393,7 @@ export class DkgChannelPlugin {
       });
       // Clone to avoid mutating the runtime's cached route object
       route = { ...resolved };
-      // Give non-owner identities (e.g. game-autopilot) their own session
+      // Give non-owner identities (e.g. background workers) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
         route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -586,7 +589,7 @@ export class DkgChannelPlugin {
     });
     // Clone to avoid mutating the runtime's cached route object
     const route = { ...resolved };
-    // Give non-owner identities (e.g. game-autopilot) their own session
+    // Give non-owner identities (e.g. background workers) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -685,9 +688,7 @@ export class DkgChannelPlugin {
 
       // Persist turn even if the consumer cancelled early — use accumulated text
       const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
-        log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      this.queueTurnPersistence(text, persistText, correlationId, identity);
     }
 
     // Only yield final if the stream completed normally (not cancelled)
@@ -827,7 +828,7 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
   ): Promise<void> {
-    // Non-owner identities (e.g. game-autopilot) get their own session
+    // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
@@ -839,6 +840,46 @@ export class DkgChannelPlugin {
       { turnId: correlationId },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private queueTurnPersistence(
+    userMessage: string,
+    assistantReply: string,
+    correlationId: string,
+    identity: string,
+  ): void {
+    if (this.pendingTurnPersistence.has(correlationId)) return;
+
+    const attemptPersist = (attempt: number): void => {
+      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
+      void this.persistTurn(userMessage, assistantReply, correlationId, identity)
+        .then(() => {
+          this.pendingTurnPersistence.delete(correlationId);
+        })
+        .catch((err: any) => {
+          const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+          if (retryDelayMs == null) {
+            this.pendingTurnPersistence.delete(correlationId);
+            this.api?.logger.warn?.(
+              `[dkg-channel] Turn persistence failed permanently after ${attempt} attempt(s): ${err.message}`,
+            );
+            return;
+          }
+
+          this.api?.logger.warn?.(
+            `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
+          );
+          const timer = setTimeout(() => {
+            const job = this.pendingTurnPersistence.get(correlationId);
+            if (!job) return;
+            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null });
+            attemptPersist(attempt + 1);
+          }, retryDelayMs);
+          this.pendingTurnPersistence.set(correlationId, { attempt, timer });
+        });
+    };
+
+    attemptPersist(1);
   }
 
   // ---------------------------------------------------------------------------

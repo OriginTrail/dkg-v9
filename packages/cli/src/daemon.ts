@@ -38,6 +38,12 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  type LocalAgentIntegrationCapabilities,
+  type LocalAgentIntegrationConfig,
+  type LocalAgentIntegrationManifest,
+  type LocalAgentIntegrationRuntime,
+  type LocalAgentIntegrationStatus,
+  type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
   resolveSharedMemoryTtlMs,
@@ -1173,6 +1179,55 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
 let _moduleCorsAllowed: CorsAllowlist = '*';
 
+export interface LocalAgentIntegrationDefinition {
+  id: string;
+  name: string;
+  description: string;
+  transportKind?: string;
+  capabilities: LocalAgentIntegrationCapabilities;
+}
+
+export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationConfig {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  transport: LocalAgentIntegrationTransport;
+  capabilities: LocalAgentIntegrationCapabilities;
+  runtime: LocalAgentIntegrationRuntime;
+  status: LocalAgentIntegrationStatus;
+  manifest?: LocalAgentIntegrationManifest;
+}
+
+const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationDefinition> = {
+  openclaw: {
+    id: 'openclaw',
+    name: 'OpenClaw',
+    description: 'Connect a local OpenClaw agent through the DKG node.',
+    transportKind: 'openclaw-channel',
+    capabilities: {
+      localChat: true,
+      connectFromUi: true,
+      installNode: true,
+      dkgPrimaryMemory: true,
+      wmImportPipeline: true,
+      nodeServedSkill: true,
+    },
+  },
+  hermes: {
+    id: 'hermes',
+    name: 'Hermes',
+    description: 'Connect a local Hermes agent through the DKG node.',
+    capabilities: {
+      connectFromUi: true,
+      installNode: true,
+      dkgPrimaryMemory: true,
+      wmImportPipeline: true,
+      nodeServedSkill: true,
+    },
+  },
+};
+
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
 const HEALTH_CACHE_TTL = 10_000; // 10 seconds
@@ -1208,8 +1263,259 @@ async function loadBridgeAuthToken(): Promise<string | undefined> {
   }
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeIntegrationId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrationTransport | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const transport: LocalAgentIntegrationTransport = {};
+  if (typeof input.kind === 'string' && input.kind.trim()) transport.kind = input.kind.trim();
+  if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
+  if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
+  if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
+  return Object.keys(transport).length > 0 ? transport : undefined;
+}
+
+function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationCapabilities | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const capabilities: LocalAgentIntegrationCapabilities = {};
+  const keys: (keyof LocalAgentIntegrationCapabilities)[] = [
+    'localChat',
+    'connectFromUi',
+    'installNode',
+    'dkgPrimaryMemory',
+    'wmImportPipeline',
+    'nodeServedSkill',
+  ];
+  for (const key of keys) {
+    if (typeof input[key] === 'boolean') capabilities[key] = input[key];
+  }
+  return Object.keys(capabilities).length > 0 ? capabilities : undefined;
+}
+
+function normalizeLocalAgentManifest(input: unknown): LocalAgentIntegrationManifest | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const manifest: LocalAgentIntegrationManifest = {};
+  if (typeof input.packageName === 'string' && input.packageName.trim()) manifest.packageName = input.packageName.trim();
+  if (typeof input.version === 'string' && input.version.trim()) manifest.version = input.version.trim();
+  if (typeof input.setupEntry === 'string' && input.setupEntry.trim()) manifest.setupEntry = input.setupEntry.trim();
+  return Object.keys(manifest).length > 0 ? manifest : undefined;
+}
+
+function normalizeLocalAgentRuntime(input: unknown): LocalAgentIntegrationRuntime | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const runtime: LocalAgentIntegrationRuntime = {};
+  const validStatuses = new Set<LocalAgentIntegrationStatus>([
+    'disconnected',
+    'configured',
+    'connecting',
+    'ready',
+    'degraded',
+    'error',
+  ]);
+  if (typeof input.status === 'string' && validStatuses.has(input.status as LocalAgentIntegrationStatus)) {
+    runtime.status = input.status as LocalAgentIntegrationStatus;
+  }
+  if (typeof input.ready === 'boolean') runtime.ready = input.ready;
+  if (input.lastError === null || typeof input.lastError === 'string') runtime.lastError = input.lastError;
+  if (typeof input.updatedAt === 'string' && input.updatedAt.trim()) runtime.updatedAt = input.updatedAt.trim();
+  return Object.keys(runtime).length > 0 ? runtime : undefined;
+}
+
+function mergeLocalAgentIntegrationConfig(
+  base: LocalAgentIntegrationConfig | undefined,
+  patch: LocalAgentIntegrationConfig,
+): LocalAgentIntegrationConfig {
+  return {
+    ...(base ?? {}),
+    ...patch,
+    transport: patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined),
+    capabilities: {
+      ...(base?.capabilities ?? {}),
+      ...(patch.capabilities ?? {}),
+    },
+    manifest: {
+      ...(base?.manifest ?? {}),
+      ...(patch.manifest ?? {}),
+    },
+    runtime: {
+      ...(base?.runtime ?? {}),
+      ...(patch.runtime ?? {}),
+    },
+    metadata: {
+      ...(base?.metadata ?? {}),
+      ...(patch.metadata ?? {}),
+    },
+  };
+}
+
+function getStoredLocalAgentIntegrations(config: DkgConfig): Record<string, LocalAgentIntegrationConfig> {
+  return config.localAgentIntegrations ?? {};
+}
+
+function getLegacyOpenClawIntegration(config: DkgConfig): LocalAgentIntegrationConfig | null {
+  const hasBridgeHints = !!config.openclawChannel?.bridgeUrl || !!config.openclawChannel?.gatewayUrl;
+  const hasLegacyHints = config.openclawAdapter === true || hasBridgeHints;
+  if (!hasLegacyHints) return null;
+  return {
+    id: 'openclaw',
+    enabled: config.openclawAdapter === true || hasBridgeHints,
+    transport: {
+      kind: 'openclaw-channel',
+      ...(config.openclawChannel?.bridgeUrl ? { bridgeUrl: trimTrailingSlashes(config.openclawChannel.bridgeUrl) } : {}),
+      ...(config.openclawChannel?.gatewayUrl ? { gatewayUrl: trimTrailingSlashes(config.openclawChannel.gatewayUrl) } : {}),
+    },
+  };
+}
+
+function computeLocalAgentIntegrationStatus(record: LocalAgentIntegrationConfig): LocalAgentIntegrationStatus {
+  if (record.runtime?.status) return record.runtime.status;
+  if (record.runtime?.ready === true) return 'ready';
+  if (record.enabled) return 'configured';
+  return 'disconnected';
+}
+
+function buildLocalAgentIntegrationRecord(
+  id: string,
+  definition: LocalAgentIntegrationDefinition | undefined,
+  stored: LocalAgentIntegrationConfig | undefined,
+): LocalAgentIntegrationRecord {
+  const merged = mergeLocalAgentIntegrationConfig(
+    definition ? { id, name: definition.name, description: definition.description, capabilities: definition.capabilities, transport: definition.transportKind ? { kind: definition.transportKind } : undefined } : { id },
+    stored ?? { id },
+  );
+  const status = computeLocalAgentIntegrationStatus(merged);
+  return {
+    ...merged,
+    id,
+    name: merged.name?.trim() || definition?.name || id,
+    description: merged.description?.trim() || definition?.description || `${id} local agent integration`,
+    enabled: merged.enabled === true,
+    transport: merged.transport ?? {},
+    capabilities: merged.capabilities ?? {},
+    runtime: merged.runtime ?? {},
+    status,
+  };
+}
+
+export function listLocalAgentIntegrations(config: DkgConfig): LocalAgentIntegrationRecord[] {
+  const legacyOpenClaw = getLegacyOpenClawIntegration(config);
+  const mergedStored: Record<string, LocalAgentIntegrationConfig> = { ...getStoredLocalAgentIntegrations(config) };
+  if (legacyOpenClaw) {
+    mergedStored.openclaw = mergeLocalAgentIntegrationConfig(legacyOpenClaw, mergedStored.openclaw ?? {});
+  }
+  const ids = new Set<string>([
+    ...Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS),
+    ...Object.keys(mergedStored),
+  ]);
+  return [...ids]
+    .map((id) => buildLocalAgentIntegrationRecord(id, LOCAL_AGENT_INTEGRATION_DEFINITIONS[id], mergedStored[id]))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function getLocalAgentIntegration(config: DkgConfig, id: string): LocalAgentIntegrationRecord | null {
+  const normalizedId = normalizeIntegrationId(id);
+  return listLocalAgentIntegrations(config).find((integration) => integration.id === normalizedId) ?? null;
+}
+
+function syncLegacyOpenClawConfig(config: DkgConfig, integration: LocalAgentIntegrationConfig | undefined): void {
+  if (!integration) return;
+  config.openclawAdapter = integration.enabled === true;
+  const transport = integration.transport ?? {};
+  const nextChannel = {
+    ...(transport.bridgeUrl ? { bridgeUrl: transport.bridgeUrl } : {}),
+    ...(transport.gatewayUrl ? { gatewayUrl: transport.gatewayUrl } : {}),
+  };
+  if (Object.keys(nextChannel).length > 0) config.openclawChannel = nextChannel;
+  else delete config.openclawChannel;
+}
+
+function extractLocalAgentIntegrationPatch(body: Record<string, unknown>): LocalAgentIntegrationConfig {
+  const patch: LocalAgentIntegrationConfig = {};
+  if (typeof body.name === 'string' && body.name.trim()) patch.name = body.name.trim();
+  if (typeof body.description === 'string' && body.description.trim()) patch.description = body.description.trim();
+  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
+
+  const transport = normalizeLocalAgentTransport(body.transport);
+  const topLevelTransport = normalizeLocalAgentTransport({
+    kind: typeof body.transportKind === 'string' ? body.transportKind : undefined,
+    bridgeUrl: body.bridgeUrl,
+    gatewayUrl: body.gatewayUrl,
+    healthUrl: body.healthUrl,
+  });
+  patch.transport = transport || topLevelTransport;
+  patch.capabilities = normalizeLocalAgentCapabilities(body.capabilities);
+  patch.manifest = normalizeLocalAgentManifest(body.manifest);
+  patch.runtime = normalizeLocalAgentRuntime(body.runtime);
+  if (typeof body.setupEntry === 'string' && body.setupEntry.trim()) patch.setupEntry = body.setupEntry.trim();
+  if (isPlainRecord(body.metadata)) patch.metadata = body.metadata;
+  return patch;
+}
+
+export function connectLocalAgentIntegration(
+  config: DkgConfig,
+  body: Record<string, unknown>,
+  now = new Date(),
+): LocalAgentIntegrationRecord {
+  const rawId = typeof body.id === 'string' ? body.id : '';
+  const id = normalizeIntegrationId(rawId);
+  if (!id) throw new Error('Missing "id"');
+  const existing = getStoredLocalAgentIntegrations(config)[id];
+  const patch = extractLocalAgentIntegrationPatch(body);
+  const base: LocalAgentIntegrationConfig = {
+    id,
+    enabled: patch.enabled ?? true,
+    connectedAt: existing?.connectedAt ?? now.toISOString(),
+    updatedAt: now.toISOString(),
+    runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
+  };
+  const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
+  config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
+  if (id === 'openclaw') syncLegacyOpenClawConfig(config, next);
+  return getLocalAgentIntegration(config, id)!;
+}
+
+export function updateLocalAgentIntegration(
+  config: DkgConfig,
+  id: string,
+  body: Record<string, unknown>,
+  now = new Date(),
+): LocalAgentIntegrationRecord {
+  const normalizedId = normalizeIntegrationId(id);
+  if (!normalizedId) throw new Error('Missing integration id');
+  const existing = getStoredLocalAgentIntegrations(config)[normalizedId]
+    ?? (normalizedId === 'openclaw' ? getLegacyOpenClawIntegration(config) : null)
+    ?? { id: normalizedId };
+  const patch = extractLocalAgentIntegrationPatch(body);
+  const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  next.id = normalizedId;
+  next.updatedAt = now.toISOString();
+  next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
+  if (!next.runtime.status) next.runtime.status = next.enabled === true ? 'configured' : 'disconnected';
+  config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [normalizedId]: next };
+  if (normalizedId === 'openclaw') syncLegacyOpenClawConfig(config, next);
+  return getLocalAgentIntegration(config, normalizedId)!;
+}
+
+function hasEnabledLocalAgentChat(config: DkgConfig, id: string): boolean {
+  const integration = getLocalAgentIntegration(config, id);
+  return integration?.enabled === true
+    && integration.capabilities.localChat === true
+    && integration.runtime.ready === true;
+}
+
 export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
-  const openclawChannel = config.openclawChannel ?? {};
+  const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
+  const openclawChannel = {
+    bridgeUrl: openclawIntegration?.transport.bridgeUrl ?? config.openclawChannel?.bridgeUrl,
+    gatewayUrl: openclawIntegration?.transport.gatewayUrl ?? config.openclawChannel?.gatewayUrl,
+  };
   const explicitBridgeBase = openclawChannel.bridgeUrl
     ? trimTrailingSlashes(openclawChannel.bridgeUrl)
     : undefined;
@@ -1463,6 +1769,7 @@ async function handleRequest(
     const chainConf = config.chain ?? network?.chain;
     const blockExplorerUrl = config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
+    const localAgentIntegrations = listLocalAgentIntegrations(config);
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -1480,7 +1787,9 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
-      hasOpenClawChannel: config.openclawAdapter === true || !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
+      hasOpenClawChannel: hasEnabledLocalAgentChat(config, 'openclaw'),
+      localAgentIntegrations,
+      connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
@@ -3508,30 +3817,94 @@ async function handleRequest(
     });
   }
 
-  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, context graphs)
-  if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
-    const adapters = [
-      { id: 'elizaos', name: 'ElizaOS', enabled: true, description: 'Connect to ElizaOS agents' },
-      { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
-    ];
-    return jsonResponse(res, 200, { adapters, skills, paranets });
+  // GET /api/local-agent-integrations — generic local agent registry/status surface
+  if (req.method === 'GET' && path === '/api/local-agent-integrations') {
+    return jsonResponse(res, 200, {
+      integrations: listLocalAgentIntegrations(config),
+    });
   }
 
-  // POST /api/register-adapter — adapter self-registers so UI can detect it
+  // GET /api/local-agent-integrations/:id — single local agent integration status
+  if (req.method === 'GET' && path.startsWith('/api/local-agent-integrations/')) {
+    const id = path.slice('/api/local-agent-integrations/'.length);
+    if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    const integration = getLocalAgentIntegration(config, id);
+    if (!integration) return jsonResponse(res, 404, { error: `Unknown integration: ${id}` });
+    return jsonResponse(res, 200, { integration });
+  }
+
+  // POST /api/local-agent-integrations/connect — upsert/connect an integration
+  if (req.method === 'POST' && path === '/api/local-agent-integrations/connect') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    try {
+      const integration = connectLocalAgentIntegration(config, parsed);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
+    }
+  }
+
+  // PUT /api/local-agent-integrations/:id — partial update for stored integration state
+  if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
+    const id = path.slice('/api/local-agent-integrations/'.length);
+    if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    try {
+      const integration = updateLocalAgentIntegration(config, id, parsed);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
+    }
+  }
+
+  // GET /api/integrations — aggregated view for Integrations panel
+  if (req.method === 'GET' && path === '/api/integrations') {
+    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
+    const localAgentIntegrations = listLocalAgentIntegrations(config);
+    const adapters = localAgentIntegrations.map((integration) => ({
+      id: integration.id,
+      name: integration.name,
+      enabled: integration.enabled,
+      description: integration.description,
+      status: integration.status,
+      capabilities: integration.capabilities,
+    }));
+    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, paranets });
+  }
+
+  // POST /api/register-adapter — legacy OpenClaw alias for /api/local-agent-integrations/connect
   if (req.method === 'POST' && path === '/api/register-adapter') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
-    const { id } = parsed;
-    if (typeof id !== 'string' || id !== 'openclaw') {
-      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(id)}` });
+    if (parsed.id !== undefined && parsed.id !== 'openclaw') {
+      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id)}` });
     }
-    if (!config.openclawAdapter) {
-      config.openclawAdapter = true;
+    try {
+      const integration = connectLocalAgentIntegration(config, {
+        ...parsed,
+        id: parsed.id ?? 'openclaw',
+        capabilities: {
+          localChat: true,
+          connectFromUi: true,
+          installNode: true,
+          dkgPrimaryMemory: true,
+          wmImportPipeline: true,
+          nodeServedSkill: true,
+          ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
+        },
+      });
       await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid JSON body' });
     }
-    return jsonResponse(res, 200, { ok: true });
   }
 
   // GET /api/context-graph/exists (V10) or /api/paranet/exists (legacy)

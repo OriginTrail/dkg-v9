@@ -51,6 +51,7 @@ export class DkgNodePlugin {
   private writeCapture: WriteCapture | null = null;
   /** Guard: backlog import runs at most once per plugin lifecycle. */
   private backlogImportDone: Promise<void> | null = null;
+  private warnedLegacyGameConfig = false;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -65,6 +66,8 @@ export class DkgNodePlugin {
    * On subsequent calls (gateway multi-phase init): re-registers tools into the new registry.
    */
   register(api: OpenClawPluginApi): void {
+    this.warnOnLegacyGameConfig(api);
+
     const registrationMode = api.registrationMode ?? 'full';
     const fullRuntime = registrationMode === 'full';
     const setupOnly = registrationMode === 'setup-only';
@@ -172,8 +175,7 @@ export class DkgNodePlugin {
       registrationMode,
       transportMode: this.channelPlugin.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
-
-    this.client.connectLocalAgentIntegration({
+    const basePayload = {
       id: 'openclaw',
       enabled: true,
       description: 'Connect a local OpenClaw agent through the DKG node.',
@@ -182,6 +184,10 @@ export class DkgNodePlugin {
       manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
       setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
       metadata,
+    };
+
+    this.client.connectLocalAgentIntegration({
+      ...basePayload,
       runtime: {
         status: 'connecting',
         ready: false,
@@ -192,8 +198,8 @@ export class DkgNodePlugin {
 
     void this.channelPlugin.start()
       .then(() => this.client.updateLocalAgentIntegration('openclaw', {
+        ...basePayload,
         transport: this.buildOpenClawTransport(),
-        metadata,
         runtime: {
           status: 'ready',
           ready: true,
@@ -204,8 +210,8 @@ export class DkgNodePlugin {
         api.logger.warn?.(`[dkg] OpenClaw channel startup did not reach ready state: ${err.message}`);
         try {
           await this.client.updateLocalAgentIntegration('openclaw', {
+            ...basePayload,
             transport: this.buildOpenClawTransport(),
-            metadata,
             runtime: {
               status: 'error',
               ready: false,
@@ -216,6 +222,17 @@ export class DkgNodePlugin {
           api.logger.warn?.(`[dkg] Failed to persist OpenClaw channel error state: ${updateErr.message}`);
         }
       });
+  }
+
+  private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
+    if (this.warnedLegacyGameConfig) return;
+    const legacyGameConfig = (this.config as Record<string, unknown> | undefined)?.game as { enabled?: boolean } | undefined;
+    if (legacyGameConfig?.enabled) {
+      this.warnedLegacyGameConfig = true;
+      api.logger.warn?.(
+        '[dkg] Legacy dkg-node.game.enabled is no longer supported in the V10 OpenClaw adapter path; OriginTrail Game tools were intentionally removed.',
+      );
+    }
   }
 
   private buildOpenClawTransport(): { kind: string; bridgeUrl?: string; healthUrl?: string } {

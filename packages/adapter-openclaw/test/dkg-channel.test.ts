@@ -141,7 +141,7 @@ describe('DkgChannelPlugin', () => {
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
     // Mock storeChatTurn to prevent actual HTTP call
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-1', 'owner');
@@ -202,7 +202,7 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     // Non-owner identity gets its own session key
@@ -247,7 +247,7 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-legacy', 'owner');
@@ -570,7 +570,7 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
@@ -595,6 +595,58 @@ describe('DkgChannelPlugin', () => {
       { type: 'text_delta', delta: 'reply' },
       { type: 'final', text: 'Streamed reply', correlationId: 'corr-stream-runtime' },
     ]);
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Streamed reply',
+      { turnId: 'corr-stream-runtime' },
+    );
+  });
+
+  it('processInboundStream should not persist a partial reply when the consumer cancels early', async () => {
+    let resumeDispatch!: () => void;
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Partial ' });
+            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            await params.dispatcherOptions.deliver({ text: 'reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-cancel', 'owner');
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text_delta', delta: 'Partial ' },
+    });
+    await expect(stream.return(undefined)).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+    resumeDispatch();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(storeSpy).not.toHaveBeenCalled();
   });
 
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {

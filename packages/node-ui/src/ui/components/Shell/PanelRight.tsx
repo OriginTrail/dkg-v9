@@ -47,7 +47,7 @@ interface AgentInfo {
 }
 
 const OPENCLAW_DOCS_URL = 'https://docs.openclaw.ai/';
-const OPENCLAW_RELEASE_URL = 'https://github.com/openclaw/openclaw/releases/tag/v2026.4.12';
+const OPENCLAW_RELEASE_URL = 'https://github.com/openclaw/openclaw/releases';
 
 let localMessageId = 0;
 

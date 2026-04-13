@@ -689,15 +689,12 @@ export class DkgChannelPlugin {
     } finally {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
-
-      // Persist turn even if the consumer cancelled early — use accumulated text
-      const persistText = replyText || '(no response)';
-      this.queueTurnPersistence(text, persistText, correlationId, identity);
     }
 
     // Only yield final if the stream completed normally (not cancelled)
     if (completed) {
       const finalText = replyText || '(no response)';
+      this.queueTurnPersistence(text, finalText, correlationId, identity);
       yield { type: 'final', text: finalText, correlationId };
     }
   }

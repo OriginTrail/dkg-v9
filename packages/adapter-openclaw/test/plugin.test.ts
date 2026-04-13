@@ -145,6 +145,17 @@ describe('DkgNodePlugin', () => {
       });
       expect(readyCall).toBeTruthy();
       const readyBody = JSON.parse(String(readyCall?.[1]?.body));
+      expect(readyBody.enabled).toBe(true);
+      expect(readyBody.capabilities).toMatchObject({
+        localChat: true,
+        connectFromUi: true,
+        dkgPrimaryMemory: true,
+      });
+      expect(readyBody.manifest).toEqual({
+        packageName: '@origintrail-official/dkg-adapter-openclaw',
+        setupEntry: './setup-entry.mjs',
+      });
+      expect(readyBody.setupEntry).toBe('./setup-entry.mjs');
       expect(readyBody.transport.kind).toBe('openclaw-channel');
       expect(readyBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(readyBody.runtime).toMatchObject({
@@ -178,6 +189,30 @@ describe('DkgNodePlugin', () => {
 
     expect(registeredTools).toHaveLength(0);
     expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
+  });
+
+  it('warns once when legacy OriginTrail Game config is still present', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+      game: { enabled: true } as any,
+    } as any);
+    const warn = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { warn },
+    };
+
+    plugin.register(mockApi);
+    plugin.register(mockApi);
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
   it('upgrades from setup-runtime to full runtime without losing the memory tool surface', () => {

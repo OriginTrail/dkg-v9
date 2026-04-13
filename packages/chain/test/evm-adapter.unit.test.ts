@@ -57,6 +57,45 @@ describe('decodeEvmError / enrichEvmError (07 EVM_MODULE — custom errors)', ()
   it('enrichEvmError returns null when message has no data=', () => {
     expect(enrichEvmError(new Error('rpc failed'))).toBeNull();
   });
+
+  it('decodes NotBatchPublisher from V10 contract errors', () => {
+    const iface = new Interface(['error NotBatchPublisher(uint256 batchId, address caller)']);
+    const data = iface.encodeErrorResult('NotBatchPublisher', [5n, '0x0000000000000000000000000000000000000001']);
+    const d = decodeEvmError(data);
+    expect(d).not.toBeNull();
+    expect(d!.name).toBe('NotBatchPublisher');
+    expect(d!.args[0]).toBe(5n);
+  });
+
+  it('decodes KnowledgeCollectionExpired', () => {
+    const iface = new Interface(['error KnowledgeCollectionExpired(uint256 id, uint256 currentEpoch, uint256 endEpoch)']);
+    const data = iface.encodeErrorResult('KnowledgeCollectionExpired', [1n, 100n, 50n]);
+    const d = decodeEvmError(data);
+    expect(d).not.toBeNull();
+    expect(d!.name).toBe('KnowledgeCollectionExpired');
+  });
+
+  it('decodes CannotUpdateImmutableKnowledgeCollection', () => {
+    const iface = new Interface(['error CannotUpdateImmutableKnowledgeCollection(uint256 id)']);
+    const data = iface.encodeErrorResult('CannotUpdateImmutableKnowledgeCollection', [7n]);
+    const d = decodeEvmError(data);
+    expect(d).not.toBeNull();
+    expect(d!.name).toBe('CannotUpdateImmutableKnowledgeCollection');
+  });
+
+  it('enrichEvmError returns decoded name for V10 errors', () => {
+    const iface = new Interface(['error NotBatchPublisher(uint256 batchId, address caller)']);
+    const data = iface.encodeErrorResult('NotBatchPublisher', [3n, '0x0000000000000000000000000000000000000001']);
+    const err = new Error(`execution reverted (unknown custom error data="${data}")`);
+    const name = enrichEvmError(err);
+    expect(name).toBe('NotBatchPublisher');
+    expect(err.message).toContain('NotBatchPublisher');
+    expect(err.message).not.toContain('unknown custom error');
+  });
+
+  it('returns null for unrecognized error selector', () => {
+    expect(decodeEvmError('0xdeadbeef')).toBeNull();
+  });
 });
 
 describe('EVMChainAdapter constructor / getters (no init)', () => {

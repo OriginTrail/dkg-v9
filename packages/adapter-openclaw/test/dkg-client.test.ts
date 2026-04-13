@@ -301,14 +301,14 @@ describe('DkgDaemonClient', () => {
     expect(writeUrl).toBe('http://localhost:9200/api/shared-memory/write');
     expect(writeOpts?.method).toBe('POST');
     const writeBody = JSON.parse(writeOpts?.body as string);
-    expect(writeBody.paranetId).toBe('testing');
+    expect(writeBody.contextGraphId).toBe('testing');
     expect(writeBody.quads).toHaveLength(1);
 
     const [pubUrl, pubOpts] = fetchSpy.mock.calls[1];
     expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
     expect(pubOpts?.method).toBe('POST');
     const pubBody = JSON.parse(pubOpts?.body as string);
-    expect(pubBody.paranetId).toBe('testing');
+    expect(pubBody.contextGraphId).toBe('testing');
     expect(pubBody.selection).toBe('all');
   });
 

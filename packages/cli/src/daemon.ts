@@ -10,6 +10,7 @@ import { join, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
+import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -1109,6 +1110,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       ) {
         jsonResponse(res, 400, { error: err.message });
       } else {
+        enrichEvmError(err);
         jsonResponse(res, 500, { error: err.message });
       }
     }
@@ -2126,8 +2128,11 @@ async function handleRequest(
         graph: contextGraphSharedMemoryUri(paranetId, subGraphName),
         triplesWritten: quads.length,
       });
-    } catch (err) {
+    } catch (err: any) {
       tracker.fail(ctx, err);
+      if (typeof err?.message === 'string' && err.message.includes('has not been registered')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
       throw err;
     }
   }
@@ -4526,9 +4531,9 @@ async function _performNpmUpdateInner(
     }
   }
 
-  const active = await activeSlot();
+  const active = await activeSlot() ?? 'a';
   const activeDir = join(rDir, active);
-  const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
+  const target = active === 'a' ? 'b' : 'a';
   const targetDir = join(rDir, target);
 
   log(`Auto-update (npm): installing ${CLI_NPM_PACKAGE}@${targetVersion} into slot ${target}...`);

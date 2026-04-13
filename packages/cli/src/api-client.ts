@@ -112,12 +112,12 @@ export class ApiClient {
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
     workspaceOperationId: string;
-    paranetId: string;
+    contextGraphId: string;
     graph: string;
     triplesWritten: number;
     skolemizedBlankNodes?: number;
   }> {
-    return this.post('/api/shared-memory/write', { paranetId: contextGraphId, quads });
+    return this.post('/api/shared-memory/write', { contextGraphId, quads });
   }
 
   /** @deprecated Use sharedMemoryWrite */
@@ -125,7 +125,7 @@ export class ApiClient {
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
     workspaceOperationId: string;
-    paranetId: string;
+    contextGraphId: string;
     graph: string;
     triplesWritten: number;
     skolemizedBlankNodes?: number;
@@ -145,7 +145,7 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.post('/api/shared-memory/publish', { paranetId: contextGraphId, selection, clearAfter });
+    return this.post('/api/shared-memory/publish', { contextGraphId, selection, clearAfter });
   }
 
   /** @deprecated Use publishFromSharedMemory */
@@ -208,12 +208,12 @@ export class ApiClient {
   }
 
   async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, paranetId: contextGraphId });
+    return this.post('/api/query', { sparql, contextGraphId });
   }
 
   async queryRemote(peerId: string, request: {
     lookupType: string;
-    paranetId?: string;
+    contextGraphId?: string;
     ual?: string;
     entityUri?: string;
     rdfType?: string;
@@ -250,7 +250,7 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.post('/api/subscribe', { paranetId: contextGraphId, includeWorkspace: options?.includeSharedMemory });
+    return this.post('/api/context-graph/subscribe', { contextGraphId, includeWorkspace: options?.includeSharedMemory });
   }
 
   /** @deprecated Use subscribeToContextGraph */
@@ -275,7 +275,7 @@ export class ApiClient {
 
   async catchupStatus(contextGraphId: string): Promise<{
     jobId: string;
-    paranetId: string;
+    contextGraphId: string;
     includeWorkspace: boolean;
     status: 'queued' | 'running' | 'done' | 'failed';
     queuedAt: number;
@@ -290,7 +290,7 @@ export class ApiClient {
     };
     error?: string;
   }> {
-    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(contextGraphId)}`);
+    return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {
@@ -313,7 +313,7 @@ export class ApiClient {
   }
 
   async listContextGraphs(): Promise<{
-    paranets: Array<{
+    contextGraphs: Array<{
       id: string;
       uri: string;
       name: string;
@@ -328,7 +328,7 @@ export class ApiClient {
 
   /** @deprecated Use listContextGraphs */
   async listParanets(): Promise<{
-    paranets: Array<{
+    contextGraphs: Array<{
       id: string;
       uri: string;
       name: string;
@@ -369,7 +369,7 @@ export class ApiClient {
   }
 
   async publishCclPolicy(request: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     version: string;
     content: string;
@@ -382,7 +382,7 @@ export class ApiClient {
   }
 
   async approveCclPolicy(request: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri: string;
     contextType?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
@@ -390,7 +390,7 @@ export class ApiClient {
   }
 
   async revokeCclPolicy(request: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri: string;
     contextType?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
@@ -398,14 +398,14 @@ export class ApiClient {
   }
 
   async listCclPolicies(opts: {
-    paranetId?: string;
+    contextGraphId?: string;
     name?: string;
     contextType?: string;
     status?: string;
     includeBody?: boolean;
   } = {}): Promise<{ policies: any[] }> {
     const params = new URLSearchParams();
-    if (opts.paranetId) params.set('paranetId', opts.paranetId);
+    if (opts.contextGraphId) params.set('contextGraphId', opts.contextGraphId);
     if (opts.name) params.set('name', opts.name);
     if (opts.contextType) params.set('contextType', opts.contextType);
     if (opts.status) params.set('status', opts.status);
@@ -415,19 +415,19 @@ export class ApiClient {
   }
 
   async resolveCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     contextType?: string;
     includeBody?: boolean;
   }): Promise<{ policy: any | null }> {
-    const params = new URLSearchParams({ paranetId: opts.paranetId, name: opts.name });
+    const params = new URLSearchParams({ contextGraphId: opts.contextGraphId, name: opts.name });
     if (opts.contextType) params.set('contextType', opts.contextType);
     if (opts.includeBody) params.set('includeBody', 'true');
     return this.get(`/api/ccl/policy/resolve?${params.toString()}`);
   }
 
   async evaluateCclPolicy(request: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     facts?: Array<[string, ...unknown[]]>;
     contextType?: string;
@@ -448,7 +448,7 @@ export class ApiClient {
   }
 
   async listCclEvaluations(opts: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri?: string;
     snapshotId?: string;
     view?: string;
@@ -456,7 +456,7 @@ export class ApiClient {
     resultKind?: 'derived' | 'decision';
     resultName?: string;
   }): Promise<{ evaluations: any[] }> {
-    const params = new URLSearchParams({ paranetId: opts.paranetId });
+    const params = new URLSearchParams({ contextGraphId: opts.contextGraphId });
     if (opts.policyUri) params.set('policyUri', opts.policyUri);
     if (opts.snapshotId) params.set('snapshotId', opts.snapshotId);
     if (opts.view) params.set('view', opts.view);

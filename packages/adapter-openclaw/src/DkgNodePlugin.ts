@@ -525,7 +525,7 @@ export class DkgNodePlugin {
     try {
       const result = await this.client.listContextGraphs();
       const graphs = result.contextGraphs;
-      return this.json({ contextGraphs: graphs, paranets: graphs, count: graphs.length });
+      return this.json({ contextGraphs: graphs, count: graphs.length });
     } catch (err: any) {
       return this.daemonError(err);
     }

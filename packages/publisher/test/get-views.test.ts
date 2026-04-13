@@ -46,9 +46,9 @@ describe('resolveViewGraphs', () => {
   });
 
   describe('verified-memory', () => {
-    it('returns a prefix when no specific verifiedGraph is given', () => {
+    it('includes root content graph and _verified_memory/ prefix when no specific verifiedGraph is given', () => {
       const res = resolveViewGraphs('verified-memory', CG);
-      expect(res.graphs).toHaveLength(0);
+      expect(res.graphs).toEqual([`did:dkg:context-graph:${CG}`]);
       expect(res.graphPrefixes).toEqual([`did:dkg:context-graph:${CG}/_verified_memory/`]);
     });
 

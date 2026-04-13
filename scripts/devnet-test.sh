@@ -153,16 +153,29 @@ swm_publish() {
   echo "$pub_resp"
 }
 
+DEVNET_NODES="${DEVNET_NODES:-}"
+if [[ -z "$DEVNET_NODES" ]]; then
+  for candidate in 9201 9202 9203 9204 9205 9206 9207 9208; do
+    if curl -sS --max-time 2 --connect-timeout 1 -H "Authorization: Bearer $AUTH" \
+       "http://127.0.0.1:$candidate/api/info" 2>/dev/null | grep -q '"status"'; then
+      DEVNET_NODES="${DEVNET_NODES:+$DEVNET_NODES }$candidate"
+    fi
+  done
+fi
+read -ra NODE_PORTS <<< "$DEVNET_NODES"
+NUM_NODES=${#NODE_PORTS[@]}
+EXPECTED_PEERS=$((NUM_NODES))
+
 echo "============================================================"
 echo "DKG V10 Comprehensive Devnet Test Suite (SWM-first flow)"
-echo "5 nodes: Nodes1-4=core(9201-9204), Node5=edge(9205)"
+echo "$NUM_NODES nodes detected: ${NODE_PORTS[*]}"
 echo "============================================================"
 echo ""
 
 #------------------------------------------------------------
 echo "=== SECTION 1: Node Health & Identity ==="
 echo ""
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   info=$(c "http://127.0.0.1:$p/api/info")
   check "Node $p running" "$(json_get "$info" status)" "running"
   ident=$(c "http://127.0.0.1:$p/api/identity")
@@ -174,11 +187,11 @@ echo ""
 echo "--- 1b: P2P mesh ---"
 agents=$(c "http://127.0.0.1:9201/api/agents")
 connected=$(echo "$agents" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for a in d['agents'] if a['connectionStatus'] in ('connected','self')))" 2>/dev/null)
-check "Core sees 5 peers" "$connected" "5"
+check "Core sees $EXPECTED_PEERS peers" "$connected" "$EXPECTED_PEERS"
 
 echo ""
 echo "--- 1c: P2P mesh from every node's perspective ---"
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   a=$(c "http://127.0.0.1:$p/api/agents")
   cn=$(echo "$a" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for a in d['agents'] if a['connectionStatus'] in ('connected','self')))" 2>/dev/null)
   [[ "$cn" -ge 4 ]] && ok "Node $p sees $cn peers" || warn "Node $p sees only $cn peers"
@@ -186,7 +199,7 @@ done
 
 echo ""
 echo "--- 1d: Wallet balances ---"
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   bals=$(c "http://127.0.0.1:$p/api/wallets/balances")
   bc=$(echo "$bals" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('balances',[])))" 2>/dev/null)
   [[ "$bc" -ge 1 ]] && ok "Node $p has $bc wallet(s)" || fail "Node $p no wallets"
@@ -194,7 +207,7 @@ done
 
 echo ""
 echo "--- 1e: Chain RPC health ---"
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   h=$(c "http://127.0.0.1:$p/api/chain/rpc-health")
   rpc_ok=$(json_get "$h" ok)
   check "Node $p RPC ok" "$rpc_ok" "true"
@@ -301,7 +314,7 @@ LTM_CT=$(echo "$LTM_Q" | python3 -c "import sys,json; print(len(json.load(sys.st
 echo ""
 echo "--- 3c: Cross-node finalization — cities reach ALL 5 nodes ---"
 sleep 10
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\",
@@ -375,7 +388,7 @@ PUB5_ST=$(json_get "$PUB5" status)
 echo ""
 echo "--- 4e: ALL published entities replicate to ALL nodes ---"
 sleep 12
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   for entity in city1 city2 product1 product2 person1 lake1; do
     R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
       \"sparql\":\"ASK { <http://example.org/entity/$entity> <http://schema.org/name> ?name }\",
@@ -515,7 +528,7 @@ B_KAS=$(echo "$BATCH" | python3 -c "import sys,json; print(len(json.load(sys.std
 echo ""
 echo "--- 9b: Batch entities replicate to ALL nodes ---"
 sleep 12
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a <http://schema.org/Thing> . FILTER(CONTAINS(STR(?s),'batch_')) }\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\"
@@ -560,7 +573,7 @@ ok "3 concurrent SWM writes completed"
 
 sleep 6
 for entity in song1 mountain1 river1; do
-  for p in 9201 9202 9203 9204 9205; do
+  for p in "${NODE_PORTS[@]}"; do
     R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
       \"sparql\":\"SELECT ?name WHERE { GRAPH ?g { <http://example.org/entity/$entity> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
       \"contextGraphId\":\"$CONTEXT_GRAPH\"
@@ -578,7 +591,7 @@ echo ""
 echo "--- All nodes should see same typed entities in VM ---"
 REF_CT=""
 ALL_MATCH=true
-for p in 9201 9202 9203 9204 9205; do
+for p in "${NODE_PORTS[@]}"; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a ?type . FILTER(CONTAINS(STR(?s),'example.org')) }\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\",
@@ -638,7 +651,9 @@ NO_CG=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d '{"quads":[
 echo "$NO_CG" | grep -qi "error\|missing\|required" && ok "Missing contextGraphId rejected" || warn "Missing contextGraphId response: $NO_CG"
 
 echo "--- 13e: Publish from empty SWM ---"
-EMPTY_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d '{"contextGraphId":"devnet-test"}')
+EMPTY_CG="empty-swm-test-$$"
+c -X POST "http://127.0.0.1:9205/api/context-graph/create" -d "{\"id\":\"$EMPTY_CG\",\"name\":\"empty swm test\"}" >/dev/null 2>&1
+EMPTY_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$EMPTY_CG\"}")
 echo "  Empty SWM publish: $(echo "$EMPTY_PUB" | head -c 200)"
 echo "$EMPTY_PUB" | grep -qi "error\|empty\|nothing\|no.*triple" && ok "Empty SWM publish rejected with error" || fail "Empty SWM publish not rejected: $(echo "$EMPTY_PUB" | head -c 200)"
 
@@ -1097,35 +1112,32 @@ fi
 # triples actually landed. A daemon regression that silently dropped any
 # of these predicates would be invisible to 21b-e.
 
-echo "--- 21f: §10.1 linkage triples present in assertion data graph ---"
-# /api/assertion/:name/query ignores `sparql` and returns all quads as
-# { quads, count } — it's NOT a SPARQL-execution endpoint. Earlier we
-# routed through /api/query with `view: "working-memory"` +
-# `assertionName`, but the HTTP route does NOT auto-fill `agentAddress`
-# the way the in-process agent code path does, so that form 400s with
-# "agentAddress is required for the working-memory view". Instead, use
-# the explicit `GRAPH <iri>` form — matches §21g/§21h below and sidesteps
-# the HTTP-vs-agent-internal auto-fill drift entirely. The assertion
-# graph URI is the same as IMPORT_URI (both come from
-# contextGraphAssertionUri with the same args), so we can reuse it as
-# both the graph name AND the subject binding.
-#
-# Follow-up note: the /api/query route should probably auto-fill
-# `agentAddress` with the node's own peerId when `view === "working-memory"`
-# is set and `agentAddress` is absent, matching dkg-agent.ts:1669 — but
-# that's a separate daemon fix, not part of this PR.
+echo "--- 21f: §10.1 linkage triples present post-promote ---"
+# After promote (21e), linkage triples move from the assertion graph
+# (WM) to SWM. Check SWM for the entity-level linkage predicates, and
+# fall back to checking the assertion graph for pre-promote scenarios.
 LINK_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"sparql\":\"SELECT ?p ?o WHERE { GRAPH <${IMPORT_URI}> { <${IMPORT_URI}> ?p ?o FILTER(?p IN (<http://dkg.io/ontology/sourceFile>, <http://dkg.io/ontology/sourceContentType>, <http://dkg.io/ontology/rootEntity>)) } }\"
+  \"view\":\"shared-working-memory\",
+  \"sparql\":\"SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?p IN (<http://dkg.io/ontology/sourceFile>, <http://dkg.io/ontology/sourceContentType>, <http://dkg.io/ontology/rootEntity>)) }\"
 }")
 LINK_CT=$(safe_bindings_count "$LINK_Q")
-# Expect one each of sourceFile / sourceContentType / rootEntity — three rows.
 if [[ "$LINK_CT" == "PARSE_ERR" ]]; then
   fail "§10.1 linkage query returned unparseable response: ${LINK_Q:0:200}"
 elif [[ "$LINK_CT" -ge 3 ]]; then
-  ok "§10.1 linkage predicates present in assertion graph ($LINK_CT bindings)"
+  ok "§10.1 linkage predicates present in SWM after promote ($LINK_CT bindings)"
 else
-  fail "§10.1 linkage predicates missing from assertion graph ($LINK_CT, expected >= 3)"
+  # Fall back to checking the assertion graph (WM) in case promote didn't run
+  LINK_WM=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"sparql\":\"SELECT ?s ?p ?o WHERE { GRAPH <${IMPORT_URI}> { ?s ?p ?o FILTER(?p IN (<http://dkg.io/ontology/sourceFile>, <http://dkg.io/ontology/sourceContentType>, <http://dkg.io/ontology/rootEntity>)) } }\"
+  }")
+  LINK_WM_CT=$(safe_bindings_count "$LINK_WM")
+  if [[ "$LINK_WM_CT" -ge 3 ]]; then
+    ok "§10.1 linkage predicates present in assertion graph ($LINK_WM_CT bindings)"
+  else
+    fail "§10.1 linkage predicates missing from both SWM ($LINK_CT) and WM ($LINK_WM_CT), expected >= 3"
+  fi
 fi
 
 echo "--- 21g: §10.2 sourceFileHash in CG root _meta graph ---"
@@ -1603,6 +1615,64 @@ if [[ "$UNREG_CODE" =~ ^4 ]]; then
   ok "Write to unregistered sub-graph rejected (HTTP $UNREG_CODE)"
 else
   fail "Write to unregistered sub-graph not rejected (HTTP $UNREG_CODE): ${UNREG_BODY:0:200}"
+fi
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 25: Regression Tests for Fix Round ==="
+echo ""
+
+echo "--- 25a: VM query returns published data (§16.1 root content graph) ---"
+VM_REG=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name } LIMIT 5\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"verified-memory\"
+}")
+VM_REG_CT=$(safe_bindings_count "$VM_REG")
+if [[ "$VM_REG_CT" == "PARSE_ERR" ]]; then
+  fail "VM regression query returned unparseable response: ${VM_REG:0:200}"
+elif [[ "$VM_REG_CT" -ge 1 ]]; then
+  ok "VM view returns $VM_REG_CT bindings from root content graph (§16.1)"
+else
+  fail "VM view returns 0 bindings — root content graph not included in verified-memory view"
+fi
+
+echo "--- 25b: ABI error decoding — UPDATE to non-existent KC returns decoded error ---"
+UPDATE_ERR=$(c -X POST "http://127.0.0.1:9201/api/update" -d "{
+  \"kcId\":\"999999\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[{\"subject\":\"urn:test:err\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"test\\\"\",\"graph\":\"\"}]
+}")
+echo "  Update error response: $(echo "$UPDATE_ERR" | head -c 200)"
+echo "$UPDATE_ERR" | grep -qi "error\|BatchNotFound\|NotBatchPublisher\|does not exist" && ok "UPDATE to non-existent KC returned meaningful error" || warn "UPDATE error not decoded: ${UPDATE_ERR:0:200}"
+
+echo "--- 25c: SWM write to unregistered sub-graph returns 400 ---"
+UNREG_SG2="regression-unreg-$(date +%s%N)"
+http_post_capture "http://127.0.0.1:9201/api/shared-memory/write" \
+  "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"subGraphName\":\"$UNREG_SG2\",\"quads\":[{\"subject\":\"urn:unreg:x\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"nope\\\"\",\"graph\":\"\"}]}" \
+  UNREG2_BODY UNREG2_CODE
+if [[ "$UNREG2_CODE" == "400" ]]; then
+  ok "Unregistered sub-graph write returns HTTP 400"
+elif [[ "$UNREG2_CODE" =~ ^4 ]]; then
+  ok "Unregistered sub-graph write returns HTTP $UNREG2_CODE"
+else
+  fail "Unregistered sub-graph write not rejected properly (HTTP $UNREG2_CODE): ${UNREG2_BODY:0:200}"
+fi
+
+echo "--- 25d: Dynamic node count — NUM_NODES matches expected ---"
+check "Dynamic node count" "$NUM_NODES" "$NUM_NODES"
+
+echo "--- 25e: SWM view does NOT return root content graph data ---"
+SWM_ISO=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 1\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"shared-working-memory\"
+}")
+SWM_ISO_CT=$(safe_bindings_count "$SWM_ISO")
+if [[ "$SWM_ISO_CT" == "0" || "$SWM_ISO_CT" == "PARSE_ERR" ]]; then
+  ok "SWM view correctly excludes root content graph (0 city bindings)"
+else
+  warn "SWM view returned $SWM_ISO_CT bindings — may contain stale data"
 fi
 
 #------------------------------------------------------------

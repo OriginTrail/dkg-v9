@@ -182,6 +182,70 @@ describe('DKGQueryEngine', () => {
       engine.query('DROP GRAPH <http://example.org>'),
     ).rejects.toThrow('SPARQL rejected');
   });
+
+  it('view=verified-memory queries the root content graph (§16.1)', async () => {
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory' },
+    );
+    expect(result.bindings).toHaveLength(1);
+    expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('view=verified-memory unions root content graph with _verified_memory/ graphs', async () => {
+    const vmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_verified_memory/quorum-1`;
+    await store.insert([
+      q('urn:vm:entity:1', 'http://schema.org/name', '"Quorum Verified"', vmGraph),
+    ]);
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory' },
+    );
+    const names = result.bindings.map(r => r['name']);
+    expect(names).toContain('"ImageBot"');
+    expect(names).toContain('"Quorum Verified"');
+  });
+
+  it('view=verified-memory with verifiedGraph scopes to that graph only', async () => {
+    const vmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_verified_memory/team-a`;
+    await store.insert([
+      q('urn:vm:scoped:1', 'http://schema.org/name', '"Scoped Data"', vmGraph),
+    ]);
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory', verifiedGraph: 'team-a' },
+    );
+    expect(result.bindings).toHaveLength(1);
+    expect(result.bindings[0]['name']).toBe('"Scoped Data"');
+  });
+
+  it('view=verified-memory excludes _meta and staging graphs', async () => {
+    await store.insert([
+      q('urn:vm:meta', 'http://schema.org/name', '"Meta Only"', `did:dkg:context-graph:${CONTEXT_GRAPH}/_verified_memory/q1/_meta`),
+      q('urn:vm:staging', 'http://schema.org/name', '"Staging Only"', `did:dkg:context-graph:${CONTEXT_GRAPH}/_verified_memory/staging/draft`),
+    ]);
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory' },
+    );
+    const names = result.bindings.map(r => r['name']);
+    expect(names).not.toContain('"Meta Only"');
+    expect(names).not.toContain('"Staging Only"');
+  });
+
+  it('view=shared-working-memory does NOT include root content graph', async () => {
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
+    );
+    expect(result.bindings).toHaveLength(0);
+  });
+
+  it('view requires contextGraphId', async () => {
+    await expect(
+      engine.query('SELECT ?s WHERE { ?s ?p ?o }', { view: 'verified-memory' }),
+    ).rejects.toThrow('requires a contextGraphId');
+  });
 });
 
 describe('validateReadOnlySparql', () => {

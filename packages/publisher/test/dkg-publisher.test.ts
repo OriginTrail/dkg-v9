@@ -625,4 +625,33 @@ describe('DKGPublisher', () => {
       });
     });
   });
+
+  describe('sub-graph registration validation on share()', () => {
+    it('rejects SWM write to unregistered sub-graph', async () => {
+      await publisher.publish({
+        contextGraphId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+      });
+
+      await expect(
+        publisher.share(PARANET, [
+          q(ENTITY, 'http://schema.org/name', '"Updated"'),
+        ], {
+          subGraphName: 'never-registered',
+          publisherPeerId: 'QmTestPeer',
+        }),
+      ).rejects.toThrow('has not been registered');
+    });
+
+    it('allows SWM write without sub-graph (root CG)', async () => {
+      await expect(
+        publisher.share(PARANET, [
+          q('urn:test:new-entity', 'http://schema.org/name', '"Fresh Write"'),
+        ], {
+          publisherPeerId: 'QmTestPeer',
+        }),
+      ).resolves.toBeDefined();
+    });
+  });
 });
+

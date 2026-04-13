@@ -628,7 +628,8 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
   // Fetch full body from source file if description is truncated
   const [fullBody, setFullBody] = useState<string | null>(null);
   useEffect(() => {
-    if (!sourceFile || !desc || desc.length < 1990) { setFullBody(null); return; }
+    setFullBody(null);
+    if (!sourceFile || !desc || desc.length < 1990) return;
     let cancelled = false;
     const hash = sourceFile.replace('urn:dkg:file:', '');
     const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : null;
@@ -636,8 +637,8 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
     if (token) headers['Authorization'] = `Bearer ${token}`;
     fetch(`/api/file/${encodeURIComponent(hash)}`, { headers })
       .then(r => r.ok ? r.text() : null)
-      .then(text => { if (!cancelled && text) setFullBody(text); })
-      .catch(() => {});
+      .then(text => { if (!cancelled) setFullBody(text ?? null); })
+      .catch(() => { if (!cancelled) setFullBody(null); });
     return () => { cancelled = true; };
   }, [sourceFile, desc]);
 

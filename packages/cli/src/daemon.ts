@@ -2856,11 +2856,11 @@ async function handleRequest(
       }
       tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
 
-      // Re-tag vector store embeddings from swm → vm for published entities
-      if (vectorStore && result.kaManifest?.length) {
+      // Re-tag vector store embeddings from swm → vm only after confirmed publish
+      if (vectorStore && result.kaManifest?.length && result.status !== 'tentative') {
         for (const ka of result.kaManifest) {
           try {
-            await vectorStore.updateLayer({ sourceUri: ka.rootEntity, contextGraphId: paranetId, newLayer: 'vm' });
+            await vectorStore.updateLayer({ entityUri: ka.rootEntity, contextGraphId: paranetId, newLayer: 'vm' });
           } catch { /* best-effort */ }
         }
       }
@@ -4732,8 +4732,11 @@ async function handleRequest(
       graph: targetGraph,
     });
 
-    // Session linking (if session URI provided and is a valid IRI)
-    if (sessionUri && typeof sessionUri === 'string' && isSafeIri(sessionUri)) {
+    // Session linking (if session URI provided)
+    if (sessionUri && typeof sessionUri === 'string') {
+      if (!isSafeIri(sessionUri)) {
+        return jsonResponse(res, 400, { error: `Invalid sessionUri: contains characters unsafe for RDF IRIs` });
+      }
       quads.push({
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',

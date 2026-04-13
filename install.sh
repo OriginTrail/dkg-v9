@@ -44,7 +44,12 @@ stage_markitdown() {
   slot_path="$1"
   slot_name="$2"
   cli_dir="$slot_path/packages/cli"
+  script_path="$cli_dir/scripts/bundle-markitdown-binaries.mjs"
   if [ ! -d "$cli_dir" ]; then
+    return
+  fi
+  if [ ! -f "$script_path" ]; then
+    info "Skipping MarkItDown staging in slot $slot_name (this checkout predates bundled MarkItDown support)."
     return
   fi
   info "Staging MarkItDown binary in slot $slot_name ..."

@@ -8,8 +8,9 @@
  * Spec: 05_PROTOCOL_EXTENSIONS.md §6.5.1
  */
 
+import { createHash } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -17,12 +18,34 @@ import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@orig
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
 
+function checksumPathFor(binaryPath: string): string {
+  return `${binaryPath}.sha256`;
+}
+
+function parseSha256Sidecar(text: string): string | null {
+  const [hash] = text.trim().split(/\s+/);
+  return hash ? hash.toLowerCase() : null;
+}
+
+function hasVerifiedBundledBinary(candidate: string): boolean {
+  const checksumPath = checksumPathFor(candidate);
+  if (!existsSync(candidate) || !existsSync(checksumPath)) return false;
+  try {
+    const expectedHash = parseSha256Sidecar(readFileSync(checksumPath, 'utf-8'));
+    if (!expectedHash) return false;
+    const actualHash = createHash('sha256').update(readFileSync(candidate)).digest('hex');
+    return actualHash === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
 function resolveMarkItDownBin(): string | null {
   const suffix = platform === 'win32' ? '.exe' : '';
   const binaryName = `markitdown-${platform}-${arch}${suffix}`;
   const binDir = resolve(fileURLToPath(new URL('../../bin', import.meta.url)));
   const candidate = join(binDir, binaryName);
-  if (existsSync(candidate)) return candidate;
+  if (hasVerifiedBundledBinary(candidate)) return candidate;
 
   // Fallback: check if markitdown is on PATH
   const pathBin = `markitdown${suffix}`;

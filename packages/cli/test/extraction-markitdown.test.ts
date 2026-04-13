@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -109,8 +110,72 @@ describe('isMarkItDownAvailable', () => {
     isMarkItDownAvailable = mod.isMarkItDownAvailable;
   });
 
+  afterEach(() => {
+    vi.doUnmock('node:fs');
+    vi.doUnmock('node:child_process');
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
   it('returns a boolean', () => {
     const result = isMarkItDownAvailable();
     expect(typeof result).toBe('boolean');
+  });
+
+  it('ignores a bundled binary when the checksum sidecar is missing', async () => {
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        existsSync: vi.fn((path: unknown) => {
+          const normalized = String(path).replace(/\\/g, '/');
+          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) return false;
+          if (normalized.includes('/bin/markitdown-')) return true;
+          return actual.existsSync(path as any);
+        }),
+      };
+    });
+    vi.doMock('node:child_process', () => ({
+      execFileSync: vi.fn(() => { throw new Error('not on path'); }),
+      execFile: vi.fn(),
+    }));
+
+    const mod = await import('../src/extraction/markitdown-converter.js');
+    expect(mod.isMarkItDownAvailable()).toBe(false);
+  });
+
+  it('accepts a bundled binary when the checksum sidecar matches', async () => {
+    const binaryBytes = Buffer.from('verified markitdown binary', 'utf-8');
+    const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        existsSync: vi.fn((path: unknown) => {
+          const normalized = String(path).replace(/\\/g, '/');
+          if (normalized.includes('/bin/markitdown-')) return true;
+          return actual.existsSync(path as any);
+        }),
+        readFileSync: vi.fn((path: unknown) => {
+          const normalized = String(path).replace(/\\/g, '/');
+          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+            return `${binaryHash}  ${assetName}\n`;
+          }
+          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+          return actual.readFileSync(path as any);
+        }),
+      };
+    });
+    vi.doMock('node:child_process', () => ({
+      execFileSync: vi.fn(() => { throw new Error('path fallback should not be used'); }),
+      execFile: vi.fn(),
+    }));
+
+    const mod = await import('../src/extraction/markitdown-converter.js');
+    expect(mod.isMarkItDownAvailable()).toBe(true);
   });
 });

@@ -131,6 +131,9 @@ def register_cli(cli_group):
         failed_targets: set = set()
         for target in dirty_targets:
             entries = cache.get(target, [])
+            if not entries:
+                click.echo(f"  Target '{target}' is now empty — skipping write.")
+                continue
             quads = [{
                 "subject": f"urn:hermes:{assertion_name}:{target}",
                 "predicate": "urn:hermes:content",

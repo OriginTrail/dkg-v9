@@ -44,6 +44,18 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     string private constant _VERSION = "1.0.0";
 
     // -----------------------------------------------------------------------
+    // Bounds on participant lists — anti-griefing caps.
+    //
+    // MAX_HOSTING_NODES bounds the O(n^2) creation-time sorted-dedup walk
+    // (`_validateHostingNodes`) to ~4k storage-reads worst case.
+    //
+    // MAX_PARTICIPANT_AGENTS bounds both the O(n^2) creation-time dedup and
+    // the O(n) shift-left in `removeParticipantAgent` to ~1.3M gas worst case.
+    // -----------------------------------------------------------------------
+    uint256 public constant MAX_HOSTING_NODES = 64;
+    uint256 public constant MAX_PARTICIPANT_AGENTS = 256;
+
+    // -----------------------------------------------------------------------
     // Storage layout — fresh design (no prior deployments to preserve).
     // -----------------------------------------------------------------------
 
@@ -176,6 +188,12 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         if (hostingNodes.length == 0) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
         }
+        if (hostingNodes.length > MAX_HOSTING_NODES) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("hosting nodes cap");
+        }
+        if (participantAgents.length > MAX_PARTICIPANT_AGENTS) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("agents cap");
+        }
         if (requiredSignatures == 0 || requiredSignatures > hostingNodes.length) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid M/N threshold");
         }
@@ -214,7 +232,7 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         cg.requiredSignatures = requiredSignatures;
         cg.metadataBatchId = metadataBatchId;
         cg.active = true;
-        cg.createdAt = block.timestamp;
+        cg.createdAt = uint40(block.timestamp);
         cg.publishPolicy = publishPolicy;
         cg.publishAuthority = normalizedAuthority;
 
@@ -415,6 +433,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         if (nodes.length == 0) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
         }
+        if (nodes.length > MAX_HOSTING_NODES) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("hosting nodes cap");
+        }
         if (_contextGraphs[contextGraphId].requiredSignatures > nodes.length) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("setHostingNodes would break quorum");
         }
@@ -444,6 +465,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         }
         address[] storage agents = _participantAgents[contextGraphId];
         uint256 len = agents.length;
+        if (len >= MAX_PARTICIPANT_AGENTS) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("agents cap");
+        }
         for (uint256 i; i < len; i++) {
             if (agents[i] == agent) {
                 revert KnowledgeAssetsLib.AgentParticipantAlreadyExists(contextGraphId, agent);
@@ -453,6 +477,10 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         emit AgentParticipantAdded(contextGraphId, agent);
     }
 
+    /// @notice Remove an agent from the participant allow-list.
+    /// @dev Shift-left preserves insertion order for deterministic off-chain
+    ///      iteration. Gas cost is bounded by MAX_PARTICIPANT_AGENTS
+    ///      (~1.3M gas worst case at the 256-entry cap).
     function removeParticipantAgent(
         uint256 contextGraphId,
         address agent
@@ -635,12 +663,17 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     ) internal virtual override(ERC721Enumerable) returns (address) {
         address from = super._update(to, tokenId, auth);
 
-        // On transfer (not mint/burn): if the curated publishAuthority was the
-        // previous owner, auto-rotate it to the new owner so governance follows
-        // the NFT and the old owner can't keep publishing. Always clear the
-        // PCA accountId — the new owner is unlikely to be the same PCA, and
-        // they must explicitly opt back into PCA mode if desired.
-        if (from != address(0) && to != address(0)) {
+        // On transfer (not mint/burn, not self-transfer): if the curated
+        // publishAuthority was the previous owner, auto-rotate it to the new
+        // owner so governance follows the NFT and the old owner can't keep
+        // publishing. Always clear the PCA accountId — the new owner is
+        // unlikely to be the same PCA, and they must explicitly opt back into
+        // PCA mode if desired.
+        //
+        // Self-transfers (`from == to`) are no-ops for governance: without the
+        // `from != to` guard the branch below would trivially evaluate true
+        // (publishAuthority == from == to) and silently clear the accountId.
+        if (from != address(0) && to != address(0) && from != to) {
             KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[tokenId];
             if (cg.publishAuthority == from) {
                 cg.publishAuthority = to;

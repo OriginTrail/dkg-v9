@@ -51,14 +51,24 @@ library KnowledgeAssetsLib {
      * types AND the account-owner address for PCA. The curator type is
      * disambiguated by the `_publishAuthorityAccountId` mapping — non-zero
      * means PCA.
+     *
+     * Storage layout (tight-packed, 2 slots):
+     *   slot 0: publishAuthority (20) | createdAt (5) | requiredSignatures (1)
+     *           | publishPolicy (1) | active (1) = 28 bytes
+     *   slot 1: metadataBatchId (32) — full 256 bits for forward-compat
+     *
+     * `createdAt` is uint40 seconds-since-epoch: max value ~1.1e12 seconds ≈
+     * year 36,835, plenty of headroom over any realistic contract lifetime.
      */
     struct ContextGraph {
-        uint8 requiredSignatures;
-        uint256 metadataBatchId;
-        bool active;
-        uint256 createdAt;
-        uint8 publishPolicy;      // 0 = curated (default), 1 = open
+        // Slot 0 (28 bytes of 32 used)
         address publishAuthority;  // Curator address (EOA, Safe multisig, or PCA owner)
+        uint40 createdAt;          // Seconds since epoch; good until year ~36,835
+        uint8 requiredSignatures;
+        uint8 publishPolicy;       // 0 = curated (default), 1 = open
+        bool active;
+        // Slot 1
+        uint256 metadataBatchId;
     }
 
     error PublisherRangeExhausted(address publisher, uint64 needed, uint64 available);

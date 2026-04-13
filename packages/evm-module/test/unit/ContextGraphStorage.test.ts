@@ -596,4 +596,210 @@ describe('@unit ContextGraphStorage', () => {
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Size caps — MAX_HOSTING_NODES / MAX_PARTICIPANT_AGENTS
+  // -------------------------------------------------------------------------
+  describe('size caps (MAX_HOSTING_NODES / MAX_PARTICIPANT_AGENTS)', () => {
+    // Sequential ascending bigints [1..n].
+    const makeHostingNodes = (n: number): bigint[] =>
+      Array.from({ length: n }, (_, i) => BigInt(i + 1));
+
+    // Deterministic distinct 20-byte addresses derived from an index.
+    const makeAgents = (n: number): string[] =>
+      Array.from({ length: n }, (_, i) =>
+        ethers.getAddress('0x' + (i + 1).toString(16).padStart(40, '0')),
+      );
+
+    it('createContextGraph succeeds at exactly MAX_HOSTING_NODES (64)', async () => {
+      const nodes = makeHostingNodes(64);
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, nodes, [], 1, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await StorageContract.getHostingNodes(1)).to.deep.equal(nodes);
+    });
+
+    it('createContextGraph reverts at MAX_HOSTING_NODES + 1 (65)', async () => {
+      const nodes = makeHostingNodes(65);
+      await expect(
+        StorageContract.connect(opSigner).createContextGraph(
+          accounts[0].address, nodes, [], 1, 0, 1, ethers.ZeroAddress, 0,
+        ),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+
+    it('createContextGraph succeeds at exactly MAX_PARTICIPANT_AGENTS (256)', async () => {
+      const agents = makeAgents(256);
+      // 256 agents pushes the dedup + storage-write cost to ~20M gas. Pin an
+      // explicit gas limit so ethers does not fall back to the 15M default.
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, [10n], agents, 1, 0, 1, ethers.ZeroAddress, 0,
+        { gasLimit: 29_000_000 },
+      );
+      expect(await StorageContract.getParticipantAgents(1)).to.deep.equal(agents);
+    });
+
+    it('createContextGraph reverts at MAX_PARTICIPANT_AGENTS + 1 (257)', async () => {
+      const agents = makeAgents(257);
+      await expect(
+        StorageContract.connect(opSigner).createContextGraph(
+          accounts[0].address, [10n], agents, 1, 0, 1, ethers.ZeroAddress, 0,
+        ),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+
+    it('setHostingNodes reverts at MAX_HOSTING_NODES + 1 (65)', async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, [10n, 20n], [], 1, 0, 1, ethers.ZeroAddress, 0,
+      );
+      const nodes = makeHostingNodes(65);
+      await expect(
+        StorageContract.connect(opSigner).setHostingNodes(1, nodes),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+
+    it('addParticipantAgent reverts at MAX_PARTICIPANT_AGENTS', async () => {
+      // Create CG with 256 agents (exactly at cap)
+      const agents = makeAgents(256);
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, [10n], agents, 1, 0, 1, ethers.ZeroAddress, 0,
+        { gasLimit: 29_000_000 },
+      );
+      // One more push must revert (cap hit on the addParticipantAgent guard)
+      const extra = ethers.getAddress('0x' + (257).toString(16).padStart(40, '0'));
+      await expect(
+        StorageContract.connect(opSigner).addParticipantAgent(1, extra),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Nonexistent-CG rejection: every mutator must revert when given an
+  // unknown contextGraphId.
+  // -------------------------------------------------------------------------
+  describe('nonexistent CG rejection', () => {
+    const ghostId = 999n;
+
+    it('addParticipantAgent reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).addParticipantAgent(ghostId, accounts[3].address),
+      ).to.be.reverted;
+    });
+
+    it('removeParticipantAgent reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).removeParticipantAgent(ghostId, accounts[3].address),
+      ).to.be.reverted;
+    });
+
+    it('updatePublishPolicy reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).updatePublishPolicy(ghostId, 1, ethers.ZeroAddress, 0),
+      ).to.be.reverted;
+    });
+
+    it('updatePublishAuthority reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).updatePublishAuthority(ghostId, ethers.ZeroAddress, 0),
+      ).to.be.reverted;
+    });
+
+    it('updateQuorum reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).updateQuorum(ghostId, 1),
+      ).to.be.reverted;
+    });
+
+    it('deactivateContextGraph reverts on unknown CG', async () => {
+      await expect(
+        StorageContract.connect(opSigner).deactivateContextGraph(ghostId),
+      ).to.be.reverted;
+    });
+
+    it('registerKCToContextGraph reverts on unknown CG (ContextGraphNotActive)', async () => {
+      await expect(
+        StorageContract.connect(opSigner).registerKCToContextGraph(ghostId, 1),
+      ).to.be.revertedWithCustomError(StorageContract, 'ContextGraphNotActive');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // deactivateContextGraph — direct coverage (state, event, auth, idempotency)
+  // -------------------------------------------------------------------------
+  describe('deactivateContextGraph', () => {
+    beforeEach(async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, [10n], [], 1, 0, 1, ethers.ZeroAddress, 0,
+      );
+    });
+
+    it('deactivates CG, flips isContextGraphActive, emits event', async () => {
+      expect(await StorageContract.isContextGraphActive(1)).to.be.true;
+      await expect(
+        StorageContract.connect(opSigner).deactivateContextGraph(1),
+      ).to.emit(StorageContract, 'ContextGraphDeactivated').withArgs(1);
+      expect(await StorageContract.isContextGraphActive(1)).to.be.false;
+    });
+
+    // Decision: implementation is idempotent — the second call re-sets
+    // `active = false` (no-op) and re-emits the event. We pin this behavior
+    // rather than revert because it has zero observable state impact and
+    // simplifies operator tooling (at-least-once retries are safe).
+    it('is idempotent on double deactivation (no revert, state stable)', async () => {
+      await StorageContract.connect(opSigner).deactivateContextGraph(1);
+      await expect(
+        StorageContract.connect(opSigner).deactivateContextGraph(1),
+      ).to.emit(StorageContract, 'ContextGraphDeactivated').withArgs(1);
+      expect(await StorageContract.isContextGraphActive(1)).to.be.false;
+    });
+
+    it('reverts when caller is not a Hub contract', async () => {
+      await expect(
+        StorageContract.connect(accounts[5]).deactivateContextGraph(1),
+      ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // NFT transfer auto-rotation — additional coverage for accountId preserve
+  // paths and self-transfer no-op.
+  // -------------------------------------------------------------------------
+  describe('NFT transfer — accountId preservation branches', () => {
+    it('does not clear accountId when authority is not the previous owner', async () => {
+      const oldOwner = accounts[0];
+      const newOwner = accounts[6];
+      const externalAuth = accounts[2];
+      await StorageContract.connect(opSigner).createContextGraph(
+        oldOwner.address, [10n], [], 1, 0, 0, externalAuth.address, 777,
+      );
+      // Pre-state
+      expect((await StorageContract.getPublishPolicy(1)).publishAuthority)
+        .to.equal(externalAuth.address);
+      expect(await StorageContract.getPublishAuthorityAccountId(1)).to.equal(777);
+
+      await StorageContract.connect(oldOwner).transferFrom(oldOwner.address, newOwner.address, 1);
+
+      // Post-state: authority NOT rotated (external != oldOwner) and the PCA
+      // accountId MUST NOT be cleared — only the owner-is-authority branch
+      // clears it.
+      expect((await StorageContract.getPublishPolicy(1)).publishAuthority)
+        .to.equal(externalAuth.address);
+      expect(await StorageContract.getPublishAuthorityAccountId(1)).to.equal(777);
+    });
+
+    it('self-transfer does not clear accountId or rotate authority', async () => {
+      const owner = accounts[0];
+      await StorageContract.connect(opSigner).createContextGraph(
+        owner.address, [10n], [], 1, 0, 0, owner.address, 777,
+      );
+      await StorageContract.connect(owner).transferFrom(owner.address, owner.address, 1);
+
+      // Self-transfer must be a governance no-op: without the `from != to`
+      // guard in `_update`, the `publishAuthority == from` branch would
+      // trivially fire (from == to) and silently wipe the accountId.
+      expect(await StorageContract.ownerOf(1)).to.equal(owner.address);
+      expect((await StorageContract.getPublishPolicy(1)).publishAuthority).to.equal(owner.address);
+      expect(await StorageContract.getPublishAuthorityAccountId(1)).to.equal(777);
+    });
+  });
 });

@@ -265,9 +265,10 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
   describe('multi-epoch full flow', () => {
     it('createAccount -> drain epoch N -> advance -> cover -> topUp -> cover drains N+1 base then topUp', async () => {
-      // Register this signer as a Hub contract so it may call coverPublishingCost.
-      const ContractSigner = accounts[5];
-      await HubContract.setContractAddress('PublishingCaller', ContractSigner.address);
+      // Impersonate KAV10 by registering accounts[5] under that Hub name. The
+      // NFT resolves the caller via Hub on every coverPublishingCost call.
+      const Kav10Signer = accounts[5];
+      await HubContract.setContractAddress('KnowledgeAssetsV10', Kav10Signer.address);
 
       // committedTRAC divisible by 12 → clean per-epoch allowance math.
       const committed = hre.ethers.parseEther('120000'); // 30% tier, 10K per epoch
@@ -275,6 +276,10 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const discountBps = 3000n;
       await TokenContract.approve(await NFT.getAddress(), committed);
       await NFT.createAccount(committed);
+
+      // Register a publishing agent for account 1.
+      const agent = accounts[6];
+      await NFT.registerAgent(1, agent.address);
 
       const epochN = await ChronosContract.getCurrentEpoch();
 
@@ -287,13 +292,13 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const baseCost1 = (numer + denom - 1n) / denom;
       const discounted1 = (baseCost1 * (BPS - discountBps)) / BPS;
       expect(discounted1).to.equal(baseAllowance);
-      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost1);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCost1);
       expect(await NFT.epochSpent(1, epochN)).to.equal(baseAllowance);
 
       // Any further cover in epoch N must revert (no topUp yet). Use a
       // baseCost large enough that discountedCost rounds to >= 1 wei.
       await expect(
-        NFT.connect(ContractSigner).coverPublishingCost(1, hre.ethers.parseEther('1')),
+        NFT.connect(Kav10Signer).coverPublishingCost(agent.address, hre.ethers.parseEther('1')),
       ).to.be.revertedWithCustomError(NFT, 'InsufficientAllowance');
 
       // --- Phase 2: advance one epoch so base allowance resets for N+1 ---
@@ -304,7 +309,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       // Cover a small amount in the fresh epoch: pulls from N+1 base, NOT N.
       const smallBase = hre.ethers.parseEther('1000');
       const smallDiscounted = (smallBase * (BPS - discountBps)) / BPS; // 700
-      await NFT.connect(ContractSigner).coverPublishingCost(1, smallBase);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, smallBase);
       expect(await NFT.epochSpent(1, epochN1)).to.equal(smallDiscounted);
       // Epoch N remains fully drained but untouched.
       expect(await NFT.epochSpent(1, epochN)).to.equal(baseAllowance);
@@ -323,7 +328,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const discounted2 = (baseCost2 * (BPS - discountBps)) / BPS; // 14000
       const expectedTopUpDraw = discounted2 - n1Remaining;
 
-      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost2);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCost2);
 
       // N+1 base fully drained.
       expect(await NFT.epochSpent(1, epochN1)).to.equal(baseAllowance);
@@ -534,13 +539,18 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   // ======================================================================
 
   describe('coverPublishingCost', () => {
-    // To exercise onlyContracts we register a test signer as a Hub contract
-    // and call from that signer.
-    let ContractSigner: SignerWithAddress;
+    // N28 fix: coverPublishingCost is callable ONLY by KnowledgeAssetsV10.
+    // We impersonate KAV10 by registering a test signer under that Hub name
+    // and routing calls from that signer. The NFT resolves the account by
+    // looking up the `publishingAgent` argument in `agentToAccountId`, so
+    // every test must register at least one agent before calling.
+    let Kav10Signer: SignerWithAddress;
+    let agent: SignerWithAddress;
 
     beforeEach(async () => {
-      ContractSigner = accounts[5];
-      await HubContract.setContractAddress('PublishingCaller', ContractSigner.address);
+      Kav10Signer = accounts[5];
+      agent = accounts[6];
+      await HubContract.setContractAddress('KnowledgeAssetsV10', Kav10Signer.address);
     });
 
     async function createAt(amount: bigint) {
@@ -548,20 +558,28 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       await NFT.createAccount(amount);
     }
 
+    async function createAtWithAgent(amount: bigint, agentAddr: string) {
+      await createAt(amount);
+      // Account id is totalSupply (just minted). Register agent on it.
+      const newId = await NFT.totalSupply();
+      await NFT.registerAgent(newId, agentAddr);
+      return newId;
+    }
+
     it('returns the discounted cost and deducts from epoch allowance', async () => {
       const committed = hre.ethers.parseEther('1200000'); // 100K per epoch, 75% discount
-      await createAt(committed);
+      await createAtWithAgent(committed, agent.address);
 
       const baseCost = hre.ethers.parseEther('10000');
       const expectedDiscount = (baseCost * (BPS - 7500n)) / BPS; // 2500 TRAC
 
       // staticCall to read the return value, then actually execute.
-      const returned = await NFT.connect(ContractSigner).coverPublishingCost.staticCall(
-        1,
+      const returned = await NFT.connect(Kav10Signer).coverPublishingCost.staticCall(
+        agent.address,
         baseCost,
       );
       expect(returned).to.equal(expectedDiscount);
-      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCost);
 
       const currentEpoch = await ChronosContract.getCurrentEpoch();
       expect(await NFT.epochSpent(1, currentEpoch)).to.equal(expectedDiscount);
@@ -571,7 +589,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
     it('spends epoch allowance first, then topUpBalance', async () => {
       const committed = hre.ethers.parseEther('120000'); // 10K per epoch, 30% discount
-      await createAt(committed);
+      await createAtWithAgent(committed, agent.address);
       const top = hre.ethers.parseEther('50000');
       await TokenContract.approve(await NFT.getAddress(), top);
       await NFT.topUp(1, top);
@@ -581,7 +599,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const discounted = (baseCost * (BPS - 3000n)) / BPS; // 14000
       const baseAllowance = committed / 12n; // 10000
 
-      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCost);
 
       const currentEpoch = await ChronosContract.getCurrentEpoch();
       expect(await NFT.epochSpent(1, currentEpoch)).to.equal(baseAllowance);
@@ -591,35 +609,94 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
     it('reverts InsufficientAllowance when both empty', async () => {
       const committed = hre.ethers.parseEther('60000'); // 5K per epoch, 20% discount
-      await createAt(committed);
+      await createAtWithAgent(committed, agent.address);
       // Drain the epoch allowance: first call consumes exactly the allowance.
       const baseCost1 = (committed / 12n) * BPS / (BPS - 2000n); // so discounted == allowance
-      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost1);
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCost1);
       // Second call with any positive cost should revert
       await expect(
-        NFT.connect(ContractSigner).coverPublishingCost(1, hre.ethers.parseEther('100')),
+        NFT.connect(Kav10Signer).coverPublishingCost(agent.address, hre.ethers.parseEther('100')),
       ).to.be.revertedWithCustomError(NFT, 'InsufficientAllowance');
     });
 
-    it('reverts AccountNotFound for unknown account', async () => {
+    it('reverts NoConvictionAccount for an unregistered agent', async () => {
+      // No agent registered; call from KAV10 with a random EOA.
       await expect(
-        NFT.connect(ContractSigner).coverPublishingCost(999, 1n),
-      ).to.be.revertedWithCustomError(NFT, 'AccountNotFound');
+        NFT.connect(Kav10Signer).coverPublishingCost(accounts[9].address, 1n),
+      )
+        .to.be.revertedWithCustomError(NFT, 'NoConvictionAccount')
+        .withArgs(accounts[9].address);
     });
 
-    it('rejects EOA callers (onlyContracts)', async () => {
+    it('N28: cross-account isolation — agent A call cannot touch account B', async () => {
+      // Account A owned by accounts[0], agent = accounts[6].
+      const committedA = hre.ethers.parseEther('120000'); // 10K/epoch, 30% discount
+      await createAtWithAgent(committedA, agent.address);
+
+      // Account B owned by accounts[1], agent = accounts[8].
+      const committedB = hre.ethers.parseEther('60000'); // 5K/epoch, 20% discount
+      const agentB = accounts[8];
+      await TokenContract.connect(accounts[1]).approve(await NFT.getAddress(), committedB);
+      await NFT.connect(accounts[1]).createAccount(committedB);
+      await NFT.connect(accounts[1]).registerAgent(2, agentB.address);
+
+      const currentEpoch = await ChronosContract.getCurrentEpoch();
+
+      // Snapshot starting state.
+      const spentABefore = await NFT.epochSpent(1, currentEpoch);
+      const spentBBefore = await NFT.epochSpent(2, currentEpoch);
+      expect(spentABefore).to.equal(0n);
+      expect(spentBBefore).to.equal(0n);
+
+      // Call with agent A: must hit account A only.
+      const baseCostA = hre.ethers.parseEther('1000');
+      const discountedA = (baseCostA * (BPS - 3000n)) / BPS; // 700
+      await NFT.connect(Kav10Signer).coverPublishingCost(agent.address, baseCostA);
+      expect(await NFT.epochSpent(1, currentEpoch)).to.equal(discountedA);
+      expect(await NFT.epochSpent(2, currentEpoch)).to.equal(0n);
+
+      // Call with agent B: must hit account B only. Account A untouched.
+      const baseCostB = hre.ethers.parseEther('500');
+      const discountedB = (baseCostB * (BPS - 2000n)) / BPS; // 400
+      await NFT.connect(Kav10Signer).coverPublishingCost(agentB.address, baseCostB);
+      expect(await NFT.epochSpent(1, currentEpoch)).to.equal(discountedA);
+      expect(await NFT.epochSpent(2, currentEpoch)).to.equal(discountedB);
+    });
+
+    it('N28: a non-KAV10 Hub-registered contract cannot call (OnlyKnowledgeAssetsV10)', async () => {
       const committed = hre.ethers.parseEther('60000');
-      await createAt(committed);
+      await createAtWithAgent(committed, agent.address);
+
+      // Register a DIFFERENT Hub contract under a different name. This mimics
+      // the attacker: a malicious but trusted Hub contract attempting to drain
+      // the victim's account. It must be rejected — the gate is KAV10-only.
+      const Attacker = accounts[7];
+      await HubContract.setContractAddress('MaliciousCaller', Attacker.address);
+
       await expect(
-        NFT.connect(accounts[7]).coverPublishingCost(1, hre.ethers.parseEther('100')),
-      ).to.be.reverted;
+        NFT.connect(Attacker).coverPublishingCost(agent.address, hre.ethers.parseEther('100')),
+      )
+        .to.be.revertedWithCustomError(NFT, 'OnlyKnowledgeAssetsV10')
+        .withArgs(Attacker.address);
     });
 
-    it('ABI has exactly 2 parameters (no caller argument)', async () => {
+    it('rejects EOA callers with OnlyKnowledgeAssetsV10', async () => {
+      const committed = hre.ethers.parseEther('60000');
+      await createAtWithAgent(committed, agent.address);
+      const eoa = accounts[7];
+      await expect(
+        NFT.connect(eoa).coverPublishingCost(agent.address, hre.ethers.parseEther('100')),
+      )
+        .to.be.revertedWithCustomError(NFT, 'OnlyKnowledgeAssetsV10')
+        .withArgs(eoa.address);
+    });
+
+    it('ABI has exactly 2 parameters: (publishingAgent, baseCost)', async () => {
       const fn = NFT.interface.getFunction('coverPublishingCost');
       expect(fn).to.not.equal(null);
       expect(fn!.inputs.length).to.equal(2);
-      expect(fn!.inputs[0].name).to.equal('accountId');
+      expect(fn!.inputs[0].name).to.equal('publishingAgent');
+      expect(fn!.inputs[0].type).to.equal('address');
       expect(fn!.inputs[1].name).to.equal('baseCost');
     });
   });

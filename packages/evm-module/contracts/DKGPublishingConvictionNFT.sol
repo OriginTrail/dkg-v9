@@ -25,10 +25,13 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *     persistent `topUpBalance` buffer.
  *   - Discount tier is fixed by `committedTRAC` at creation (6-tier ladder,
  *     0%-75%). topUp does NOT change the tier or extend expiry.
- *   - `coverPublishingCost` is called by other Hub contracts (e.g.
- *     KnowledgeAssetsV10) and deducts from the current epoch allowance first,
- *     then from `topUpBalance`. It does NOT move TRAC — TRAC already lives in
- *     StakingStorage; this function updates accounting only.
+ *   - `coverPublishingCost` is callable only by `KnowledgeAssetsV10` and
+ *     receives the publishing agent (the outer tx's msg.sender) rather than a
+ *     caller-supplied accountId. The NFT auto-resolves the paying account via
+ *     `agentToAccountId`, which closes N28 (a trusted caller could otherwise
+ *     pass a victim's accountId and drain their allowance). It deducts from
+ *     the current epoch allowance first, then from `topUpBalance`, and does
+ *     NOT move TRAC — TRAC already lives in StakingStorage.
  *   - The legacy unspent-TRAC release function is gone: the flow-through
  *     design eliminates it.
  *   - Agents are tracked per account with a governance-configurable cap, and
@@ -98,7 +101,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     // --- Errors ---
 
     error ZeroAddressDependency(string name);
-    error AccountNotFound(uint256 accountId);
+    error NoConvictionAccount(address publishingAgent);
+    error OnlyKnowledgeAssetsV10(address caller);
     error NotAccountOwner(uint256 accountId, address caller);
     error InsufficientAllowance(uint256 accountId, uint40 epoch, uint96 required, uint96 available);
     error AccountExpired(uint256 accountId, uint40 expiresAt);
@@ -231,28 +235,39 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     // ========================================================================
 
     /**
-     * @notice Deduct the discounted publishing cost from the account's
-     *         available allowance. Called by other Hub contracts only.
+     * @notice Deduct the discounted publishing cost from the account bound to
+     *         `publishingAgent`. Callable ONLY by KnowledgeAssetsV10.
      *
-     * Authorization: onlyContracts. The caller contract (e.g. KnowledgeAssetsV10)
-     * is responsible for verifying its own caller maps to `accountId` via
-     * `agentToAccountId`. This function performs NO caller check: the third
-     * `caller` parameter that existed pre-V10 was unsafe (the calling contract
-     * could pass any address) and has been removed.
+     * N28 fix: the caller does NOT pass an `accountId`. It passes the outer
+     * transaction's `msg.sender` (the publishing agent). The NFT resolves the
+     * paying account via the on-chain `agentToAccountId` reverse map. This
+     * removes the victim-account-drain vector where a trusted caller could
+     * pass any account id.
+     *
+     * The function is further gated to `KnowledgeAssetsV10` (resolved lazily
+     * from Hub on every call). Any other Hub-registered contract reverts with
+     * `OnlyKnowledgeAssetsV10`. KAV10 is trusted to pass its own `msg.sender`
+     * as the publishing agent, so a malicious EOA going through KAV10 can
+     * only drain its own conviction account.
      *
      * Spend order: current-epoch base allowance (committedTRAC / 12) first,
      * then `topUpBalance`. Reverts if the combined balance is insufficient.
      *
      * Does NOT move TRAC — TRAC already lives in StakingStorage from
-     * createAccount/topUp. Returns the discounted amount for the caller's
-     * internal accounting.
+     * createAccount/topUp. Returns the discounted amount for KAV10's internal
+     * accounting.
      */
     function coverPublishingCost(
-        uint256 accountId,
+        address publishingAgent,
         uint96 baseCost
-    ) external onlyContracts returns (uint96 discountedCost) {
+    ) external returns (uint96 discountedCost) {
+        address kav10 = hub.getContractAddress("KnowledgeAssetsV10");
+        if (msg.sender != kav10) revert OnlyKnowledgeAssetsV10(msg.sender);
+
+        uint256 accountId = agentToAccountId[publishingAgent];
+        if (accountId == 0) revert NoConvictionAccount(publishingAgent);
+
         Account storage acct = accounts[accountId];
-        if (acct.committedTRAC == 0) revert AccountNotFound(accountId);
 
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
         if (currentEpoch >= acct.expiresAtEpoch) {

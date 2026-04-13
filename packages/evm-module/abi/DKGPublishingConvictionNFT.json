@@ -29,17 +29,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      }
-    ],
-    "name": "AccountNotFound",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "agent",
         "type": "address"
@@ -243,6 +232,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "publishingAgent",
+        "type": "address"
+      }
+    ],
+    "name": "NoConvictionAccount",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
@@ -254,6 +254,17 @@
       }
     ],
     "name": "NotAccountOwner",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "OnlyKnowledgeAssetsV10",
     "type": "error"
   },
   {
@@ -662,9 +673,9 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "publishingAgent",
+        "type": "address"
       },
       {
         "internalType": "uint96",

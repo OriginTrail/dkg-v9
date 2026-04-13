@@ -123,6 +123,7 @@ describe('isMarkItDownAvailable', () => {
   });
 
   it('ignores a bundled binary when the checksum sidecar is missing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
@@ -143,6 +144,7 @@ describe('isMarkItDownAvailable', () => {
 
     const mod = await import('../src/extraction/markitdown-converter.js');
     expect(mod.isMarkItDownAvailable()).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring bundled MarkItDown binary without a valid checksum sidecar'));
   });
 
   it('accepts a bundled binary when the checksum sidecar matches', async () => {

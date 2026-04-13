@@ -4569,7 +4569,7 @@ async function _performNpmUpdateInner(
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
-    if (!existsSync(bundledMarkItDownPath)) {
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
           join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
@@ -4986,7 +4986,7 @@ async function _performUpdateInner(
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
-    if (!existsSync(bundledMarkItDownPath)) {
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
           join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),

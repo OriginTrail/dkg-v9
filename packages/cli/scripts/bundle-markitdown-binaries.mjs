@@ -137,6 +137,10 @@ export function checksumPathFor(binaryPath) {
   return `${binaryPath}.sha256`;
 }
 
+export function metadataPathFor(binaryPath) {
+  return `${binaryPath}.meta.json`;
+}
+
 export function releaseTagForVersion(version) {
   return `v${version.replace(/^v/, '')}`;
 }
@@ -151,6 +155,36 @@ export function releaseAssetUrl(baseUrl, assetName) {
 
 export function sha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function buildFingerprintForPackage(packageDir = DEFAULT_PACKAGE_DIR) {
+  const resolvedPackageDir = resolvePackageDir(packageDir);
+  const entryScript = readFileSync(join(resolvedPackageDir, 'scripts', 'markitdown-entry.py'));
+  return sha256Hex([
+    MARKITDOWN_UPSTREAM_VERSION,
+    PYINSTALLER_VERSION,
+    sha256Hex(entryScript),
+  ].join('\n'));
+}
+
+function metadataMatchesExpected(actualMetadata, expectedMetadata) {
+  if (!expectedMetadata) return true;
+  if (!actualMetadata || typeof actualMetadata !== 'object') return false;
+  return Object.entries(expectedMetadata).every(([key, value]) => actualMetadata[key] === value);
+}
+
+async function writeMetadataFile(binaryPath, metadata) {
+  await writeFile(metadataPathFor(binaryPath), `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
+}
+
+async function readMetadataFile(binaryPath) {
+  const path = metadataPathFor(binaryPath);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(await readFile(path, 'utf-8'));
+  } catch {
+    return null;
+  }
 }
 
 export function parseSha256File(text) {
@@ -204,7 +238,7 @@ async function verifyChecksum(binaryPath, expectedHash) {
   return actualHash;
 }
 
-async function hasVerifiedBinary(binaryPath) {
+async function hasVerifiedBinary(binaryPath, expectedMetadata = null) {
   const binaryChecksumPath = checksumPathFor(binaryPath);
   if (!existsSync(binaryPath) || !existsSync(binaryChecksumPath)) {
     return false;
@@ -213,6 +247,10 @@ async function hasVerifiedBinary(binaryPath) {
     const checksumText = await readFile(binaryChecksumPath, 'utf-8');
     const expectedHash = parseSha256File(checksumText);
     await verifyChecksum(binaryPath, expectedHash);
+    const metadata = await readMetadataFile(binaryPath);
+    if (!metadataMatchesExpected(metadata, expectedMetadata)) {
+      return false;
+    }
     return true;
   } catch {
     return false;
@@ -227,12 +265,15 @@ export async function downloadBinaryAsset({
   assetName,
   destinationDir,
   baseUrl,
+  cliVersion,
   force = false,
 }) {
   const destination = join(destinationDir, assetName);
   const destinationChecksumPath = checksumPathFor(destination);
+  const destinationMetadataPath = metadataPathFor(destination);
+  const expectedMetadata = { source: 'release', cliVersion };
   if (!force && existsSync(destination)) {
-    if (await hasVerifiedBinary(destination)) {
+    if (await hasVerifiedBinary(destination, expectedMetadata)) {
       return { status: 'present', binaryPath: destination };
     }
   }
@@ -253,20 +294,25 @@ export async function downloadBinaryAsset({
   const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const tempDestination = `${destination}${tempSuffix}`;
   const tempChecksumPath = `${destinationChecksumPath}${tempSuffix}`;
+  const tempMetadataPath = `${destinationMetadataPath}${tempSuffix}`;
   try {
     await writeFile(tempDestination, bytes);
     ensureExecutable(tempDestination);
     await writeFile(tempChecksumPath, `${expectedHash}  ${assetName}\n`, 'utf-8');
+    await writeFile(tempMetadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`, 'utf-8');
     await Promise.all([
       removeIfExists(destination),
       removeIfExists(destinationChecksumPath),
+      removeIfExists(destinationMetadataPath),
     ]);
     await rename(tempDestination, destination);
     await rename(tempChecksumPath, destinationChecksumPath);
+    await rename(tempMetadataPath, destinationMetadataPath);
   } catch (err) {
     await Promise.all([
       removeIfExists(tempDestination),
       removeIfExists(tempChecksumPath),
+      removeIfExists(tempMetadataPath),
     ]);
     throw err;
   }
@@ -307,8 +353,13 @@ export async function buildCurrentPlatformBinary({
 
   const binDir = resolveBinDir(packageDir, outputDir);
   const binaryPath = targetBinaryPath(target, packageDir, outputDir);
+  const expectedMetadata = {
+    source: 'build',
+    cliVersion: readCliVersion(packageDir),
+    buildFingerprint: buildFingerprintForPackage(packageDir),
+  };
   if (!force && existsSync(binaryPath)) {
-    if (await hasVerifiedBinary(binaryPath)) {
+    if (await hasVerifiedBinary(binaryPath, expectedMetadata)) {
       return { status: 'present', binaryPath };
     }
   }
@@ -369,6 +420,7 @@ export async function buildCurrentPlatformBinary({
     ensureExecutable(binaryPath);
     const hash = await verifyChecksum(binaryPath, sha256Hex(await readFile(binaryPath)));
     await writeChecksumFile(binaryPath, hash);
+    await writeMetadataFile(binaryPath, expectedMetadata);
     return { status: 'built', binaryPath, hash };
   } finally {
     await rm(tmpRoot, { recursive: true, force: true });
@@ -393,6 +445,7 @@ export async function bundleReleasedBinaries({
       assetName: target.assetName,
       destinationDir: binDir,
       baseUrl,
+      cliVersion: resolvedVersion,
       force,
     }));
   }
@@ -414,19 +467,20 @@ export async function ensureCurrentPlatformBinary({
   }
 
   const binaryPath = targetBinaryPath(target, packageDir, outputDir);
+  const resolvedVersion = version ?? readCliVersion(packageDir);
+  const expectedMetadata = { source: 'release', cliVersion: resolvedVersion };
   if (!force && existsSync(binaryPath)) {
-    if (await hasVerifiedBinary(binaryPath)) {
+    if (await hasVerifiedBinary(binaryPath, expectedMetadata)) {
       return { status: 'present', binaryPath };
     }
   }
-
-  const resolvedVersion = version ?? readCliVersion(packageDir);
   const baseUrl = releaseBaseUrlOverride ?? releaseBaseUrl(resolvedVersion, releaseRepo);
   try {
     const result = await downloadBinaryAsset({
       assetName: target.assetName,
       destinationDir: resolveBinDir(packageDir, outputDir),
       baseUrl,
+      cliVersion: resolvedVersion,
       force,
     });
     return { ...result, source: 'release' };

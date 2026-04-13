@@ -9,6 +9,7 @@ import {
   downloadBinaryAsset,
   ensureCurrentPlatformBinary,
   getSupportedTarget,
+  metadataPathFor,
   parseSha256File,
   pyInstallerNameForTarget,
   readCliVersion,
@@ -20,6 +21,7 @@ import {
 } from '../scripts/bundle-markitdown-binaries.mjs';
 
 describe('bundle-markitdown-binaries helpers', () => {
+  const CLI_VERSION = '9.0.0-rc.3';
   let tmpPaths: string[] = [];
 
   afterEach(async () => {
@@ -80,11 +82,14 @@ describe('bundle-markitdown-binaries helpers', () => {
         assetName,
         destinationDir,
         baseUrl,
+        cliVersion: CLI_VERSION,
       });
 
       expect(result.status).toBe('downloaded');
       expect(await readFile(join(destinationDir, assetName))).toEqual(bytes);
       expect(await readFile(checksumPathFor(join(destinationDir, assetName)), 'utf-8')).toContain(hash);
+      await expect(readFile(metadataPathFor(join(destinationDir, assetName)), 'utf-8')).resolves.toContain(CLI_VERSION);
+      await expect(readFile(metadataPathFor(join(destinationDir, assetName)), 'utf-8')).resolves.toContain('"source": "release"');
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }
@@ -100,11 +105,13 @@ describe('bundle-markitdown-binaries helpers', () => {
     const binaryPath = join(destinationDir, assetName);
     await writeFile(binaryPath, bytes);
     await writeFile(checksumPathFor(binaryPath), `${hash}  ${assetName}\n`, 'utf-8');
+    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: CLI_VERSION }, null, 2)}\n`, 'utf-8');
 
     const result = await downloadBinaryAsset({
       assetName,
       destinationDir,
       baseUrl: 'http://127.0.0.1:1/release',
+      cliVersion: CLI_VERSION,
     });
 
     expect(result.status).toBe('present');
@@ -145,11 +152,62 @@ describe('bundle-markitdown-binaries helpers', () => {
         assetName,
         destinationDir,
         baseUrl: `http://127.0.0.1:${port}/release`,
+        cliVersion: CLI_VERSION,
       });
 
       expect(result.status).toBe('downloaded');
       expect(await readFile(binaryPath)).toEqual(bytes);
       expect(await readFile(checksumPathFor(binaryPath), 'utf-8')).toContain(hash);
+      await expect(readFile(metadataPathFor(binaryPath), 'utf-8')).resolves.toContain(CLI_VERSION);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+
+  it('re-downloads an existing asset when its metadata sidecar is stale', async () => {
+    const destinationDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-stale-meta-'));
+    tmpPaths.push(destinationDir);
+
+    const assetName = 'markitdown-test';
+    const binaryPath = join(destinationDir, assetName);
+    const staleBytes = Buffer.from('stale but checksum-valid bytes', 'utf-8');
+    const staleHash = sha256Hex(staleBytes);
+    await writeFile(binaryPath, staleBytes);
+    await writeFile(checksumPathFor(binaryPath), `${staleHash}  ${assetName}\n`, 'utf-8');
+    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: '9.0.0-rc.2' }, null, 2)}\n`, 'utf-8');
+
+    const refreshedBytes = Buffer.from('# refreshed markdown\n', 'utf-8');
+    const refreshedHash = sha256Hex(refreshedBytes);
+
+    const server = createServer((req, res) => {
+      if (req.url === `/release/${assetName}`) {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(refreshedBytes);
+        return;
+      }
+      if (req.url === `/release/${assetName}.sha256`) {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(`${refreshedHash}  ${assetName}\n`);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      const result = await downloadBinaryAsset({
+        assetName,
+        destinationDir,
+        baseUrl: `http://127.0.0.1:${port}/release`,
+        cliVersion: CLI_VERSION,
+      });
+
+      expect(result.status).toBe('downloaded');
+      expect(await readFile(binaryPath)).toEqual(refreshedBytes);
+      await expect(readFile(metadataPathFor(binaryPath), 'utf-8')).resolves.toContain(CLI_VERSION);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }
@@ -177,10 +235,12 @@ describe('bundle-markitdown-binaries helpers', () => {
         assetName,
         destinationDir,
         baseUrl: `http://127.0.0.1:${port}/release`,
+        cliVersion: CLI_VERSION,
       })).rejects.toThrow(/returned 404/);
 
       expect(await readFile(binaryPath)).toEqual(staleBytes);
       expect(existsSync(checksumPathFor(binaryPath))).toBe(false);
+      expect(existsSync(metadataPathFor(binaryPath))).toBe(false);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }
@@ -216,6 +276,7 @@ describe('bundle-markitdown-binaries helpers', () => {
         assetName,
         destinationDir,
         baseUrl: `http://127.0.0.1:${port}/release`,
+        cliVersion: CLI_VERSION,
       })).rejects.toThrow(/Checksum mismatch/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
@@ -230,7 +291,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     const packageDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-package-'));
     const outputDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-output-'));
     tmpPaths.push(packageDir, outputDir);
-    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ version: '9.0.0-rc.3' }, null, 2));
+    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ version: CLI_VERSION }, null, 2));
 
     const bytes = Buffer.from('platform-specific binary', 'utf-8');
     const hash = sha256Hex(bytes);
@@ -264,6 +325,7 @@ describe('bundle-markitdown-binaries helpers', () => {
       expect(result.source).toBe('release');
       expect(existsSync(join(outputDir, target.assetName))).toBe(true);
       expect(await readFile(join(outputDir, target.assetName))).toEqual(bytes);
+      await expect(readFile(metadataPathFor(join(outputDir, target.assetName)), 'utf-8')).resolves.toContain(CLI_VERSION);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }

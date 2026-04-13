@@ -46,6 +46,12 @@ function resolveMarkItDownBin(): string | null {
   const binDir = resolve(fileURLToPath(new URL('../../bin', import.meta.url)));
   const candidate = join(binDir, binaryName);
   if (hasVerifiedBundledBinary(candidate)) return candidate;
+  if (existsSync(candidate)) {
+    console.warn(
+      `Ignoring bundled MarkItDown binary without a valid checksum sidecar (${candidate}). `
+      + 'Rerun the staging flow or remove the stale file to use a verified bundled converter.',
+    );
+  }
 
   // Fallback: check if markitdown is on PATH
   const pathBin = `markitdown${suffix}`;

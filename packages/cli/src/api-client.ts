@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
@@ -368,6 +370,79 @@ export class ApiClient {
     return this.post('/api/endorse', request);
   }
 
+  async importAssertionFile(name: string, request: {
+    filePath: string;
+    contextGraphId: string;
+    contentType?: string;
+    ontologyRef?: string;
+    subGraphName?: string;
+  }): Promise<{
+    assertionUri: string;
+    fileHash: string;
+    detectedContentType?: string;
+    extraction?: {
+      status: string;
+      tripleCount?: number;
+      pipelineUsed?: string;
+      mdIntermediateHash?: string;
+      error?: string;
+    };
+  }> {
+    const fileBytes = await readFile(request.filePath);
+    const form = new FormData();
+    const contentType = request.contentType ?? inferUploadContentType(request.filePath);
+    const file = contentType
+      ? new Blob([fileBytes], { type: contentType })
+      : new Blob([fileBytes]);
+
+    form.append('file', file, basename(request.filePath));
+    form.append('contextGraphId', request.contextGraphId);
+    if (request.contentType) form.append('contentType', request.contentType);
+    if (request.ontologyRef) form.append('ontologyRef', request.ontologyRef);
+    if (request.subGraphName) form.append('subGraphName', request.subGraphName);
+
+    return this.postForm(`/api/assertion/${encodeURIComponent(name)}/import-file`, form);
+  }
+
+  async assertionExtractionStatus(name: string, contextGraphId: string): Promise<{
+    assertionUri?: string;
+    fileHash?: string;
+    status?: string;
+    tripleCount?: number;
+    pipelineUsed?: string;
+    mdIntermediateHash?: string;
+    error?: string;
+  }> {
+    return this.get(
+      `/api/assertion/${encodeURIComponent(name)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    );
+  }
+
+  async promoteAssertion(name: string, request: {
+    contextGraphId: string;
+    entities?: 'all' | string[];
+    subGraphName?: string;
+  }): Promise<{
+    promoted?: boolean;
+    promotedCount?: number;
+    contextGraphId?: string;
+    count?: number;
+    sharedMemoryGraph?: string;
+    rootEntities?: string[];
+  }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/promote`, request);
+  }
+
+  async queryAssertion(name: string, request: {
+    contextGraphId: string;
+    subGraphName?: string;
+  }): Promise<{
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+    count: number;
+  }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/query`, request);
+  }
+
   async publishCclPolicy(request: {
     contextGraphId: string;
     name: string;
@@ -503,6 +578,19 @@ export class ApiClient {
     return res.json() as Promise<T>;
   }
 
+  private async postForm<T>(path: string, body: FormData): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, (data as Record<string, unknown>).error as string);
+    }
+    return res.json() as Promise<T>;
+  }
+
   /** Create an Error with an `httpStatus` property so callers can distinguish
    *  application-level responses from connection failures. */
   static httpError(status: number, message?: string): Error & { httpStatus: number } {
@@ -510,4 +598,15 @@ export class ApiClient {
     err.httpStatus = status;
     return err;
   }
+}
+
+function inferUploadContentType(filePath: string): string | undefined {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
+  if (lower.endsWith('.txt')) return 'text/plain';
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
+  if (lower.endsWith('.csv')) return 'text/csv';
+  if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return undefined;
 }

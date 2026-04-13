@@ -942,6 +942,34 @@ describe('performNpmUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
   });
 
+  it('does not probe a source-slot build binary as an npm reuse candidate', async () => {
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) {
+        throw new Error(`npm update should not inspect source-slot MarkItDown candidates: ${normalized}`);
+      }
+      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).not.toHaveBeenCalled();
+    expect(mockedExistsSync.mock.calls.some(
+      ([path]) => normalizePathString(path).includes('/releases/a/packages/cli/bin/markitdown-'),
+    )).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
   it('recovers pending state if swap succeeded but version was not written', async () => {
     mockActiveSlot = 'b';
     mockedReadFile.mockImplementation(async (path: any) => {

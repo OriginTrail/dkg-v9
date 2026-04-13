@@ -4655,7 +4655,6 @@ async function _performNpmUpdateInner(
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
           join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
-          join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),
         ],
         targetBinaryPath: bundledMarkItDownPath,
         log,

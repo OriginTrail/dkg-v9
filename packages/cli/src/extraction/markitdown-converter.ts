@@ -17,9 +17,21 @@ import { fileURLToPath } from 'node:url';
 import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@origintrail-official/dkg-core';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
+const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';
+const PYINSTALLER_VERSION = '6.19.0';
+
+type BundledMarkItDownMetadata = {
+  source?: 'release' | 'build';
+  cliVersion?: string;
+  buildFingerprint?: string;
+};
 
 function checksumPathFor(binaryPath: string): string {
   return `${binaryPath}.sha256`;
+}
+
+function metadataPathFor(binaryPath: string): string {
+  return `${binaryPath}.meta.json`;
 }
 
 function parseSha256Sidecar(text: string): string | null {
@@ -27,17 +39,72 @@ function parseSha256Sidecar(text: string): string | null {
   return hash ? hash.toLowerCase() : null;
 }
 
-function hasVerifiedBundledBinary(candidate: string): boolean {
+function sha256Hex(bytes: string | Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function readCliVersion(): string | null {
+  try {
+    const raw = readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf-8');
+    const pkg = JSON.parse(raw) as { version?: unknown };
+    return typeof pkg.version === 'string' && pkg.version.trim().length > 0 ? pkg.version.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function bundledMarkItDownBuildFingerprint(): string | null {
+  try {
+    const entryScript = readFileSync(fileURLToPath(new URL('../../scripts/markitdown-entry.py', import.meta.url)));
+    const bundlerScript = readFileSync(fileURLToPath(new URL('../../scripts/bundle-markitdown-binaries.mjs', import.meta.url)));
+    return sha256Hex([
+      MARKITDOWN_UPSTREAM_VERSION,
+      PYINSTALLER_VERSION,
+      sha256Hex(entryScript),
+      sha256Hex(bundlerScript),
+    ].join('\n'));
+  } catch {
+    return null;
+  }
+}
+
+function readBundledMetadata(candidate: string): BundledMarkItDownMetadata | null {
+  const metadataPath = metadataPathFor(candidate);
+  if (!existsSync(metadataPath)) return null;
+  try {
+    return JSON.parse(readFileSync(metadataPath, 'utf-8')) as BundledMarkItDownMetadata;
+  } catch {
+    return null;
+  }
+}
+
+function bundledMetadataMatchesCurrentPackage(metadata: BundledMarkItDownMetadata | null): boolean {
+  if (!metadata || typeof metadata !== 'object') return false;
+  const cliVersion = readCliVersion();
+  if (!cliVersion || metadata.cliVersion !== cliVersion) return false;
+  if (metadata.source === 'release') return true;
+  if (metadata.source !== 'build') return false;
+  const buildFingerprint = bundledMarkItDownBuildFingerprint();
+  return !!buildFingerprint && metadata.buildFingerprint === buildFingerprint;
+}
+
+function bundledBinaryValidationFailure(candidate: string): 'checksum' | 'metadata' | null {
   const checksumPath = checksumPathFor(candidate);
-  if (!existsSync(candidate) || !existsSync(checksumPath)) return false;
+  if (!existsSync(candidate) || !existsSync(checksumPath)) return 'checksum';
   try {
     const expectedHash = parseSha256Sidecar(readFileSync(checksumPath, 'utf-8'));
-    if (!expectedHash) return false;
-    const actualHash = createHash('sha256').update(readFileSync(candidate)).digest('hex');
-    return actualHash === expectedHash;
+    if (!expectedHash) return 'checksum';
+    const actualHash = sha256Hex(readFileSync(candidate));
+    if (actualHash !== expectedHash) return 'checksum';
+    const metadata = readBundledMetadata(candidate);
+    return bundledMetadataMatchesCurrentPackage(metadata) ? null : 'metadata';
   } catch {
-    return false;
+    return 'checksum';
   }
+}
+
+function hasVerifiedBundledBinary(candidate: string): boolean {
+  return bundledBinaryValidationFailure(candidate) === null;
 }
 
 function resolveMarkItDownBin(): string | null {
@@ -47,10 +114,18 @@ function resolveMarkItDownBin(): string | null {
   const candidate = join(binDir, binaryName);
   if (hasVerifiedBundledBinary(candidate)) return candidate;
   if (existsSync(candidate)) {
-    console.warn(
-      `Ignoring bundled MarkItDown binary without a valid checksum sidecar (${candidate}). `
-      + 'Rerun the staging flow or remove the stale file to use a verified bundled converter.',
-    );
+    const failure = bundledBinaryValidationFailure(candidate);
+    if (failure === 'metadata') {
+      console.warn(
+        `Ignoring bundled MarkItDown binary with incompatible metadata sidecar (${candidate}). `
+        + 'Rerun the staging flow or remove the stale file to use a bundled converter that matches this package version.',
+      );
+    } else {
+      console.warn(
+        `Ignoring bundled MarkItDown binary without a valid checksum sidecar (${candidate}). `
+        + 'Rerun the staging flow or remove the stale file to use a verified bundled converter.',
+      );
+    }
   }
 
   // Fallback: check if markitdown is on PATH

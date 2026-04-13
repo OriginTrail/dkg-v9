@@ -783,91 +783,93 @@ function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boole
   );
 }
 
+async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecord): Promise<LocalAgentIntegration> {
+  const id = String(record.id ?? '').toLowerCase();
+  const surface = LOCAL_AGENT_SURFACES[id];
+  const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
+  const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
+  const configured = record.enabled === true;
+  const runtimeStatus = record.runtime?.status;
+  const health = configured && hasChatBridge && surface?.fetchHealth
+    ? await surface.fetchHealth().catch(() => null)
+    : null;
+  const chatReady = health?.ok === true;
+  const bridgeOnline = chatReady;
+  const persistentChat = configured && hasChatBridge && (
+    chatReady
+    || runtimeStatus === 'connecting'
+    || record.runtime?.ready === true
+    || hasLocalAgentTransportHints(record)
+  );
+
+  let status: LocalAgentIntegrationStatus;
+  let statusLabel: string;
+  let detail: string;
+  if (bridgeOnline) {
+    status = 'chat_ready';
+    statusLabel = 'Chat ready';
+    detail = `Connected through the ${health?.target ?? 'local bridge'}.`;
+  } else if (persistentChat && record.runtime?.status === 'connecting') {
+    status = 'connecting';
+    statusLabel = 'Connecting';
+    detail = record.runtime?.lastError
+      ?? `${record.name} is registered and the local chat bridge is still starting.`;
+  } else if (persistentChat) {
+    status = 'bridge_offline';
+    statusLabel = 'Bridge offline';
+    detail = health?.error
+      ?? record.runtime?.lastError
+      ?? `${record.name} is attached to this node, but the local bridge is not responding right now.`;
+  } else if (surface) {
+    status = 'available';
+    statusLabel = connectSupported ? 'Ready to connect' : 'Awaiting chat bridge';
+    detail = configured
+      ? `${record.name} is registered, but this panel is waiting for the framework chat bridge.`
+      : (record.runtime?.lastError
+          ?? `Use the node-served skill plus ${record.name} onboarding to attach an existing local agent.`);
+  } else {
+    status = 'coming_soon';
+    statusLabel = configured ? 'Registered, panel pending' : 'Next integration';
+    detail = configured
+      ? `${record.name} is registered on the node, but the right-panel chat bridge is not wired yet.`
+      : 'The local-agent registry is in place so this framework can plug into the same side-panel flow next.';
+  }
+
+  const bridgeStatusLabel = bridgeOnline
+    ? 'Bridge live'
+    : status === 'connecting'
+      ? 'Connecting'
+      : persistentChat
+        ? 'Bridge offline'
+        : connectSupported
+          ? 'Ready to connect'
+          : 'Coming next';
+
+  return {
+    id,
+    name: record.name,
+    framework: record.name,
+    description: record.description,
+    chatSupported: hasChatBridge,
+    connectSupported,
+    configured,
+    detected: configured || chatReady,
+    persistentChat,
+    chatReady,
+    bridgeOnline,
+    bridgeStatusLabel,
+    status,
+    statusLabel,
+    detail,
+    error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
+    target: health?.target,
+    source: configured || surface ? 'live' : 'planned',
+  } satisfies LocalAgentIntegration;
+}
+
 export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
   const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
-  const integrations = await Promise.all((response.integrations ?? []).map(async (record) => {
-    const id = String(record.id ?? '').toLowerCase();
-    const surface = LOCAL_AGENT_SURFACES[id];
-    const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
-    const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
-    const configured = record.enabled === true;
-    const runtimeStatus = record.runtime?.status;
-    const health = configured && hasChatBridge && surface?.fetchHealth
-      ? await surface.fetchHealth().catch(() => null)
-      : null;
-    const chatReady = health?.ok === true;
-    const bridgeOnline = chatReady;
-    const persistentChat = configured && hasChatBridge && (
-      chatReady
-      || runtimeStatus === 'connecting'
-      || record.runtime?.ready === true
-      || hasLocalAgentTransportHints(record)
-    );
-
-    let status: LocalAgentIntegrationStatus;
-    let statusLabel: string;
-    let detail: string;
-    if (bridgeOnline) {
-      status = 'chat_ready';
-      statusLabel = 'Chat ready';
-      detail = `Connected through the ${health?.target ?? 'local bridge'}.`;
-    } else if (persistentChat && record.runtime?.status === 'connecting') {
-      status = 'connecting';
-      statusLabel = 'Connecting';
-      detail = record.runtime?.lastError
-        ?? `${record.name} is registered and the local chat bridge is still starting.`;
-    } else if (persistentChat) {
-      status = 'bridge_offline';
-      statusLabel = 'Bridge offline';
-      detail = health?.error
-        ?? record.runtime?.lastError
-        ?? `${record.name} is attached to this node, but the local bridge is not responding right now.`;
-    } else if (surface) {
-      status = 'available';
-      statusLabel = connectSupported ? 'Ready to connect' : 'Awaiting chat bridge';
-      detail = configured
-        ? `${record.name} is registered, but this panel is waiting for the framework chat bridge.`
-        : (record.runtime?.lastError
-            ?? `Use the node-served skill plus ${record.name} onboarding to attach an existing local agent.`);
-    } else {
-      status = 'coming_soon';
-      statusLabel = configured ? 'Registered, panel pending' : 'Next integration';
-      detail = configured
-        ? `${record.name} is registered on the node, but the right-panel chat bridge is not wired yet.`
-        : 'The local-agent registry is in place so this framework can plug into the same side-panel flow next.';
-    }
-
-    const bridgeStatusLabel = bridgeOnline
-      ? 'Bridge live'
-      : status === 'connecting'
-        ? 'Connecting'
-        : persistentChat
-          ? 'Bridge offline'
-          : connectSupported
-            ? 'Ready to connect'
-            : 'Coming next';
-
-    return {
-      id,
-      name: record.name,
-      framework: record.name,
-      description: record.description,
-      chatSupported: hasChatBridge,
-      connectSupported,
-      configured,
-      detected: configured || chatReady,
-      persistentChat,
-      chatReady,
-      bridgeOnline,
-      bridgeStatusLabel,
-      status,
-      statusLabel,
-      detail,
-      error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
-      target: health?.target,
-      source: configured || surface ? 'live' : 'planned',
-    } satisfies LocalAgentIntegration;
-  }));
+  const integrations = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
 
   integrations.sort((a, b) => {
     const aPriority = a.id === 'openclaw' ? 0 : 1;
@@ -887,14 +889,15 @@ export async function connectLocalAgentIntegration(id: string): Promise<LocalAge
     throw new Error(`${id} local connect is not available yet.`);
   }
 
-  const response = await post<{ ok: boolean; notice?: string }>('/api/local-agent-integrations/connect', {
+  const response = await post<{ ok: boolean; notice?: string; integration?: LocalAgentIntegrationRecord }>('/api/local-agent-integrations/connect', {
     id: normalizedId,
     metadata: {
       source: 'node-ui',
     },
   });
-  const { integrations } = await fetchLocalAgentIntegrations();
-  const integration = integrations.find((item) => item.id === normalizedId);
+  const integration = response.integration
+    ? await mapLocalAgentIntegrationRecord(response.integration)
+    : (await fetchLocalAgentIntegrations()).integrations.find((item) => item.id === normalizedId);
   if (!integration) {
     throw new Error(`Missing local agent integration: ${normalizedId}`);
   }

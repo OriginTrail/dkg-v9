@@ -996,7 +996,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
       // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
       const clientIp = req.socket.remoteAddress ?? 'unknown';
-      if (!rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
+      if (!shouldBypassRateLimitForLoopbackLocalAgentTraffic(clientIp, reqUrl.pathname)
+        && !rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
@@ -4877,6 +4878,25 @@ class HttpRateLimiter {
     clearInterval(this._timer);
     this._hits.clear();
   }
+}
+
+export function isLoopbackClientIp(ip: string): boolean {
+  const normalized = ip.trim().toLowerCase();
+  if (normalized === '::1') return true;
+  if (normalized.startsWith('::ffff:')) {
+    return normalized.slice('::ffff:'.length).startsWith('127.');
+  }
+  return normalized.startsWith('127.');
+}
+
+function isLoopbackLocalAgentRateLimitExemptPath(pathname: string): boolean {
+  return pathname.startsWith('/api/openclaw-channel/')
+    || pathname === '/api/local-agent-integrations'
+    || pathname.startsWith('/api/local-agent-integrations/');
+}
+
+export function shouldBypassRateLimitForLoopbackLocalAgentTraffic(ip: string, pathname: string): boolean {
+  return isLoopbackClientIp(ip) && isLoopbackLocalAgentRateLimitExemptPath(pathname);
 }
 
 function isValidContextGraphId(id: string): boolean {

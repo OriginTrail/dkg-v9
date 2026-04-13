@@ -158,6 +158,11 @@ describe('PanelRight UI - connected agent flow', () => {
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
     expect(panelRight).toContain('streamLocalAgentChat(integrationId, text');
   });
+
+  it('does not clear attached agents on a transient integrations refresh failure', () => {
+    expect(panelRight).toContain('do not collapse an attached agent chat surface');
+    expect(panelRight).not.toContain('setIntegrations([])');
+  });
 });
 
 describe('Agent hub shell surfaces', () => {
@@ -557,24 +562,127 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
+  it('upsertLocalAgentIntegrationState replaces a stale unattached OpenClaw record with the attached chat state', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { upsertLocalAgentIntegrationState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const result = upsertLocalAgentIntegrationState([
+        {
+          id: 'openclaw',
+          name: 'OpenClaw',
+          framework: 'OpenClaw',
+          description: 'OpenClaw framework adapter',
+          chatSupported: true,
+          connectSupported: true,
+          configured: false,
+          detected: false,
+          persistentChat: false,
+          chatReady: false,
+          bridgeOnline: false,
+          bridgeStatusLabel: 'Ready to connect',
+          status: 'available',
+          statusLabel: 'Ready to connect',
+          detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+          source: 'live',
+        },
+      ], {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: true,
+        detected: true,
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        bridgeStatusLabel: 'Bridge live',
+        status: 'chat_ready',
+        statusLabel: 'Chat ready',
+        detail: 'Connected through the bridge.',
+        source: 'live',
+      });
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        status: 'chat_ready',
+      });
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('markLocalAgentIntegrationDisconnected keeps the integration record but clears persistent chat', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { markLocalAgentIntegrationDisconnected } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const result = markLocalAgentIntegrationDisconnected([
+        {
+          id: 'openclaw',
+          name: 'OpenClaw',
+          framework: 'OpenClaw',
+          description: 'OpenClaw framework adapter',
+          chatSupported: true,
+          connectSupported: true,
+          configured: true,
+          detected: true,
+          persistentChat: true,
+          chatReady: true,
+          bridgeOnline: true,
+          bridgeStatusLabel: 'Bridge live',
+          status: 'chat_ready',
+          statusLabel: 'Chat ready',
+          detail: 'Connected through the bridge.',
+          source: 'live',
+        },
+      ], 'openclaw');
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        status: 'available',
+        statusLabel: 'Ready to connect',
+      });
+      expect(result[0].detail).toContain('Reconnect from the + tab');
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
   it('connectLocalAgentIntegration returns the refreshed OpenClaw integration plus daemon notice', async () => {
     const fakeFetch = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ ok: true, notice: 'OpenClaw is connected and chat-ready.', integration: { id: 'openclaw', enabled: true } }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
         json: async () => ({
-          integrations: [
-            {
-              id: 'openclaw',
-              name: 'OpenClaw',
-              description: 'OpenClaw framework adapter',
-              enabled: true,
-              capabilities: { localChat: true, connectFromUi: true },
-            },
-          ],
+          ok: true,
+          notice: 'OpenClaw is connected and chat-ready.',
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'ready', ready: true },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
         }),
       })
       .mockResolvedValueOnce({
@@ -597,6 +705,48 @@ describe('OpenClaw bridge behavioral tests', () => {
       });
       expect(result.integration.chatReady).toBe(true);
       expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+      expect(fakeFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('connectLocalAgentIntegration does not require a second integrations fetch when the daemon already returns the connected record', async () => {
+    const fakeFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          notice: 'OpenClaw attach is in progress.',
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'connecting' },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ok: false, error: 'still booting' }),
+      });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
+      const result = await connectLocalAgentIntegration('openclaw');
+      expect(result.integration).toMatchObject({
+        id: 'openclaw',
+        persistentChat: true,
+        chatReady: false,
+        status: 'connecting',
+      });
+      expect(fakeFetch).toHaveBeenCalledTimes(2);
+      expect(String(fakeFetch.mock.calls[0][0])).toContain('/api/local-agent-integrations/connect');
+      expect(String(fakeFetch.mock.calls[1][0])).toContain('/api/openclaw-channel/health');
     } finally {
       globalThis.fetch = original;
     }

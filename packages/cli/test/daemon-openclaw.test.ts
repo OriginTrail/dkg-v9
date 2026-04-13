@@ -8,11 +8,13 @@ import {
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
+  isLoopbackClientIp,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  shouldBypassRateLimitForLoopbackLocalAgentTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
@@ -289,6 +291,31 @@ describe('OpenClaw persist-turn validation', () => {
       userMessage: '',
       assistantReply: '',
     })).toBe(false);
+  });
+});
+
+describe('daemon loopback request handling', () => {
+  it('treats local IPv4 and IPv6 addresses as loopback clients', () => {
+    expect(isLoopbackClientIp('127.0.0.1')).toBe(true);
+    expect(isLoopbackClientIp('127.0.0.42')).toBe(true);
+    expect(isLoopbackClientIp('::1')).toBe(true);
+    expect(isLoopbackClientIp('::ffff:127.0.0.1')).toBe(true);
+  });
+
+  it('does not treat non-loopback addresses as local clients', () => {
+    expect(isLoopbackClientIp('192.168.1.10')).toBe(false);
+    expect(isLoopbackClientIp('10.0.0.5')).toBe(false);
+    expect(isLoopbackClientIp('::ffff:192.168.1.10')).toBe(false);
+  });
+
+  it('bypasses rate limiting only for loopback local-agent internal routes', () => {
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/persist-turn')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/send')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/stream')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('::1', '/api/local-agent-integrations')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/local-agent-integrations/openclaw')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/status')).toBe(false);
+    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('192.168.1.10', '/api/openclaw-channel/persist-turn')).toBe(false);
   });
 });
 

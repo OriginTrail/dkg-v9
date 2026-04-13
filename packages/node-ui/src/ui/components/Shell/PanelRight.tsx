@@ -192,6 +192,41 @@ function compareLocalAgentIntegrations(a: LocalAgentIntegration, b: LocalAgentIn
   return a.name.localeCompare(b.name);
 }
 
+export function upsertLocalAgentIntegrationState(
+  integrations: LocalAgentIntegration[],
+  nextIntegration: LocalAgentIntegration,
+): LocalAgentIntegration[] {
+  return [...integrations.filter((item) => item.id !== nextIntegration.id), nextIntegration]
+    .sort(compareLocalAgentIntegrations);
+}
+
+export function markLocalAgentIntegrationDisconnected(
+  integrations: LocalAgentIntegration[],
+  integrationId: string,
+): LocalAgentIntegration[] {
+  const existing = integrations.find((item) => item.id === integrationId);
+  if (!existing) return integrations;
+  const readyToConnect = existing.connectSupported;
+  const status = readyToConnect ? 'available' : 'coming_soon';
+  const statusLabel = readyToConnect ? 'Ready to connect' : 'Coming next';
+  return upsertLocalAgentIntegrationState(integrations, {
+    ...existing,
+    configured: false,
+    detected: false,
+    persistentChat: false,
+    chatReady: false,
+    bridgeOnline: false,
+    bridgeStatusLabel: statusLabel,
+    status,
+    statusLabel,
+    detail: readyToConnect
+      ? `${existing.name} is no longer attached to this node. Reconnect from the + tab when you want live chat again.`
+      : existing.detail,
+    error: undefined,
+    target: undefined,
+  });
+}
+
 function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
   if (integration.bridgeOnline) return 'connected';
   if (integration.status === 'connecting') return 'known';
@@ -644,8 +679,8 @@ export function PanelRight() {
         setSelectedIntegrationId(ADD_AGENT_TAB_ID);
       }
     } catch {
-      setIntegrations([]);
-      setSelectedIntegrationId(ADD_AGENT_TAB_ID);
+      // Keep the last known integrations in place so transient refresh failures
+      // do not collapse an attached agent chat surface back into the add-agent UI.
     }
   }, [localHistoryLoadedByIntegration, localMessagesByIntegration, memorySessions, selectedIntegrationId]);
 
@@ -780,6 +815,7 @@ export function PanelRight() {
     setConnectNotice(null);
     try {
       const result = await connectLocalAgentIntegration(integrationId);
+      setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, result.integration));
       await refreshLocalIntegrations();
       setSelectedIntegrationId(integrationId);
       autoFocusedLocalAgentRef.current = true;
@@ -803,6 +839,7 @@ export function PanelRight() {
     setConnectNotice(null);
     try {
       await disconnectLocalAgentIntegration(integrationId);
+      setIntegrations((prev) => markLocalAgentIntegrationDisconnected(prev, integrationId));
       autoFocusedLocalAgentRef.current = false;
       setSelectedIntegrationId(integrationId);
       setConnectNotice('The local agent was disconnected from this node. Session history remains available here.');

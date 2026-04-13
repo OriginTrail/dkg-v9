@@ -210,6 +210,15 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
+      - name: Validate CLI package version matches tag
+        run: |
+          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
+          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::packages/cli/package.json version ${PKG_VERSION} does not match pushed tag version ${TAG_VERSION}"
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

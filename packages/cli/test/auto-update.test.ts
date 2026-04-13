@@ -13,6 +13,8 @@ const MOCK_BUNDLER_SCRIPT = [
   "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
   "export const PYINSTALLER_VERSION = '6.19.0';",
 ].join('\n');
+let mockBundledCliPackageVersion = CLI_VERSION;
+let mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
 
 function buildFingerprintForTest(): string {
   return sha256HexForTest([
@@ -28,7 +30,12 @@ function mockReadFileSyncValue(path: unknown): string {
   if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
   if (normalized.endsWith('/scripts/markitdown-entry.py')) return MOCK_MARKITDOWN_ENTRY_SCRIPT;
   if (normalized.endsWith('/scripts/bundle-markitdown-binaries.mjs')) return MOCK_BUNDLER_SCRIPT;
-  if (normalized.endsWith('/package.json')) return JSON.stringify({ version: CLI_VERSION });
+  if (normalized.includes('/node_modules/@origintrail-official/dkg/package.json')) {
+    return JSON.stringify({ version: mockInstalledPackageVersion });
+  }
+  if (normalized.endsWith('/packages/cli/package.json')) {
+    return JSON.stringify({ version: mockBundledCliPackageVersion });
+  }
   return 'testtoken';
 }
 
@@ -818,6 +825,8 @@ describe('performNpmUpdate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockActiveSlot = 'a';
+    mockBundledCliPackageVersion = CLI_VERSION;
+    mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
     mockedExistsSync.mockReturnValue(true);
     mockedMkdir.mockResolvedValue(undefined as any);
     mockedRm.mockResolvedValue(undefined as any);
@@ -863,6 +872,7 @@ describe('performNpmUpdate', () => {
   });
 
   it('continues when the bundled MarkItDown binary is missing after install', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
     mockedExistsSync.mockImplementation((p: any) => {
       const path = String(p);
       if (path.includes('markitdown-')) return false;
@@ -876,6 +886,7 @@ describe('performNpmUpdate', () => {
   });
 
   it('reuses the active-slot MarkItDown binary when npm install leaves it missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
     const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
     const sourceHash = sha256HexForTest(sourceBytes);
     mockedReadFile.mockImplementation(async (path: any) => {
@@ -889,7 +900,6 @@ describe('performNpmUpdate', () => {
         return `${sourceHash}  ${assetName}\n` as any;
       }
       if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
-      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
       throw new Error(`Unexpected readFile: ${normalized}`);
     });
     mockedExistsSync.mockImplementation((p: any) => {
@@ -908,6 +918,7 @@ describe('performNpmUpdate', () => {
   });
 
   it('skips active-slot MarkItDown reuse when metadata targets a different npm version', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
@@ -921,7 +932,6 @@ describe('performNpmUpdate', () => {
       if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) {
         return Buffer.from('active-slot-markitdown', 'utf-8') as any;
       }
-      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
       throw new Error(`Unexpected readFile: ${normalized}`);
     });
     mockedExistsSync.mockImplementation((p: any) => {
@@ -940,10 +950,10 @@ describe('performNpmUpdate', () => {
   });
 
   it('skips active-slot MarkItDown reuse when the checksum sidecar is missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
-      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
       throw new Error(`Unexpected readFile: ${normalized}`);
     });
     mockedExistsSync.mockImplementation((p: any) => {
@@ -963,13 +973,13 @@ describe('performNpmUpdate', () => {
   });
 
   it('does not probe a source-slot build binary as an npm reuse candidate', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
       if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) {
         throw new Error(`npm update should not inspect source-slot MarkItDown candidates: ${normalized}`);
       }
-      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
       throw new Error(`Unexpected readFile: ${normalized}`);
     });
     mockedExistsSync.mockImplementation((p: any) => {
@@ -988,6 +998,41 @@ describe('performNpmUpdate', () => {
       ([path]) => normalizePathString(path).includes('/releases/a/packages/cli/bin/markitdown-'),
     )).toBe(false);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('validates npm-installed MarkItDown metadata against the resolved package version instead of the requested spec', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.6' }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('latest', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('.current-version'),
+      '9.0.0-beta.6',
+    );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {

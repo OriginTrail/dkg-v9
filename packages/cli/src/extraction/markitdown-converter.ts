@@ -8,27 +8,20 @@
  * Spec: 05_PROTOCOL_EXTENSIONS.md §6.5.1
  */
 
-import { createHash } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@origintrail-official/dkg-core';
+import {
+  bundledMarkItDownBuildFingerprint,
+  readCliPackageVersion,
+  sha256Hex,
+  type BundledMarkItDownMetadata,
+} from './markitdown-bundle-metadata.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
-
-type BundledMarkItDownMetadata = {
-  source?: 'release' | 'build';
-  cliVersion?: string;
-  buildFingerprint?: string;
-};
-
-type BundledMarkItDownBuildConfig = {
-  markItDownUpstreamVersion: string;
-  pyInstallerVersion: string;
-  bundlerScriptBytes: Buffer;
-};
 
 function checksumPathFor(binaryPath: string): string {
   return `${binaryPath}.sha256`;
@@ -43,48 +36,7 @@ function parseSha256Sidecar(text: string): string | null {
   return hash ? hash.toLowerCase() : null;
 }
 
-function sha256Hex(bytes: string | Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
-function readCliVersion(): string | null {
-  try {
-    const raw = readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf-8');
-    const pkg = JSON.parse(raw) as { version?: unknown };
-    return typeof pkg.version === 'string' && pkg.version.trim().length > 0 ? pkg.version.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-function readBundledMarkItDownBuildConfig(): BundledMarkItDownBuildConfig | null {
-  try {
-    const bundlerScriptBytes = readFileSync(fileURLToPath(new URL('../../scripts/bundle-markitdown-binaries.mjs', import.meta.url)));
-    const bundlerScriptText = bundlerScriptBytes.toString('utf-8');
-    const markItDownUpstreamVersion = bundlerScriptText.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)';/)?.[1];
-    const pyInstallerVersion = bundlerScriptText.match(/export const PYINSTALLER_VERSION = '([^']+)';/)?.[1];
-    if (!markItDownUpstreamVersion || !pyInstallerVersion) return null;
-    return { markItDownUpstreamVersion, pyInstallerVersion, bundlerScriptBytes };
-  } catch {
-    return null;
-  }
-}
-
-function bundledMarkItDownBuildFingerprint(): string | null {
-  try {
-    const buildConfig = readBundledMarkItDownBuildConfig();
-    if (!buildConfig) return null;
-    const entryScript = readFileSync(fileURLToPath(new URL('../../scripts/markitdown-entry.py', import.meta.url)));
-    return sha256Hex([
-      buildConfig.markItDownUpstreamVersion,
-      buildConfig.pyInstallerVersion,
-      sha256Hex(entryScript),
-      sha256Hex(buildConfig.bundlerScriptBytes),
-    ].join('\n'));
-  } catch {
-    return null;
-  }
-}
+const CLI_DIR = fileURLToPath(new URL('../../', import.meta.url));
 
 function readBundledMetadata(candidate: string): BundledMarkItDownMetadata | null {
   const metadataPath = metadataPathFor(candidate);
@@ -98,11 +50,11 @@ function readBundledMetadata(candidate: string): BundledMarkItDownMetadata | nul
 
 function bundledMetadataMatchesCurrentPackage(metadata: BundledMarkItDownMetadata | null): boolean {
   if (!metadata || typeof metadata !== 'object') return false;
-  const cliVersion = readCliVersion();
+  const cliVersion = readCliPackageVersion(CLI_DIR);
   if (!cliVersion || metadata.cliVersion !== cliVersion) return false;
   if (metadata.source === 'release') return true;
   if (metadata.source !== 'build') return false;
-  const buildFingerprint = bundledMarkItDownBuildFingerprint();
+  const buildFingerprint = bundledMarkItDownBuildFingerprint(CLI_DIR);
   return !!buildFingerprint && metadata.buildFingerprint === buildFingerprint;
 }
 
@@ -174,7 +126,7 @@ async function runMarkItDown(filePath: string): Promise<string> {
   if (!bin) {
     throw new Error(
       'MarkItDown binary not found. Document extraction unavailable. '
-      + 'Install markitdown or place the standalone binary in the node bin/ directory.',
+      + 'Install markitdown on PATH or stage a verified standalone binary with node ./scripts/bundle-markitdown-binaries.mjs.',
     );
   }
 

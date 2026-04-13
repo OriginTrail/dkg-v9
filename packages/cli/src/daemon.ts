@@ -55,6 +55,11 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import {
+  expectedBundledMarkItDownBuildMetadata,
+  readCliPackageVersion,
+  type BundledMarkItDownMetadata,
+} from './extraction/markitdown-bundle-metadata.js';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
 import { FileStore } from './file-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
@@ -190,12 +195,6 @@ function currentBundledMarkItDownAssetName(): string | null {
   ))?.assetName ?? null;
 }
 
-type BundledMarkItDownMetadata = {
-  source?: string;
-  cliVersion?: string;
-  buildFingerprint?: string;
-};
-
 function markItDownChecksumPath(binaryPath: string): string {
   return `${binaryPath}.sha256`;
 }
@@ -226,40 +225,6 @@ async function readBundledMarkItDownMetadata(binaryPath: string): Promise<Bundle
   } catch {
     return null;
   }
-}
-
-function bundledMarkItDownBuildFingerprint(cliDir: string): string | null {
-  try {
-    const entryScript = readFileSync(join(cliDir, 'scripts', 'markitdown-entry.py'));
-    const bundlerScript = readFileSync(join(cliDir, 'scripts', 'bundle-markitdown-binaries.mjs'), 'utf-8');
-    const upstreamVersion = bundlerScript.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)'/)?.[1];
-    const pyInstallerVersion = bundlerScript.match(/export const PYINSTALLER_VERSION = '([^']+)'/)?.[1];
-    if (!upstreamVersion || !pyInstallerVersion) return null;
-    return createHash('sha256').update([
-      upstreamVersion,
-      pyInstallerVersion,
-      createHash('sha256').update(entryScript).digest('hex'),
-      createHash('sha256').update(bundlerScript).digest('hex'),
-    ].join('\n')).digest('hex');
-  } catch {
-    return null;
-  }
-}
-
-function readCliPackageVersion(cliDir: string): string | null {
-  try {
-    const pkg = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf-8')) as { version?: unknown };
-    return typeof pkg.version === 'string' && pkg.version.trim().length > 0 ? pkg.version.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-function expectedBundledMarkItDownBuildMetadata(cliDir: string): BundledMarkItDownMetadata | null {
-  const cliVersion = readCliPackageVersion(cliDir);
-  const buildFingerprint = bundledMarkItDownBuildFingerprint(cliDir);
-  if (!cliVersion || !buildFingerprint) return null;
-  return { source: 'build', cliVersion, buildFingerprint };
 }
 
 async function hasVerifiedBundledMarkItDownBinary(
@@ -4647,10 +4612,15 @@ async function _performNpmUpdateInner(
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return 'failed';
   }
+  let resolvedVersion = readCliPackageVersion(npmPkgDir);
+  if (!resolvedVersion) {
+    resolvedVersion = targetVersion;
+    log(`Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`);
+  }
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
-    const expectedMetadata: BundledMarkItDownMetadata = { source: 'release', cliVersion: targetVersion };
+    const expectedMetadata: BundledMarkItDownMetadata = { source: 'release', cliVersion: resolvedVersion };
     if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
@@ -4665,16 +4635,6 @@ async function _performNpmUpdateInner(
         log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
       }
     }
-  }
-
-  let resolvedVersion = targetVersion;
-  try {
-    const installedPkg = JSON.parse(await readFile(join(npmPkgDir, 'package.json'), 'utf-8'));
-    if (installedPkg.version && typeof installedPkg.version === 'string') {
-      resolvedVersion = installedPkg.version;
-    }
-  } catch {
-    log(`Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`);
   }
 
   await writePendingUpdateState({

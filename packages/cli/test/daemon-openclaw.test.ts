@@ -15,7 +15,7 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
-  shouldBypassRateLimitForLoopbackLocalAgentTraffic,
+  shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
@@ -319,14 +319,16 @@ describe('daemon loopback request handling', () => {
     expect(isLoopbackClientIp('::ffff:192.168.1.10')).toBe(false);
   });
 
-  it('bypasses rate limiting only for loopback local-agent internal routes', () => {
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/persist-turn')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/send')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/openclaw-channel/stream')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('::1', '/api/local-agent-integrations')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/local-agent-integrations/openclaw')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('127.0.0.1', '/api/status')).toBe(false);
-    expect(shouldBypassRateLimitForLoopbackLocalAgentTraffic('192.168.1.10', '/api/openclaw-channel/persist-turn')).toBe(false);
+  it('bypasses rate limiting for loopback node-ui and local-agent traffic, but not remote clients', () => {
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/ui')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/ui/assets/index.js')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/paranet/list')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/query')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/openclaw-channel/persist-turn')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('::1', '/api/local-agent-integrations')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/.well-known/skill.md')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/network/testnet.json')).toBe(false);
+    expect(shouldBypassRateLimitForLoopbackTraffic('192.168.1.10', '/api/query')).toBe(false);
   });
 });
 

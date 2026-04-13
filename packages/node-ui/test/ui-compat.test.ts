@@ -640,3 +640,30 @@ describe('listAssertions query path', () => {
     expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
   });
 });
+
+describe('mock detection request fan-out guard', () => {
+  const wrapper = readFile('api-wrapper.ts');
+
+  it('deduplicates concurrent mock-mode detection through a shared promise', () => {
+    expect(wrapper).toContain('let detectMockModePromise: Promise<boolean> | null = null;');
+    expect(wrapper).toContain('if (detectMockModePromise) return detectMockModePromise;');
+    expect(wrapper).toContain('detectMockModePromise = (async () => {');
+  });
+});
+
+describe('memory layer custom query execution', () => {
+  const memoryLayerView = readFile('views/MemoryLayerView.tsx');
+
+  it('keeps draft query separate from the active query used by executeQuery', () => {
+    expect(memoryLayerView).toContain("const [draftQuery, setDraftQuery] = useState('');");
+    expect(memoryLayerView).toContain("const [activeQuery, setActiveQuery] = useState('');");
+    expect(memoryLayerView).toContain('const sparql = activeQuery || defaultSparql;');
+  });
+
+  it('runs custom query on explicit Run or Enter instead of every keystroke', () => {
+    expect(memoryLayerView).toContain('const runQuery = useCallback(() => {');
+    expect(memoryLayerView).toContain('onChange={(e) => setDraftQuery(e.target.value)}');
+    expect(memoryLayerView).toContain("onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}");
+    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn" onClick={runQuery}>');
+  });
+});

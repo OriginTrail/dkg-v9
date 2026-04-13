@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchExtractionStatus, fileUrl, type ExtractionStatus } from '../../api.js';
+import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } from '../../api.js';
 
 interface FilePreviewModalProps {
   open: boolean;
@@ -29,9 +29,17 @@ function previewKind(ct: string): 'pdf' | 'image' | 'text' | 'binary' {
   return 'binary';
 }
 
+async function authenticatedBlobUrl(url: string): Promise<string> {
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 export function FilePreviewModal({ open, onClose, assertionName, contextGraphId }: FilePreviewModalProps) {
   const [status, setStatus] = useState<ExtractionStatus | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,25 +49,53 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId 
     setError(null);
     setStatus(null);
     setTextContent(null);
+    setBlobUrl(null);
 
     fetchExtractionStatus(assertionName, contextGraphId)
       .then(async (s) => {
         setStatus(s);
         const kind = previewKind(s.detectedContentType);
+        const url = fileUrl(s.fileHash, s.detectedContentType);
         if (kind === 'text') {
-          const url = fileUrl(s.fileHash, s.detectedContentType);
-          const res = await fetch(url);
+          const res = await fetch(url, { headers: authHeaders() });
           if (res.ok) setTextContent(await res.text());
+        } else if (kind === 'pdf' || kind === 'image') {
+          const blob = await authenticatedBlobUrl(url);
+          setBlobUrl(blob);
         }
       })
       .catch((err) => setError(err.message ?? 'Failed to load file info'))
       .finally(() => setLoading(false));
+
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
   }, [open, assertionName, contextGraphId]);
+
+  useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
 
   if (!open) return null;
 
   const kind = status ? previewKind(status.detectedContentType) : null;
-  const url = status ? fileUrl(status.fileHash, status.detectedContentType) : null;
+  const rawUrl = status ? fileUrl(status.fileHash, status.detectedContentType) : null;
+
+  const handleDownload = async (downloadUrl: string, filename: string) => {
+    try {
+      const blob = await authenticatedBlobUrl(downloadUrl);
+      const a = document.createElement('a');
+      a.href = blob;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(blob);
+    } catch {
+      // fallback — the browser may handle auth via cookies
+      window.open(downloadUrl, '_blank');
+    }
+  };
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -101,17 +137,17 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId 
             </div>
 
             <div className="v10-file-preview-content">
-              {kind === 'pdf' && url && (
+              {kind === 'pdf' && blobUrl && (
                 <iframe
-                  src={url}
+                  src={blobUrl}
                   className="v10-file-preview-iframe"
                   title={`Preview: ${assertionName}`}
                 />
               )}
 
-              {kind === 'image' && url && (
+              {kind === 'image' && blobUrl && (
                 <img
-                  src={url}
+                  src={blobUrl}
                   alt={assertionName}
                   className="v10-file-preview-image"
                 />
@@ -124,29 +160,37 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId 
               {kind === 'binary' && (
                 <div className="v10-file-preview-binary">
                   <p>This file type cannot be previewed directly.</p>
-                  {url && (
-                    <a href={url} download={assertionName} className="v10-file-preview-download">
+                  {rawUrl && (
+                    <button
+                      className="v10-file-preview-download"
+                      onClick={() => handleDownload(rawUrl, assertionName)}
+                    >
                       Download file
-                    </a>
+                    </button>
                   )}
                 </div>
               )}
             </div>
 
             <div className="v10-file-preview-footer">
-              {url && (
-                <a href={url} download={assertionName} className="v10-file-preview-download">
+              {rawUrl && (
+                <button
+                  className="v10-file-preview-download"
+                  onClick={() => handleDownload(rawUrl, assertionName)}
+                >
                   Download original
-                </a>
+                </button>
               )}
               {status.mdIntermediateHash && (
-                <a
-                  href={fileUrl(status.mdIntermediateHash, 'text/markdown')}
-                  download={`${assertionName}.md`}
+                <button
                   className="v10-file-preview-download"
+                  onClick={() => handleDownload(
+                    fileUrl(status.mdIntermediateHash!, 'text/markdown'),
+                    `${assertionName}.md`,
+                  )}
                 >
                   Download markdown intermediate
-                </a>
+                </button>
               )}
             </div>
           </>

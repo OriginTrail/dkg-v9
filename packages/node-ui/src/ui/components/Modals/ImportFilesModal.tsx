@@ -100,7 +100,8 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
     for (let i = 0; i < files.length; i++) {
       setCurrentFile(i);
       const { file } = files[i];
-      const assertionName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const sanitized = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const assertionName = `${Date.now().toString(36)}-${i}-${sanitized}`;
 
       try {
         const result: ImportFileResult = await importFile(assertionName, contextGraphId, file);

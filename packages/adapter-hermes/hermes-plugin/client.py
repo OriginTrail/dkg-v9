@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +19,21 @@ _DEFAULT_URL = "http://127.0.0.1:9200"
 _TIMEOUT = 5  # seconds
 
 
+def _resolve_dkg_home() -> Path:
+    """Resolve the DKG data directory: $DKG_HOME > ~/.dkg."""
+    env = os.environ.get("DKG_HOME")
+    if env:
+        return Path(env)
+    return Path.home() / ".dkg"
+
+
 def _load_auth_token() -> Optional[str]:
-    """Try to load auth token from ~/.dkg/auth.token."""
-    token_path = Path.home() / ".dkg" / "auth.token"
+    """Try to load auth token from $DKG_HOME/auth.token (or ~/.dkg/auth.token)."""
+    token_path = _resolve_dkg_home() / "auth.token"
     if not token_path.exists():
         return None
     try:
         lines = token_path.read_text(encoding="utf-8").strip().splitlines()
-        # Filter comment lines (may contain em dashes or other UTF-8)
         token_lines = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
         return token_lines[0] if token_lines else None
     except Exception:
@@ -106,36 +113,47 @@ class DKGClient:
 
     # -- Assertions (Working Memory) -------------------------------------------
 
-    def create_assertion(self, context_graph_id: str, agent_name: str, name: str = "hermes-memory") -> Dict[str, Any]:
-        """POST /api/assertion/create — create a WM assertion for this agent."""
-        return self._post("/api/assertion/create", {
+    def create_assertion(self, context_graph_id: str, name: str, sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/assertion/create — create a WM assertion. Returns { assertionUri }."""
+        payload: Dict[str, Any] = {
             "contextGraphId": context_graph_id,
-            "agent": agent_name,
             "name": name,
+        }
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post("/api/assertion/create", payload)
+
+    def write_assertion(self, assertion_name: str, context_graph_id: str, quads: List[Dict[str, str]],
+                        sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/assertion/{name}/write — write quads to the assertion graph."""
+        payload: Dict[str, Any] = {
+            "contextGraphId": context_graph_id,
+            "quads": quads,
+        }
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post(f"/api/assertion/{assertion_name}/write", payload)
+
+    def query_assertion(self, assertion_name: str, context_graph_id: str, sparql: str) -> Dict[str, Any]:
+        """POST /api/assertion/{name}/query — SPARQL within assertion scope."""
+        return self._post(f"/api/assertion/{assertion_name}/query", {
+            "sparql": sparql,
+            "contextGraphId": context_graph_id,
         })
 
-    def write_assertion(self, assertion_id: str, content: str, content_type: str = "text/plain") -> Dict[str, Any]:
-        """POST /api/assertion/{id}/write — write content to assertion."""
-        return self._post(f"/api/assertion/{assertion_id}/write", {
-            "content": content,
-            "contentType": content_type,
+    def promote_assertion(self, assertion_name: str, context_graph_id: str) -> Dict[str, Any]:
+        """POST /api/assertion/{name}/promote — promote assertion to SWM."""
+        return self._post(f"/api/assertion/{assertion_name}/promote", {
+            "contextGraphId": context_graph_id,
         })
-
-    def query_assertion(self, assertion_id: str, sparql: str) -> Dict[str, Any]:
-        """POST /api/assertion/{id}/query — SPARQL within assertion scope."""
-        return self._post(f"/api/assertion/{assertion_id}/query", {"sparql": sparql})
-
-    def promote_assertion(self, assertion_id: str) -> Dict[str, Any]:
-        """POST /api/assertion/{id}/promote — promote assertion to Verified Memory."""
-        return self._post(f"/api/assertion/{assertion_id}/promote", {})
 
     # -- Shared Working Memory -------------------------------------------------
 
-    def share(self, context_graph_id: str, content: str) -> Dict[str, Any]:
-        """POST /api/shared-memory/write — write to SWM (team-visible)."""
+    def share(self, context_graph_id: str, quads: List[Dict[str, str]]) -> Dict[str, Any]:
+        """POST /api/shared-memory/write — write quads to SWM (team-visible)."""
         return self._post("/api/shared-memory/write", {
             "contextGraphId": context_graph_id,
-            "content": content,
+            "quads": quads,
         })
 
     def publish(self, context_graph_id: str) -> Dict[str, Any]:

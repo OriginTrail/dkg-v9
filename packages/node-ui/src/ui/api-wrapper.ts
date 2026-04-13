@@ -3,11 +3,27 @@ import { mockApi } from './mocks/provider.js';
 
 let useMocks: boolean | null = null;
 
+function authHeaders(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  const token = (window as any).__DKG_TOKEN__;
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
 async function detectMockMode(): Promise<boolean> {
   if (useMocks !== null) return useMocks;
   try {
-    const resp = await fetch('/api/status', { signal: AbortSignal.timeout(2000) });
-    useMocks = !resp.ok;
+    const resp = await fetch('/api/status', {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (resp.ok) {
+      useMocks = false;
+    } else if (resp.status === 401) {
+      useMocks = false;
+    } else {
+      useMocks = true;
+    }
   } catch {
     useMocks = true;
   }
@@ -17,11 +33,7 @@ async function detectMockMode(): Promise<boolean> {
 async function withFallback<T>(realFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
   const mock = await detectMockMode();
   if (mock) return mockFn();
-  try {
-    return await realFn();
-  } catch {
-    return mockFn();
-  }
+  return realFn();
 }
 
 export const api = {

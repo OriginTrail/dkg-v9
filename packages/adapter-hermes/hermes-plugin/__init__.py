@@ -422,11 +422,12 @@ class DKGMemoryProvider(MemoryProvider):
 
         # Create or resolve assertion for this agent's Working Memory
         result = self._client.create_assertion(
-            self._context_graph, self._agent_name, "hermes-memory"
+            self._context_graph, self._agent_name,
         )
-        if result.get("assertionId"):
-            self._assertion_id = result["assertionId"]
-            logger.info(f"[dkg] Assertion ready: {self._assertion_id}")
+        assertion_uri = result.get("assertionUri")
+        if assertion_uri:
+            self._assertion_id = self._agent_name
+            logger.info(f"[dkg] Assertion ready: {assertion_uri}")
         elif result.get("success") is False:
             logger.warning(f"[dkg] Assertion creation failed: {result.get('error')} — using direct query")
 
@@ -551,7 +552,7 @@ class DKGMemoryProvider(MemoryProvider):
                 f"}} LIMIT 10"
             )
             if self._assertion_id:
-                result = self._client.query_assertion(self._assertion_id, sparql)
+                result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
             else:
                 result = self._client.query(sparql, self._context_graph)
             bindings = result.get("results", {}).get("bindings", [])
@@ -700,12 +701,19 @@ class DKGMemoryProvider(MemoryProvider):
             _save_cache(self._cache, self._agent_name)
 
         # Write to DKG assertion if online
-        if self._client and not self._offline:
-            all_content = _ENTRY_SEP.join(e["content"] for e in entries)
+        if self._client and not self._offline and self._assertion_id:
+            quads = []
+            for e in entries:
+                quads.append({
+                    "subject": f"urn:hermes:{self._agent_name}:{target}",
+                    "predicate": "urn:hermes:content",
+                    "object": f"[{e.get('target', target)}]\n{e['content']}",
+                })
             try:
                 self._client.write_assertion(
-                    self._assertion_id or "default",
-                    f"[{target}]\n{all_content}",
+                    self._assertion_id,
+                    self._context_graph,
+                    quads,
                 )
             except Exception as e:
                 logger.debug(f"[dkg] Assertion write failed: {e}")
@@ -743,7 +751,12 @@ class DKGMemoryProvider(MemoryProvider):
         if not content:
             return tool_error("Content is required.")
         cg = args.get("context_graph", self._context_graph)
-        result = self._client.share(cg, content)
+        quads = [{
+            "subject": f"urn:hermes:{self._agent_name}:shared",
+            "predicate": "urn:hermes:sharedContent",
+            "object": content,
+        }]
+        result = self._client.share(cg, quads)
         return json.dumps(result)
 
     def _handle_publish(self, args: Dict[str, Any]) -> str:
@@ -768,11 +781,7 @@ class DKGMemoryProvider(MemoryProvider):
                     "object": obj_out,
                     "graph": str(q.get("graph", "")),
                 })
-            # Write to SWM first, then publish
-            share_result = self._client._post("/api/shared-memory/write", {
-                "contextGraphId": cg,
-                "quads": quads,
-            })
+            share_result = self._client.share(cg, quads)
             if share_result.get("success") is False:
                 return json.dumps(share_result)
             result = self._client.publish(cg)
@@ -942,7 +951,7 @@ class DKGMemoryProvider(MemoryProvider):
 
         try:
             sparql = "SELECT ?content WHERE { ?s <urn:hermes:content> ?content }"
-            result = self._client.query_assertion(self._assertion_id, sparql)
+            result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
             bindings = result.get("results", {}).get("bindings", [])
             if bindings:
                 facts = []
@@ -961,12 +970,13 @@ class DKGMemoryProvider(MemoryProvider):
         return self._cache.get("memory", []) + self._cache.get("user", [])
 
     def _flush_queued_writes(self) -> None:
-        """Flush any writes queued during offline period."""
+        """Flush any writes queued during offline period. Only removes items that succeeded."""
         queued = self._cache.get("queued_writes", [])
         if not queued or self._offline:
             return
 
         logger.info(f"[dkg] Flushing {len(queued)} queued writes from offline period")
+        failed: list = []
         for item in queued:
             try:
                 if item.get("type") == "turn":
@@ -983,9 +993,10 @@ class DKGMemoryProvider(MemoryProvider):
                     })
             except Exception as e:
                 logger.debug(f"[dkg] Failed to flush queued write: {e}")
+                failed.append(item)
 
         with self._lock:
-            self._cache["queued_writes"] = []
+            self._cache["queued_writes"] = failed
             _save_cache(self._cache, self._agent_name)
 
 

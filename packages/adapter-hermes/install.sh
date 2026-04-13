@@ -94,19 +94,53 @@ ln -sfn "$PLUGIN_SRC" "$PLUGIN_TARGET"
 
 if [ -L "$PLUGIN_TARGET" ] && [ -f "$PLUGIN_TARGET/__init__.py" ]; then
   echo "  Symlink created successfully."
-  echo ""
-  echo "Next steps:"
-  echo "  1. Run: hermes memory setup"
-  echo "  2. Select 'dkg' from the provider list"
-  echo "  3. Enter your DKG daemon URL (default: http://127.0.0.1:9200)"
-  echo ""
-  echo "  Or set directly in config.yaml:"
-  echo "    memory:"
-  echo "      provider: dkg"
-  echo ""
-  echo "  The DKG daemon must be running (dkg start) for full functionality."
-  echo "  If the daemon is not available, the plugin falls back to local cache."
 else
   echo "  Error: Symlink verification failed."
   exit 1
 fi
+
+# ── Daemon-side adapter setup ───────────────────────────────────────────────
+# The TypeScript daemon adapter serves /api/hermes/* routes. When running
+# the DKG node from the monorepo, these routes are already available.
+# For standalone installs, register the adapter with the running daemon.
+
+echo ""
+echo "Registering daemon-side adapter…"
+DKG_HOME="${DKG_HOME:-$HOME/.dkg}"
+TOKEN_FILE="$DKG_HOME/auth.token"
+DAEMON_URL="${DKG_DAEMON_URL:-http://127.0.0.1:9200}"
+
+AUTH_HEADER=""
+if [ -f "$TOKEN_FILE" ]; then
+  AUTH_TOKEN=$(grep -v '^#' "$TOKEN_FILE" | head -n1 | tr -d '[:space:]')
+  if [ -n "$AUTH_TOKEN" ]; then
+    AUTH_HEADER="Authorization: Bearer $AUTH_TOKEN"
+  fi
+fi
+
+REG_RESP=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST "$DAEMON_URL/api/register-adapter" \
+  -H "Content-Type: application/json" \
+  ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
+  -d '{"id":"hermes","framework":"hermes-agent"}' 2>/dev/null || true)
+
+if [ "$REG_RESP" = "200" ] || [ "$REG_RESP" = "204" ]; then
+  echo "  Daemon adapter registered."
+elif [ "$REG_RESP" = "000" ]; then
+  echo "  Daemon not reachable at $DAEMON_URL — adapter will register on first connect."
+else
+  echo "  Daemon returned HTTP $REG_RESP — adapter may need manual registration."
+fi
+
+echo ""
+echo "Next steps:"
+echo "  1. Run: hermes memory setup"
+echo "  2. Select 'dkg' from the provider list"
+echo "  3. Enter your DKG daemon URL (default: http://127.0.0.1:9200)"
+echo ""
+echo "  Or set directly in config.yaml:"
+echo "    memory:"
+echo "      provider: dkg"
+echo ""
+echo "  The DKG daemon must be running (dkg start) for full functionality."
+echo "  If the daemon is not available, the plugin falls back to local cache."

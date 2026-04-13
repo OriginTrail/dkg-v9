@@ -13,6 +13,8 @@
   },
   "files": [
     "dist",
+    "hermes-plugin",
+    "install.sh",
     "README.md",
     "LICENSE"
   ],

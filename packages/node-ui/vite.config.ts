@@ -42,6 +42,7 @@ export default defineConfig({
     react(),
     {
       name: 'inject-dkg-token',
+      apply: 'serve',
       transformIndexHtml(html) {
         if (!token) return html;
         return html.replace('</head>', `<script>window.__DKG_TOKEN__=${JSON.stringify(token)}</script></head>`);

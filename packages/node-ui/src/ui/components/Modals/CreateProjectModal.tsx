@@ -130,50 +130,50 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
           <div className="v10-form-divider" />
 
-          <div className="v10-form-group">
-            <label className="v10-form-label">Access</label>
+          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <label className="v10-form-label">Access <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={access === 'curated'} onChange={() => setAccess('curated')} />
+                <input type="radio" checked={access === 'curated'} readOnly disabled />
                 Curated — only invited collaborators can view
               </label>
               <label className="v10-form-radio">
-                <input type="radio" checked={access === 'public'} onChange={() => setAccess('public')} />
+                <input type="radio" checked={access === 'public'} readOnly disabled />
                 Public — anyone can view
               </label>
             </div>
           </div>
 
-          <div className="v10-form-group">
-            <label className="v10-form-label">Publish Policy</label>
+          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <label className="v10-form-label">Publish Policy <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={publishPolicy === 'curator-only'} onChange={() => setPublishPolicy('curator-only')} />
+                <input type="radio" checked={publishPolicy === 'curator-only'} readOnly disabled />
                 Curator only — only the curator can publish to Verified Memory
               </label>
               <label className="v10-form-radio">
-                <input type="radio" checked={publishPolicy === 'open'} onChange={() => setPublishPolicy('open')} />
+                <input type="radio" checked={publishPolicy === 'open'} readOnly disabled />
                 Open — any collaborator can publish to Verified Memory
               </label>
             </div>
           </div>
 
-          <div className="v10-form-group">
-            <label className="v10-form-label">Ontology</label>
+          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <label className="v10-form-label">Ontology <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'agent'} onChange={() => setOntology('agent')} />
+                <input type="radio" checked={ontology === 'agent'} readOnly disabled />
                 Let agent decide — your agent will choose the best vocabulary
               </label>
               <div className="v10-form-radio-desc">
                 Your agent will query community ontologies and select the most relevant one.
               </div>
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} />
+                <input type="radio" checked={ontology === 'upload'} readOnly disabled />
                 Upload an ontology file (.ttl, .owl, .rdf)
               </label>
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
+                <input type="radio" checked={ontology === 'community'} readOnly disabled />
                 Choose from community ontologies
               </label>
             </div>
@@ -185,10 +185,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </div>
 
           {showAdvanced && (
-            <div className="v10-form-advanced-body">
+            <div className="v10-form-advanced-body" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
-                <label className="v10-form-label">Consensus Quorum</label>
-                <select className="v10-form-select" value={quorum} onChange={(e) => setQuorum(e.target.value)}>
+                <label className="v10-form-label">Consensus Quorum <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select className="v10-form-select" value={quorum} disabled>
                   <option value="off">Off — no consensus verification required</option>
                   <option value="2of3">2 of 3 — lightweight consensus</option>
                   <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
@@ -196,8 +196,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">SWM TTL</label>
-                <select className="v10-form-select" value={swmTtl} onChange={(e) => setSwmTtl(e.target.value)}>
+                <label className="v10-form-label">SWM TTL <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select className="v10-form-select" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
@@ -205,8 +205,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">SWM Size Cap</label>
-                <select className="v10-form-select" value={swmCap} onChange={(e) => setSwmCap(e.target.value)}>
+                <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select className="v10-form-select" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>

@@ -4,7 +4,7 @@ declare global {
   interface Window { __DKG_TOKEN__?: string; }
 }
 
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   if (typeof window === 'undefined') return {};
   const token = window.__DKG_TOKEN__;
   if (!token) return {};

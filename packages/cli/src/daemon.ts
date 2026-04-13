@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, escapeSparqlLiteral, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -4869,7 +4869,7 @@ async function handleRequest(
     }
 
     // Fan-out 2: SPARQL text search (scoped to the requested CG + layers)
-    const escapedQuery = query.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').toLowerCase();
+    const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
     const graphFilters = memoryLayers.map((l: string) => {
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;

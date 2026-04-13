@@ -91,6 +91,7 @@ library KnowledgeAssetsLib {
     error ContextGraphNotFound(uint256 contextGraphId);
     error UnauthorizedPublisher(uint256 contextGraphId, address publisher);
     error NotContextGraphOwner(uint256 contextGraphId, address caller);
+    error NotContextGraphOwnerOrAuthority(uint256 contextGraphId, address caller);
     error AgentParticipantAlreadyExists(uint256 contextGraphId, address agent);
     error AgentParticipantNotFound(uint256 contextGraphId, address agent);
     error KCAlreadyRegisteredToContextGraph(uint256 kcId, uint256 existingContextGraphId);

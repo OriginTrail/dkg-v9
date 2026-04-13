@@ -212,6 +212,32 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths[0]).toBe('C:/Users/test/adapter');
   });
+
+  it('replaces stale cached adapter-openclaw load paths with the current adapter path', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        allow: ['adapter-openclaw'],
+        load: {
+          paths: [
+            'C:/Users/test/AppData/Local/npm-cache/_npx/123/node_modules/@origintrail-official/dkg-adapter-openclaw',
+            '/other/plugin',
+          ],
+        },
+        entries: {
+          'adapter-openclaw': { enabled: true },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.load.paths).toEqual([
+      '/other/plugin',
+      'C:/Projects/dkg-v9/packages/adapter-openclaw',
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -244,6 +270,24 @@ describe('writeWorkspaceConfig', () => {
     const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
     expect(config['some-other-plugin']).toEqual({ key: 'value' });
     expect(config['dkg-node']).toBeDefined();
+  });
+
+  it('removes legacy game config from the workspace dkg-node block', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'config.json'), JSON.stringify({
+      'dkg-node': {
+        daemonUrl: 'http://127.0.0.1:9200',
+        memory: { enabled: true },
+        channel: { enabled: true },
+        game: { enabled: true },
+      },
+    }));
+
+    writeWorkspaceConfig(ws, 9200);
+
+    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
+    expect(config['dkg-node'].game).toBeUndefined();
   });
 
   it('preserves existing daemonUrl when --port not explicit', () => {

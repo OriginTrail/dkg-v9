@@ -4,6 +4,7 @@ import {
   buildOpenClawChannelHeaders,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
+  getOpenClawUiSetupCommand,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
@@ -234,6 +235,37 @@ describe('OpenClaw channel routing helpers', () => {
     await proxyPromise;
 
     expect(secondReadCalled).toBe(true);
+  });
+});
+
+describe('OpenClaw UI setup command resolution', () => {
+  const runtimeModuleUrl = 'file:///C:/Projects/dkg-v9/packages/cli/dist/daemon.js';
+
+  it('prefers the local workspace adapter setup CLI when it exists', () => {
+    const command = getOpenClawUiSetupCommand(
+      '@origintrail-official/dkg-adapter-openclaw',
+      runtimeModuleUrl,
+      (path) => path.endsWith('packages\\adapter-openclaw\\dist\\setup-cli.js'),
+    );
+
+    expect(command.source).toBe('workspace');
+    expect(command.command).toBe(process.execPath);
+    expect(command.args[0]).toMatch(/packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/);
+    expect(command.args.slice(1)).toEqual(['setup', '--no-fund', '--no-start', '--no-verify']);
+  });
+
+  it('falls back to npx when the local adapter build is unavailable', () => {
+    const command = getOpenClawUiSetupCommand(
+      '@origintrail-official/dkg-adapter-openclaw',
+      runtimeModuleUrl,
+      () => false,
+    );
+
+    expect(command).toEqual({
+      command: 'npx',
+      args: ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', '--no-fund', '--no-start', '--no-verify'],
+      source: 'npx',
+    });
   });
 });
 

@@ -155,6 +155,29 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 });
 
+describe('Agent hub shell surfaces', () => {
+  const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
+  const panelCenter = readUiFile('components/Shell/PanelCenter.tsx');
+  const agentHub = readUiFile('pages/AgentHub.tsx');
+
+  it('keeps both Agent Hub and Integrations in the left shell navigation', () => {
+    expect(panelLeft).toContain('Agent Hub');
+    expect(panelLeft).toContain('Integrations');
+  });
+
+  it('routes the center panel agent-hub tab to the restored Agent Hub page', () => {
+    expect(panelCenter).toContain("activeTabId === 'agent-hub'");
+    expect(panelCenter).toContain("Loading agent hub...");
+    expect(panelCenter).toContain('AgentHubPage');
+  });
+
+  it('restores Agent Hub without reviving the old My Agent product path', () => {
+    expect(agentHub).toContain('Agent Hub');
+    expect(agentHub).toContain('Bring your own agent into the node');
+    expect(agentHub).not.toContain('My Agent');
+  });
+});
+
 describe('OpenClaw bridge behavioral tests', () => {
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };

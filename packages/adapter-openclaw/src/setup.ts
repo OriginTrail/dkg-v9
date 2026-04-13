@@ -469,6 +469,12 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   const pluginId = 'adapter-openclaw';
   // Normalize adapter path to forward slashes for cross-platform compatibility
   const normalizedPath = adapterPath.replace(/\\/g, '/');
+  const isAdapterLoadPath = (value: string): boolean => {
+    const normalized = value.replace(/\\/g, '/').toLowerCase();
+    return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
+      || normalized.endsWith('/packages/adapter-openclaw')
+      || normalized.includes('/packages/adapter-openclaw/');
+  };
 
   // Add to allow list (idempotent)
   if (!config.plugins.allow.includes(pluginId)) {
@@ -481,6 +487,14 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   // Add to load paths (idempotent — check normalized versions)
   // Filter out non-string entries from legacy/malformed configs
   config.plugins.load.paths = config.plugins.load.paths.filter((p: unknown) => typeof p === 'string');
+  const retainedPaths = config.plugins.load.paths.filter((p: string) => !isAdapterLoadPath(p));
+  const removedLoadPathCount = config.plugins.load.paths.length - retainedPaths.length;
+  if (removedLoadPathCount > 0) {
+    config.plugins.load.paths = retainedPaths;
+    log(`Removed ${removedLoadPathCount} stale adapter-openclaw load path(s)`);
+  } else {
+    config.plugins.load.paths = retainedPaths;
+  }
   const existingPaths = config.plugins.load.paths.map((p: string) => p.replace(/\\/g, '/'));
   if (!existingPaths.includes(normalizedPath)) {
     config.plugins.load.paths.push(normalizedPath);
@@ -550,12 +564,17 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, port
   // Feature flags default to true on first run but are not overridden on re-runs
   // so that user-configured `false` values are respected.
   const dkgNode = existing['dkg-node'] ?? {};
-  existing['dkg-node'] = {
+  const nextDkgNode = {
     ...dkgNode,
     daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
     memory: { enabled: true, ...dkgNode.memory },
     channel: { enabled: true, ...dkgNode.channel },
   };
+  if (nextDkgNode.game !== undefined) {
+    delete nextDkgNode.game;
+    log('Removed legacy dkg-node.game config from workspace config');
+  }
+  existing['dkg-node'] = nextDkgNode;
 
   mkdirSync(workspaceDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');

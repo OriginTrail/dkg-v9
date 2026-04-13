@@ -1700,9 +1700,41 @@ export async function probeOpenClawChannelHealth(
   return { ok: false, bridge, gateway, error: lastError };
 }
 
+type OpenClawUiSetupCommand = {
+  command: string;
+  args: string[];
+  source: 'workspace' | 'npx';
+};
+
+export function getOpenClawUiSetupCommand(
+  packageName: string,
+  runtimeModuleUrl = import.meta.url,
+  fileExists: (path: string) => boolean = existsSync,
+): OpenClawUiSetupCommand {
+  const setupArgs = ['setup', '--no-fund', '--no-start', '--no-verify'];
+
+  if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
+    const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
+    if (fileExists(localSetupCliPath)) {
+      return {
+        command: process.execPath,
+        args: [localSetupCliPath, ...setupArgs],
+        source: 'workspace',
+      };
+    }
+  }
+
+  return {
+    command: 'npx',
+    args: ['--yes', packageName, ...setupArgs],
+    source: 'npx',
+  };
+}
+
 async function runOpenClawUiSetup(packageName: string): Promise<void> {
-  await execFileAsync('npx', ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'], {
-    shell: process.platform === 'win32',
+  const setupCommand = getOpenClawUiSetupCommand(packageName);
+  await execFileAsync(setupCommand.command, setupCommand.args, {
+    shell: setupCommand.source === 'npx' && process.platform === 'win32',
     timeout: 120_000,
   });
 }

@@ -67,6 +67,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     mapping(uint256 => uint96) public topUpBalance;
 
     mapping(uint256 => address[]) private _registeredAgents;
+    /// @dev `accountId == 0` is the "not registered" sentinel (_nextAccountId starts at 1).
     mapping(address => uint256) public agentToAccountId;
     mapping(uint256 => mapping(address => bool)) private _isRegisteredAgent;
 
@@ -85,7 +86,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     event ToppedUp(uint256 indexed accountId, uint96 amount, uint96 newTopUpBalance);
     event CostCovered(
         uint256 indexed accountId,
-        uint40 epoch,
+        uint40 indexed epoch,
         uint96 baseCost,
         uint96 discountedCost,
         uint96 drawnFromEpoch,
@@ -102,6 +103,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     error InsufficientAllowance(uint256 accountId, uint40 epoch, uint96 required, uint96 available);
     error AccountExpired(uint256 accountId, uint40 expiresAt);
     error InvalidAmount();
+    error ZeroAgentAddress();
     error AgentAlreadyRegistered(address agent, uint256 existingAccountId);
     error AgentNotRegistered(uint256 accountId, address agent);
     error AgentCapReached(uint256 accountId, uint256 cap);
@@ -126,6 +128,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
         if (ch == address(0)) revert ZeroAddressDependency("Chronos");
         chronos = Chronos(ch);
 
+        // accountId == 0 is the "not registered" sentinel for agentToAccountId.
         if (_nextAccountId == 0) _nextAccountId = 1;
         if (maxAgentsPerAccount == 0) maxAgentsPerAccount = 100;
     }
@@ -298,7 +301,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
 
     function registerAgent(uint256 accountId, address agent) external {
         _requireOwner(accountId);
-        if (agent == address(0)) revert InvalidAmount();
+        if (agent == address(0)) revert ZeroAgentAddress();
         if (agentToAccountId[agent] != 0) {
             revert AgentAlreadyRegistered(agent, agentToAccountId[agent]);
         }

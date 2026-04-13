@@ -1,5 +1,5 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
@@ -204,6 +204,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       for (let i = 0; i < LOCK_DURATION; i++) {
         before.push(await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i)));
       }
+      // Snapshot the epoch immediately AFTER the lock window too so we can
+      // prove the 12-epoch distribution did not bleed into epoch N+12.
+      const outsideBefore = await EpochStorageContract.getEpochPool(
+        STAKER_SHARD_ID,
+        current + BigInt(LOCK_DURATION),
+      );
 
       await TokenContract.approve(await NFT.getAddress(), amount);
       await NFT.createAccount(amount);
@@ -213,15 +219,119 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i));
         expect(after - before[i]).to.equal(perEpoch);
       }
-      // The epoch after the lock should be unaffected
-      const outside = await EpochStorageContract.getEpochPool(
+      // The epoch after the lock window (N + 12) must be completely unaffected.
+      const outsideAfter = await EpochStorageContract.getEpochPool(
         STAKER_SHARD_ID,
         current + BigInt(LOCK_DURATION),
       );
-      // It may also be non-zero from prior tests, but the delta should remain 0
-      expect(outside).to.equal(
-        outside - 0n, // trivially true; included to document intent
-      );
+      expect(outsideAfter - outsideBefore).to.equal(0n);
+    });
+
+    it('conserves TRAC when committedTRAC is NOT divisible by 12 (remainder goes to EpochStorage accumulator)', async () => {
+      // 25_013 ether: lowest tier (>=25K) plus 13 wei tail that does not divide 12.
+      const amount = hre.ethers.parseEther('25000') + 13n;
+      const current = await ChronosContract.getCurrentEpoch();
+
+      const epochBefore: bigint[] = [];
+      for (let i = 0; i < LOCK_DURATION; i++) {
+        epochBefore.push(
+          await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i)),
+        );
+      }
+      const remainderBefore = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
+
+      await TokenContract.approve(await NFT.getAddress(), amount);
+      await NFT.createAccount(amount);
+
+      let epochDeltaSum = 0n;
+      for (let i = 0; i < LOCK_DURATION; i++) {
+        const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, current + BigInt(i));
+        epochDeltaSum += after - epochBefore[i];
+      }
+      const remainderAfter = await EpochStorageContract.accumulatedRemainder(STAKER_SHARD_ID);
+      const remainderDelta = remainderAfter - remainderBefore;
+
+      // Conservation: every wei committed lands somewhere in EpochStorage
+      // (epoch pools + the shard's accumulatedRemainder carry). The contract
+      // MUST NOT silently lose TRAC when committedTRAC % 12 != 0.
+      expect(epochDeltaSum + remainderDelta).to.equal(amount);
+      expect(amount % BigInt(LOCK_DURATION)).to.not.equal(0n);
+    });
+  });
+
+  // ======================================================================
+  // C2. Multi-epoch full-flow integration test
+  // ======================================================================
+
+  describe('multi-epoch full flow', () => {
+    it('createAccount -> drain epoch N -> advance -> cover -> topUp -> cover drains N+1 base then topUp', async () => {
+      // Register this signer as a Hub contract so it may call coverPublishingCost.
+      const ContractSigner = accounts[5];
+      await HubContract.setContractAddress('PublishingCaller', ContractSigner.address);
+
+      // committedTRAC divisible by 12 → clean per-epoch allowance math.
+      const committed = hre.ethers.parseEther('120000'); // 30% tier, 10K per epoch
+      const baseAllowance = committed / 12n;
+      const discountBps = 3000n;
+      await TokenContract.approve(await NFT.getAddress(), committed);
+      await NFT.createAccount(committed);
+
+      const epochN = await ChronosContract.getCurrentEpoch();
+
+      // --- Phase 1: drain epoch N base allowance exactly ---
+      // Pick baseCost so discountedCost == baseAllowance (10000 ether). Round
+      // UP on the division so the contract's floor-division inside
+      // coverPublishingCost produces exactly `baseAllowance`.
+      const numer = baseAllowance * BPS;
+      const denom = BPS - discountBps;
+      const baseCost1 = (numer + denom - 1n) / denom;
+      const discounted1 = (baseCost1 * (BPS - discountBps)) / BPS;
+      expect(discounted1).to.equal(baseAllowance);
+      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost1);
+      expect(await NFT.epochSpent(1, epochN)).to.equal(baseAllowance);
+
+      // Any further cover in epoch N must revert (no topUp yet). Use a
+      // baseCost large enough that discountedCost rounds to >= 1 wei.
+      await expect(
+        NFT.connect(ContractSigner).coverPublishingCost(1, hre.ethers.parseEther('1')),
+      ).to.be.revertedWithCustomError(NFT, 'InsufficientAllowance');
+
+      // --- Phase 2: advance one epoch so base allowance resets for N+1 ---
+      await time.increase((await ChronosContract.timeUntilNextEpoch()) + 1n);
+      const epochN1 = await ChronosContract.getCurrentEpoch();
+      expect(epochN1).to.equal(epochN + 1n);
+
+      // Cover a small amount in the fresh epoch: pulls from N+1 base, NOT N.
+      const smallBase = hre.ethers.parseEther('1000');
+      const smallDiscounted = (smallBase * (BPS - discountBps)) / BPS; // 700
+      await NFT.connect(ContractSigner).coverPublishingCost(1, smallBase);
+      expect(await NFT.epochSpent(1, epochN1)).to.equal(smallDiscounted);
+      // Epoch N remains fully drained but untouched.
+      expect(await NFT.epochSpent(1, epochN)).to.equal(baseAllowance);
+
+      // --- Phase 3: topUp while account still live ---
+      const topAmount = hre.ethers.parseEther('50000');
+      await TokenContract.approve(await NFT.getAddress(), topAmount);
+      await NFT.topUp(1, topAmount);
+      expect((await NFT.getAccountInfo(1)).topUpBuffer).to.equal(topAmount);
+
+      // --- Phase 4: cover larger than N+1 remaining → drains remainder of N+1, then topUp ---
+      // N+1 remaining base = baseAllowance - smallDiscounted
+      const n1Remaining = baseAllowance - smallDiscounted;
+      // Choose baseCost2 so discounted > n1Remaining (forces topUp draw).
+      const baseCost2 = hre.ethers.parseEther('20000'); // discounted = 14000
+      const discounted2 = (baseCost2 * (BPS - discountBps)) / BPS; // 14000
+      const expectedTopUpDraw = discounted2 - n1Remaining;
+
+      await NFT.connect(ContractSigner).coverPublishingCost(1, baseCost2);
+
+      // N+1 base fully drained.
+      expect(await NFT.epochSpent(1, epochN1)).to.equal(baseAllowance);
+      // topUp buffer reduced by exactly the shortfall.
+      const info = await NFT.getAccountInfo(1);
+      expect(info.topUpBuffer).to.equal(topAmount - expectedTopUpDraw);
+      // Epoch N still untouched — historical state is immutable.
+      expect(await NFT.epochSpent(1, epochN)).to.equal(baseAllowance);
     });
   });
 

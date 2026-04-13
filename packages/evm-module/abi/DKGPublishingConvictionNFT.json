@@ -220,22 +220,6 @@
         "internalType": "uint40",
         "name": "epoch",
         "type": "uint40"
-      }
-    ],
-    "name": "EpochAlreadyReleased",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "epoch",
-        "type": "uint40"
       },
       {
         "internalType": "uint96",
@@ -273,19 +257,8 @@
     "type": "error"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "caller",
-        "type": "address"
-      }
-    ],
-    "name": "NotAuthorizedAgent",
+    "inputs": [],
+    "name": "TokenTransferFailed",
     "type": "error"
   },
   {
@@ -300,8 +273,24 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      }
+    ],
+    "name": "ZeroAddressDependency",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAgentAddress",
     "type": "error"
   },
   {
@@ -327,9 +316,21 @@
       },
       {
         "indexed": false,
-        "internalType": "uint96",
-        "name": "epochAllowance",
-        "type": "uint96"
+        "internalType": "uint16",
+        "name": "discountBps",
+        "type": "uint16"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "createdAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "expiresAtEpoch",
+        "type": "uint40"
       }
     ],
     "name": "AccountCreated",
@@ -371,31 +372,6 @@
       }
     ],
     "name": "AgentRegistered",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "epoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "thresholdPercent",
-        "type": "uint8"
-      }
-    ],
-    "name": "AllowanceThresholdReached",
     "type": "event"
   },
   {
@@ -458,7 +434,7 @@
         "type": "uint256"
       },
       {
-        "indexed": false,
+        "indexed": true,
         "internalType": "uint40",
         "name": "epoch",
         "type": "uint40"
@@ -473,6 +449,18 @@
         "indexed": false,
         "internalType": "uint96",
         "name": "discountedCost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "drawnFromEpoch",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "drawnFromTopUp",
         "type": "uint96"
       }
     ],
@@ -493,9 +481,15 @@
         "internalType": "uint96",
         "name": "amount",
         "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newTopUpBalance",
+        "type": "uint96"
       }
     ],
-    "name": "TopUp",
+    "name": "ToppedUp",
     "type": "event"
   },
   {
@@ -521,31 +515,6 @@
       }
     ],
     "name": "Transfer",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "epoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "UnspentTRACReleased",
     "type": "event"
   },
   {
@@ -575,6 +544,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "STAKER_SHARD_ID",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -590,11 +572,6 @@
         "type": "uint96"
       },
       {
-        "internalType": "uint96",
-        "name": "epochAllowance",
-        "type": "uint96"
-      },
-      {
         "internalType": "uint40",
         "name": "createdAtEpoch",
         "type": "uint40"
@@ -605,9 +582,9 @@
         "type": "uint40"
       },
       {
-        "internalType": "uint40",
-        "name": "originalExpiresAtEpoch",
-        "type": "uint40"
+        "internalType": "uint16",
+        "name": "discountBps",
+        "type": "uint16"
       }
     ],
     "stateMutability": "view",
@@ -671,10 +648,10 @@
   },
   {
     "inputs": [],
-    "name": "chronosAddress",
+    "name": "chronos",
     "outputs": [
       {
-        "internalType": "address",
+        "internalType": "contract Chronos",
         "name": "",
         "type": "address"
       }
@@ -693,18 +670,13 @@
         "internalType": "uint96",
         "name": "baseCost",
         "type": "uint96"
-      },
-      {
-        "internalType": "address",
-        "name": "caller",
-        "type": "address"
       }
     ],
     "name": "coverPublishingCost",
     "outputs": [
       {
         "internalType": "uint96",
-        "name": "",
+        "name": "discountedCost",
         "type": "uint96"
       }
     ],
@@ -715,7 +687,7 @@
     "inputs": [
       {
         "internalType": "uint96",
-        "name": "amount",
+        "name": "committedTRAC",
         "type": "uint96"
       }
     ],
@@ -774,10 +746,10 @@
   },
   {
     "inputs": [],
-    "name": "epochStorageAddress",
+    "name": "epochStorage",
     "outputs": [
       {
-        "internalType": "address",
+        "internalType": "contract EpochStorage",
         "name": "",
         "type": "address"
       }
@@ -807,7 +779,7 @@
       },
       {
         "internalType": "uint96",
-        "name": "epochAllowance",
+        "name": "baseEpochAllowance",
         "type": "uint96"
       },
       {
@@ -821,9 +793,14 @@
         "type": "uint40"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint16",
         "name": "discountBps",
-        "type": "uint256"
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint96",
+        "name": "topUpBuffer",
+        "type": "uint96"
       },
       {
         "internalType": "uint256",
@@ -921,30 +898,6 @@
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "epoch",
-        "type": "uint40"
-      }
-    ],
-    "name": "getEpochSpent",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
       }
     ],
     "name": "getRegisteredAgents",
@@ -1000,6 +953,30 @@
     "name": "initialize",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "isAgent",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1092,24 +1069,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "epoch",
-        "type": "uint40"
-      }
-    ],
-    "name": "releaseUnspentTRAC",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "from",
         "type": "address"
@@ -1190,19 +1149,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "bool",
-        "name": "_status",
-        "type": "bool"
-      }
-    ],
-    "name": "setStatus",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "stakingStorageAddress",
     "outputs": [
@@ -1210,19 +1156,6 @@
         "internalType": "address",
         "name": "",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "status",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -1359,14 +1292,9 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "",
-        "type": "uint40"
       }
     ],
-    "name": "topUpCredits",
+    "name": "topUpBalance",
     "outputs": [
       {
         "internalType": "uint96",

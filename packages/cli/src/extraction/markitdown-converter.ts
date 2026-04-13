@@ -17,13 +17,17 @@ import { fileURLToPath } from 'node:url';
 import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@origintrail-official/dkg-core';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
-const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';
-const PYINSTALLER_VERSION = '6.19.0';
 
 type BundledMarkItDownMetadata = {
   source?: 'release' | 'build';
   cliVersion?: string;
   buildFingerprint?: string;
+};
+
+type BundledMarkItDownBuildConfig = {
+  markItDownUpstreamVersion: string;
+  pyInstallerVersion: string;
+  bundlerScriptBytes: Buffer;
 };
 
 function checksumPathFor(binaryPath: string): string {
@@ -53,15 +57,29 @@ function readCliVersion(): string | null {
   }
 }
 
+function readBundledMarkItDownBuildConfig(): BundledMarkItDownBuildConfig | null {
+  try {
+    const bundlerScriptBytes = readFileSync(fileURLToPath(new URL('../../scripts/bundle-markitdown-binaries.mjs', import.meta.url)));
+    const bundlerScriptText = bundlerScriptBytes.toString('utf-8');
+    const markItDownUpstreamVersion = bundlerScriptText.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)';/)?.[1];
+    const pyInstallerVersion = bundlerScriptText.match(/export const PYINSTALLER_VERSION = '([^']+)';/)?.[1];
+    if (!markItDownUpstreamVersion || !pyInstallerVersion) return null;
+    return { markItDownUpstreamVersion, pyInstallerVersion, bundlerScriptBytes };
+  } catch {
+    return null;
+  }
+}
+
 function bundledMarkItDownBuildFingerprint(): string | null {
   try {
+    const buildConfig = readBundledMarkItDownBuildConfig();
+    if (!buildConfig) return null;
     const entryScript = readFileSync(fileURLToPath(new URL('../../scripts/markitdown-entry.py', import.meta.url)));
-    const bundlerScript = readFileSync(fileURLToPath(new URL('../../scripts/bundle-markitdown-binaries.mjs', import.meta.url)));
     return sha256Hex([
-      MARKITDOWN_UPSTREAM_VERSION,
-      PYINSTALLER_VERSION,
+      buildConfig.markItDownUpstreamVersion,
+      buildConfig.pyInstallerVersion,
       sha256Hex(entryScript),
-      sha256Hex(bundlerScript),
+      sha256Hex(buildConfig.bundlerScriptBytes),
     ].join('\n'));
   } catch {
     return null;

@@ -65,34 +65,95 @@ jobs:
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          root = Path('packages/cli/bin')
+          root.mkdir(parents=True, exist_ok=True)
+          docx_path = root / 'markitdown-smoke.docx'
+
+          content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+          </Types>
+          """
+
+          rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+          </Relationships>
+          """
+
+          document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:body>
+              <w:p><w:r><w:t>Smoke Docx</w:t></w:r></w:p>
+              <w:p><w:r><w:t>Hello from DOCX smoke test.</w:t></w:r></w:p>
+              <w:sectPr>
+                <w:pgSz w:w="12240" w:h="15840"/>
+                <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+              </w:sectPr>
+            </w:body>
+          </w:document>
+          """
+
+          with ZipFile(docx_path, 'w', ZIP_DEFLATED) as archive:
+            archive.writestr('[Content_Types].xml', content_types)
+            archive.writestr('_rels/.rels', rels)
+            archive.writestr('word/document.xml', document)
+          PY
+
           node - <<'NODE'
           const fs = require('node:fs');
           const { spawnSync } = require('node:child_process');
           const path = require('node:path');
 
           const binaryPath = path.resolve('packages/cli/bin', process.env.ASSET_NAME);
-          const fixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.html');
+          const htmlFixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.html');
+          const docxFixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.docx');
           fs.writeFileSync(
-            fixturePath,
+            htmlFixturePath,
             '<html><body><h1>Smoke Test</h1><p>Hello from MarkItDown smoke test.</p></body></html>',
             'utf8',
           );
 
-          const result = spawnSync(binaryPath, [fixturePath], { encoding: 'utf8' });
+          const fixtures = [
+            {
+              fixturePath: htmlFixturePath,
+              expected: ['Smoke Test', 'Hello from MarkItDown smoke test.'],
+            },
+            {
+              fixturePath: docxFixturePath,
+              expected: ['Smoke Docx', 'Hello from DOCX smoke test.'],
+            },
+          ];
 
-          if (result.error) {
-            throw result.error;
-          }
-          if (result.status !== 0) {
-            throw new Error(
-              `Expected ${binaryPath} to exit with code 0 on the smoke conversion path, got ${result.status}.\n`
-              + `stdout:\n${result.stdout ?? ''}\n`
-              + `stderr:\n${result.stderr ?? ''}`,
-            );
-          }
-          const output = String(result.stdout ?? '');
-          if (!output.includes('Smoke Test') || !output.includes('Hello from MarkItDown smoke test.')) {
-            throw new Error(`Smoke test for ${binaryPath} did not emit the expected Markdown content.\n${output}`);
+          for (const fixture of fixtures) {
+            const result = spawnSync(binaryPath, [fixture.fixturePath], { encoding: 'utf8' });
+
+            if (result.error) {
+              throw result.error;
+            }
+            if (result.status !== 0) {
+              throw new Error(
+                `Expected ${binaryPath} to exit with code 0 on the smoke conversion path for ${fixture.fixturePath}, got ${result.status}.\n`
+                + `stdout:\n${result.stdout ?? ''}\n`
+                + `stderr:\n${result.stderr ?? ''}`,
+              );
+            }
+            const output = String(result.stdout ?? '');
+            for (const expectedChunk of fixture.expected) {
+              if (!output.includes(expectedChunk)) {
+                throw new Error(
+                  `Smoke test for ${binaryPath} did not emit the expected Markdown content for ${fixture.fixturePath}.\n`
+                  + `Missing chunk: ${expectedChunk}\n`
+                  + `${output}`,
+                );
+              }
+            }
           }
           NODE
 
@@ -103,6 +164,7 @@ jobs:
           path: |
             packages/cli/bin/${{ matrix.asset_name }}
             packages/cli/bin/${{ matrix.asset_name }}.sha256
+            packages/cli/bin/${{ matrix.asset_name }}.meta.json
           if-no-files-found: error
 
   release:

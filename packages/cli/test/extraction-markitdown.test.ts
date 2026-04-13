@@ -11,11 +11,18 @@ let isMarkItDownAvailable: typeof import('../src/extraction/markitdown-converter
 let MARKITDOWN_CONTENT_TYPES: typeof import('../src/extraction/markitdown-converter.js').MARKITDOWN_CONTENT_TYPES;
 
 const CLI_VERSION = JSON.parse(nativeReadFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
+const BUNDLER_SCRIPT_BYTES = nativeReadFileSync(new URL('../scripts/bundle-markitdown-binaries.mjs', import.meta.url));
+const BUNDLER_SCRIPT_TEXT = BUNDLER_SCRIPT_BYTES.toString('utf-8');
+const MARKITDOWN_UPSTREAM_VERSION = BUNDLER_SCRIPT_TEXT.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)';/)?.[1];
+const PYINSTALLER_VERSION = BUNDLER_SCRIPT_TEXT.match(/export const PYINSTALLER_VERSION = '([^']+)';/)?.[1];
+if (!MARKITDOWN_UPSTREAM_VERSION || !PYINSTALLER_VERSION) {
+  throw new Error('Unable to parse MarkItDown build versions from bundle-markitdown-binaries.mjs');
+}
 const MARKITDOWN_BUILD_FINGERPRINT = createHash('sha256').update([
-  '0.1.5',
-  '6.19.0',
+  MARKITDOWN_UPSTREAM_VERSION,
+  PYINSTALLER_VERSION,
   createHash('sha256').update(nativeReadFileSync(new URL('../scripts/markitdown-entry.py', import.meta.url))).digest('hex'),
-  createHash('sha256').update(nativeReadFileSync(new URL('../scripts/bundle-markitdown-binaries.mjs', import.meta.url))).digest('hex'),
+  createHash('sha256').update(BUNDLER_SCRIPT_BYTES).digest('hex'),
 ].join('\n')).digest('hex');
 
 describe('MARKITDOWN_CONTENT_TYPES', () => {

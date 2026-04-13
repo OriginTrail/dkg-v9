@@ -199,6 +199,100 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
   });
 });
 
+describe('Async Lift Publisher Queue — Full Lifecycle', () => {
+  let store: OxigraphStore;
+  let time: number;
+  let ids: number;
+
+  beforeEach(() => {
+    store = new OxigraphStore();
+    time = 1_000;
+    ids = 0;
+  });
+
+  it('job transitions through entire lifecycle: accepted → claimed → validated → broadcast → included → finalized', async () => {
+    const pub = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++time,
+      idGenerator: () => `job-${++ids}`,
+      publishExecutor: async () => ({
+        status: 'confirmed' as const,
+        merkleRoot: new Uint8Array(32),
+        ual: 'did:dkg:mock/test/1',
+        kcId: 1n,
+        kaManifest: [],
+        publicQuads: [],
+      }),
+    });
+
+    const jobId = await pub.lift(makeLiftRequest());
+    expect((await pub.getStatus(jobId))?.status).toBe('accepted');
+
+    const claimed = await pub.claimNext('wallet-1');
+    expect(claimed).not.toBeNull();
+    expect((await pub.getStatus(jobId))?.status).toBe('claimed');
+
+    await pub.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:test:entity:1'],
+        canonicalRootMap: { 'urn:test:entity:1': 'urn:test:entity:1' },
+        swmQuadCount: 1,
+        authorityProofRef: 'proof:owner:test',
+        transitionType: 'CREATE' as const,
+      },
+    });
+    expect((await pub.getStatus(jobId))?.status).toBe('validated');
+
+    await pub.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xabc123', walletId: 'wallet-1' },
+    });
+    expect((await pub.getStatus(jobId))?.status).toBe('broadcast');
+
+    await pub.update(jobId, 'included', {
+      inclusion: { txHash: '0xabc123', blockNumber: 42 },
+    });
+    expect((await pub.getStatus(jobId))?.status).toBe('included');
+
+    await pub.update(jobId, 'finalized', {
+      finalization: { confirmedByChain: true, finalizedAtMs: time, proofRef: '' },
+    });
+    expect((await pub.getStatus(jobId))?.status).toBe('finalized');
+
+    const stats = await pub.getStats();
+    expect(stats['finalized']).toBe(1);
+    expect(stats['accepted']).toBe(0);
+  });
+
+  it('job stuck at accepted never reaches finalized without claim', async () => {
+    const pub = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++time,
+      idGenerator: () => `job-${++ids}`,
+    });
+
+    const jobId = await pub.lift(makeLiftRequest());
+
+    const stats = await pub.getStats();
+    expect(stats['accepted']).toBe(1);
+    expect(stats['claimed']).toBe(0);
+    expect(stats['finalized']).toBe(0);
+
+    const status = await pub.getStatus(jobId);
+    expect(status?.status).toBe('accepted');
+  });
+
+  it('invalid state transition is rejected', async () => {
+    const pub = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++time,
+      idGenerator: () => `job-${++ids}`,
+    });
+
+    const jobId = await pub.lift(makeLiftRequest());
+
+    await expect(pub.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xabc', walletId: 'wallet-1' },
+    })).rejects.toThrow();
+  });
+});
+
 describe('Async Lift Publisher Queue — Recovery', () => {
   let store: OxigraphStore;
   let time: number;

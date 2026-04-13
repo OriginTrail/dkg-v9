@@ -200,6 +200,7 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
 
     await nodes[0].createSubGraph(CG, 'alpha');
     await nodes[0].createSubGraph(CG, 'beta');
+    await nodes[1].createSubGraph(CG, 'beta');
 
     // Node A writes to alpha, Node B writes to beta
     await Promise.all([

@@ -1,5 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
@@ -300,6 +301,7 @@ export class DKGPublisher implements Publisher {
       const v = validateSubGraphName(options.subGraphName);
       if (!v.valid) throw new Error(`Invalid sub-graph name for share: ${v.reason}`);
     }
+    await this.ensureSubGraphRegistered(contextGraphId, options.subGraphName);
     // Round 9 Bug 25: reserved-namespace guard lives at the public
     // entry points (`share`, `conditionalShare`), not here — this
     // method is Bucket B (internal plumbing) and its callers have
@@ -1362,15 +1364,27 @@ export class DKGPublisher implements Publisher {
           v10Origin: true,
         });
       } catch (v10Err) {
-        // V10 update failed — KC may live in V9 storage. Try legacy path.
+        const errorName = enrichEvmError(v10Err);
+        const V10_DEFINITIVE_ERRORS = [
+          'NotBatchPublisher', 'KnowledgeCollectionExpired',
+          'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
+        ];
+        if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
+          throw v10Err;
+        }
         if (typeof this.chain.updateKnowledgeAssets === 'function') {
-          this.log.info(ctx, `V10 update failed, trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-          txResult = await this.chain.updateKnowledgeAssets({
-            batchId: kcId,
-            newMerkleRoot: kcMerkleRoot,
-            newPublicByteSize: updateByteSize,
-            publisherAddress: this.publisherAddress,
-          });
+          this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+          try {
+            txResult = await this.chain.updateKnowledgeAssets({
+              batchId: kcId,
+              newMerkleRoot: kcMerkleRoot,
+              newPublicByteSize: updateByteSize,
+              publisherAddress: this.publisherAddress,
+            });
+          } catch (v9Err) {
+            enrichEvmError(v9Err);
+            throw v9Err;
+          }
         } else {
           throw v10Err;
         }

@@ -70,8 +70,12 @@ export function resolveViewGraphs(
           graphPrefixes: [],
         };
       }
+      // §16.1: the root content graph `did:dkg:context-graph:{id}` IS the
+      // Verified Memory content layer (chain-confirmed data lands here after
+      // finalization).  Any quorum-specific verified-memory sub-graphs live
+      // under `_verified_memory/` and are unioned in as well.
       return {
-        graphs: [],
+        graphs: [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }

@@ -9,14 +9,14 @@
  *  5. Fund wallets via testnet faucet
  *  6. Merge adapter plugin into ~/.openclaw/openclaw.json
  *  7. Write workspace config.json with feature flags
- *  8. Prefer node-served skill discovery over copied workspace skills
+ *  8. Remove known legacy adapter-owned workspace skill folders
  *  9. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -582,13 +582,73 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, port
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: Skill discovery note
+// Step 9: Remove stale adapter-owned workspace skills
 // ---------------------------------------------------------------------------
 
-export function copySkills(workspaceDir: string, rootOverride?: string): void {
-  const _root = rootOverride ?? adapterRoot();
-  const _workspaceDir = workspaceDir;
-  log('Skipping workspace skill copy: the DKG node serves the canonical SKILL.md at /.well-known/skill.md');
+const LEGACY_WORKSPACE_SKILL_CLEANUP_VERSION = 1;
+
+function workspaceConfigPath(workspaceDir: string): string {
+  return join(workspaceDir, 'config.json');
+}
+
+function workspaceSkillCleanupVersion(workspaceDir: string): number {
+  const configPath = workspaceConfigPath(workspaceDir);
+  if (!existsSync(configPath)) return 0;
+  try {
+    const existing = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const version = Number(existing?.['dkg-node']?.workspaceSkillCleanupVersion);
+    return Number.isFinite(version) ? version : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function markWorkspaceSkillCleanupComplete(workspaceDir: string): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  let existing: Record<string, any> = {};
+  if (existsSync(configPath)) {
+    try {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8')) ?? {};
+    } catch {
+      existing = {};
+    }
+  }
+  const dkgNode = existing['dkg-node'] ?? {};
+  if (dkgNode.workspaceSkillCleanupVersion === LEGACY_WORKSPACE_SKILL_CLEANUP_VERSION) return;
+  existing['dkg-node'] = {
+    ...dkgNode,
+    workspaceSkillCleanupVersion: LEGACY_WORKSPACE_SKILL_CLEANUP_VERSION,
+  };
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
+}
+
+export function removeLegacyWorkspaceSkills(workspaceDir: string): void {
+  if (workspaceSkillCleanupVersion(workspaceDir) >= LEGACY_WORKSPACE_SKILL_CLEANUP_VERSION) {
+    log('Legacy workspace skill cleanup already completed; leaving current workspace skill folders untouched');
+    return;
+  }
+
+  const legacySkillDirs = [
+    join(workspaceDir, 'skills', 'dkg-node'),
+    join(workspaceDir, 'skills', 'origin-trail-game'),
+    join(workspaceDir, 'skills', 'ccl'),
+  ];
+
+  let removedCount = 0;
+  for (const skillDir of legacySkillDirs) {
+    if (!existsSync(skillDir)) continue;
+    rmSync(skillDir, { recursive: true, force: true });
+    removedCount += 1;
+  }
+
+  markWorkspaceSkillCleanupComplete(workspaceDir);
+
+  if (removedCount > 0) {
+    log(`Removed ${removedCount} legacy adapter-owned skill folder(s) from the OpenClaw workspace`);
+  } else {
+    log('No legacy adapter-owned workspace skills found; node-served SKILL.md remains canonical');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -749,11 +809,11 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would write workspace config.json');
   }
 
-  // Step 9: Prefer node-served skill discovery over copied workspace skills
+  // Step 9: Remove stale adapter-owned workspace skills and keep node-served discovery canonical
   if (!dryRun) {
-    copySkills(workspaceDir, resolvedAdapterPath);
+    removeLegacyWorkspaceSkills(workspaceDir);
   } else {
-    log('[dry-run] Would skip workspace skill copy and rely on node-served skill discovery');
+    log('[dry-run] Would remove legacy workspace skill folders and rely on node-served skill discovery');
   }
 
   // Prompt to reload gateway. Modern OpenClaw usually auto-restarts shortly

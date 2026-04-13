@@ -691,7 +691,10 @@ export interface LocalAgentIntegration {
   connectSupported: boolean;
   configured: boolean;
   detected: boolean;
+  persistentChat: boolean;
   chatReady: boolean;
+  bridgeOnline: boolean;
+  bridgeStatusLabel: string;
   status: LocalAgentIntegrationStatus;
   statusLabel: string;
   detail: string;
@@ -772,6 +775,14 @@ export async function fetchOpenClawLocalHistory(limit = 50): Promise<LocalAgentH
 
 export type LocalAgentStreamEvent = OpenClawStreamEvent;
 
+function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boolean {
+  return Boolean(
+    record.transport?.bridgeUrl
+    || record.transport?.gatewayUrl
+    || record.transport?.healthUrl,
+  );
+}
+
 export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
   const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
   const integrations = await Promise.all((response.integrations ?? []).map(async (record) => {
@@ -780,35 +791,44 @@ export async function fetchLocalAgentIntegrations(): Promise<{ integrations: Loc
     const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
     const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
     const configured = record.enabled === true;
+    const runtimeStatus = record.runtime?.status;
     const health = configured && hasChatBridge && surface?.fetchHealth
       ? await surface.fetchHealth().catch(() => null)
       : null;
     const chatReady = health?.ok === true;
+    const bridgeOnline = chatReady;
+    const persistentChat = configured && hasChatBridge && (
+      chatReady
+      || runtimeStatus === 'connecting'
+      || record.runtime?.ready === true
+      || hasLocalAgentTransportHints(record)
+    );
 
     let status: LocalAgentIntegrationStatus;
     let statusLabel: string;
     let detail: string;
-    if (chatReady) {
+    if (bridgeOnline) {
       status = 'chat_ready';
       statusLabel = 'Chat ready';
       detail = `Connected through the ${health?.target ?? 'local bridge'}.`;
-    } else if (configured && hasChatBridge && record.runtime?.status === 'connecting') {
+    } else if (persistentChat && record.runtime?.status === 'connecting') {
       status = 'connecting';
       statusLabel = 'Connecting';
       detail = record.runtime?.lastError
         ?? `${record.name} is registered and the local chat bridge is still starting.`;
-    } else if (configured && hasChatBridge) {
+    } else if (persistentChat) {
       status = 'bridge_offline';
       statusLabel = 'Bridge offline';
       detail = health?.error
         ?? record.runtime?.lastError
-        ?? `${record.name} is configured, but the local bridge is not responding yet.`;
+        ?? `${record.name} is attached to this node, but the local bridge is not responding right now.`;
     } else if (surface) {
       status = 'available';
       statusLabel = connectSupported ? 'Ready to connect' : 'Awaiting chat bridge';
       detail = configured
         ? `${record.name} is registered, but this panel is waiting for the framework chat bridge.`
-        : `Use the node-served skill plus ${record.name} onboarding to attach an existing local agent.`;
+        : (record.runtime?.lastError
+            ?? `Use the node-served skill plus ${record.name} onboarding to attach an existing local agent.`);
     } else {
       status = 'coming_soon';
       statusLabel = configured ? 'Registered, panel pending' : 'Next integration';
@@ -816,6 +836,16 @@ export async function fetchLocalAgentIntegrations(): Promise<{ integrations: Loc
         ? `${record.name} is registered on the node, but the right-panel chat bridge is not wired yet.`
         : 'The local-agent registry is in place so this framework can plug into the same side-panel flow next.';
     }
+
+    const bridgeStatusLabel = bridgeOnline
+      ? 'Bridge live'
+      : status === 'connecting'
+        ? 'Connecting'
+        : persistentChat
+          ? 'Bridge offline'
+          : connectSupported
+            ? 'Ready to connect'
+            : 'Coming next';
 
     return {
       id,
@@ -826,7 +856,10 @@ export async function fetchLocalAgentIntegrations(): Promise<{ integrations: Loc
       connectSupported,
       configured,
       detected: configured || chatReady,
+      persistentChat,
       chatReady,
+      bridgeOnline,
+      bridgeStatusLabel,
       status,
       statusLabel,
       detail,
@@ -835,6 +868,14 @@ export async function fetchLocalAgentIntegrations(): Promise<{ integrations: Loc
       source: configured || surface ? 'live' : 'planned',
     } satisfies LocalAgentIntegration;
   }));
+
+  integrations.sort((a, b) => {
+    const aPriority = a.id === 'openclaw' ? 0 : 1;
+    const bPriority = b.id === 'openclaw' ? 0 : 1;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    if (a.persistentChat !== b.persistentChat) return a.persistentChat ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
 
   return { integrations };
 }
@@ -861,6 +902,18 @@ export async function connectLocalAgentIntegration(id: string): Promise<LocalAge
     integration,
     notice: response.notice,
   };
+}
+
+export async function disconnectLocalAgentIntegration(id: string): Promise<void> {
+  const normalizedId = id.trim().toLowerCase();
+  await put(`/api/local-agent-integrations/${encodeURIComponent(normalizedId)}`, {
+    enabled: false,
+    runtime: {
+      status: 'disconnected',
+      ready: false,
+      lastError: null,
+    },
+  });
 }
 
 export async function fetchLocalAgentHealth(id: string) {

@@ -175,6 +175,7 @@ export class DkgNodePlugin {
       registrationMode,
       transportMode: this.channelPlugin.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
+    const bridgeAlreadyReady = this.channelPlugin.isListening;
     const basePayload = {
       id: 'openclaw',
       enabled: true,
@@ -189,12 +190,17 @@ export class DkgNodePlugin {
     this.client.connectLocalAgentIntegration({
       ...basePayload,
       runtime: {
-        status: 'connecting',
-        ready: false,
+        status: bridgeAlreadyReady ? 'ready' : 'connecting',
+        ready: bridgeAlreadyReady,
+        lastError: null,
       },
     }).catch(err => {
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
     });
+
+    if (bridgeAlreadyReady) {
+      return;
+    }
 
     void this.channelPlugin.start()
       .then(() => this.client.updateLocalAgentIntegration('openclaw', {

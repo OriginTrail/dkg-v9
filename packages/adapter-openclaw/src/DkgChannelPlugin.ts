@@ -276,7 +276,7 @@ export class DkgChannelPlugin {
         id: CHANNEL_NAME,
         label: 'DKG UI',
         selectionLabel: 'DKG UI',
-        blurb: 'Local DKG Agent Hub bridge',
+        blurb: 'Local DKG UI bridge',
         displayName: 'DKG UI',
       },
       capabilities: {
@@ -1076,6 +1076,10 @@ export class DkgChannelPlugin {
   get bridgePort(): number {
     const address = this.server?.address();
     return typeof address === 'object' && address ? address.port : this.port;
+  }
+
+  get isListening(): boolean {
+    return this.server?.listening === true;
   }
 
   get isUsingGatewayRoute(): boolean {

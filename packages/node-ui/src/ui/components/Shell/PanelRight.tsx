@@ -6,6 +6,7 @@ import {
   type LocalAgentStreamEvent,
   type MemorySession,
   connectLocalAgentIntegration,
+  disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
   fetchLocalAgentHistory,
@@ -48,6 +49,7 @@ interface LocalAgentSessionSummary {
 
 const OPENCLAW_DOCS_URL = 'https://docs.openclaw.ai/';
 const OPENCLAW_RELEASE_URL = 'https://github.com/openclaw/openclaw/releases';
+const ADD_AGENT_TAB_ID = '__add_agent__';
 
 let localMessageId = 0;
 
@@ -142,11 +144,68 @@ function summarizeLocalAgentSessions(
   return summaries;
 }
 
+function hasLocalAgentConversation(
+  integrationId: string,
+  localMessagesByIntegration: Record<string, LocalAgentMessage[]>,
+  localHistoryLoadedByIntegration: Record<string, boolean>,
+  sessions: LocalAgentSessionSummary[],
+): boolean {
+  return (localMessagesByIntegration[integrationId]?.length ?? 0) > 0
+    || localHistoryLoadedByIntegration[integrationId] === true
+    || sessions.some((session) => session.integrationId === integrationId);
+}
+
+export function resolveLocalAgentSelectionState(args: {
+  integrations: LocalAgentIntegration[];
+  selectedIntegrationId: string;
+  localMessagesByIntegration: Record<string, LocalAgentMessage[]>;
+  localHistoryLoadedByIntegration: Record<string, boolean>;
+  sessions: LocalAgentSessionSummary[];
+}) {
+  const sortedIntegrations = [...args.integrations].sort(compareLocalAgentIntegrations);
+  const connectedIntegrations = sortedIntegrations.filter((item) => item.persistentChat);
+  const selectedIntegration = sortedIntegrations.find((item) => item.id === args.selectedIntegrationId)
+    ?? connectedIntegrations[0]
+    ?? null;
+  const selectedHasConversation = selectedIntegration
+    ? hasLocalAgentConversation(
+      selectedIntegration.id,
+      args.localMessagesByIntegration,
+      args.localHistoryLoadedByIntegration,
+      args.sessions,
+    )
+    : false;
+
+  return {
+    sortedIntegrations,
+    connectedIntegrations,
+    selectedIntegration,
+    selectedHasConversation,
+  };
+}
+
+function compareLocalAgentIntegrations(a: LocalAgentIntegration, b: LocalAgentIntegration): number {
+  const aPriority = a.id === 'openclaw' ? 0 : 1;
+  const bPriority = b.id === 'openclaw' ? 0 : 1;
+  if (aPriority !== bPriority) return aPriority - bPriority;
+  if (a.persistentChat !== b.persistentChat) return a.persistentChat ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
+  if (integration.bridgeOnline) return 'connected';
+  if (integration.status === 'connecting') return 'known';
+  return 'offline';
+}
+
 function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
+  selectedIntegration: LocalAgentIntegration | null;
+  selectedHasConversation: boolean;
   onSelectIntegration: (id: string) => void;
   onConnectIntegration: (id: string) => void;
+  onDisconnectIntegration: (id: string) => void;
   onRefreshIntegrations: () => void;
   connectBusyId: string | null;
   connectNotice: string | null;
@@ -162,8 +221,11 @@ function ConnectedAgentsTab(props: {
   const {
     integrations,
     selectedIntegrationId,
+    selectedIntegration,
+    selectedHasConversation,
     onSelectIntegration,
     onConnectIntegration,
+    onDisconnectIntegration,
     onRefreshIntegrations,
     connectBusyId,
     connectNotice,
@@ -177,153 +239,212 @@ function ConnectedAgentsTab(props: {
     localSending,
   } = props;
 
-  const selected = integrations.find((item) => item.id === selectedIntegrationId) ?? integrations[0] ?? null;
-  const readyCount = integrations.filter((item) => item.chatReady).length;
+  const sortedIntegrations = [...integrations].sort(compareLocalAgentIntegrations);
+  const connectedAgents = sortedIntegrations.filter((item) => item.persistentChat);
+  const addableIntegrations = sortedIntegrations.filter((item) => !item.persistentChat);
+  const selected = selectedIntegration;
+  const showingSessionHistory = Boolean(selected && !selected.persistentChat && selectedHasConversation);
+  const visibleAgentTabs = showingSessionHistory
+    ? [selected!, ...connectedAgents.filter((item) => item.id !== selected!.id)]
+    : connectedAgents;
+  const showAddFlow = selectedIntegrationId === ADD_AGENT_TAB_ID
+    || (!selected && connectedAgents.length === 0)
+    || Boolean(selected && !selected.persistentChat && !selectedHasConversation);
+  const inputDisabled = localSending || !selected?.chatReady;
+  const statusLabel = showingSessionHistory ? 'Session history' : (selected?.bridgeStatusLabel ?? 'Ready to connect');
+  const statusDetail = showingSessionHistory
+    ? 'history available; reconnect from + to resume live chat'
+    : selected?.bridgeOnline
+      ? (selected.target === 'gateway' ? 'gateway route live' : 'local bridge live')
+      : selected?.status === 'connecting'
+        ? 'waiting for the bridge to come up'
+        : 'refresh to retry once the bridge is back';
 
   return (
     <div className="v10-agents-tab">
-      <div className="v10-agents-summary">
-        <span className="v10-agents-stat">
-          <span className={`v10-agents-stat-dot ${readyCount > 0 ? 'connected' : 'known'}`} />
-          {readyCount} chat-ready
-        </span>
-        <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title="Refresh local agent status">
-          Refresh
+      <div className="v10-agent-subtabs" role="tablist" aria-label="Integrated agents">
+        {visibleAgentTabs.map((integration) => (
+          <button
+            key={integration.id}
+            className={`v10-agent-subtab ${selected?.id === integration.id && !showAddFlow ? 'active' : ''}`}
+            onClick={() => onSelectIntegration(integration.id)}
+            role="tab"
+            aria-selected={selected?.id === integration.id && !showAddFlow}
+          >
+            <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
+            <span>{integration.name}</span>
+          </button>
+        ))}
+        <button
+          className={`v10-agent-subtab add ${showAddFlow ? 'active' : ''}`}
+          onClick={() => onSelectIntegration(ADD_AGENT_TAB_ID)}
+          role="tab"
+          aria-selected={showAddFlow}
+          aria-label="Add another integrated agent"
+          title="Add another integrated agent"
+        >
+          +
         </button>
       </div>
 
-      <div className="v10-agents-section-label">Integrated Agent Chat</div>
-      <div className="v10-local-agent-list" role="tablist" aria-label="Local agent integrations">
-        {integrations.map((integration) => (
-          <button
-            key={integration.id}
-            className={`v10-local-agent-card ${selected?.id === integration.id ? 'active' : ''}`}
-            onClick={() => onSelectIntegration(integration.id)}
-            role="tab"
-            aria-selected={selected?.id === integration.id}
-          >
-            <div className="v10-local-agent-card-head">
-              <span className={`v10-agent-card-dot ${integration.chatReady ? 'connected' : integration.status === 'coming_soon' ? 'known' : 'self'}`} />
-              <span className="v10-agent-card-name">{integration.name}</span>
-              <span className={`v10-local-agent-badge ${integration.status}`}>
-                {integration.statusLabel}
-              </span>
-            </div>
-            <div className="v10-agent-card-meta">
-              <span>{integration.framework}</span>
-              <span>{integration.detail}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {selected && (
-        <div className="v10-local-agent-detail">
-          <div className="v10-local-agent-detail-head">
-            <div>
-              <div className="v10-local-agent-title">{selected.name}</div>
-              <div className="v10-local-agent-subtitle">{selected.description}</div>
-            </div>
-            <span className={`v10-local-agent-status-pill ${selected.status}`}>
-              {selected.statusLabel}
-            </span>
-          </div>
-
+      {showAddFlow ? (
+        <div className="v10-agent-add-surface">
+          <div className="v10-agents-section-label">Connect Another Agent</div>
           {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
           {connectError && <div className="v10-local-agent-error">{connectError}</div>}
-
-          {selected.chatSupported && selected.chatReady ? (
-            <>
-              <div className="v10-local-agent-chat-meta">
-                <span>Messages stay anchored in your private DKG memory graph until you choose to publish.</span>
-                <span>{selected.target === 'gateway' ? 'Gateway bridge live' : 'Local bridge live'}</span>
+          <div className="v10-local-agent-list" aria-label="Available agent integrations">
+            {addableIntegrations.length === 0 && (
+              <div className="v10-agent-empty-state">
+                No additional local agent integrations are available yet.
               </div>
-              <div className="v10-chat-messages v10-local-agent-messages">
-                {!localHistoryLoaded && localMessages.length === 0 && (
-                  <div className="v10-agent-empty-state">
-                    Loading the latest conversation from DKG memory...
+            )}
+            {addableIntegrations.map((integration) => (
+              <div key={integration.id} className="v10-local-agent-detail v10-local-agent-choice">
+                <div className="v10-local-agent-detail-head">
+                  <div>
+                    <div className="v10-local-agent-title">{integration.name}</div>
+                    <div className="v10-local-agent-subtitle">{integration.description}</div>
                   </div>
-                )}
-                {localHistoryLoaded && localMessages.length === 0 && (
-                  <div className="v10-agent-empty-state">
-                    Send a message to start chatting with your connected {selected.name} agent.
-                  </div>
-                )}
-                {localMessages.map((message) => (
-                  <div key={message.id} className={`v10-chat-msg ${message.role}`}>
-                    <div className={`v10-chat-bubble ${message.role}`}>
-                      {message.content}
-                      {message.streaming && <span className="v10-chat-cursor" />}
+                  <span className={`v10-local-agent-status-pill ${integration.status}`}>
+                    {integration.statusLabel}
+                  </span>
+                </div>
+                <p className="v10-local-agent-copy">{integration.detail}</p>
+                {integration.id === 'openclaw' && (
+                  <>
+                    <p className="v10-local-agent-copy">
+                      Connect your local OpenClaw once, then this tab becomes the persistent chat surface for that agent. The node can retry the bridge without forcing you back through setup.
+                    </p>
+                    <div className="v10-local-agent-actions">
+                      <button
+                        className="v10-agent-send-btn secondary"
+                        onClick={() => onConnectIntegration(integration.id)}
+                        disabled={connectBusyId === integration.id}
+                      >
+                        {connectBusyId === integration.id ? 'Connecting...' : 'Connect OpenClaw'}
+                      </button>
+                      <a className="v10-agent-link-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
+                        Docs
+                      </a>
+                      <a className="v10-agent-link-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
+                        Release Notes
+                      </a>
                     </div>
-                    {message.ts && (
-                      <span className={`v10-local-agent-msg-time ${message.role}`}>
-                        {message.ts}
-                      </span>
-                    )}
-                  </div>
-                ))}
-                <div ref={localChatEndRef} />
-              </div>
-              <div className="v10-agent-input-area">
-                <input
-                  type="text"
-                  placeholder={`Message ${selected.name}...`}
-                  className="v10-agent-input"
-                  value={localInput}
-                  onChange={(e) => onLocalInputChange(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      onSendLocalMessage();
-                    }
-                  }}
-                  disabled={localSending}
-                />
-                <button className="v10-agent-send-btn" onClick={onSendLocalMessage} disabled={localSending || !localInput.trim()}>
-                  Send
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="v10-local-agent-setup">
-              <p className="v10-local-agent-copy">{selected.detail}</p>
-              {selected.id === 'openclaw' && (
-                <>
+                  </>
+                )}
+                {integration.id === 'hermes' && (
                   <p className="v10-local-agent-copy">
-                    The node will try to attach your local OpenClaw install automatically and reload the local gateway if needed. If the bridge is still offline after that, run
-                    {' '}
-                    <code>openclaw doctor</code>
-                    {' '}
-                    and check
-                    {' '}
-                    <code>openclaw gateway status</code>
-                    .
+                    Hermes will plug into this same local-agent contract next, using the same side-panel chat surface once its runtime bridge is ready.
                   </p>
-                  <div className="v10-local-agent-actions">
-                    <button
-                      className="v10-agent-send-btn secondary"
-                      onClick={() => onConnectIntegration(selected.id)}
-                      disabled={connectBusyId === selected.id}
-                    >
-                      {connectBusyId === selected.id ? 'Connecting...' : 'Connect OpenClaw'}
-                    </button>
-                    <a className="v10-agent-link-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
-                      Docs
-                    </a>
-                    <a className="v10-agent-link-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
-                      Release Notes
-                    </a>
-                  </div>
-                </>
-              )}
-              {selected.id === 'hermes' && (
-                <p className="v10-local-agent-copy">
-                  Hermes will plug into this same local-agent contract next, using the same right-rail chat surface.
-                </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        selected && (
+          <div className="v10-local-agent-detail v10-local-agent-chat-shell">
+            <div className="v10-agents-summary v10-agents-summary-active">
+              <span className="v10-agents-stat">
+                <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(selected)}`} />
+                {statusLabel}
+              </span>
+              <span className="v10-agents-status-detail">{statusDetail}</span>
+              <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title="Refresh bridge status">
+                Refresh
+              </button>
+              {selected.persistentChat && (
+                <button
+                  className="v10-agents-refresh disconnect"
+                  onClick={() => onDisconnectIntegration(selected.id)}
+                  title={`Disconnect ${selected.name} from this node`}
+                >
+                  Disconnect
+                </button>
               )}
             </div>
-          )}
-        </div>
+
+            {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
+            {connectError && <div className="v10-local-agent-error">{connectError}</div>}
+
+            <div className="v10-local-agent-chat-meta">
+              <span>Messages stay anchored in your private DKG memory graph.</span>
+              <span>{showingSessionHistory
+                ? 'Session history only'
+                : selected.chatReady
+                  ? (selected.target === 'gateway' ? 'Gateway bridge live' : 'Local bridge live')
+                  : 'Agent stays attached to this node'}</span>
+            </div>
+
+            {!selected.chatReady && (
+              <div className={`v10-local-agent-warning ${selected.status === 'connecting' ? 'connecting' : 'offline'}`}>
+                {showingSessionHistory
+                  ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
+                  : selected.status === 'connecting'
+                  ? `${selected.name} is still finishing bridge setup. This chat tab stays in place and will go live automatically when the bridge responds.`
+                  : `${selected.name} stays connected to this node, but the bridge is currently offline. Refresh after the bridge recovers to resume chatting here.`}
+              </div>
+            )}
+
+            <div className="v10-chat-messages v10-local-agent-messages">
+              {!localHistoryLoaded && localMessages.length === 0 && (
+                <div className="v10-agent-empty-state">
+                  Loading the latest conversation from DKG memory...
+                </div>
+              )}
+              {localHistoryLoaded && localMessages.length === 0 && (
+                <div className="v10-agent-empty-state">
+                  {showingSessionHistory
+                    ? `${selected.name} session history is available, but there are no stored turns to show yet.`
+                    : selected.chatReady
+                    ? `Send a message to start chatting with ${selected.name}.`
+                    : `${selected.name} is attached to this node. Your conversation history will stay here even while the bridge reconnects.`}
+                </div>
+              )}
+              {localMessages.map((message) => (
+                <div key={message.id} className={`v10-chat-msg ${message.role}`}>
+                  <div className={`v10-chat-bubble ${message.role}`}>
+                    {message.content}
+                    {message.streaming && <span className="v10-chat-cursor" />}
+                  </div>
+                  {message.ts && (
+                    <span className={`v10-local-agent-msg-time ${message.role}`}>
+                      {message.ts}
+                    </span>
+                  )}
+                </div>
+              ))}
+              <div ref={localChatEndRef} />
+            </div>
+            <div className="v10-agent-input-area">
+              <input
+                type="text"
+                placeholder={
+                  showingSessionHistory
+                    ? `Reconnect ${selected.name} to resume live chat...`
+                    : selected.chatReady
+                    ? `Message ${selected.name}...`
+                    : selected.status === 'connecting'
+                      ? `${selected.name} is still connecting...`
+                      : `${selected.name} bridge offline...`
+                }
+                className="v10-agent-input"
+                value={localInput}
+                onChange={(e) => onLocalInputChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    onSendLocalMessage();
+                  }
+                }}
+                disabled={inputDisabled}
+              />
+              <button className="v10-agent-send-btn" onClick={onSendLocalMessage} disabled={inputDisabled || !localInput.trim()}>
+                Send
+              </button>
+            </div>
+          </div>
+        )
       )}
     </div>
   );
@@ -434,14 +555,25 @@ export function PanelRight() {
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
 
-  const selectedIntegration = integrations.find((item) => item.id === selectedIntegrationId) ?? integrations[0] ?? null;
+  const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
+  const {
+    sortedIntegrations,
+    connectedIntegrations,
+    selectedIntegration,
+    selectedHasConversation,
+  } = resolveLocalAgentSelectionState({
+    integrations,
+    selectedIntegrationId,
+    localMessagesByIntegration,
+    localHistoryLoadedByIntegration,
+    sessions: localSessions,
+  });
   const selectedLocalMessages = selectedIntegration
     ? (localMessagesByIntegration[selectedIntegration.id] ?? [])
     : [];
   const selectedLocalHistoryLoaded = selectedIntegration
     ? (localHistoryLoadedByIntegration[selectedIntegration.id] ?? false)
     : false;
-  const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
 
   const scrollLocalChatToBottom = useCallback(() => {
     localChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -488,19 +620,34 @@ export function PanelRight() {
     try {
       const { integrations: items } = await fetchLocalAgentIntegrations();
       setIntegrations(items);
-      if (!items.some((item) => item.id === selectedIntegrationId) && items[0]) {
-        setSelectedIntegrationId(items[0].id);
+      const sessionSummaries = summarizeLocalAgentSessions(memorySessions, items);
+      const connected = [...items].sort(compareLocalAgentIntegrations).filter((item) => item.persistentChat);
+      const selectedItem = items.find((item) => item.id === selectedIntegrationId) ?? null;
+      const preserveSelected = selectedIntegrationId !== ADD_AGENT_TAB_ID
+        && Boolean(selectedItem)
+        && (selectedItem.persistentChat || hasLocalAgentConversation(
+          selectedIntegrationId,
+          localMessagesByIntegration,
+          localHistoryLoadedByIntegration,
+          sessionSummaries,
+        ));
+      if (!preserveSelected) {
+        setSelectedIntegrationId(connected[0]?.id ?? ADD_AGENT_TAB_ID);
       }
-      const chatReady = items.find((item) => item.chatReady);
-      if (chatReady && !autoFocusedLocalAgentRef.current) {
+      const preferred = connected[0];
+      if (preferred && !autoFocusedLocalAgentRef.current) {
         autoFocusedLocalAgentRef.current = true;
-        setSelectedIntegrationId(chatReady.id);
+        setSelectedIntegrationId(preferred.id);
         setMode('agents');
+      } else if (!preferred && !preserveSelected) {
+        autoFocusedLocalAgentRef.current = false;
+        setSelectedIntegrationId(ADD_AGENT_TAB_ID);
       }
     } catch {
       setIntegrations([]);
+      setSelectedIntegrationId(ADD_AGENT_TAB_ID);
     }
-  }, [selectedIntegrationId]);
+  }, [localHistoryLoadedByIntegration, localMessagesByIntegration, memorySessions, selectedIntegrationId]);
 
   const loadLocalHistory = useCallback(async (integrationId: string) => {
     setLocalHistoryLoadedByIntegration((prev) => ({
@@ -538,11 +685,11 @@ export function PanelRight() {
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
   useEffect(() => {
-    if (!selectedIntegration?.chatSupported || !selectedIntegration.chatReady) {
+    if (!selectedIntegration?.chatSupported || (!selectedIntegration.persistentChat && !selectedHasConversation)) {
       if (selectedIntegration) {
         setLocalHistoryLoadedByIntegration((prev) => ({
           ...prev,
-          [selectedIntegration.id]: selectedIntegration.status === 'coming_soon',
+          [selectedIntegration.id]: false,
         }));
       }
       return;
@@ -555,7 +702,7 @@ export function PanelRight() {
     return () => {
       cancelled = true;
     };
-  }, [selectedIntegration?.id, selectedIntegration?.chatReady, selectedIntegration?.chatSupported, selectedIntegration?.status, loadLocalHistory]);
+  }, [selectedHasConversation, selectedIntegration?.chatSupported, selectedIntegration?.id, selectedIntegration?.persistentChat, loadLocalHistory]);
 
   const sendLocalMessage = useCallback(async () => {
     const integration = selectedIntegration;
@@ -620,11 +767,12 @@ export function PanelRight() {
             : message,
         ),
       );
+      void refreshLocalIntegrations();
     } finally {
       setLocalSending(false);
       localAbortRef.current = null;
     }
-  }, [advance, loadSessions, localInput, localSending, selectedIntegration, stage, updateLocalMessages]);
+  }, [advance, loadSessions, localInput, localSending, refreshLocalIntegrations, selectedIntegration, stage, updateLocalMessages]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
@@ -633,6 +781,8 @@ export function PanelRight() {
     try {
       const result = await connectLocalAgentIntegration(integrationId);
       await refreshLocalIntegrations();
+      setSelectedIntegrationId(integrationId);
+      autoFocusedLocalAgentRef.current = true;
       setConnectNotice(
         result.notice
           ?? (result.integration.chatReady
@@ -641,9 +791,25 @@ export function PanelRight() {
       );
       setMode('agents');
     } catch (err: any) {
+      await refreshLocalIntegrations();
       setConnectError(err.message);
     } finally {
       setConnectBusyId(null);
+    }
+  }, [refreshLocalIntegrations]);
+
+  const disconnectIntegration = useCallback(async (integrationId: string) => {
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      await disconnectLocalAgentIntegration(integrationId);
+      autoFocusedLocalAgentRef.current = false;
+      setSelectedIntegrationId(integrationId);
+      setConnectNotice('The local agent was disconnected from this node. Session history remains available here.');
+      setMode('agents');
+      await refreshLocalIntegrations();
+    } catch (err: any) {
+      setConnectError(err.message);
     }
   }, [refreshLocalIntegrations]);
 
@@ -680,8 +846,11 @@ export function PanelRight() {
         <ConnectedAgentsTab
           integrations={integrations}
           selectedIntegrationId={selectedIntegrationId}
+          selectedIntegration={selectedIntegration}
+          selectedHasConversation={selectedHasConversation}
           onSelectIntegration={setSelectedIntegrationId}
           onConnectIntegration={connectIntegration}
+          onDisconnectIntegration={disconnectIntegration}
           onRefreshIntegrations={refreshLocalIntegrations}
           connectBusyId={connectBusyId}
           connectNotice={connectNotice}

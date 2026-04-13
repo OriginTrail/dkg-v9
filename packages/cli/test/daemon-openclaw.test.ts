@@ -12,6 +12,7 @@ import {
   listLocalAgentIntegrations,
   parseRequiredSignatures,
   pipeOpenClawStream,
+  probeOpenClawChannelHealth,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
 import type { DkgConfig } from '../src/config.js';
@@ -389,6 +390,64 @@ describe('local agent integration registry helpers', () => {
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
+  it('does not leave a failed first-time OpenClaw attach marked as connected', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn().mockRejectedValue(new Error('setup failed'));
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'bridge offline',
+    });
+
+    await expect(connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    )).rejects.toThrow('setup failed');
+
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.enabled).toBe(false);
+    expect(integration?.status).toBe('error');
+    expect(integration?.runtime.ready).toBe(false);
+    expect(integration?.runtime.lastError).toBe('setup failed');
+  });
+
+  it('keeps an already attached legacy OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
+    const config = makeConfig({
+      openclawAdapter: true,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9201',
+      },
+    });
+    const runSetup = vi.fn().mockRejectedValue(new Error('setup failed'));
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'bridge offline',
+    });
+
+    await expect(connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    )).rejects.toThrow('setup failed');
+
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.enabled).toBe(true);
+    expect(integration?.status).toBe('error');
+    expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+  });
+
   it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
     const config = makeConfig();
     const runSetup = vi.fn().mockResolvedValue(undefined);
@@ -463,6 +522,35 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
     expect(result.notice).toBe('OpenClaw attached successfully and is chat-ready.');
+  });
+
+  it('rechecks OpenClaw bridge health quickly after a cached failure so recovery is not sticky', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-13T12:00:00.000Z'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ ok: false, error: 'offline' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ ok: true, channel: 'dkg-ui' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+
+    try {
+      const config = makeConfig();
+      const first = await probeOpenClawChannelHealth(config, 'bridge-token', { ignoreBridgeCache: true });
+      expect(first.ok).toBe(false);
+
+      vi.setSystemTime(new Date('2026-04-13T12:00:01.500Z'));
+      const second = await probeOpenClawChannelHealth(config, 'bridge-token');
+
+      expect(second.ok).toBe(true);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('updates a stored integration without dropping nested metadata', () => {

@@ -8,7 +8,7 @@ import {
   writeDkgConfig,
   mergeOpenClawConfig,
   writeWorkspaceConfig,
-  copySkills,
+  removeLegacyWorkspaceSkills,
 } from '../src/setup.js';
 
 // ---------------------------------------------------------------------------
@@ -328,31 +328,63 @@ describe('writeWorkspaceConfig', () => {
 });
 
 // ---------------------------------------------------------------------------
-// copySkills
+// removeLegacyWorkspaceSkills
 // ---------------------------------------------------------------------------
 
-describe('copySkills', () => {
-  it('does not copy workspace skill files anymore', () => {
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# DKG Node Skills');
-
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-
-    copySkills(ws, fakeRoot);
-
-    expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
-  });
-
-  it('leaves existing workspace skills untouched', () => {
+describe('removeLegacyWorkspaceSkills', () => {
+  it('removes legacy adapter-owned workspace skill folders', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Existing Skill');
+    mkdirSync(join(ws, 'skills', 'origin-trail-game'), { recursive: true });
+    mkdirSync(join(ws, 'skills', 'ccl'), { recursive: true });
+    writeFileSync(join(ws, 'config.json'), JSON.stringify({ 'dkg-node': {} }, null, 2));
+    writeFileSync(
+      join(ws, 'skills', 'dkg-node', 'SKILL.md'),
+      '# legacy dkg node skill',
+    );
+    writeFileSync(
+      join(ws, 'skills', 'origin-trail-game', 'SKILL.md'),
+      '# legacy origin trail game skill',
+    );
+    writeFileSync(
+      join(ws, 'skills', 'ccl', 'SKILL.md'),
+      '# legacy ccl skill',
+    );
 
-    copySkills(ws, join(testDir, 'adapter'));
+    removeLegacyWorkspaceSkills(ws);
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Existing Skill');
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+    expect(existsSync(join(ws, 'skills', 'origin-trail-game'))).toBe(false);
+    expect(existsSync(join(ws, 'skills', 'ccl'))).toBe(false);
+    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
+    expect(config['dkg-node'].workspaceSkillCleanupVersion).toBe(1);
+  });
+
+  it('leaves unrelated workspace skills untouched', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(join(ws, 'skills', 'custom-agent'), { recursive: true });
+    writeFileSync(join(ws, 'skills', 'custom-agent', 'SKILL.md'), '# Existing Skill');
+
+    removeLegacyWorkspaceSkills(ws);
+
+    expect(readFileSync(join(ws, 'skills', 'custom-agent', 'SKILL.md'), 'utf-8')).toBe('# Existing Skill');
+  });
+
+  it('marks cleanup complete so reruns do not remove later user-managed legacy-named folders', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
+    writeFileSync(join(ws, 'config.json'), JSON.stringify({ 'dkg-node': {} }, null, 2));
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# legacy dkg node skill');
+
+    removeLegacyWorkspaceSkills(ws);
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+
+    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# user-managed dkg node skill');
+
+    removeLegacyWorkspaceSkills(ws);
+
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# user-managed dkg node skill');
   });
 });
 

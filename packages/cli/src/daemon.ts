@@ -1226,9 +1226,16 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
 
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
-const HEALTH_CACHE_TTL = 10_000; // 10 seconds
+const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
+const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
 const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 20_000;
 const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
+
+function isOpenClawBridgeHealthCacheValid(cache: { ok: boolean; ts: number } | null): boolean {
+  if (!cache) return false;
+  const ttl = cache.ok ? BRIDGE_HEALTH_CACHE_OK_TTL_MS : BRIDGE_HEALTH_CACHE_ERROR_TTL_MS;
+  return Date.now() - cache.ts < ttl;
+}
 
 export interface OpenClawChannelTarget {
   name: 'bridge' | 'gateway';
@@ -1516,6 +1523,18 @@ export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): bool
     && integration.capabilities.localChat === true;
 }
 
+function hasLocalAgentTransportConfig(
+  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime' | 'enabled'> | null | undefined,
+): boolean {
+  if (!integration || integration.enabled !== true) return false;
+  return Boolean(
+    integration.transport?.bridgeUrl
+    || integration.transport?.gatewayUrl
+    || integration.transport?.healthUrl
+    || integration.runtime?.ready === true,
+  );
+}
+
 export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
   const storedOpenClawIntegration = getStoredLocalAgentIntegrations(config).openclaw;
   if (storedOpenClawIntegration?.enabled === false) return [];
@@ -1642,9 +1661,8 @@ export async function probeOpenClawChannelHealth(
 
       const cachedBridgeHealth = bridgeHealthCache;
       const cacheValid = !opts.ignoreBridgeCache
-        && cachedBridgeHealth !== null
-        && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
-      if (cacheValid) {
+        && isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
+      if (cacheValid && cachedBridgeHealth) {
         bridge = { ok: cachedBridgeHealth.ok, cached: true };
         if (cachedBridgeHealth.ok) {
           return { ok: true, target: 'bridge', bridge };
@@ -1774,6 +1792,9 @@ export async function connectLocalAgentIntegrationFromUi(
     ) => Promise<OpenClawChannelHealthReport>;
   } = {},
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
+  const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
+  const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
+  const hadAttachedBridgeBeforeConnect = hasLocalAgentTransportConfig(existingBeforeConnect);
   const requested = connectLocalAgentIntegration(config, {
     ...body,
     runtime: {
@@ -1832,6 +1853,8 @@ export async function connectLocalAgentIntegrationFromUi(
   } catch (err: any) {
     const message = err?.stderr?.trim?.() || err?.stdout?.trim?.() || err?.message || 'OpenClaw attach failed';
     const integration = updateLocalAgentIntegration(config, requested.id, {
+      enabled: hadAttachedBridgeBeforeConnect ? true : false,
+      ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport ? { transport: existingBeforeConnect.transport } : {}),
       runtime: {
         status: 'error',
         ready: false,
@@ -1893,8 +1916,8 @@ async function ensureOpenClawBridgeAvailable(
   }
 
   const cachedBridgeHealth = bridgeHealthCache;
-  const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
-  if (cacheValid) {
+  const cacheValid = isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
+  if (cacheValid && cachedBridgeHealth) {
     return cachedBridgeHealth.ok
       ? { ok: true }
       : { ok: false, details: 'Bridge health check cached as unavailable', offline: true };
@@ -2284,7 +2307,7 @@ async function handleRequest(
       peer = (await resolveNameToPeerId(agent, peerFilter)) ?? undefined;
     }
     const rows = dashDb.getChatMessages({ peer, since: since || undefined, limit });
-    const msgs = rows.map(r => ({
+    const msgs = rows.map((r: any) => ({
       ts: r.ts,
       direction: r.direction,
       peer: r.peer,
@@ -2725,7 +2748,7 @@ async function handleRequest(
       return jsonResponse(res, httpStatus, {
         kcId: String(result.kcId),
         status: result.status,
-        kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
+        kas: result.kaManifest.map((ka: any) => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
         ...(publishContextGraphId != null ? { publishContextGraphId: String(publishContextGraphId) } : {}),
         ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
@@ -4091,6 +4114,7 @@ async function handleRequest(
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
     } catch (err: any) {
+      try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
     }
   }

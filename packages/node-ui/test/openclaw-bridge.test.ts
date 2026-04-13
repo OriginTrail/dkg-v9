@@ -123,6 +123,7 @@ describe('PanelRight UI - connected agent flow', () => {
   it('defines the connected agents tab in PanelRight', () => {
     expect(panelRight).toContain('function ConnectedAgentsTab');
     expect(panelRight).toContain("useState<'agents' | 'network' | 'sessions'>('agents')");
+    expect(panelRight).toContain('const ADD_AGENT_TAB_ID =');
   });
 
   it('removes the built-in assistant path and splits the right rail into three agent-first tabs', () => {
@@ -134,10 +135,14 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('function SessionsTab');
   });
 
-  it('renders OpenClaw connect/chat-ready copy in the side panel', () => {
+  it('keeps the Agents tab as the persistent OpenClaw chat surface with sub-tabs and add-agent flow', () => {
     expect(panelRight).toContain('Connect OpenClaw');
+    expect(panelRight).toContain('Connect Another Agent');
+    expect(panelRight).toContain('Disconnect');
+    expect(panelRight).toContain('Session history');
     expect(panelRight).toContain('Messages stay anchored in your private DKG memory graph');
     expect(panelRight).toContain('OpenClaw');
+    expect(panelRight).toContain('v10-agent-subtabs');
   });
 
   it('keeps the interface future-friendly for Hermes', () => {
@@ -160,12 +165,12 @@ describe('Agent hub shell surfaces', () => {
   const panelCenter = readUiFile('components/Shell/PanelCenter.tsx');
   const agentHub = readUiFile('pages/AgentHub.tsx');
 
-  it('keeps both Agent Hub and Integrations in the left shell navigation', () => {
-    expect(panelLeft).toContain('Agent Hub');
+  it('keeps Integrations visible while hiding the duplicate Agent Hub shell entry', () => {
+    expect(panelLeft).not.toContain('Agent Hub');
     expect(panelLeft).toContain('Integrations');
   });
 
-  it('routes the center panel agent-hub tab to the restored Agent Hub page', () => {
+  it('keeps the center-panel agent-hub route alive under the hood', () => {
     expect(panelCenter).toContain("activeTabId === 'agent-hub'");
     expect(panelCenter).toContain("Loading agent hub...");
     expect(panelCenter).toContain('AgentHubPage');
@@ -412,6 +417,9 @@ describe('OpenClaw bridge behavioral tests', () => {
       const openclaw = result.integrations.find((item) => item.id === 'openclaw');
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(openclaw?.chatReady).toBe(true);
+      expect(openclaw?.persistentChat).toBe(true);
+      expect(openclaw?.bridgeOnline).toBe(true);
+      expect(openclaw?.bridgeStatusLabel).toBe('Bridge live');
       expect(openclaw?.status).toBe('chat_ready');
       expect(openclaw?.target).toBe('gateway');
       expect(hermes?.status).toBe('coming_soon');
@@ -448,12 +456,104 @@ describe('OpenClaw bridge behavioral tests', () => {
       const result = await fetchLocalAgentIntegrations();
       expect(result.integrations[0]).toMatchObject({
         id: 'openclaw',
+        persistentChat: true,
         chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Connecting',
         status: 'connecting',
         statusLabel: 'Connecting',
       });
     } finally {
       globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations does not treat a failed unattached OpenClaw record as a persistent chat tab', async () => {
+    const fakeFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'openclaw',
+              name: 'OpenClaw',
+              description: 'OpenClaw framework adapter',
+              enabled: false,
+              capabilities: { localChat: true, connectFromUi: true },
+              runtime: { status: 'error', lastError: 'setup failed' },
+            },
+          ],
+        }),
+      });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      expect(result.integrations[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: false,
+        chatReady: false,
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'setup failed',
+      });
+      expect(fakeFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('resolveLocalAgentSelectionState reopens disconnected session history in the Agents view', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveLocalAgentSelectionState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const state = resolveLocalAgentSelectionState({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            framework: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            chatSupported: true,
+            connectSupported: true,
+            configured: false,
+            detected: false,
+            persistentChat: false,
+            chatReady: false,
+            bridgeOnline: false,
+            bridgeStatusLabel: 'Ready to connect',
+            status: 'available',
+            statusLabel: 'Ready to connect',
+            detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+            source: 'live',
+          },
+        ],
+        selectedIntegrationId: 'openclaw',
+        localMessagesByIntegration: {},
+        localHistoryLoadedByIntegration: {},
+        sessions: [
+          {
+            id: 'session-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            title: 'OpenClaw - session-1',
+            lastUpdatedAt: '2026-04-13 20:00',
+            lastMessagePreview: 'Hey there',
+          },
+        ],
+      });
+
+      expect(state.selectedIntegration?.id).toBe('openclaw');
+      expect(state.selectedHasConversation).toBe(true);
+      expect(state.connectedIntegrations).toHaveLength(0);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
     }
   });
 
@@ -497,6 +597,32 @@ describe('OpenClaw bridge behavioral tests', () => {
       });
       expect(result.integration.chatReady).toBe(true);
       expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('disconnectLocalAgentIntegration disables the stored integration without deleting the registry record', async () => {
+    const fakeFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { disconnectLocalAgentIntegration } = await import('../src/ui/api.js');
+      await disconnectLocalAgentIntegration('openclaw');
+      const [url, opts] = fakeFetch.mock.calls[0];
+      expect(String(url)).toContain('/api/local-agent-integrations/openclaw');
+      expect(opts.method).toBe('PUT');
+      expect(JSON.parse(opts.body)).toEqual({
+        enabled: false,
+        runtime: {
+          status: 'disconnected',
+          ready: false,
+          lastError: null,
+        },
+      });
     } finally {
       globalThis.fetch = original;
     }

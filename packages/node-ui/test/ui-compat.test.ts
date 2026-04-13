@@ -491,10 +491,10 @@ describe('right-rail agent shell replaces Agent Hub', () => {
     expect(app).toContain('PanelRight');
   });
 
-  it('removes the center-panel Agent Hub entry point', () => {
+  it('hides the duplicate left-nav Agent Hub entry while keeping the internal route alive', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
     expect(panelLeft).not.toContain('Agent Hub');
-    expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");
+    expect(panelCenter).toContain("activeTabId === 'agent-hub'");
   });
 
   it('moves connected-agent chat into the right rail with Agents, Network, and Sessions tabs', () => {

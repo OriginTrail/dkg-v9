@@ -3281,6 +3281,22 @@ async function handleRequest(
     });
   }
 
+  // GET /api/file/:hash — serve a stored file by its content hash
+  if (req.method === 'GET' && path.startsWith('/api/file/')) {
+    const hash = safeDecodeURIComponent(path.slice('/api/file/'.length), res);
+    if (hash === null) return;
+    const bytes = await fileStore.get(hash);
+    if (!bytes) return jsonResponse(res, 404, { error: `File not found: ${hash}` });
+    const ct = url.searchParams.get('contentType') ?? 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Length': bytes.length,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    res.end(bytes);
+    return;
+  }
+
   // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
   if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
     const body = await readBody(req);

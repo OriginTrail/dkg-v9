@@ -272,8 +272,8 @@ export const executeQuery = (sparql: string, contextGraphId?: string, includeSha
 
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
-  await post<any>('/api/shared-memory/write', { paranetId: contextGraphId, quads });
-  return post<any>('/api/shared-memory/publish', { paranetId: contextGraphId, selection: 'all', clearAfter: true });
+  await post<any>('/api/shared-memory/write', { contextGraphId, quads });
+  return post<any>('/api/shared-memory/publish', { contextGraphId, selection: 'all', clearAfter: true });
 };
 
 // --- Assertions (WM objects) ---
@@ -287,7 +287,7 @@ export interface AssertionInfo {
 /** Discover assertions in WM by querying named graphs that match the assertion pattern. */
 export async function listAssertions(contextGraphId: string): Promise<AssertionInfo[]> {
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
-  const data = await executeQuery(sparql, contextGraphId);
+  const data = await post<{ result: any }>('/api/query', { sparql, contextGraphId, view: 'working-memory' });
   const bindings: any[] = data?.result?.bindings ?? [];
   const prefix = `did:dkg:context-graph:${contextGraphId}/assertion/`;
   const result: AssertionInfo[] = [];
@@ -341,7 +341,7 @@ export interface SwmRootEntity {
 /** List root entities in SWM with their triple counts. */
 export async function listSwmEntities(contextGraphId: string): Promise<SwmRootEntity[]> {
   const sparql = `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?cnt)`;
-  const data = await executeQuery(sparql, contextGraphId, true, '_shared_memory');
+  const data = await post<{ result: any }>('/api/query', { sparql, contextGraphId, view: 'shared-working-memory' });
   const bindings: any[] = data?.result?.bindings ?? [];
   return bindings.map((b) => {
     const uri = typeof b.s === 'string' ? b.s : b.s?.value ?? '';

@@ -4,6 +4,7 @@ import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { CreateProjectModal } from '../components/Modals/CreateProjectModal.js';
+import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 
 function StatCard({ label, value, sub, accentColor }: { label: string; value: string | number; sub?: string; accentColor?: string }) {
   return (
@@ -50,6 +51,8 @@ export function DashboardView() {
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showImportFiles, setShowImportFiles] = useState(false);
+  const { activeProjectId, contextGraphs } = useProjectsStore();
 
   const totalKCs = metrics?.total_kcs ?? metrics?.totalKnowledgeCollections ?? 0;
   const peers = status?.connectedPeers ?? status?.peerCount ?? 0;
@@ -85,7 +88,13 @@ export function DashboardView() {
           </div>
           <div className="v10-quick-actions">
             <QuickAction icon="+" label="Create Project" onClick={() => setShowCreateProject(true)} />
-            <QuickAction icon="↑" label="Import Memories" />
+            <QuickAction icon="↑" label="Import Memories" onClick={() => {
+              if (activeProjectId || contextGraphs.length > 0) {
+                setShowImportFiles(true);
+              } else {
+                setShowCreateProject(true);
+              }
+            }} />
             <QuickAction icon="⟐" label="Run SPARQL" onClick={() => openTab({ id: 'sparql', label: 'SPARQL', closable: true })} />
             <QuickAction icon="⬡" label="Browse Graph" onClick={() => openTab({ id: 'explorer', label: 'Explorer', closable: true })} />
           </div>
@@ -141,6 +150,16 @@ export function DashboardView() {
       </div>
 
       <CreateProjectModal open={showCreateProject} onClose={() => setShowCreateProject(false)} />
+      <ImportFilesModal
+        open={showImportFiles}
+        onClose={() => setShowImportFiles(false)}
+        contextGraphId={activeProjectId ?? contextGraphs[0]?.id ?? ''}
+        contextGraphName={
+          activeProjectId
+            ? contextGraphs.find((cg) => cg.id === activeProjectId)?.name
+            : contextGraphs[0]?.name
+        }
+      />
     </div>
   );
 }

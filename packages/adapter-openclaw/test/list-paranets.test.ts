@@ -170,7 +170,7 @@ describe('dkg_publish tool', () => {
     expect(parsed.quadsPublished).toBe(2);
 
     const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(writeBody.paranetId).toBe('testing');
+    expect(writeBody.contextGraphId).toBe('testing');
     expect(writeBody.quads).toHaveLength(2);
     expect(writeBody.quads[0].subject).toBe('https://example.org/wine');
     expect(writeBody.quads[0].object).toBe('"Cabernet Sauvignon"');

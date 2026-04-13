@@ -28,16 +28,12 @@ describe('lobby API type contract', () => {
 });
 
 describe('backward-compatible route redirects', () => {
-  it('App.tsx includes redirects for /network, /operations/*, /wallet, /integrations', () => {
+  it('App.tsx routes /network as a lazy page and catch-all to AppShell', () => {
     const app = readFile('App.tsx');
     expect(app).toContain('path="/network"');
-    expect(app).toContain('path="/operations/*"');
-    expect(app).toContain('path="/wallet"');
-    expect(app).toContain('path="/integrations"');
-    for (const route of ['/network', '/operations/\\*', '/wallet', '/integrations']) {
-      const pattern = new RegExp(`path="${route}"[^>]*element=\\{<Navigate`);
-      expect(app).toMatch(pattern);
-    }
+    expect(app).toContain('path="*"');
+    expect(app).toContain('AppShell');
+    expect(app).toContain('NetworkDebugPage');
   });
 
   it('Explorer.tsx includes redirects for /publish, /history, /saved', () => {
@@ -50,93 +46,66 @@ describe('backward-compatible route redirects', () => {
   });
 });
 
-describe('CSS compatibility selectors', () => {
+describe('V10 CSS layout selectors', () => {
   const css = readFile('styles.css');
 
-  it('includes .tab-group selector', () => {
-    expect(css).toMatch(/\.tab-group\s*\{/);
+  it('includes .v10-center-tabs selector', () => {
+    expect(css).toMatch(/\.v10-center-tabs\s*\{/);
   });
 
-  it('includes .tab-item selector', () => {
-    expect(css).toMatch(/\.tab-item\s*\{/);
+  it('includes .v10-center-tab selector', () => {
+    expect(css).toMatch(/\.v10-center-tab\s*[\{,]/);
   });
 
-  it('includes .chat-layout selector', () => {
-    expect(css).toMatch(/\.chat-layout\s*\{/);
+  it('includes .v10-app and .v10-app-body selectors', () => {
+    expect(css).toMatch(/\.v10-app\s*\{/);
+    expect(css).toMatch(/\.v10-app-body\s*\{/);
   });
 
-  it('includes .chat-peers selector', () => {
-    expect(css).toMatch(/\.chat-peers\s*\{/);
+  it('includes .v10-panel-left and .v10-panel-right selectors', () => {
+    expect(css).toMatch(/\.v10-panel-left\s*\{/);
+    expect(css).toMatch(/\.v10-panel-right\s*\{/);
   });
 
-  it('includes .chat-peers-header selector', () => {
-    expect(css).toMatch(/\.chat-peers-header\s*\{/);
+  it('includes .v10-panel-center selector', () => {
+    expect(css).toMatch(/\.v10-panel-center/);
   });
 
-  it('includes .chat-peers-empty selector', () => {
-    expect(css).toMatch(/\.chat-peers-empty\s*\{/);
+  it('includes .v10-chat-messages selector', () => {
+    expect(css).toMatch(/\.v10-chat-messages\s*\{/);
   });
 
-  it('includes .chat-peer-item selector', () => {
-    expect(css).toMatch(/\.chat-peer-item\s*\{/);
+  it('includes .v10-agent-input-area selector', () => {
+    expect(css).toMatch(/\.v10-agent-input-area\s*\{/);
   });
 
-  it('includes .chat-main selector', () => {
-    expect(css).toMatch(/\.chat-main\s*\{/);
+  it('includes .v10-agent-send-btn selector', () => {
+    expect(css).toMatch(/\.v10-agent-send-btn\s*\{/);
   });
 
-  it('includes .chat-messages selector', () => {
-    expect(css).toMatch(/\.chat-messages\s*\{/);
-  });
-
-  it('includes .chat-input-area selector', () => {
-    expect(css).toMatch(/\.chat-input-area\s*\{/);
-  });
-
-  it('includes .chat-send-btn selector', () => {
-    expect(css).toMatch(/\.chat-send-btn\s*\{/);
-  });
-
-  it('includes .chat-empty selector', () => {
-    expect(css).toMatch(/\.chat-empty\s*\{/);
-  });
-
-  it('includes .chat-bubble selector', () => {
+  it('includes .chat-bubble selector (legacy)', () => {
     expect(css).toMatch(/\.chat-bubble\s*\{/);
   });
 
-  it('includes .chat-no-selection selector', () => {
-    expect(css).toMatch(/\.chat-no-selection\s*\{/);
+  it('includes .v10-header-notif selectors', () => {
+    expect(css).toMatch(/\.v10-header-notif/);
   });
 
-  it('includes .chat-send-error selector', () => {
-    expect(css).toMatch(/\.chat-send-error\s*\{/);
+  it('includes .dkg-btn selector', () => {
+    expect(css).toMatch(/\.dkg-btn\s*\{/);
   });
 
-  it('includes .chat-delivery selector', () => {
-    expect(css).toMatch(/\.chat-delivery\s*\{/);
-  });
-
-  it('includes .chat-spinner animation', () => {
-    expect(css).toMatch(/\.chat-spinner\s*\{/);
-  });
-
-  it('includes .badge, .badge-info, .badge-success selectors', () => {
-    expect(css).toMatch(/\.badge\s*\{/);
-    expect(css).toMatch(/\.badge-info\s*\{/);
-    expect(css).toMatch(/\.badge-success\s*\{/);
-  });
-
-  it('includes .btn and .btn-primary selectors', () => {
-    expect(css).toMatch(/\.btn\s*\{/);
-    expect(css).toMatch(/\.btn-primary\s*\{/);
+  it('includes .v10-modal-btn selector', () => {
+    expect(css).toMatch(/\.v10-modal-btn\s*\{/);
   });
 });
 
-describe('no external CDN font imports', () => {
-  it('styles.css does not import from external CDN', () => {
+describe('V10 font imports', () => {
+  it('styles.css imports Google Fonts for Instrument Sans and JetBrains Mono', () => {
     const css = readFile('styles.css');
-    expect(css).not.toMatch(/@import\s+url\s*\(\s*['"]https?:\/\//);
+    expect(css).toMatch(/@import\s+url\s*\(/);
+    expect(css).toContain('Instrument+Sans');
+    expect(css).toContain('JetBrains+Mono');
   });
 });
 
@@ -194,22 +163,24 @@ describe('dashboard uses runtime data', () => {
   });
 });
 
-describe('sidebar uses live status', () => {
-  const app = readFile('App.tsx');
+describe('header uses live status', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('sidebar health reads from liveStatus, not hardcoded values', () => {
-    expect(app).not.toMatch(/['"]14 peers['"]/);
-    expect(app).toContain('liveStatus');
-    expect(app).toContain('connectedPeers');
+  it('header health reads from nodeStatus, not hardcoded values', () => {
+    expect(header).not.toMatch(/['"]14 peers['"]/);
+    expect(header).toContain('nodeStatus');
+    expect(header).toContain('connectedPeers');
   });
 
-  it('apps nav renders dynamic installedApps', () => {
-    expect(app).toContain('installedApps');
-    expect(app).toMatch(/installedApps\.filter/);
+  it('App.tsx polls status via useLiveStatus and stores in agents store', () => {
+    const app = readFile('App.tsx');
+    expect(app).toContain('useLiveStatus');
+    expect(app).toContain('setNodeStatus');
+    expect(app).toContain('api.fetchStatus()');
   });
 
-  it('clears status to null on fetch failure so stale data is not shown', () => {
-    expect(app).toMatch(/\.catch\(\(\)\s*=>\s*\{[^}]*setStatus\(null\)/);
+  it('header gracefully handles missing status data', () => {
+    expect(header).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
   });
 });
 
@@ -458,49 +429,46 @@ describe('x-forwarded-proto allowlist', () => {
 });
 
 describe('clickable notifications', () => {
-  const app = readFile('App.tsx');
   const agentHub = readFile('pages/AgentHub.tsx');
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('NotificationBell uses useNavigate for navigation', () => {
-    const bellSection = app.slice(
-      app.indexOf('function NotificationBell'),
-      app.indexOf('export function App'),
-    );
-    expect(bellSection).toContain('useNavigate()');
+  it('Header has notification bell with dropdown', () => {
+    expect(header).toContain('BELL_ICON');
+    expect(header).toContain('v10-header-notif-dropdown');
+    expect(header).toContain('setShowNotifs');
   });
 
-  it('notification items with peer field navigate to /agent?tab=peers&peer=', () => {
-    expect(app).toContain("navigate(`/agent?tab=peers&peer=");
-    expect(app).toContain('encodeURIComponent(n.peer');
+  it('notifications are fetched and displayed', () => {
+    expect(header).toContain('fetchNotifications');
+    expect(header).toContain('setNotifications');
+    expect(header).toContain('v10-header-notif-item');
   });
 
-  it('notification items without peer are not clickable', () => {
-    expect(app).toContain("const clickable = !!n.peer");
-    expect(app).toContain("cursor: clickable ? 'pointer' : 'default'");
+  it('notification dropdown shows unread badge', () => {
+    expect(header).toContain('v10-header-notif-badge');
+    expect(header).toContain('unread');
   });
 
-  it('clickable notification shows "Open chat" hint', () => {
-    expect(app).toContain('Open chat');
-    expect(app).toContain('clickable &&');
+  it('notification dropdown closes on outside click', () => {
+    expect(header).toContain('notifRef');
+    expect(header).toContain('setShowNotifs(false)');
+    expect(header).toContain('mousedown');
   });
 
-  it('notification dropdown closes on click-through', () => {
-    const navSection = app.slice(
-      app.indexOf("navigate(`/agent?tab=peers") - 200,
-      app.indexOf("navigate(`/agent?tab=peers") + 100,
-    );
-    expect(navSection).toContain('setOpen(false)');
+  it('notifications are marked as read when opened', () => {
+    expect(header).toContain('markNotificationsRead');
+    expect(header).toContain('setUnread(0)');
   });
 
-  it('notification items have data-peer attribute for testability', () => {
-    expect(app).toContain('data-peer={n.peer');
+  it('notification items show message and timestamp', () => {
+    expect(header).toContain('n.message');
+    expect(header).toContain('n.ts');
+    expect(header).toContain('toLocaleTimeString');
   });
 
-  it('clickable notifications are keyboard-accessible', () => {
-    expect(app).toContain('tabIndex={clickable ? 0 : undefined}');
-    expect(app).toContain("e.key === 'Enter'");
-    expect(app).toContain("e.key === ' '");
-    expect(app).toContain('onKeyDown={clickable');
+  it('empty state shown when no notifications', () => {
+    expect(header).toContain('No notifications');
+    expect(header).toContain('v10-header-notif-empty');
   });
 
   it('AgentHub reads tab and peer from URL search params', () => {
@@ -547,9 +515,12 @@ describe('Agent Hub merged with messages and private memories', () => {
     expect(app).not.toContain('chat-fab');
   });
 
-  it('App redirects /messages to /agent', () => {
-    expect(app).toContain('path="/messages"');
-    expect(app).toContain('Navigate to="/agent"');
+  it('App uses V10 shell with three-panel layout', () => {
+    expect(app).toContain('v10-app');
+    expect(app).toContain('v10-app-body');
+    expect(app).toContain('PanelLeft');
+    expect(app).toContain('PanelCenter');
+    expect(app).toContain('PanelRight');
   });
 
   it('AgentHub has no mocked agents or canned responses', () => {

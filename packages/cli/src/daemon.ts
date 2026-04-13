@@ -54,7 +54,7 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -2502,22 +2502,6 @@ async function handleRequest(
     }
   }
 
-  // GET /api/file/:hash  — serve a stored file by its sha256 hash
-  if (req.method === 'GET' && path.startsWith('/api/file/')) {
-    const hash = safeDecodeURIComponent(path.slice('/api/file/'.length), res);
-    if (hash === null) return;
-    const buf = await fileStore.get(hash.startsWith('sha256:') ? hash : `sha256:${hash}`);
-    if (!buf) return jsonResponse(res, 404, { error: 'File not found' });
-    const ct = (reqUrl.searchParams.get('contentType') || 'application/octet-stream');
-    res.writeHead(200, {
-      'Content-Type': ct,
-      'Content-Length': String(buf.length),
-      'Cache-Control': 'public, max-age=86400, immutable',
-    });
-    res.end(buf);
-    return;
-  }
-
   // POST /api/assertion/:name/import-file  (multipart/form-data)
   //   file (required):           the uploaded document bytes
   //   contextGraphId (required): target context graph
@@ -2869,26 +2853,25 @@ async function handleRequest(
       return respondWithFailedExtraction(500, `Phase 2 extraction failed: ${message}`, 0);
     }
 
-    // ── Layer 2: LLM semantic extraction (optional, non-blocking) ──
-    let llmTriples: Array<{ subject: string; predicate: string; object: string }> = [];
-    let llmModel: string | undefined;
-    if (config.llm?.apiKey && mdIntermediate) {
-      try {
-        const llmResult = await extractWithLlm(
-          { markdown: mdIntermediate, agentDid: `did:dkg:agent:${agent.peerId}`, documentIri: assertionUri },
-          config.llm,
-        );
-        llmTriples = llmResult.triples;
-        llmModel = llmResult.model;
-        if (llmTriples.length > 0) {
-          console.log(`[llm-extractor] Produced ${llmTriples.length} triples (model: ${llmModel})`);
-        }
-      } catch (err: any) {
-        console.warn(`[llm-extractor] Extraction failed (non-fatal): ${err.message}`);
-      }
-    }
-
     // ── Build the full quad set for both graphs (atomic single insert) ──
+    // We assemble rows 1-13 as data-graph quads + rows 14-20 as CG root
+    // `_meta` quads, each with its own explicit `graph` field, and commit
+    // them all in ONE `agent.store.insert(...)` call. Every supported
+    // triple-store adapter (oxigraph, blazegraph, sparql-http) implements
+    // `insert` as a single N-Quads load / `INSERT DATA` operation, so the
+    // call is naturally atomic across graphs: either every row lands or
+    // none does. This replaces the earlier two-call flow
+    // (`assertion.write` + `store.insert`) which had a window where rows
+    // 1-13 could commit and rows 14-20 fail, leaving dangling data.
+    //
+    // `assertion.create` still runs first to register the assertion graph
+    // container (idempotent on "already exists"). The write itself
+    // bypasses `assertion.write` so the daemon can set per-quad graph
+    // fields directly — `publisher.assertionWrite` hardcodes every quad to
+    // the assertion graph URI, which defeats the multi-graph atomicity
+    // we need here. Sub-graph registration is already validated by
+    // `assertion.create`, so bypassing `assertion.write` doesn't skip any
+    // safety checks.
     const assertionGraph = contextGraphAssertionUri(
       contextGraphId!,
       agent.peerId,
@@ -2901,38 +2884,75 @@ async function handleRequest(
       ? `urn:dkg:file:${mdIntermediateHash}`
       : fileUri;
 
+    // Data-graph quads: content (triples) + extractor linkage (provenance)
+    // + daemon-owned rows 2, markdownForm, 4, 5, 8, 9-13. Every quad is pinned to the
+    // assertion graph URI. `triples` and `provenance` come from the
+    // extractor without a `graph` field, so we stamp each one here.
+    //
+    // Round 9 Bug 27: rows 6 (`dkg:fileName`) and 7 (`dkg:contentType`)
+    // are REMOVED from the file descriptor block. `<fileUri>` is
+    // content-addressed — two imports of identical bytes under different
+    // filenames / upload content types would have written contradictory
+    // facts to the same subject. Per-upload metadata now lives on the
+    // assertion UAL in `_meta` (new row 15a: `dkg:sourceFileName`,
+    // existing row 15: `dkg:sourceContentType` already there) where
+    // per-assertion facts belong. Only intrinsic-to-content properties
+    // (rdf:type, dkg:contentHash, dkg:size) remain on `<fileUri>` —
+    // those are safe because they're derived purely from the blob bytes.
+    // See `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
     const dataGraphQuads = [
       ...triples.map(t => ({ ...t, graph: assertionGraph })),
       ...sourceFileLinkage.map(t => ({ ...t, graph: assertionGraph })),
-      ...llmTriples.map(t => ({ ...t, graph: assertionGraph })),
+      // Row 2 — daemon-owned. Describes the ORIGINAL upload blob (row 1's
+      // target), so for a PDF upload this is "application/pdf" — NOT the
+      // markdown intermediate the extractor processes. Extractor never
+      // emits this row; the daemon is the single source of truth. Its
+      // subject matches rows 1 and 3 on the resolved document entity.
       { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+      // Graph-level link to the markdown bytes structural extraction ran
+      // against. For markdown-native uploads this equals row 1's object;
+      // for converter-backed uploads it points at the stored intermediate.
       { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/markdownForm', object: markdownFormUri, graph: assertionGraph },
+      // Row 4 — file descriptor block subject is the content-addressed URN
       { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
+      // Row 5 — on-chain canonical hash format is keccak256:<hex>
       { subject: fileUri, predicate: 'http://dkg.io/ontology/contentHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: assertionGraph },
+      // Row 8 — xsd:integer for size (byte count)
       { subject: fileUri, predicate: 'http://dkg.io/ontology/size', object: `"${fileStoreEntry.size}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: assertionGraph },
+      // Row 9 — ExtractionProvenance subject is a fresh UUID URN per import
       { subject: provUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ExtractionProvenance', graph: assertionGraph },
+      // Row 10 — back-references the ORIGINAL upload file URN (same value
+      // as rows 4-5, 8 subject). The new `dkg:markdownForm` entity link
+      // above separately exposes the markdown bytes Phase 2 actually read.
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractedFrom', object: fileUri, graph: assertionGraph },
+      // Row 11
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractedBy', object: agentDid, graph: assertionGraph },
+      // Row 12
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractedAt', object: startedAtLiteral, graph: assertionGraph },
+      // Row 13
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: assertionGraph },
     ];
 
+    // `_meta` quads (rows 14-20): always land in the CG ROOT `_meta`, never
+    // a sub-graph `_meta`, keyed by the assertion UAL so daemon restarts
+    // can recover the file ↔ assertion linkage from the graph alone.
     const metaQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
+      // Row 14 — rootEntity comes from the extractor's resolved value so
+      // the data-graph row 3 and `_meta` row 14 point at the same IRI.
       { subject: assertionUri, predicate: 'http://dkg.io/ontology/rootEntity', object: resolvedRootEntity, graph: metaGraph },
+      // Row 15 — original content type from the upload (matches row 2
+      // now that both rows are sourced from `detectedContentType`).
       { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
+      // Row 16 — load-bearing: lets a caller look up the source blob by UAL alone.
       { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
-      { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify(llmTriples.length > 0 ? 'structural+semantic' : 'structural'), graph: metaGraph },
+      // Row 17
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: metaGraph },
+      // Row 18
       { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: `"${triples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
-      { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"${llmTriples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
+      // Row 19 — V10.0 has no semantic (Layer 2) extraction, so always zero.
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"0"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
     ];
-    if (llmModel) {
-      metaQuads.push({
-        subject: assertionUri,
-        predicate: 'http://dkg.io/ontology/semanticModel',
-        object: JSON.stringify(llmModel),
-        graph: metaGraph,
-      });
-    }
+    // Row 20 — only emitted when Phase 1 actually ran (PDF/DOCX path).
     if (mdIntermediateHash) {
       metaQuads.push({
         subject: assertionUri,
@@ -2941,6 +2961,13 @@ async function handleRequest(
         graph: metaGraph,
       });
     }
+    // Round 9 Bug 27: `dkg:sourceFileName` — per-upload metadata that
+    // used to live on `<fileUri>` (row 6 in the old file descriptor
+    // block) moves to `_meta` keyed by `<assertionUri>` so two imports
+    // of identical bytes under different filenames don't collide on
+    // the same content-addressed subject. Symmetric to row 15
+    // (`dkg:sourceContentType`). Skipped entirely when the upload
+    // didn't carry a filename (matches the row 20 optional pattern).
     const uploadedFilename = filePart.filename?.trim() ?? '';
     if (uploadedFilename.length > 0) {
       metaQuads.push({
@@ -2951,6 +2978,11 @@ async function handleRequest(
       });
     }
 
+    // Round 14 Bug 42: lock acquisition moved to the top of the
+    // handler, before Phase 1/2 extraction. This inner `try` now
+    // wraps only the assertion.create + snapshot + cleanup + insert
+    // + rollback sequence. See the lock-acquisition site above for
+    // the full rationale.
     try {
       // Ensure the assertion graph exists even when Phase 2 yields zero
       // content triples, so a completed import always materializes the
@@ -3165,18 +3197,13 @@ async function handleRequest(
       throw err;
     }
 
-    const totalTripleCount = triples.length + llmTriples.length;
-    const effectivePipeline = llmTriples.length > 0
-      ? `${pipelineUsed}+llm:${llmModel}`
-      : pipelineUsed;
-
     const completedRecord: ExtractionStatusRecord = {
       status: 'completed',
       fileHash: fileStoreEntry.keccak256,
       ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
-      pipelineUsed: effectivePipeline,
-      tripleCount: totalTripleCount,
+      pipelineUsed,
+      tripleCount: triples.length,
       mdIntermediateHash,
       startedAt,
       completedAt: new Date().toISOString(),
@@ -3185,8 +3212,8 @@ async function handleRequest(
 
     return respondWithImportFileResponse(200, {
       status: 'completed',
-      tripleCount: totalTripleCount,
-      pipelineUsed: effectivePipeline,
+      tripleCount: triples.length,
+      pipelineUsed,
       ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
     });
     } finally {
@@ -4499,9 +4526,9 @@ async function _performNpmUpdateInner(
     }
   }
 
-  const active = await activeSlot();
+  const active = await activeSlot() ?? 'a';
   const activeDir = join(rDir, active);
-  const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
+  const target = active === 'a' ? 'b' : 'a';
   const targetDir = join(rDir, target);
 
   log(`Auto-update (npm): installing ${CLI_NPM_PACKAGE}@${targetVersion} into slot ${target}...`);

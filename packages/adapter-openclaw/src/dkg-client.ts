@@ -193,9 +193,9 @@ export class DkgDaemonClient {
         'privateQuads, accessPolicy, and allowedPeers are not supported in V10 SWM-first publish',
       );
     }
-    await this.post('/api/shared-memory/write', { paranetId: contextGraphId, quads });
+    await this.post('/api/shared-memory/write', { contextGraphId, quads });
     return this.post('/api/shared-memory/publish', {
-      paranetId: contextGraphId,
+      contextGraphId,
       selection: 'all',
       clearAfter: true,
     });

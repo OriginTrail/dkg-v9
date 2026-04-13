@@ -258,7 +258,7 @@ async function execPublish(
     const writeRes = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/write`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ paranetId: config.contextGraph, quads }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
       signal: opSignal(signal, 'publish'),
     });
     if (!writeRes.ok) {
@@ -277,7 +277,7 @@ async function execPublish(
     const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ paranetId: config.contextGraph, selection: 'all', clearAfter: true }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph, selection: 'all', clearAfter: true }),
       signal: opSignal(signal, 'publish'),
     });
     const body = (await res.json()) as { kcId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };

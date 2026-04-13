@@ -77,11 +77,11 @@ describe('ApiClient', () => {
 
     it('listCclPolicies() builds query string from filters', async () => {
       globalThis.fetch = mockFetchOk({ policies: [] });
-      await client.listCclPolicies({ paranetId: 'ops', name: 'incident', contextType: 'review', includeBody: true });
+      await client.listCclPolicies({ contextGraphId: 'ops', name: 'incident', contextType: 'review', includeBody: true });
 
       const [url] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toContain('/api/ccl/policy/list?');
-      expect(url).toContain('paranetId=ops');
+      expect(url).toContain('contextGraphId=ops');
       expect(url).toContain('name=incident');
       expect(url).toContain('contextType=review');
       expect(url).toContain('includeBody=true');
@@ -109,7 +109,7 @@ describe('ApiClient', () => {
       expect(result.kcId).toBe('kc1');
 
       const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
-      expect(body.paranetId).toBe('test-paranet');
+      expect(body.contextGraphId).toBe('test-paranet');
       expect(body.quads).toHaveLength(1);
     });
 
@@ -119,23 +119,23 @@ describe('ApiClient', () => {
 
       const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
-      expect(body.paranetId).toBe('my-paranet');
+      expect(body.contextGraphId).toBe('my-paranet');
     });
 
     it('publishCclPolicy() posts policy payload', async () => {
       globalThis.fetch = mockFetchOk({ policyUri: 'urn:policy', hash: 'sha256:abc', status: 'proposed' });
-      await client.publishCclPolicy({ paranetId: 'ops', name: 'incident', version: '0.1.0', content: 'rules: []' });
+      await client.publishCclPolicy({ contextGraphId: 'ops', name: 'incident', version: '0.1.0', content: 'rules: []' });
 
       const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toBe(`http://127.0.0.1:${PORT}/api/ccl/policy/publish`);
       const body = JSON.parse(opts.body);
-      expect(body.paranetId).toBe('ops');
+      expect(body.contextGraphId).toBe('ops');
       expect(body.name).toBe('incident');
     });
 
     it('approveCclPolicy() posts approval payload', async () => {
       globalThis.fetch = mockFetchOk({ policyUri: 'urn:policy', bindingUri: 'urn:binding', approvedAt: 'now' });
-      await client.approveCclPolicy({ paranetId: 'ops', policyUri: 'urn:policy', contextType: 'incident_review' });
+      await client.approveCclPolicy({ contextGraphId: 'ops', policyUri: 'urn:policy', contextType: 'incident_review' });
 
       const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toBe(`http://127.0.0.1:${PORT}/api/ccl/policy/approve`);
@@ -145,7 +145,7 @@ describe('ApiClient', () => {
 
     it('revokeCclPolicy() posts revocation payload', async () => {
       globalThis.fetch = mockFetchOk({ policyUri: 'urn:policy', bindingUri: 'urn:binding', revokedAt: 'now', status: 'revoked' });
-      await client.revokeCclPolicy({ paranetId: 'ops', policyUri: 'urn:policy', contextType: 'incident_review' });
+      await client.revokeCclPolicy({ contextGraphId: 'ops', policyUri: 'urn:policy', contextType: 'incident_review' });
 
       const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toBe(`http://127.0.0.1:${PORT}/api/ccl/policy/revoke`);
@@ -155,7 +155,7 @@ describe('ApiClient', () => {
 
     it('evaluateCclPolicy() posts evaluation payload', async () => {
       globalThis.fetch = mockFetchOk({ policy: { name: 'incident' }, factSetHash: 'sha256:abc', result: { derived: {}, decisions: {} } });
-      await client.evaluateCclPolicy({ paranetId: 'ops', name: 'incident', facts: [['claim', 'c1']], snapshotId: 'snap-1', publishResult: true });
+      await client.evaluateCclPolicy({ contextGraphId: 'ops', name: 'incident', facts: [['claim', 'c1']], snapshotId: 'snap-1', publishResult: true });
 
       const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toBe(`http://127.0.0.1:${PORT}/api/ccl/eval`);
@@ -167,11 +167,11 @@ describe('ApiClient', () => {
 
     it('listCclEvaluations() builds result query string', async () => {
       globalThis.fetch = mockFetchOk({ evaluations: [] });
-      await client.listCclEvaluations({ paranetId: 'ops', snapshotId: 'snap-2', resultKind: 'decision', resultName: 'propose_accept' });
+      await client.listCclEvaluations({ contextGraphId: 'ops', snapshotId: 'snap-2', resultKind: 'decision', resultName: 'propose_accept' });
 
       const [url] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toContain('/api/ccl/results?');
-      expect(url).toContain('paranetId=ops');
+      expect(url).toContain('contextGraphId=ops');
       expect(url).toContain('snapshotId=snap-2');
       expect(url).toContain('resultKind=decision');
       expect(url).toContain('resultName=propose_accept');

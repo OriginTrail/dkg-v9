@@ -1566,11 +1566,24 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   return targets;
 }
 
+type OpenClawBridgeHealthState = Record<string, unknown> & {
+  ok: boolean;
+  channel?: string;
+  cached?: boolean;
+  error?: string;
+};
+
+type OpenClawGatewayHealthState = Record<string, unknown> & {
+  ok: boolean;
+  channel?: string;
+  error?: string;
+};
+
 export interface OpenClawChannelHealthReport {
   ok: boolean;
   target?: 'bridge' | 'gateway';
-  bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
-  gateway?: { ok: boolean; channel?: string; error?: string };
+  bridge?: OpenClawBridgeHealthState;
+  gateway?: OpenClawGatewayHealthState;
   error?: string;
 }
 
@@ -1612,8 +1625,8 @@ export async function probeOpenClawChannelHealth(
   opts: { ignoreBridgeCache?: boolean; timeoutMs?: number } = {},
 ): Promise<OpenClawChannelHealthReport> {
   const targets = getOpenClawChannelTargets(config);
-  let bridge: Record<string, unknown> | undefined;
-  let gateway: Record<string, unknown> | undefined;
+  let bridge: OpenClawBridgeHealthState | undefined;
+  let gateway: OpenClawGatewayHealthState | undefined;
   let lastError = 'No OpenClaw channel health endpoint configured';
   const timeoutMs = opts.timeoutMs ?? 5_000;
 

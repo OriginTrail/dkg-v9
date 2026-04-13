@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -191,6 +191,29 @@ function currentBundledMarkItDownAssetName(): string | null {
   ))?.assetName ?? null;
 }
 
+function markItDownChecksumPath(binaryPath: string): string {
+  return `${binaryPath}.sha256`;
+}
+
+function parseSha256Sidecar(text: string): string | null {
+  const [hash] = text.trim().split(/\s+/);
+  return hash ? hash.toLowerCase() : null;
+}
+
+async function hasVerifiedBundledMarkItDownBinary(binaryPath: string): Promise<boolean> {
+  const checksumPath = markItDownChecksumPath(binaryPath);
+  if (!existsSync(binaryPath) || !existsSync(checksumPath)) return false;
+  try {
+    const checksumText = await readFile(checksumPath, 'utf-8');
+    const expectedHash = parseSha256Sidecar(checksumText);
+    if (!expectedHash) return false;
+    const actualHash = createHash('sha256').update(await readFile(binaryPath)).digest('hex');
+    return actualHash === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
 async function carryForwardBundledMarkItDownBinary(opts: {
   sourceCandidates: string[];
   targetBinaryPath: string;
@@ -199,17 +222,35 @@ async function carryForwardBundledMarkItDownBinary(opts: {
 }): Promise<boolean> {
   for (const sourceBinaryPath of opts.sourceCandidates) {
     if (!existsSync(sourceBinaryPath)) continue;
-    await mkdir(dirname(opts.targetBinaryPath), { recursive: true });
-    await copyFile(sourceBinaryPath, opts.targetBinaryPath);
-
-    const sourceChecksumPath = `${sourceBinaryPath}.sha256`;
-    const targetChecksumPath = `${opts.targetBinaryPath}.sha256`;
-    if (existsSync(sourceChecksumPath)) {
-      await copyFile(sourceChecksumPath, targetChecksumPath);
+    if (!(await hasVerifiedBundledMarkItDownBinary(sourceBinaryPath))) {
+      opts.log(`${opts.context}: skipping active-slot bundled MarkItDown binary without a valid checksum sidecar (${sourceBinaryPath}).`);
+      continue;
     }
+    await mkdir(dirname(opts.targetBinaryPath), { recursive: true });
 
-    opts.log(`${opts.context}: reused bundled MarkItDown binary from the active slot (${sourceBinaryPath}).`);
-    return true;
+    const sourceChecksumPath = markItDownChecksumPath(sourceBinaryPath);
+    const targetChecksumPath = markItDownChecksumPath(opts.targetBinaryPath);
+    const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tempTargetBinaryPath = `${opts.targetBinaryPath}${tempSuffix}`;
+    const tempTargetChecksumPath = `${targetChecksumPath}${tempSuffix}`;
+    try {
+      await copyFile(sourceBinaryPath, tempTargetBinaryPath);
+      await copyFile(sourceChecksumPath, tempTargetChecksumPath);
+      await Promise.all([
+        rm(opts.targetBinaryPath, { force: true }),
+        rm(targetChecksumPath, { force: true }),
+      ]);
+      await rename(tempTargetBinaryPath, opts.targetBinaryPath);
+      await rename(tempTargetChecksumPath, targetChecksumPath);
+      opts.log(`${opts.context}: reused bundled MarkItDown binary from the active slot (${sourceBinaryPath}).`);
+      return true;
+    } catch (err: any) {
+      await Promise.all([
+        rm(tempTargetBinaryPath, { force: true }),
+        rm(tempTargetChecksumPath, { force: true }),
+      ]);
+      opts.log(`${opts.context}: failed to reuse bundled MarkItDown binary from the active slot (${sourceBinaryPath}) - ${err?.message ?? String(err)}.`);
+    }
   }
   return false;
 }

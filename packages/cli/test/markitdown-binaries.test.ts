@@ -155,6 +155,37 @@ describe('bundle-markitdown-binaries helpers', () => {
     }
   });
 
+  it('keeps the existing asset in place when replacement fetch fails', async () => {
+    const destinationDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-keep-old-'));
+    tmpPaths.push(destinationDir);
+
+    const assetName = 'markitdown-test';
+    const binaryPath = join(destinationDir, assetName);
+    const staleBytes = Buffer.from('manual stage without sidecar', 'utf-8');
+    await writeFile(binaryPath, staleBytes);
+
+    const server = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      await expect(downloadBinaryAsset({
+        assetName,
+        destinationDir,
+        baseUrl: `http://127.0.0.1:${port}/release`,
+      })).rejects.toThrow(/returned 404/);
+
+      expect(await readFile(binaryPath)).toEqual(staleBytes);
+      expect(existsSync(checksumPathFor(binaryPath))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+
   it('rejects checksum mismatches from the release asset feed', async () => {
     const destinationDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-bad-'));
     tmpPaths.push(destinationDir);

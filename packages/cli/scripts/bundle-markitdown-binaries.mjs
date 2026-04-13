@@ -235,10 +235,6 @@ export async function downloadBinaryAsset({
     if (await hasVerifiedBinary(destination)) {
       return { status: 'present', binaryPath: destination };
     }
-    await Promise.all([
-      removeIfExists(destination),
-      removeIfExists(destinationChecksumPath),
-    ]);
   }
 
   await ensureDir(destinationDir);
@@ -315,10 +311,6 @@ export async function buildCurrentPlatformBinary({
     if (await hasVerifiedBinary(binaryPath)) {
       return { status: 'present', binaryPath };
     }
-    await Promise.all([
-      removeIfExists(binaryPath),
-      removeIfExists(checksumPathFor(binaryPath)),
-    ]);
   }
 
   await ensureDir(binDir);
@@ -426,10 +418,6 @@ export async function ensureCurrentPlatformBinary({
     if (await hasVerifiedBinary(binaryPath)) {
       return { status: 'present', binaryPath };
     }
-    await Promise.all([
-      removeIfExists(binaryPath),
-      removeIfExists(checksumPathFor(binaryPath)),
-    ]);
   }
 
   const resolvedVersion = version ?? readCliVersion(packageDir);

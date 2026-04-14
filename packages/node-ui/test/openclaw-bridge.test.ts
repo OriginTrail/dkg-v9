@@ -163,7 +163,9 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).not.toContain('localHistoryLoadedByIntegration[integrationId] === true');
   });
 
-  it('preserves the selected session when disconnecting or reopening a specific local-agent thread', () => {
+  it('preserves the selected session when reselecting, disconnecting, or reopening a specific local-agent thread', () => {
+    expect(panelRight).toContain('shouldPreserveSessionForIntegrationSelection');
+    expect(panelRight).toContain('onClick={() => onSelectIntegration(integration.id, {');
     expect(panelRight).toContain('setSelectedIntegration(integrationId, { preserveSession: selectedIntegrationId === integrationId })');
     expect(panelRight).toContain('setSelectedIntegration(session.integrationId, { sessionId: session.sessionId })');
     expect(panelRight).toContain('shouldPreserveSessionOnReconnect');
@@ -416,8 +418,11 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
-  it('preserves a reopened non-default session when reconnecting the same integration', async () => {
-    const { shouldPreserveSessionOnReconnect } = await import('../src/ui/components/Shell/PanelRight.tsx');
+  it('preserves a reopened non-default session when reselecting or reconnecting the same integration', async () => {
+    const {
+      shouldPreserveSessionForIntegrationSelection,
+      shouldPreserveSessionOnReconnect,
+    } = await import('../src/ui/components/Shell/PanelRight.tsx');
     const integrations = [
       {
         id: 'openclaw',
@@ -439,6 +444,21 @@ describe('OpenClaw bridge behavioral tests', () => {
       },
     ];
 
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: 'openclaw:dkg-ui:worker-1',
+      integrations,
+    })).toBe(true);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: 'hermes:dkg-ui',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: null,
+      integrations,
+    })).toBe(false);
     expect(shouldPreserveSessionOnReconnect({
       integrationId: 'openclaw',
       selectedSessionId: 'openclaw:dkg-ui:worker-1',

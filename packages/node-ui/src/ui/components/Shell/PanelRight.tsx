@@ -136,13 +136,21 @@ function integrationIdFromSessionId(
   return null;
 }
 
-export function shouldPreserveSessionOnReconnect(args: {
+export function shouldPreserveSessionForIntegrationSelection(args: {
   integrationId: string;
   selectedSessionId: string | null;
   integrations: LocalAgentIntegration[];
 }): boolean {
   return args.selectedSessionId != null
     && integrationIdFromSessionId(args.selectedSessionId, args.integrations)?.id === args.integrationId;
+}
+
+export function shouldPreserveSessionOnReconnect(args: {
+  integrationId: string;
+  selectedSessionId: string | null;
+  integrations: LocalAgentIntegration[];
+}): boolean {
+  return shouldPreserveSessionForIntegrationSelection(args);
 }
 
 function summarizeLocalAgentSessions(
@@ -391,9 +399,10 @@ function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
   selectedIntegration: LocalAgentIntegration | null;
+  selectedSessionId: string | null;
   selectedHasConversation: boolean;
   selectedIntegrationHasAnyConversation: boolean;
-  onSelectIntegration: (id: string) => void;
+  onSelectIntegration: (id: string, opts?: { preserveSession?: boolean; sessionId?: string | null }) => void;
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
   onRefreshIntegrations: () => void;
@@ -412,6 +421,7 @@ function ConnectedAgentsTab(props: {
     integrations,
     selectedIntegrationId,
     selectedIntegration,
+    selectedSessionId,
     selectedHasConversation,
     selectedIntegrationHasAnyConversation,
     onSelectIntegration,
@@ -458,7 +468,13 @@ function ConnectedAgentsTab(props: {
           <button
             key={integration.id}
             className={`v10-agent-subtab ${selected?.id === integration.id && !showAddFlow ? 'active' : ''}`}
-            onClick={() => onSelectIntegration(integration.id)}
+            onClick={() => onSelectIntegration(integration.id, {
+              preserveSession: shouldPreserveSessionForIntegrationSelection({
+                integrationId: integration.id,
+                selectedSessionId,
+                integrations,
+              }),
+            })}
             role="tab"
             aria-selected={selected?.id === integration.id && !showAddFlow}
           >
@@ -1127,6 +1143,7 @@ export function PanelRight() {
           integrations={integrations}
           selectedIntegrationId={selectedIntegrationId}
           selectedIntegration={selectedIntegration}
+          selectedSessionId={selectedSessionId}
           selectedHasConversation={selectedHasConversation}
           selectedIntegrationHasAnyConversation={selectedIntegrationHasAnyConversation}
           onSelectIntegration={setSelectedIntegration}

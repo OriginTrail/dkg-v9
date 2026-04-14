@@ -760,7 +760,7 @@ export class DkgChannelPlugin {
           ),
         );
 
-    dispatchFn()
+    const dispatchCompletion = dispatchFn()
       .then(() => {
         dispatchTerminal = 'done';
         push({ type: 'done' });
@@ -771,6 +771,55 @@ export class DkgChannelPlugin {
         dispatchFailureMessage = dispatchFailure.message;
         push({ type: 'error', error: dispatchFailure });
       });
+
+    const persistResolvedTerminalState = (): void => {
+      let resolvedTerminalState = terminalState;
+      let resolvedFinalText = finalText;
+      let resolvedFailureReason = failureReason;
+
+      if (resolvedTerminalState === 'cancelled') {
+        const queuedTerminal = [...queue].reverse().find(
+          (item): item is { type: 'done' } | { type: 'error'; error: Error } =>
+            item.type === 'done' || item.type === 'error',
+        );
+        if (queuedTerminal?.type === 'done' || dispatchTerminal === 'done') {
+          try {
+            resolvedFinalText = finalizeAgentReplyText(replyText);
+            resolvedTerminalState = 'completed';
+          } catch (err) {
+            resolvedTerminalState = 'failed';
+            resolvedFailureReason = getErrorMessage(err);
+          }
+        } else if (queuedTerminal?.type === 'error' || dispatchTerminal === 'error') {
+          const queuedTerminalError: Error | null =
+            queuedTerminal && queuedTerminal.type === 'error' ? queuedTerminal.error : null;
+          resolvedTerminalState = 'failed';
+          resolvedFailureReason = queuedTerminalError?.message ?? dispatchFailureMessage ?? resolvedFailureReason;
+        }
+      }
+
+      if (resolvedTerminalState === 'completed' && resolvedFinalText) {
+        this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, undefined, true);
+      } else if (resolvedTerminalState === 'failed') {
+        this.queueTurnPersistence(
+          text,
+          this.buildFailedAssistantReply(resolvedFailureReason),
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason: resolvedFailureReason },
+          true,
+        );
+      } else {
+        this.queueTurnPersistence(
+          text,
+          CANCELLED_TURN_MESSAGE,
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason: 'cancelled' },
+          true,
+        );
+      }
+    };
 
     // Yield events as they arrive
     let terminalState: 'cancelled' | 'completed' | 'failed' = 'cancelled';
@@ -805,48 +854,14 @@ export class DkgChannelPlugin {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
-      if (terminalState === 'cancelled') {
-        const queuedTerminal = [...queue].reverse().find(
-          (item): item is { type: 'done' } | { type: 'error'; error: Error } =>
-            item.type === 'done' || item.type === 'error',
-        );
-        if (queuedTerminal?.type === 'done' || dispatchTerminal === 'done') {
-          try {
-            finalText = finalizeAgentReplyText(replyText);
-            terminalState = 'completed';
-          } catch (err) {
-            terminalState = 'failed';
-            failureReason = getErrorMessage(err);
-          }
-        } else if (queuedTerminal?.type === 'error' || dispatchTerminal === 'error') {
-          const queuedTerminalError: Error | null =
-            queuedTerminal && queuedTerminal.type === 'error' ? queuedTerminal.error : null;
-          terminalState = 'failed';
-          failureReason = queuedTerminalError?.message ?? dispatchFailureMessage ?? failureReason;
-        }
+      if (terminalState === 'cancelled' && dispatchTerminal == null) {
+        void dispatchCompletion.finally(() => {
+          persistResolvedTerminalState();
+        });
+        return;
       }
 
-      if (terminalState === 'completed' && finalText) {
-        this.queueTurnPersistence(text, finalText, correlationId, identity, undefined, true);
-      } else if (terminalState === 'failed') {
-        this.queueTurnPersistence(
-          text,
-          this.buildFailedAssistantReply(failureReason),
-          correlationId,
-          identity,
-          { persistenceState: 'failed', failureReason },
-          true,
-        );
-      } else {
-        this.queueTurnPersistence(
-          text,
-          CANCELLED_TURN_MESSAGE,
-          correlationId,
-          identity,
-          { persistenceState: 'failed', failureReason: 'cancelled' },
-          true,
-        );
-      }
+      persistResolvedTerminalState();
     }
 
     // Only yield final if the stream completed normally (not cancelled)

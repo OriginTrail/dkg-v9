@@ -603,7 +603,7 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
-  it('processInboundStream should persist a cancelled turn without storing the partial reply text', async () => {
+  it('processInboundStream should wait for a still-running dispatch to settle before persisting a closed stream', async () => {
     let resumeDispatch!: () => void;
     const mockRuntime = {
       channel: {
@@ -643,18 +643,15 @@ describe('DkgChannelPlugin', () => {
       done: true,
       value: undefined,
     });
+    expect(storeSpy).not.toHaveBeenCalled();
     resumeDispatch();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(storeSpy).toHaveBeenCalledWith(
       'openclaw:dkg-ui',
       'Hello',
-      '[OpenClaw reply cancelled before completion]',
-      {
-        turnId: 'corr-stream-cancel',
-        persistenceState: 'failed',
-        failureReason: 'cancelled',
-      },
+      'Partial reply',
+      { turnId: 'corr-stream-cancel' },
     );
   });
 

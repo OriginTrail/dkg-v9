@@ -1809,6 +1809,7 @@ export function getOpenClawUiSetupCommand(
   packageName: string,
   runtimeModuleUrl = import.meta.url,
   fileExists: (path: string) => boolean = existsSync,
+  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
 ): OpenClawUiSetupCommand {
   if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
     const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
@@ -1821,7 +1822,7 @@ export function getOpenClawUiSetupCommand(
     }
   }
 
-  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, { fileExists });
+  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, { fileExists, ...deps });
   if (workspaceCommand) {
     return workspaceCommand;
   }

@@ -282,6 +282,31 @@ describe('OpenClaw UI setup command resolution', () => {
       source: 'npx',
     });
   });
+
+  it('resolves workspace package bins from the repo root instead of packages/packages', () => {
+    const command = getOpenClawUiSetupCommand(
+      '@origintrail-official/dkg-adapter-hermes',
+      runtimeModuleUrl,
+      () => true,
+      {
+        readDirNames: (path) => {
+          expect(path).toMatch(/dkg-v9[\\/]packages$/);
+          return ['adapter-hermes'];
+        },
+        readFileText: (path) => {
+          expect(path).toMatch(/packages[\\/]adapter-hermes[\\/]package\.json$/);
+          return JSON.stringify({
+            name: '@origintrail-official/dkg-adapter-hermes',
+            bin: 'dist/setup-cli.js',
+          });
+        },
+      },
+    );
+
+    expect(command.source).toBe('workspace');
+    expect(command.command).toBe(process.execPath);
+    expect(command.args[0]).toMatch(/packages[\\/]adapter-hermes[\\/]dist[\\/]setup-cli\.js$/);
+  });
 });
 
 describe('OpenClaw persist-turn validation', () => {

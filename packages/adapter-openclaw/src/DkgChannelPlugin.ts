@@ -82,6 +82,7 @@ export class DkgChannelPlugin {
   private inFlight = 0;
   private readonly maxInFlight = 3;
   private stopping = false;
+  private readonly stopWaiters: Array<() => void> = [];
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -218,8 +219,9 @@ export class DkgChannelPlugin {
     }
 
     for (const [id, job] of this.pendingTurnPersistence) {
-      if (job.timer) clearTimeout(job.timer);
-      this.pendingTurnPersistence.delete(id);
+      if (!job.timer) continue;
+      clearTimeout(job.timer);
+      this.deletePendingTurnPersistence(id);
     }
 
     if (this.serverStart) {
@@ -232,6 +234,32 @@ export class DkgChannelPlugin {
       });
       this.server = null;
     }
+
+    await this.waitForStopDrain();
+  }
+
+  private deletePendingTurnPersistence(correlationId: string): void {
+    const job = this.pendingTurnPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingTurnPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private notifyStopIdle(): void {
+    if (!this.stopping || this.inFlight > 0 || this.pendingTurnPersistence.size > 0) return;
+    while (this.stopWaiters.length > 0) {
+      this.stopWaiters.shift()?.();
+    }
+  }
+
+  private waitForStopDrain(): Promise<void> {
+    if (this.inFlight === 0 && this.pendingTurnPersistence.size === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.stopWaiters.push(resolve);
+      this.notifyStopIdle();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -723,26 +751,26 @@ export class DkgChannelPlugin {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
-      if (!this.stopping) {
-        if (terminalState === 'completed' && finalText) {
-          this.queueTurnPersistence(text, finalText, correlationId, identity);
-        } else if (terminalState === 'failed') {
-          this.queueTurnPersistence(
-            text,
-            this.buildFailedAssistantReply(failureReason),
-            correlationId,
-            identity,
-            { persistenceState: 'failed', failureReason },
-          );
-        } else {
-          this.queueTurnPersistence(
-            text,
-            CANCELLED_TURN_MESSAGE,
-            correlationId,
-            identity,
-            { persistenceState: 'failed', failureReason: 'cancelled' },
-          );
-        }
+      if (terminalState === 'completed' && finalText) {
+        this.queueTurnPersistence(text, finalText, correlationId, identity, undefined, true);
+      } else if (terminalState === 'failed') {
+        this.queueTurnPersistence(
+          text,
+          this.buildFailedAssistantReply(failureReason),
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason },
+          true,
+        );
+      } else {
+        this.queueTurnPersistence(
+          text,
+          CANCELLED_TURN_MESSAGE,
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason: 'cancelled' },
+          true,
+        );
       }
     }
 
@@ -907,26 +935,30 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
     opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
   ): void {
-    if (this.stopping || this.pendingTurnPersistence.has(correlationId)) return;
+    if ((this.stopping && !allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
 
     const attemptPersist = (attempt: number): void => {
-      if (this.stopping) return;
+      if (this.stopping && !allowDuringShutdown) return;
       this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
       void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
         .then(() => {
-          this.pendingTurnPersistence.delete(correlationId);
+          this.deletePendingTurnPersistence(correlationId);
         })
         .catch((err: any) => {
           const currentJob = this.pendingTurnPersistence.get(correlationId);
-          if (this.stopping || !currentJob) {
-            this.pendingTurnPersistence.delete(correlationId);
+          if (!currentJob) {
+            return;
+          }
+          if (this.stopping) {
+            this.deletePendingTurnPersistence(correlationId);
             return;
           }
 
           const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
           if (retryDelayMs == null) {
-            this.pendingTurnPersistence.delete(correlationId);
+            this.deletePendingTurnPersistence(correlationId);
             this.api?.logger.warn?.(
               `[dkg-channel] Turn persistence failed permanently after ${attempt} attempt(s): ${err.message}`,
             );
@@ -938,7 +970,7 @@ export class DkgChannelPlugin {
           );
           const timer = setTimeout(() => {
             if (this.stopping) {
-              this.pendingTurnPersistence.delete(correlationId);
+              this.deletePendingTurnPersistence(correlationId);
               return;
             }
             const job = this.pendingTurnPersistence.get(correlationId);
@@ -1038,6 +1070,7 @@ export class DkgChannelPlugin {
       }
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundHttp completed in ${durationMs}ms`);
     }
@@ -1102,6 +1135,7 @@ export class DkgChannelPlugin {
       if (!res.writableEnded) res.end();
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundStreamHttp completed in ${durationMs}ms`);
     }

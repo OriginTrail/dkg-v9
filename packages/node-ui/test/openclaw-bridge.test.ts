@@ -166,6 +166,7 @@ describe('PanelRight UI - connected agent flow', () => {
   it('preserves the selected session when disconnecting or reopening a specific local-agent thread', () => {
     expect(panelRight).toContain('setSelectedIntegration(integrationId, { preserveSession: selectedIntegrationId === integrationId })');
     expect(panelRight).toContain('setSelectedIntegration(session.integrationId, { sessionId: session.sessionId })');
+    expect(panelRight).toContain('shouldPreserveSessionOnReconnect');
   });
 
   it('keeps the interface future-friendly for Hermes', () => {
@@ -214,11 +215,17 @@ describe('Agent hub shell surfaces', () => {
 describe('OpenClaw bridge behavioral tests', () => {
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };
+    (globalThis as any).localStorage = {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    };
     vi.resetModules();
   });
 
   afterEach(() => {
     delete (globalThis as any).window;
+    delete (globalThis as any).localStorage;
   });
 
   it('fetchOpenClawAgents calls GET /api/openclaw-agents', async () => {
@@ -407,6 +414,46 @@ describe('OpenClaw bridge behavioral tests', () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it('preserves a reopened non-default session when reconnecting the same integration', async () => {
+    const { shouldPreserveSessionOnReconnect } = await import('../src/ui/components/Shell/PanelRight.tsx');
+    const integrations = [
+      {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        connected: false,
+        chatReady: false,
+        persistentChat: true,
+        connectSupported: true,
+      },
+      {
+        id: 'hermes',
+        name: 'Hermes',
+        framework: 'Hermes',
+        connected: false,
+        chatReady: false,
+        persistentChat: true,
+        connectSupported: true,
+      },
+    ];
+
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: 'openclaw:dkg-ui:worker-1',
+      integrations,
+    })).toBe(true);
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: 'hermes:dkg-ui',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: null,
+      integrations,
+    })).toBe(false);
   });
 
   it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread', async () => {

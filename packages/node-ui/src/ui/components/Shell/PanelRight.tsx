@@ -136,6 +136,15 @@ function integrationIdFromSessionId(
   return null;
 }
 
+export function shouldPreserveSessionOnReconnect(args: {
+  integrationId: string;
+  selectedSessionId: string | null;
+  integrations: LocalAgentIntegration[];
+}): boolean {
+  return args.selectedSessionId != null
+    && integrationIdFromSessionId(args.selectedSessionId, args.integrations)?.id === args.integrationId;
+}
+
 function summarizeLocalAgentSessions(
   sessions: MemorySession[],
   integrations: LocalAgentIntegration[],
@@ -809,7 +818,6 @@ export function PanelRight() {
   ) => {
     setSelectedIntegrationId(integrationId);
     if (integrationId === ADD_AGENT_TAB_ID) {
-      setSelectedSessionId(null);
       return;
     }
     if (opts.preserveSession) {
@@ -1048,7 +1056,12 @@ export function PanelRight() {
       const result = await connectLocalAgentIntegration(integrationId);
       setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, result.integration));
       await refreshLocalIntegrations();
-      setSelectedIntegration(integrationId);
+      const preserveSession = shouldPreserveSessionOnReconnect({
+        integrationId,
+        selectedSessionId,
+        integrations,
+      });
+      setSelectedIntegration(integrationId, { preserveSession });
       autoFocusedLocalAgentRef.current = true;
       setConnectNotice(
         result.notice
@@ -1063,7 +1076,7 @@ export function PanelRight() {
     } finally {
       setConnectBusyId(null);
     }
-  }, [refreshLocalIntegrations, setSelectedIntegration]);
+  }, [integrations, refreshLocalIntegrations, selectedSessionId, setSelectedIntegration]);
 
   const disconnectIntegration = useCallback(async (integrationId: string) => {
     setConnectError(null);

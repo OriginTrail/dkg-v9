@@ -1,5 +1,3 @@
-import runtimeEntry from './openclaw-entry.mjs';
-
 export default function setupEntry(api = {}) {
   const mode = api.registrationMode ?? 'full';
   const log = api.logger ?? console;
@@ -9,5 +7,5 @@ export default function setupEntry(api = {}) {
     return;
   }
 
-  return runtimeEntry(api);
+  return import('./openclaw-entry.mjs').then(({ default: runtimeEntry }) => runtimeEntry(api));
 }

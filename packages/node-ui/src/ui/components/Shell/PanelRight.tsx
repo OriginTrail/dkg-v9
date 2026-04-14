@@ -177,7 +177,18 @@ function hasLocalAgentConversation(
   return (localMessagesByConversation[conversation.stateKey]?.length ?? 0) > 0
     || (conversation.sessionId
       ? sessions.some((session) => session.sessionId === conversation.sessionId)
-      : false)
+      : false);
+}
+
+function hasAnyLocalAgentConversation(
+  integrationId: string,
+  localMessagesByConversation: Record<string, LocalAgentMessage[]>,
+  sessions: LocalAgentSessionSummary[],
+): boolean {
+  const integrationStateKey = getLocalAgentConversationStateKey(integrationId, null);
+  return Object.entries(localMessagesByConversation).some(([stateKey, messages]) =>
+    messages.length > 0
+      && (stateKey === integrationStateKey || stateKey.startsWith(`${integrationId}:`)))
     || sessions.some((session) => session.integrationId === integrationId);
 }
 
@@ -207,6 +218,13 @@ export function resolveLocalAgentSelectionState(args: {
       args.sessions,
     )
     : false;
+  const selectedIntegrationHasAnyConversation = selectedIntegration
+    ? hasAnyLocalAgentConversation(
+      selectedIntegration.id,
+      args.localMessagesByConversation,
+      args.sessions,
+    )
+    : false;
 
   return {
     sortedIntegrations,
@@ -214,6 +232,40 @@ export function resolveLocalAgentSelectionState(args: {
     selectedIntegration,
     selectedConversation,
     selectedHasConversation,
+    selectedIntegrationHasAnyConversation,
+  };
+}
+
+export function resolveConnectedAgentsTabState(args: {
+  connectedAgents: LocalAgentIntegration[];
+  selectedIntegration: LocalAgentIntegration | null;
+  selectedIntegrationId: string;
+  selectedHasConversation: boolean;
+  selectedIntegrationHasAnyConversation: boolean;
+  localHistoryLoaded: boolean;
+  localMessagesCount: number;
+}) {
+  const selected = args.selectedIntegration;
+  const showingSessionHistory = Boolean(selected && !selected.persistentChat && args.selectedHasConversation);
+  const showingStoredSessions = Boolean(
+    selected && !selected.persistentChat && args.selectedIntegrationHasAnyConversation,
+  );
+  const visibleAgentTabs = showingStoredSessions
+    ? [selected!, ...args.connectedAgents.filter((item) => item.id !== selected!.id)]
+    : args.connectedAgents;
+  const showAddFlow = args.selectedIntegrationId === ADD_AGENT_TAB_ID
+    || (!selected && args.connectedAgents.length === 0)
+    || Boolean(selected && !selected.persistentChat && !args.selectedIntegrationHasAnyConversation);
+  const shouldShowConversationLoader = !args.localHistoryLoaded
+    && args.localMessagesCount === 0
+    && Boolean(selected?.persistentChat || args.selectedHasConversation);
+
+  return {
+    showingSessionHistory,
+    showingStoredSessions,
+    visibleAgentTabs,
+    showAddFlow,
+    shouldShowConversationLoader,
   };
 }
 
@@ -258,6 +310,29 @@ export function markLocalAgentIntegrationDisconnected(
     error: undefined,
     target: undefined,
   });
+}
+
+export function shouldPreserveSelectedLocalAgentTab(args: {
+  selectedIntegrationId: string;
+  selectedItem: LocalAgentIntegration | null;
+  selectedSessionId: string | null;
+  localMessagesByConversation: Record<string, LocalAgentMessage[]>;
+  sessionSummaries: LocalAgentSessionSummary[];
+}): boolean {
+  return args.selectedIntegrationId === ADD_AGENT_TAB_ID
+    || (Boolean(args.selectedItem)
+      && (args.selectedItem.persistentChat
+        || hasLocalAgentConversation(
+          args.selectedIntegrationId,
+          args.selectedSessionId,
+          args.localMessagesByConversation,
+          args.sessionSummaries,
+        )
+        || hasAnyLocalAgentConversation(
+          args.selectedIntegrationId,
+          args.localMessagesByConversation,
+          args.sessionSummaries,
+        )));
 }
 
 function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
@@ -308,6 +383,7 @@ function ConnectedAgentsTab(props: {
   selectedIntegrationId: string;
   selectedIntegration: LocalAgentIntegration | null;
   selectedHasConversation: boolean;
+  selectedIntegrationHasAnyConversation: boolean;
   onSelectIntegration: (id: string) => void;
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
@@ -328,6 +404,7 @@ function ConnectedAgentsTab(props: {
     selectedIntegrationId,
     selectedIntegration,
     selectedHasConversation,
+    selectedIntegrationHasAnyConversation,
     onSelectIntegration,
     onConnectIntegration,
     onDisconnectIntegration,
@@ -348,13 +425,21 @@ function ConnectedAgentsTab(props: {
   const connectedAgents = sortedIntegrations.filter((item) => item.persistentChat);
   const addableIntegrations = sortedIntegrations.filter((item) => !item.persistentChat);
   const selected = selectedIntegration;
-  const showingSessionHistory = Boolean(selected && !selected.persistentChat && selectedHasConversation);
-  const visibleAgentTabs = showingSessionHistory
-    ? [selected!, ...connectedAgents.filter((item) => item.id !== selected!.id)]
-    : connectedAgents;
-  const showAddFlow = selectedIntegrationId === ADD_AGENT_TAB_ID
-    || (!selected && connectedAgents.length === 0)
-    || Boolean(selected && !selected.persistentChat && !selectedHasConversation);
+  const {
+    showingSessionHistory,
+    showingStoredSessions,
+    visibleAgentTabs,
+    showAddFlow,
+    shouldShowConversationLoader,
+  } = resolveConnectedAgentsTabState({
+    connectedAgents,
+    selectedIntegration,
+    selectedIntegrationId,
+    selectedHasConversation,
+    selectedIntegrationHasAnyConversation,
+    localHistoryLoaded,
+    localMessagesCount: localMessages.length,
+  });
   const inputDisabled = localSending || !selected?.chatReady;
 
   return (
@@ -471,20 +556,24 @@ function ConnectedAgentsTab(props: {
                   ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
                   : selected.status === 'connecting'
                   ? `${selected.name} is still finishing setup. This chat tab stays in place and will go live automatically when the connection is ready.`
+                  : showingStoredSessions
+                  ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to resume live chat here.`
                   : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
               </div>
             )}
 
             <div className="v10-chat-messages v10-local-agent-messages">
-              {!localHistoryLoaded && localMessages.length === 0 && (
+              {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
                   Loading the latest conversation from DKG memory...
                 </div>
               )}
-              {localHistoryLoaded && localMessages.length === 0 && (
+              {(!shouldShowConversationLoader && localMessages.length === 0) && (
                 <div className="v10-agent-empty-state">
                   {showingSessionHistory
                     ? `${selected.name} session history is available, but there are no stored turns to show yet.`
+                    : showingStoredSessions
+                    ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to start a fresh live thread.`
                     : selected.chatReady
                     ? `Send a message to start chatting with ${selected.name}.`
                     : `${selected.name} is attached to this node. Your conversation history will stay here even while the bridge reconnects.`}
@@ -661,6 +750,7 @@ export function PanelRight() {
     selectedIntegration,
     selectedConversation,
     selectedHasConversation,
+    selectedIntegrationHasAnyConversation,
   } = resolveLocalAgentSelectionState({
     integrations,
     selectedIntegrationId,
@@ -760,14 +850,13 @@ export function PanelRight() {
       const sessionSummaries = summarizeLocalAgentSessions(memorySessions, items);
       const connected = [...items].sort(compareLocalAgentIntegrations).filter((item) => item.persistentChat);
       const selectedItem = items.find((item) => item.id === selectedIntegrationId) ?? null;
-      const preserveSelected = selectedIntegrationId === ADD_AGENT_TAB_ID
-        || (Boolean(selectedItem)
-          && (selectedItem.persistentChat || hasLocalAgentConversation(
-            selectedIntegrationId,
-            selectedSessionId,
-            localMessagesByConversation,
-            sessionSummaries,
-          )));
+      const preserveSelected = shouldPreserveSelectedLocalAgentTab({
+        selectedIntegrationId,
+        selectedItem,
+        selectedSessionId,
+        localMessagesByConversation,
+        sessionSummaries,
+      });
       if (!preserveSelected) {
         setSelectedIntegration(connected[0]?.id ?? ADD_AGENT_TAB_ID);
       }
@@ -1026,6 +1115,7 @@ export function PanelRight() {
           selectedIntegrationId={selectedIntegrationId}
           selectedIntegration={selectedIntegration}
           selectedHasConversation={selectedHasConversation}
+          selectedIntegrationHasAnyConversation={selectedIntegrationHasAnyConversation}
           onSelectIntegration={setSelectedIntegration}
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}

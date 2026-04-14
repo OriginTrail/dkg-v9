@@ -148,7 +148,7 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('keeps the + add-agent tab selected during background refreshes', () => {
-    expect(panelRight).toContain('const preserveSelected = selectedIntegrationId === ADD_AGENT_TAB_ID');
+    expect(panelRight).toContain('const preserveSelected = shouldPreserveSelectedLocalAgentTab({');
     expect(panelRight).toContain("preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID");
   });
 
@@ -157,6 +157,9 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('localMessagesByConversation');
     expect(panelRight).toContain('getLocalAgentConversationStateKey');
     expect(panelRight).toContain('sessionId: conversation.sessionId ?? undefined');
+    expect(panelRight).toContain('selectedIntegrationHasAnyConversation');
+    expect(panelRight).toContain('resolveConnectedAgentsTabState');
+    expect(panelRight).toContain('shouldPreserveSelectedLocalAgentTab');
     expect(panelRight).not.toContain('localHistoryLoadedByIntegration[integrationId] === true');
   });
 
@@ -675,6 +678,176 @@ describe('OpenClaw bridge behavioral tests', () => {
 
       expect(state.selectedHasConversation).toBe(false);
       expect(state.selectedConversation?.sessionId).toBe('openclaw:dkg-ui');
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('resolveLocalAgentSelectionState keeps integration-wide stored sessions separate from the selected default thread', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveLocalAgentSelectionState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const state = resolveLocalAgentSelectionState({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            framework: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            chatSupported: true,
+            connectSupported: true,
+            configured: false,
+            detected: false,
+            persistentChat: false,
+            chatReady: false,
+            bridgeOnline: false,
+            bridgeStatusLabel: 'Ready to connect',
+            status: 'available',
+            statusLabel: 'Ready to connect',
+            detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+            source: 'live',
+          },
+        ],
+        selectedIntegrationId: 'openclaw',
+        selectedSessionId: 'openclaw:dkg-ui',
+        localMessagesByConversation: {},
+        sessions: [
+          {
+            sessionId: 'openclaw:dkg-ui:worker-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            preview: 'Worker thread',
+            messageCount: 2,
+            lastTs: '2026-04-13T21:00:00Z',
+          },
+        ],
+      });
+
+      expect(state.selectedConversation?.sessionId).toBe('openclaw:dkg-ui');
+      expect(state.selectedHasConversation).toBe(false);
+      expect(state.selectedIntegrationHasAnyConversation).toBe(true);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('resolveConnectedAgentsTabState keeps a disconnected integration visible when it has saved sessions elsewhere', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveConnectedAgentsTabState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const openclaw = {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: false,
+        detected: false,
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Ready to connect',
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+        source: 'live',
+      };
+      const connectedHermes = {
+        id: 'hermes',
+        name: 'Hermes',
+        framework: 'Hermes',
+        description: 'Hermes framework adapter',
+        chatSupported: true,
+        connectSupported: false,
+        configured: true,
+        detected: true,
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        bridgeStatusLabel: 'Connected',
+        status: 'chat_ready',
+        statusLabel: 'Chat ready',
+        detail: 'Connected through the bridge.',
+        source: 'live',
+      };
+
+      const state = resolveConnectedAgentsTabState({
+        connectedAgents: [connectedHermes],
+        selectedIntegration: openclaw,
+        selectedIntegrationId: 'openclaw',
+        selectedHasConversation: false,
+        selectedIntegrationHasAnyConversation: true,
+        localHistoryLoaded: false,
+        localMessagesCount: 0,
+      });
+
+      expect(state.showingSessionHistory).toBe(false);
+      expect(state.showingStoredSessions).toBe(true);
+      expect(state.showAddFlow).toBe(false);
+      expect(state.visibleAgentTabs.map((item: any) => item.id)).toEqual(['openclaw', 'hermes']);
+      expect(state.shouldShowConversationLoader).toBe(false);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('shouldPreserveSelectedLocalAgentTab keeps a disconnected integration selected when other saved sessions exist', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { shouldPreserveSelectedLocalAgentTab } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const openclaw = {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: false,
+        detected: false,
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Ready to connect',
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+        source: 'live',
+      };
+
+      const preserve = shouldPreserveSelectedLocalAgentTab({
+        selectedIntegrationId: 'openclaw',
+        selectedItem: openclaw,
+        selectedSessionId: 'openclaw:dkg-ui',
+        localMessagesByConversation: {},
+        sessionSummaries: [
+          {
+            sessionId: 'openclaw:dkg-ui:worker-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            preview: 'Worker thread',
+            messageCount: 2,
+            lastTs: '2026-04-13T21:00:00Z',
+          },
+        ],
+      });
+
+      expect(preserve).toBe(true);
     } finally {
       (globalThis as any).localStorage = originalLocalStorage;
     }

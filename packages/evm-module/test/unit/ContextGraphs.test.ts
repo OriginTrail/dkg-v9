@@ -600,11 +600,13 @@ describe('@unit ContextGraphs (facade)', () => {
         cgId = await createCuratedCG(accounts[6], pcaOwner.address, pcaAccountId);
       });
 
-      it('authorizes the PCA account owner directly (EOA branch hits first)', async () => {
-        // publisher == publishAuthority == pcaOwner, so the contract returns
-        // true on the direct address-equality branch BEFORE it ever reaches
-        // the PCA lookup. This is the decision #22-preferred behavior: the
-        // account owner is always implicitly authorized.
+      it('authorizes the PCA account owner via live ownerOf resolve', async () => {
+        // In PCA mode the stored `publishAuthority` snapshot is IGNORED at
+        // read time — the facade live-resolves `ownerOf(accountId)` on the
+        // DKGPublishingConvictionNFT instead. Since `pcaOwner` still holds
+        // the NFT in this fixture, live-resolve returns `pcaOwner.address`
+        // and the check passes. See the `PCA transfer auth drift`
+        // describe block for the post-transfer behavior.
         expect(await Facade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.be.true;
       });
 
@@ -663,6 +665,238 @@ describe('@unit ContextGraphs (facade)', () => {
       // expose a clean deregistration primitive, and Phase 8 will cover
       // this via an integration test that exercises the full deploy flow
       // with Phase 6 omitted. See audit note on ContextGraphs.sol:250-259.
+    });
+  });
+
+  // =========================================================================
+  // PCA transfer auth drift (Codex HIGH regression)
+  // =========================================================================
+  //
+  // Regression coverage for the Codex HIGH finding: in PCA curator mode the
+  // stored `publishAuthority` is a CREATE-TIME snapshot and goes STALE the
+  // moment the PCA NFT transfers. Before the fix, `isAuthorizedPublisher`
+  // ran an unconditional `publisher == storedAuthority` match BEFORE the PCA
+  // branch, so the old PCA owner (Alice) retained publishing authority after
+  // transferring her PCA to Bob, and Bob was NOT recognized unless he self-
+  // registered as an agent. The same stale snapshot also leaked through the
+  // `onlyContextGraphOwnerOrAuthority` modifier for governance mutators.
+  //
+  // Fix: both read paths (`isAuthorizedPublisher` and `_isOwnerOrAuthority`)
+  // now IGNORE the stored snapshot in PCA mode and live-resolve the current
+  // NFT owner via `IDKGPublishingConvictionNFT.ownerOf(accountId)`.
+  //
+  // Each test here documents the regression it blocks. Transferring the PCA
+  // NFT exercises the NFT contract's `_update` hook that clears agent
+  // mappings, so agent-based authorization paths also update in lockstep.
+  describe('PCA transfer auth drift', () => {
+    let alice: SignerWithAddress;        // original PCA owner + initial authority
+    let bob: SignerWithAddress;          // new PCA owner after transfer
+    let carol: SignerWithAddress;        // agent registered under Alice's PCA
+    let dave: SignerWithAddress;         // agent Bob registers post-transfer
+    let stranger: SignerWithAddress;     // wholly unrelated wallet
+    let cgHolder: SignerWithAddress;     // holds the CG NFT (independent of PCA owner)
+    let pcaAccountId: bigint;
+    let cgId: bigint;
+
+    beforeEach(async () => {
+      // accounts[0] is the deployer and has the full TRAC supply. Pick a
+      // clean set of signers for the drift fixture — none of them (other
+      // than the funder) holds a PCA at this point.
+      alice = accounts[0];             // deployer; funds Bob and holds the initial PCA
+      bob = accounts[5];
+      carol = accounts[6];
+      dave = accounts[7];
+      stranger = accounts[9];
+      cgHolder = accounts[0];          // simplest: Alice also holds the CG NFT
+
+      // Mint a PCA for Alice.
+      pcaAccountId = await createPCAAccount(alice, '60000');
+
+      // Create a curated CG in PCA mode. cgHolder == alice here so the
+      // transfer flow doesn't also need to move the CG token; we're
+      // isolating the PCA drift specifically.
+      cgId = await createCuratedCG(cgHolder, alice.address, pcaAccountId);
+    });
+
+    async function transferPCA(from: SignerWithAddress, to: SignerWithAddress) {
+      // Standard ERC-721 transfer. DKGPublishingConvictionNFT inherits
+      // from ERC721Enumerable, so `transferFrom` is available. The
+      // contract's `_update` hook clears `_registeredAgents` and
+      // `agentToAccountId` for pre-existing agents of this account.
+      await NFT.connect(from).transferFrom(from.address, to.address, pcaAccountId);
+    }
+
+    // -------------------------------------------------------------------------
+    // isAuthorizedPublisher
+    // -------------------------------------------------------------------------
+
+    it('old PCA owner (Alice) loses publish authority after transferring the PCA', async () => {
+      // Pre-transfer: Alice is the PCA owner, so live-resolve returns her.
+      expect(await Facade.isAuthorizedPublisher(cgId, alice.address)).to.be.true;
+
+      // Transfer. Post-transfer: Alice no longer owns the PCA NFT, so
+      // live-resolve returns Bob instead. Alice is not authorized.
+      // REGRESSION: before the fix, the stored authority snapshot (= Alice)
+      // passed the unconditional direct-equality check and returned true.
+      await transferPCA(alice, bob);
+
+      expect(await Facade.isAuthorizedPublisher(cgId, alice.address)).to.be.false;
+    });
+
+    it('new PCA owner (Bob) gains publish authority after transfer', async () => {
+      // Pre-transfer: Bob is not the PCA owner, not an agent — no authority.
+      expect(await Facade.isAuthorizedPublisher(cgId, bob.address)).to.be.false;
+
+      await transferPCA(alice, bob);
+
+      // Post-transfer: live-resolve returns Bob, so he is authorized even
+      // though the STORED authority snapshot still reads Alice. REGRESSION:
+      // before the fix, only the stored snapshot was consulted and Bob
+      // was not recognized until he self-registered as an agent.
+      expect(await Facade.isAuthorizedPublisher(cgId, bob.address)).to.be.true;
+    });
+
+    it('stranger is not authorized before or after PCA transfer', async () => {
+      expect(await Facade.isAuthorizedPublisher(cgId, stranger.address)).to.be.false;
+
+      await transferPCA(alice, bob);
+
+      expect(await Facade.isAuthorizedPublisher(cgId, stranger.address)).to.be.false;
+    });
+
+    it('agents cleared on PCA transfer lose publish authority in lockstep', async () => {
+      // Register Carol as an agent under Alice's PCA before the transfer.
+      await NFT.connect(alice).registerAgent(pcaAccountId, carol.address);
+
+      // Pre-transfer: Carol is a registered agent of pcaAccountId, so the
+      // PCA branch authorizes her.
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.true;
+
+      // Transfer. The NFT contract's `_update` hook clears the agent
+      // registrations for this token id (see DKGPublishingConvictionNFT.sol
+      // _update branch), so `agentToAccountId[carol] == 0` post-transfer.
+      await transferPCA(alice, bob);
+
+      // Post-transfer: Carol's agent mapping was cleared, so she is no
+      // longer authorized. Defense-in-depth: the facade's PCA branch
+      // would ALSO reject her (live owner is Bob, not Carol), but this
+      // test exercises the agent-clearing path specifically.
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.false;
+    });
+
+    it('new PCA owner can register fresh agents post-transfer and they become authorized', async () => {
+      // Start from the cleared-state fixture: register Carol, transfer,
+      // confirm Carol was cleared.
+      await NFT.connect(alice).registerAgent(pcaAccountId, carol.address);
+      await transferPCA(alice, bob);
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.false;
+
+      // Bob is now the PCA owner; he registers Dave as a fresh agent.
+      await NFT.connect(bob).registerAgent(pcaAccountId, dave.address);
+
+      // Dave authorizes via the PCA-agent branch on live lookup.
+      expect(await Facade.isAuthorizedPublisher(cgId, dave.address)).to.be.true;
+      // Sanity: Bob himself is still authorized (live owner match).
+      expect(await Facade.isAuthorizedPublisher(cgId, bob.address)).to.be.true;
+    });
+
+    // -------------------------------------------------------------------------
+    // onlyContextGraphOwnerOrAuthority governance modifier
+    // -------------------------------------------------------------------------
+
+    it('old PCA owner cannot mutate participant-agent allow-list after transfer', async () => {
+      // Pre-transfer: Alice is the PCA owner, so the modifier allows her
+      // via the _isOwnerOrAuthority live-resolve branch. (She's ALSO the
+      // CG token holder in this fixture, which would let her through
+      // independently — to isolate the PCA-branch behavior we assert on
+      // the post-transfer-as-stranger case below.)
+      const newAgent1 = ethers.getAddress('0x' + 'ab'.repeat(20));
+      await Facade.connect(alice).addParticipantAgent(cgId, newAgent1); // succeeds pre-transfer
+
+      // Transfer PCA AND CG ownership to Bob so Alice has NO remaining
+      // path into the modifier (neither CG owner nor PCA owner).
+      await Storage.connect(alice).transferFrom(alice.address, bob.address, cgId);
+      await transferPCA(alice, bob);
+
+      // Post-transfer: Alice is neither the CG owner (Bob) nor the live
+      // PCA owner (Bob) — the modifier must reject her. REGRESSION:
+      // before the fix, the modifier read the STORED authority snapshot
+      // (= Alice) and approved her, letting the old PCA owner mutate
+      // governance on a PCA she no longer controlled.
+      const newAgent2 = ethers.getAddress('0x' + 'cd'.repeat(20));
+      await expect(
+        Facade.connect(alice).addParticipantAgent(cgId, newAgent2),
+      )
+        .to.be.revertedWithCustomError(Facade, 'NotContextGraphOwnerOrAuthority')
+        .withArgs(cgId, alice.address);
+    });
+
+    it('new PCA owner CAN mutate participant-agent allow-list after transfer', async () => {
+      // Rotate both CG and PCA ownership to Bob.
+      await Storage.connect(alice).transferFrom(alice.address, bob.address, cgId);
+      await transferPCA(alice, bob);
+
+      // Bob is now the CG NFT holder AND the live PCA owner. Either path
+      // alone would admit him through the modifier; this test asserts the
+      // aggregate effect: he can mutate the allow-list.
+      const newAgent = ethers.getAddress('0x' + 'ef'.repeat(20));
+      await expect(
+        Facade.connect(bob).addParticipantAgent(cgId, newAgent),
+      ).to.emit(Storage, 'AgentParticipantAdded').withArgs(cgId, newAgent);
+      expect(await Storage.isParticipantAgent(cgId, newAgent)).to.be.true;
+    });
+
+    it('PCA registered agents are NOT granted governance rights (publishing only)', async () => {
+      // Register Carol as an agent under Alice's PCA. Agents can publish
+      // on behalf of the PCA, but they MUST NOT be able to mutate the
+      // governance allow-list — that's owner-only.
+      await NFT.connect(alice).registerAgent(pcaAccountId, carol.address);
+
+      // Sanity: Carol IS authorized for publishing.
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.true;
+
+      // But the governance modifier rejects her — she's neither the CG
+      // token holder (Alice in this fixture) nor the live PCA owner.
+      // The _isOwnerOrAuthority helper explicitly only checks ownerOf(),
+      // not the agent mapping, to enforce this separation.
+      const someAgent = ethers.getAddress('0x' + '11'.repeat(20));
+      await expect(
+        Facade.connect(carol).addParticipantAgent(cgId, someAgent),
+      )
+        .to.be.revertedWithCustomError(Facade, 'NotContextGraphOwnerOrAuthority')
+        .withArgs(cgId, carol.address);
+    });
+
+    it('CG token holder retains governance rights independent of PCA transfer', async () => {
+      // Fixture variant: Charlie holds the CG NFT; Alice holds the PCA.
+      // Transferring the PCA away from Alice must NOT affect Charlie's
+      // owner-path governance authority.
+      const charlie = accounts[8];
+
+      // Set up a second PCA + CG pair so the beforeEach fixture state
+      // doesn't interfere. Charlie gets the CG token; Alice (deployer)
+      // still has TRAC, so we can mint a second PCA for her.
+      const pcaId2 = await createPCAAccount(alice, '60000');
+      const cgId2 = await createCuratedCG(charlie, alice.address, pcaId2);
+
+      // Pre-transfer: Charlie can add a participant agent via the
+      // owner-path; Alice can via the live-resolve PCA path.
+      const agent1 = ethers.getAddress('0x' + '22'.repeat(20));
+      await Facade.connect(charlie).addParticipantAgent(cgId2, agent1);
+      expect(await Storage.isParticipantAgent(cgId2, agent1)).to.be.true;
+
+      // Transfer Alice's PCA to Bob. Charlie's CG token is untouched.
+      await NFT.connect(alice).transferFrom(alice.address, bob.address, pcaId2);
+
+      // Post-transfer: Charlie is still the CG token holder, so the
+      // owner branch of `_isOwnerOrAuthority` admits him unchanged.
+      // (REGRESSION insurance: the fix must not accidentally gate the
+      // owner path on PCA liveness.)
+      const agent2 = ethers.getAddress('0x' + '33'.repeat(20));
+      await expect(
+        Facade.connect(charlie).addParticipantAgent(cgId2, agent2),
+      ).to.emit(Storage, 'AgentParticipantAdded').withArgs(cgId2, agent2);
+      expect(await Storage.isParticipantAgent(cgId2, agent2)).to.be.true;
     });
   });
 

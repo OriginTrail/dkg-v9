@@ -24,12 +24,21 @@ import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
  *      ContextGraphStorage (see decision #22):
  *
  *        1. EOA    — publishAuthority = wallet, accountId = 0
+ *                    Read path: direct address match against stored authority.
  *        2. Safe   — publishAuthority = multisig contract, accountId = 0
  *                    (Safe executes txs as msg.sender, so address equality
  *                    works transparently; ERC-1271 is not required here)
- *        3. PCA    — publishAuthority = PCA account-owner marker,
- *                    accountId = DKGPublishingConvictionNFT account id;
- *                    the caller must be a registered agent of that account.
+ *        3. PCA    — accountId = DKGPublishingConvictionNFT account id;
+ *                    `publishAuthority` is a CREATE-TIME SNAPSHOT only.
+ *                    Read path LIVE-RESOLVES `ownerOf(accountId)` and
+ *                    accepts that owner or any registered agent of the
+ *                    same account. The stored snapshot is IGNORED at read
+ *                    time because it goes stale the moment the PCA NFT
+ *                    transfers. Governance mutators (participant-agent
+ *                    allow-list) similarly live-resolve via
+ *                    `_isOwnerOrAuthority`, and agents are NOT granted
+ *                    governance rights — only the NFT holder is.
+ *                    (Closes Codex HIGH: PCA auth drift on NFT transfer.)
  *
  *      The NFT reference is resolved from the Hub on every authorization
  *      check so that a Phase 6 deployment made *after* the Phase 7 facade
@@ -121,20 +130,91 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @notice Allow either the NFT owner or the configured curator to
-     *         mutate the participant-agent allow-list.
-     * @dev For open-policy CGs `publishAuthority` is `address(0)`, so only
-     *      the owner branch can ever pass — the authority comparison is dead
-     *      code in that case. This matches the design: open CGs don't have
-     *      curators, and agent allow-lists only matter for curated flows.
+     * @notice Allow the CG NFT holder OR the configured curator (EOA/Safe
+     *         direct address, or the LIVE PCA NFT owner) to mutate the
+     *         participant-agent allow-list.
+     *
+     * @dev For open-policy CGs `publishAuthority` is `address(0)` and the
+     *      stored accountId is 0, so only the owner branch can ever pass —
+     *      the authority comparison is dead code in that case. This matches
+     *      the design: open CGs don't have curators, and agent allow-lists
+     *      only matter for curated flows.
+     *
+     *      In PCA curator mode (`publishAuthorityAccountId != 0`), the stored
+     *      `publishAuthority` is a write-time snapshot that goes STALE when
+     *      the PCA NFT transfers. We therefore live-resolve the current PCA
+     *      NFT owner via `IDKGPublishingConvictionNFT.ownerOf(accountId)`
+     *      instead of trusting the stored snapshot. This closes the Codex
+     *      HIGH "PCA auth drift on NFT transfer" finding, where the old PCA
+     *      owner would otherwise retain governance rights on the CG after
+     *      transferring the PCA.
+     *
+     *      PCA REGISTERED AGENTS are NOT granted governance rights through
+     *      this modifier — agents can publish on behalf of the PCA owner
+     *      (see `isAuthorizedPublisher`), but only the PCA NFT holder
+     *      themselves can mutate the CG's participant-agent allow-list.
+     *      Governance lives with the account, not with its operational
+     *      wallets.
      */
     modifier onlyContextGraphOwnerOrAuthority(uint256 contextGraphId) {
-        address cgOwner = contextGraphStorage.getContextGraphOwner(contextGraphId);
-        (, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
-        if (msg.sender != cgOwner && msg.sender != authority) {
+        if (!_isOwnerOrAuthority(contextGraphId, msg.sender)) {
             revert KnowledgeAssetsLib.NotContextGraphOwnerOrAuthority(contextGraphId, msg.sender);
         }
         _;
+    }
+
+    /**
+     * @dev Single source of truth for owner-or-authority governance checks.
+     *      Extracted from the modifier so the same branching logic can be
+     *      reused by future governance mutators without duplicating the
+     *      PCA live-resolve dance.
+     *
+     *      Returns true when any of the following is true:
+     *        1. `caller` is the current CG NFT token holder.
+     *        2. Curator mode is EOA/Safe (accountId == 0) AND `caller` is the
+     *           stored static authority.
+     *        3. Curator mode is PCA (accountId != 0) AND `caller` is the
+     *           LIVE current owner of the PCA NFT at `accountId`. The stored
+     *           `publishAuthority` is ignored in PCA mode — it's a
+     *           create-time snapshot that goes stale on PCA transfer.
+     *
+     *      Fail-closed behavior: if the DKGPublishingConvictionNFT contract
+     *      is not resolvable from the Hub, or `ownerOf(accountId)` reverts
+     *      (account burned or never minted), governance defaults to the CG
+     *      owner branch only.
+     */
+    function _isOwnerOrAuthority(
+        uint256 contextGraphId,
+        address caller
+    ) internal view returns (bool) {
+        if (contextGraphStorage.getContextGraphOwner(contextGraphId) == caller) {
+            return true;
+        }
+
+        uint256 accountId = contextGraphStorage.getPublishAuthorityAccountId(contextGraphId);
+
+        if (accountId == 0) {
+            // EOA / Safe curator: static stored authority is authoritative.
+            (, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
+            return caller == authority;
+        }
+
+        // PCA curator: live-resolve current NFT owner. Stored authority is
+        // ignored — it's a stale-on-transfer snapshot. Agents are NOT
+        // granted governance rights; only the NFT holder is.
+        address nftAddr;
+        try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
+            nftAddr = addr;
+        } catch {
+            return false;
+        }
+        if (nftAddr == address(0)) return false;
+
+        try IDKGPublishingConvictionNFT(nftAddr).ownerOf(accountId) returns (address currentOwner) {
+            return caller == currentOwner;
+        } catch {
+            return false;
+        }
     }
 
     function updatePublishPolicy(
@@ -208,16 +288,34 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      * @dev Implements the 3-curator-type model per decision #22:
      *
      *      - Open CGs (publishPolicy == 1) allow any non-zero principal.
-     *      - Curated + EOA curator: direct address equality against authority.
-     *      - Curated + Safe multisig: same direct address equality. A Gnosis
-     *        Safe IS `msg.sender` when it executes a transaction, so any
-     *        call made on behalf of the Safe arrives here with
-     *        `publisher == safeAddress`. No ERC-1271 signature check is
-     *        required at this layer.
-     *      - Curated + PCA: the CG's `publishAuthorityAccountId` is non-zero
-     *        and points to a DKGPublishingConvictionNFT account id. The
-     *        caller passes the authorization if they are a registered agent
-     *        of that same account id (mapping-based lookup on the NFT).
+     *      - Curated + EOA curator (accountId == 0): direct address equality
+     *        against the STORED `publishAuthority`. The storage layer auto-
+     *        rotates this field when the CG NFT transfers, so it is always
+     *        live for EOA/Safe mode.
+     *      - Curated + Safe multisig (accountId == 0): same direct address
+     *        equality. A Gnosis Safe IS `msg.sender` when it executes a
+     *        transaction, so any call made on behalf of the Safe arrives
+     *        here with `publisher == safeAddress`. No ERC-1271 signature
+     *        check is required at this layer.
+     *      - Curated + PCA (accountId != 0): the stored `publishAuthority`
+     *        is a CREATE-TIME SNAPSHOT that goes STALE the moment the PCA
+     *        NFT transfers. The stored snapshot is therefore IGNORED for
+     *        authorization. Instead we LIVE-RESOLVE the current PCA NFT
+     *        owner via `IDKGPublishingConvictionNFT.ownerOf(accountId)` and
+     *        accept either (a) that live owner directly or (b) a registered
+     *        agent whose `agentToAccountId(publisher) == accountId`. Both
+     *        mappings on the NFT contract are cleared by the transfer hook,
+     *        so stale agent entries automatically stop authorizing.
+     *
+     *      Branch order is IMPORTANT. Because the EOA/Safe branch matches on
+     *      the stored authority snapshot, it MUST NOT run in PCA mode — an
+     *      unconditional direct-equality check before the accountId branch
+     *      would silently authorize a stale ex-owner. (Closes Codex HIGH
+     *      "PCA auth drift on NFT transfer": Alice creates a CG in PCA mode,
+     *      transfers the NFT to Bob, and the stored authority still reads
+     *      Alice. The pre-fix code returned true for Alice; the fix ignores
+     *      the snapshot in PCA mode and live-resolves ownerOf(accountId)
+     *      which now returns Bob.)
      *
      *      The DKGPublishingConvictionNFT reference is resolved on every call
      *      via a `try/catch` on `hub.getContractAddress("DKGPublishingConvictionNFT")`.
@@ -226,7 +324,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      *      so the catch branch handles gracefully-degraded environments where
      *      Phase 6 has not been deployed yet. Using a fresh lookup each call
      *      (rather than caching on `initialize()`) lets the PCA branch start
-     *      working without a facade redeployment once Phase 6 lands.
+     *      working without a facade redeployment once Phase 6 lands. Any
+     *      resolution failure in PCA mode yields `false` (fail-closed read
+     *      path — unlike the write path, which reverts).
      *
      *      View-only — no state mutations.
      *
@@ -245,7 +345,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         if (!contextGraphStorage.isContextGraphActive(contextGraphId)) return false;
 
         // 1. Open CGs authorize any non-zero principal.
-        (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
+        (uint8 policy, address storedAuthority) = contextGraphStorage.getPublishPolicy(contextGraphId);
         if (policy == 1) {
             return publisher != address(0);
         }
@@ -253,19 +353,22 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         // 2. Curated: never authorize the zero address.
         if (publisher == address(0)) return false;
 
-        // 3. EOA / Safe: direct address match.
-        //    A Safe executing a tx arrives here as `msg.sender == safeAddress`,
-        //    which the caller forwards as `publisher` in the N17-correct flow.
-        if (publisher == authority) return true;
-
-        // 4. PCA curator type: stored accountId non-zero. Resolve the
-        //    DKGPublishingConvictionNFT from the Hub on every call so a
-        //    post-Phase-7 Phase 6 deployment activates the branch without
-        //    facade redeployment. A missing registration reverts in Hub,
-        //    so try/catch the graceful-degrade branch.
+        // 3. Determine curator type from accountId FIRST — we must not run
+        //    the direct-equality branch in PCA mode because the stored
+        //    authority is a stale-on-transfer snapshot in that case.
         uint256 authorityAccountId = contextGraphStorage.getPublishAuthorityAccountId(contextGraphId);
-        if (authorityAccountId == 0) return false;
 
+        if (authorityAccountId == 0) {
+            // 3a. EOA / Safe curator: direct address match against the
+            //     stored authority. Storage auto-rotates this field on CG
+            //     NFT transfer, so it is always live for this mode.
+            return publisher == storedAuthority;
+        }
+
+        // 3b. PCA curator: IGNORE the stored authority snapshot entirely.
+        //     Live-resolve the NFT's current owner and accept it or any
+        //     registered agent of the same account. A missing / burned NFT
+        //     yields `false` (fail-closed read path).
         address nftAddr;
         try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
             nftAddr = addr;
@@ -274,6 +377,17 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         }
         if (nftAddr == address(0)) return false;
 
+        // Live owner match — supersedes the stale stored authority.
+        try IDKGPublishingConvictionNFT(nftAddr).ownerOf(authorityAccountId) returns (address currentOwner) {
+            if (publisher == currentOwner) return true;
+        } catch {
+            // Account burned or never existed — refuse gracefully.
+            return false;
+        }
+
+        // Registered agent of the authorized account. `agentToAccountId`
+        // is cleared by the NFT's `_update` transfer hook, so stale agent
+        // entries automatically stop authorizing post-transfer.
         uint256 publisherAccountId = IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(publisher);
         return publisherAccountId != 0 && publisherAccountId == authorityAccountId;
     }
@@ -299,17 +413,37 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     // --- Internal: PCA coherence validation ---
 
     /**
-     * @notice Enforce (authority, accountId) coherence when a CG is configured
-     *         in PCA curator mode.
+     * @notice WRITE-TIME sanity check that a claimed (authority, accountId)
+     *         pair is initially coherent for a PCA-mode CG.
      *
-     * @dev Rationale (closes "silent broadening" authorization vector):
-     *      `isAuthorizedPublisher` ORs the EOA/Safe direct-authority branch
-     *      with the PCA-agent branch. A mismatched pair — e.g.
-     *      `publishAuthority = Alice`, `publishAuthorityAccountId = 42` where
-     *      account 42 is owned by Bob — would silently grant TWO curators to
-     *      the same CG: Alice passes the EOA branch, and Bob's registered
-     *      agents pass the PCA branch. Enforcing authority == ownerOf(accountId)
-     *      on every write path collapses this back to exactly one curator.
+     * @dev IMPORTANT: this is a CREATE-TIME SANITY GATE, NOT a drift-
+     *      prevention guarantee. The stored `publishAuthority` is a
+     *      snapshot that this check validates ONCE at write time so the
+     *      initial config is internally consistent — "you claimed authority
+     *      X owns account Y; we verified X == ownerOf(Y) right now."
+     *
+     *      Drift AFTER write (e.g. Alice creates a CG in PCA mode, then
+     *      transfers the PCA NFT to Bob) is handled by LIVE RESOLVE at
+     *      read time in `isAuthorizedPublisher` and `_isOwnerOrAuthority`,
+     *      which IGNORE the stored snapshot in PCA mode and dereference
+     *      `ownerOf(accountId)` on every call. The stored snapshot is
+     *      retained only as a write-time audit trail and is NOT used for
+     *      authorization. (Codex HIGH: PCA auth drift on NFT transfer.)
+     *
+     *      Historical rationale (still valid): the pre-live-resolve design
+     *      ORed an EOA/Safe direct-authority branch with a PCA-agent
+     *      branch, so a mismatched pair — e.g. `publishAuthority = Alice`,
+     *      `accountId = 42` where account 42 is owned by Bob — would have
+     *      silently granted TWO curators to the same CG: Alice via the EOA
+     *      branch, Bob's agents via the PCA branch. The live-resolve fix
+     *      collapses the EOA branch out of PCA mode entirely, but the
+     *      write-time coherence check is still valuable because it catches
+     *      misconfigurations where the caller passes an authority that
+     *      does not match the NFT they claim. Without it, Alice could
+     *      create a CG with `(authority = Alice, accountId = Bob's)` and
+     *      the initial authorization surface would silently be "whoever
+     *      owns Bob's NFT now" rather than the more obvious "Alice". A
+     *      clear write-time revert keeps storage honest.
      *
      *      Fail-closed write-path behavior (stricter than read-path):
      *        - If the NFT contract is not resolvable via Hub (not registered,
@@ -325,9 +459,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      *          claimed authority, revert with `PCAAuthorityMismatch`.
      *
      *      `accountId == 0` (non-PCA / EOA / Safe / open) skips the check
-     *      entirely — the authority is validated by the direct-equality
-     *      branch in `isAuthorizedPublisher`, and there's no PCA lookup
-     *      to reconcile.
+     *      entirely — EOA/Safe modes use the stored authority verbatim at
+     *      read time and there is no PCA lookup to reconcile.
      *
      *      `authority == address(0)` also skips: it represents either the
      *      open-policy state (where non-zero accountId is structurally

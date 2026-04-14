@@ -116,6 +116,14 @@ function buildAttachmentSummary(attachments: LocalAgentChatAttachmentRef[]): str
   return `Attached ${names[0]} and ${names.length - 1} more files.`;
 }
 
+function isSendableAttachmentDraft(draft: LocalAgentAttachmentDraft): boolean {
+  return draft.status === 'queued' || draft.status === 'completed';
+}
+
+function getProjectDisplayName(projects: ContextGraph[], projectId: string): string {
+  return projects.find((project) => project.id === projectId)?.name ?? projectId;
+}
+
 function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatAttachmentRef | null {
   if (draft.status !== 'completed' || !draft.result) return null;
   return {
@@ -515,6 +523,11 @@ function ConnectedAgentsTab(props: {
   const selectedProject = activeProjectId
     ? (availableProjects.find((project) => project.id === activeProjectId) ?? null)
     : null;
+  const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
+  const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
+  const attachmentTargetsLabel = attachmentTargetIds.length === 1
+    ? getProjectDisplayName(availableProjects, attachmentTargetIds[0]!)
+    : `${attachmentTargetIds.length} projects`;
   const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   const sortedIntegrations = [...integrations].sort(compareLocalAgentIntegrations);
@@ -720,6 +733,7 @@ function ConnectedAgentsTab(props: {
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                     {selectedAttachmentDrafts.map((attachment) => {
                       const triples = attachment.result?.extraction.tripleCount ?? attachment.result?.extraction.triplesWritten;
+                      const targetLabel = getProjectDisplayName(availableProjects, attachment.contextGraphId);
                       const statusLabel = attachment.status === 'queued'
                         ? 'Queued - imports on send'
                         : attachment.status === 'uploading'
@@ -748,6 +762,7 @@ function ConnectedAgentsTab(props: {
                           <span style={{ fontWeight: 700 }}>{fileBadge(attachment.file.name)}</span>
                           <span>{attachment.file.name}</span>
                           <span style={{ color: 'var(--text-tertiary)' }}>{formatFileSize(attachment.file.size)}</span>
+                          <span style={{ color: 'var(--text-tertiary)' }}>To {targetLabel}</span>
                           <span style={{ color: attachment.status === 'error' ? 'var(--accent-red)' : 'var(--text-tertiary)' }}>
                             {statusLabel}
                           </span>
@@ -769,11 +784,11 @@ function ConnectedAgentsTab(props: {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                 {activeProjectId ? (
                   <div className="v10-local-agent-copy" style={{ margin: 0 }}>
-                      Import target: <strong>{selectedProject?.name ?? activeProjectId}</strong>
+                      New attachments target: <strong>{selectedProject?.name ?? activeProjectId}</strong>
                   </div>
                 ) : (
                   <label className="v10-local-agent-copy" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    Import target:
+                    New attachments target:
                       <select
                         value={activeProjectId ?? ''}
                         onChange={(e) => onSelectProject(e.target.value)}
@@ -812,6 +827,13 @@ function ConnectedAgentsTab(props: {
                     </button>
                   </div>
                 </div>
+                {selectedAttachmentDrafts.length > 0 && (
+                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
+                    {attachmentTargetIds.length === 1
+                      ? `Queued files keep their stored target: ${attachmentTargetsLabel}.`
+                      : 'Queued files keep their stored targets and may span multiple projects.'}
+                  </div>
+                )}
 
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <input
@@ -840,14 +862,14 @@ function ConnectedAgentsTab(props: {
                   <button
                     className="v10-agent-send-btn"
                     onClick={onSendLocalMessage}
-                    disabled={inputDisabled || (!localInput.trim() && selectedAttachmentDrafts.length === 0)}
+                    disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
                   >
                     Send
                   </button>
                 </div>
                 {!activeProjectId && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
-                    Choose a project above before attaching files.
+                    Choose a target above before attaching files.
                   </div>
                 )}
               </div>
@@ -1297,7 +1319,8 @@ export function PanelRight() {
     const conversation = selectedConversation;
     const text = localInput.trim();
     const drafts = selectedAttachmentDrafts;
-    if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && drafts.length === 0)) return;
+    const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);
+    if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && !hasSendableDrafts)) return;
     const integrationId = integration.id;
     const conversationKey = conversation.stateKey;
     setLocalSendingForConversation(conversationKey, true);

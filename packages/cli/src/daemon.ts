@@ -1211,7 +1211,6 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
     transportKind: 'openclaw-channel',
     capabilities: {
       localChat: true,
-      chatAttachments: true,
       connectFromUi: true,
       installNode: true,
       dkgPrimaryMemory: true,
@@ -4618,7 +4617,6 @@ async function handleRequest(
         id: parsed.id ?? 'openclaw',
         capabilities: {
           localChat: true,
-          chatAttachments: true,
           connectFromUi: true,
           installNode: true,
           dkgPrimaryMemory: true,

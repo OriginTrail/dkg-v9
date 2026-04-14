@@ -100,6 +100,19 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/timedOut/);
   });
 
+  it('does not default OpenClaw chatAttachments in daemon-owned registry surfaces', () => {
+    const definitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf("openclaw: {"),
+      daemonSrc.indexOf('hermes: {'),
+    );
+    const registerAdapterBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/register-adapter"),
+      daemonSrc.indexOf('// GET /api/settings', daemonSrc.indexOf("// POST /api/register-adapter")),
+    );
+    expect(definitionsBlock).not.toContain('chatAttachments: true');
+    expect(registerAdapterBlock).not.toContain('chatAttachments: true');
+  });
+
   it('discarding an imported assertion evicts its cached extraction status', () => {
     const discardBlock = daemonSrc.slice(
       daemonSrc.indexOf("// POST /api/assertion/:name/discard"),
@@ -194,11 +207,12 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
     expect(panelRight).toContain('Attach files');
-    expect(panelRight).toContain('Import target:');
+    expect(panelRight).toContain('New attachments target:');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain('Stored only');
     expect(panelRight).toContain('Queued - imports on send');
-    expect(panelRight).toContain('selectedAttachmentDrafts.length === 0');
+    expect(panelRight).toContain('Queued files keep their stored target');
+    expect(panelRight).toContain('To {targetLabel}');
     expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
   });
 
@@ -216,6 +230,12 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
     expect(sendLocalMessageBlock).toContain("if (!text && attachments.length === 0) {");
     expect(panelRight).not.toContain('selectedCompletedAttachments');
+  });
+
+  it('only enables attachment-only sends when at least one draft is sendable', () => {
+    expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
+    expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
+    expect(panelRight).toContain('Choose a target above before attaching files.');
   });
 
   it('merges reloaded local history with live messages', () => {

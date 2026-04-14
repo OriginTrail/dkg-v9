@@ -634,10 +634,12 @@ describe('local agent integration registry helpers', () => {
 
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
+    const openclaw = integrations.find((integration) => integration.id === 'openclaw');
 
     expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw']);
     expect(integrations.every((integration) => integration.enabled === false)).toBe(true);
     expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
+    expect(openclaw?.capabilities.chatAttachments).toBeUndefined();
   });
 
   it('ignores stale legacy OpenClaw config flags when no local-agent registry record exists', () => {
@@ -681,8 +683,23 @@ describe('local agent integration registry helpers', () => {
     expect(integration.enabled).toBe(true);
     expect(integration.status).toBe('ready');
     expect(integration.manifest?.version).toBe('2026.4.12');
+    expect(integration.capabilities.chatAttachments).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+
+  it('preserves adapter-advertised OpenClaw attachment capability when it is explicitly provided', () => {
+    const config = makeConfig();
+
+    const integration = connectLocalAgentIntegration(config, {
+      id: 'openclaw',
+      capabilities: {
+        localChat: true,
+        chatAttachments: true,
+      },
+    });
+
+    expect(integration.capabilities.chatAttachments).toBe(true);
   });
 
   it('marks explicit OpenClaw disconnects as user-disabled and clears that flag on reconnect', () => {

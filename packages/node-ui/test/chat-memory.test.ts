@@ -75,7 +75,9 @@ describe('ChatMemoryManager', () => {
 
     const quads = mockShare.mock.calls[0][1];
     const attachmentQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/attachmentRefs');
+    const usedToolQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/usedTool');
     expect(attachmentQuad).toBeDefined();
+    expect(usedToolQuad).toBeUndefined();
     const persistedRefs = JSON.parse(JSON.parse(String(attachmentQuad.object)));
     expect(persistedRefs).toEqual([
       expect.objectContaining({

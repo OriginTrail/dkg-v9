@@ -211,6 +211,8 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Attach files');
     expect(panelRight).toContain('New attachments target:');
     expect(panelRight).toContain('Choose a project');
+    expect(panelRight).toContain("value={activeProjectId ?? ''}");
+    expect(panelRight).not.toContain('{activeProjectId ? (');
     expect(panelRight).toContain('Stored only');
     expect(panelRight).toContain('Queued - imports on send');
     expect(panelRight).toContain('Queued files keep their stored target');
@@ -251,10 +253,12 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('streamLocalAgentChat(integrationId, text, {');
   });
 
-  it('persists imported attachment tool calls alongside verified attachment refs', () => {
+  it('persists verified attachment refs separately from assistant tool calls', () => {
     const persistTurnBlock = readCliFile('daemon.ts');
-    expect(persistTurnBlock).toContain('const persistedToolCalls = mergePersistedToolCalls(normalizedToolCalls, verifiedAttachmentRefs);');
-    expect(persistTurnBlock).toContain('buildOpenClawAttachmentToolCalls(attachmentRefs)');
+    expect(persistTurnBlock).toContain('await memoryManager.storeChatExchange(');
+    expect(persistTurnBlock).toContain('normalizedToolCalls,');
+    expect(persistTurnBlock).not.toContain('mergePersistedToolCalls(');
+    expect(persistTurnBlock).not.toContain('buildOpenClawAttachmentToolCalls(');
     expect(persistTurnBlock).toContain('sourceFileName');
   });
 

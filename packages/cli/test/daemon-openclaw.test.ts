@@ -11,7 +11,6 @@ import {
   hasConfiguredLocalAgentChat,
   hasOpenClawChatTurnContent,
   isLoopbackClientIp,
-  buildOpenClawAttachmentToolCalls,
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
@@ -334,7 +333,7 @@ describe('OpenClaw persist-turn validation', () => {
     })).toBe(false);
   });
 
-  it('accepts node-owned attachment refs and converts them into persisted attachment tool calls', () => {
+  it('accepts node-owned attachment refs without reclassifying them as assistant tool calls', () => {
     const attachmentRefs = [
       {
         assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
@@ -354,17 +353,6 @@ describe('OpenClaw persist-turn validation', () => {
       attachmentRefs,
     })).toBe(true);
     expect(normalizeOpenClawAttachmentRefs(attachmentRefs)).toEqual(attachmentRefs);
-    expect(buildOpenClawAttachmentToolCalls(attachmentRefs)).toEqual([
-      {
-        name: 'dkg.importedAttachment',
-        args: attachmentRefs[0],
-        result: {
-          imported: true,
-          assertionUri: attachmentRefs[0].assertionUri,
-          fileHash: attachmentRefs[0].fileHash,
-        },
-      },
-    ]);
   });
 
   it('allows attachment-only chat turns only when at least one attachment ref is present', () => {

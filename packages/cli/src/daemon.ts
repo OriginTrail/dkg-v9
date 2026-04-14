@@ -2475,40 +2475,6 @@ export async function verifyOpenClawAttachmentRefsProvenance(
   return attachmentRefs;
 }
 
-export function buildOpenClawAttachmentToolCalls(
-  attachmentRefs: OpenClawAttachmentRef[] | undefined,
-): Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined {
-  if (!attachmentRefs?.length) return undefined;
-  return attachmentRefs.map((ref) => ({
-    name: 'dkg.importedAttachment',
-    args: { ...ref },
-    result: {
-      imported: true,
-      assertionUri: ref.assertionUri,
-      fileHash: ref.fileHash,
-    },
-  }));
-}
-
-function mergePersistedToolCalls(
-  normalizedToolCalls: Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined,
-  attachmentRefs: OpenClawAttachmentRef[] | undefined,
-): Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined {
-  const attachmentToolCalls = buildOpenClawAttachmentToolCalls(attachmentRefs);
-  if (!normalizedToolCalls?.length && !attachmentToolCalls?.length) return undefined;
-
-  const merged = [...(normalizedToolCalls ?? [])];
-  for (const call of attachmentToolCalls ?? []) {
-    const alreadyPresent = merged.some((existing) =>
-      existing.name === call.name
-      && isPlainRecord(existing.args)
-      && existing.args.assertionUri === call.args.assertionUri,
-    );
-    if (!alreadyPresent) merged.push(call);
-  }
-  return merged;
-}
-
 let _standaloneCache: boolean | null = null;
 function resolveAutoUpdateEnabled(config: DkgConfig): boolean {
   if (_standaloneCache === null) _standaloneCache = isStandaloneInstall();
@@ -3117,13 +3083,12 @@ async function handleRequest(
     const normalizedFailureReason = typeof failureReason === 'string'
       ? failureReason
       : (failureReason === null ? null : undefined);
-    const persistedToolCalls = mergePersistedToolCalls(normalizedToolCalls, verifiedAttachmentRefs);
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
-        persistedToolCalls,
+        normalizedToolCalls,
         {
           turnId: normalizedTurnId,
           persistenceState: normalizedPersistenceState,

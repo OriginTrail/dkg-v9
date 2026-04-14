@@ -520,9 +520,6 @@ function ConnectedAgentsTab(props: {
     onRemoveAttachment,
   } = props;
   const selectedAttachmentDrafts = attachments;
-  const selectedProject = activeProjectId
-    ? (availableProjects.find((project) => project.id === activeProjectId) ?? null)
-    : null;
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
   const attachmentTargetsLabel = attachmentTargetIds.length === 1
@@ -782,28 +779,22 @@ function ConnectedAgentsTab(props: {
                 )}
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                {activeProjectId ? (
-                  <div className="v10-local-agent-copy" style={{ margin: 0 }}>
-                      New attachments target: <strong>{selectedProject?.name ?? activeProjectId}</strong>
-                  </div>
-                ) : (
                   <label className="v10-local-agent-copy" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
                     New attachments target:
-                      <select
-                        value={activeProjectId ?? ''}
-                        onChange={(e) => onSelectProject(e.target.value)}
-                        disabled={projectsLoading || availableProjects.length === 0}
-                        style={{ minWidth: 220 }}
-                      >
-                        <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
-                        {availableProjects.map((project) => (
-                          <option key={project.id} value={project.id}>
-                            {project.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
+                    <select
+                      value={activeProjectId ?? ''}
+                      onChange={(e) => onSelectProject(e.target.value)}
+                      disabled={projectsLoading || availableProjects.length === 0}
+                      style={{ minWidth: 220 }}
+                    >
+                      <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
+                      {availableProjects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <input

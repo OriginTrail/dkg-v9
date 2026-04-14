@@ -64,6 +64,13 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('fetchLocalAgentHistory');
     expect(apiSrc).toContain('streamLocalAgentChat');
   });
+
+  it('keeps the local-agent contract attachment-aware', () => {
+    expect(apiSrc).toContain('LocalAgentChatAttachmentRef');
+    expect(apiSrc).toContain('chatAttachments?: boolean');
+    expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
+    expect(apiSrc).toContain('attachmentRefs');
+  });
 });
 
 describe('OpenClaw daemon endpoints', () => {
@@ -176,13 +183,21 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('same local-agent contract');
   });
 
+  it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
+    expect(panelRight).toContain('Attach files');
+    expect(panelRight).toContain('Import target:');
+    expect(panelRight).toContain('Choose a project');
+    expect(panelRight).toContain('Stored only');
+    expect(panelRight).toContain('selectedCompletedAttachments.length === 0');
+  });
+
   it('merges reloaded local history with live messages', () => {
     expect(panelRight).toContain('function mergeLocalAgentMessages');
     expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
   });
 
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
-    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, messageText');
   });
 
   it('does not clear attached agents on a transient integrations refresh failure', () => {

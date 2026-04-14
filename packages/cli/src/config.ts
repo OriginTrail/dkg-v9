@@ -78,6 +78,7 @@ export type LocalAgentIntegrationStatus =
 
 export interface LocalAgentIntegrationCapabilities {
   localChat?: boolean;
+  chatAttachments?: boolean;
   connectFromUi?: boolean;
   installNode?: boolean;
   dkgPrimaryMemory?: boolean;

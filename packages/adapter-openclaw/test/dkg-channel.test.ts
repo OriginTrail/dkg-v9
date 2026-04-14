@@ -312,6 +312,64 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('processInbound should carry attachment refs into the runtime prompt and persist them with the turn', async () => {
+    let dispatched: any;
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg-1/assertion/chat-doc',
+        fileHash: 'sha256:feedbeef',
+        contextGraphId: 'cg-1',
+        fileName: 'chat-doc.pdf',
+        detectedContentType: 'application/pdf',
+      },
+    ];
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Summarize'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            dispatched = params;
+            await params.dispatcherOptions.deliver({ text: 'Attached reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const reply = await plugin.processInbound('Summarize these files.', 'corr-attach', 'owner', { attachmentRefs });
+
+    expect(reply.text).toBe('Attached reply');
+    expect(dispatched.ctx).toMatchObject({
+      BodyForAgent: expect.stringContaining('Attached Working Memory items:'),
+      AttachmentRefs: attachmentRefs,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Summarize these files.',
+      'Attached reply',
+      expect.objectContaining({
+        turnId: 'corr-attach',
+        attachmentRefs,
+      }),
+    );
+  });
+
   it('processInbound should retry turn persistence after a transient DKG failure', async () => {
     vi.useFakeTimers();
     try {
@@ -523,6 +581,46 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('processInbound should append attachment context for legacy routeInboundMessage fallback', async () => {
+    const routeInboundMessage = vi.fn().mockResolvedValue({
+      correlationId: 'corr-legacy-attach',
+      text: 'Reply with attachments',
+      turnId: 't-legacy-attach',
+    });
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg-2/assertion/chat-doc',
+        fileHash: 'sha256:abc123',
+        contextGraphId: 'cg-2',
+        fileName: 'chat-doc.pdf',
+      },
+    ];
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    const reply = await plugin.processInbound('Summarize these files.', 'corr-legacy-attach', 'owner', { attachmentRefs });
+
+    expect(routeInboundMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channelName: CHANNEL_NAME,
+      senderId: 'owner',
+      senderIsOwner: true,
+      correlationId: 'corr-legacy-attach',
+      text: expect.stringContaining('Attached Working Memory items:'),
+    }));
+    expect(reply.text).toBe('Reply with attachments');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Summarize these files.',
+      'Reply with attachments',
+      expect.objectContaining({
+        turnId: 'corr-legacy-attach',
+        attachmentRefs,
+      }),
+    );
+  });
+
   it('processInboundStream should fall back to routeInboundMessage when streaming dispatch is unavailable', async () => {
     const routeInboundMessage = vi.fn().mockResolvedValue({
       correlationId: 'corr-stream',
@@ -544,6 +642,15 @@ describe('DkgChannelPlugin', () => {
 
   it('processInboundStream should force block streaming in the direct runtime fallback', async () => {
     let dispatched: any;
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg-stream/assertion/notes',
+        fileHash: 'sha256:stream123',
+        contextGraphId: 'cg-stream',
+        fileName: 'notes.md',
+        detectedContentType: 'text/markdown',
+      },
+    ];
     const mockRuntime = {
       channel: {
         routing: {
@@ -574,13 +681,14 @@ describe('DkgChannelPlugin', () => {
     plugin.register(api);
 
     const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
-    for await (const event of plugin.processInboundStream('Hello', 'corr-stream-runtime', 'owner')) {
+    for await (const event of plugin.processInboundStream('Hello', 'corr-stream-runtime', 'owner', { attachmentRefs })) {
       events.push(event as any);
     }
 
     expect(dispatched).toMatchObject({
       ctx: expect.objectContaining({
-        BodyForAgent: 'Hello',
+        BodyForAgent: expect.stringContaining('Attached Working Memory items:'),
+        AttachmentRefs: attachmentRefs,
         SessionKey: 'session-1',
       }),
       cfg: mockCfg,
@@ -599,7 +707,7 @@ describe('DkgChannelPlugin', () => {
       'openclaw:dkg-ui',
       'Hello',
       'Streamed reply',
-      { turnId: 'corr-stream-runtime' },
+      { turnId: 'corr-stream-runtime', attachmentRefs },
     );
   });
 

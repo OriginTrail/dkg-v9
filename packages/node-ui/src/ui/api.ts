@@ -208,7 +208,7 @@ export interface ImportFileResult {
   fileHash: string;
   detectedContentType: string;
   extraction: {
-    status: 'completed' | 'skipped' | 'error';
+    status: 'completed' | 'skipped' | 'failed';
     tripleCount?: number;
     triplesWritten?: number;
     provenance?: any;
@@ -398,6 +398,7 @@ export interface MemorySession {
     turnId?: string;
     persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
     failureReason?: string | null;
+    attachmentRefs?: LocalAgentChatAttachmentRef[];
   }>;
 }
 export interface MemorySessionPublicationStatus {
@@ -525,6 +526,26 @@ export interface OpenClawAgent {
 export const fetchOpenClawAgents = () =>
   get<{ agents: OpenClawAgent[] }>('/api/openclaw-agents');
 
+export interface LocalAgentChatAttachmentRef {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
+interface LocalAgentChatRequestOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+  identity?: string;
+  attachments?: LocalAgentChatAttachmentRef[];
+}
+
 export const sendOpenClawChat = (peerId: string, text: string) =>
   post<{ delivered: boolean; reply: string | null; timedOut: boolean; waitMs: number; error?: string }>(
     '/api/chat-openclaw',
@@ -535,12 +556,13 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
 
 export async function sendOpenClawLocalChat(
   text: string,
-  opts?: { correlationId?: string; signal?: AbortSignal; identity?: string },
+  opts?: LocalAgentChatRequestOptions,
 ): Promise<{ text: string; correlationId: string }> {
   const body = {
     text,
     correlationId: opts?.correlationId ?? crypto.randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
+    ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -566,17 +588,15 @@ export type OpenClawStreamEvent =
  */
 export async function streamOpenClawLocalChat(
   text: string,
-  opts: {
-    correlationId?: string;
-    signal?: AbortSignal;
+  opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
-    identity?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const body = {
     text,
     correlationId: opts.correlationId ?? crypto.randomUUID(),
     ...(opts.identity ? { identity: opts.identity } : {}),
+    ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -677,6 +697,7 @@ interface LocalAgentIntegrationRecord {
   status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
   capabilities?: {
     localChat?: boolean;
+    chatAttachments?: boolean;
     connectFromUi?: boolean;
     installNode?: boolean;
     dkgPrimaryMemory?: boolean;
@@ -716,6 +737,7 @@ export interface LocalAgentIntegration {
   framework: string;
   description: string;
   chatSupported: boolean;
+  chatAttachments: boolean;
   connectSupported: boolean;
   configured: boolean;
   detected: boolean;
@@ -743,6 +765,7 @@ export interface LocalAgentHistoryMessage {
   ts: string;
   turnId?: string;
   failureReason?: string | null;
+  attachmentRefs?: LocalAgentChatAttachmentRef[];
 }
 
 interface LocalAgentSurface {
@@ -819,6 +842,7 @@ async function fetchLocalAgentHistoryBySessionId(
         ts: message.ts,
         turnId: message.turnId,
         failureReason: message.failureReason,
+        attachmentRefs: message.attachmentRefs,
       }));
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {
@@ -850,6 +874,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const id = String(record.id ?? '').toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[id];
   const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
+  const chatAttachments = hasChatBridge && record.capabilities?.chatAttachments === true;
   const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
   const configured = record.enabled === true;
   const runtimeStatus = record.runtime?.status;
@@ -914,6 +939,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     framework: record.name,
     description: record.description,
     chatSupported: hasChatBridge,
+    chatAttachments,
     connectSupported,
     configured,
     detected: configured || chatReady,
@@ -1005,6 +1031,7 @@ export async function streamLocalAgentChat(
     signal?: AbortSignal;
     onEvent?: (event: LocalAgentStreamEvent) => void;
     sessionId?: string;
+    attachments?: LocalAgentChatAttachmentRef[];
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();

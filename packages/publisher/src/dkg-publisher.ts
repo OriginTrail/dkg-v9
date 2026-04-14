@@ -596,8 +596,29 @@ export class DKGPublisher implements Publisher {
 
     const ctxGraphId = options?.publishContextGraphId;
     if (ctxGraphId !== undefined && ctxGraphId !== null) {
-      try { BigInt(ctxGraphId); } catch {
+      // Validate at the public entry so the caller sees one clear error
+      // instead of watching it decay through ACK collection, self-sign
+      // digests, and finally the evm-adapter pre-tx guard. Mirrors the
+      // `<= 0n` gate at `packages/chain/src/evm-adapter.ts:createKnowledgeAssetsV10`
+      // and the 3 other round-4 boundaries (ACK provider, async
+      // publisher-runner, core-node storage-ack-handler) so the whole
+      // pipeline agrees on the legal domain. `BigInt("-1")` returns `-1n`
+      // without throwing — the old try/catch-only check would let
+      // negative ids through, the publisher digests got built with the
+      // wrong value, and the publish ended in a misleading `tentative`
+      // status with the root error three layers deep.
+      let parsed: bigint;
+      try {
+        parsed = BigInt(ctxGraphId);
+      } catch {
         throw new Error(`Invalid publishContextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
+      }
+      if (parsed <= 0n) {
+        throw new Error(
+          `Invalid publishContextGraphId: ${String(ctxGraphId)} ` +
+          `(must be a positive integer; V10 contract rejects cgId <= 0 at ` +
+          `KnowledgeAssetsV10.sol:379 with ZeroContextGraphId)`,
+        );
       }
     }
 
@@ -1041,6 +1062,35 @@ export class DKGPublisher implements Publisher {
     // ZeroContextGraphId. Always prefer the explicit target override.
     const v10CgDomain = options.publishContextGraphId ?? contextGraphId;
     const swmGraphId = contextGraphId;
+
+    // Numeric-negative and numeric-zero CG ids are programming errors —
+    // reject them here BEFORE burning CPU on ACK collection, self-sign
+    // digests, or on-chain tx construction, so the caller sees the real
+    // error instead of watching it decay through a swallowed ACK warning
+    // into a misleading `tentative` status. Descriptive SWM graph names
+    // (e.g. `"devnet-test"`, `"test-paranet"`) MUST still fall through to
+    // the soft `v10CgId = 0n` coercion below — mock adapter tests and
+    // integration fixtures publish with those names and rely on the
+    // data-flow path continuing to exercise. So we only fail loud when
+    // `BigInt(v10CgDomain)` actually parses and the parsed value is
+    // non-positive, which is specifically the "numeric but invalid" case.
+    {
+      let parsedDomain: bigint | null = null;
+      try {
+        parsedDomain = BigInt(v10CgDomain);
+      } catch {
+        // Non-numeric descriptive name — stays on the soft path below.
+      }
+      if (parsedDomain !== null && parsedDomain <= 0n) {
+        throw new Error(
+          `V10 publish requires a positive on-chain context graph id; ` +
+          `got '${v10CgDomain}' (parsed to ${parsedDomain}). ` +
+          'Register the CG via ContextGraphs.createContextGraph first ' +
+          'and pass the returned numeric id as `publishContextGraphId` ' +
+          '(or as the first argument to `publish()`).',
+        );
+      }
+    }
 
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {

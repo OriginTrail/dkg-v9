@@ -45,6 +45,15 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   setupEntry: './setup-entry.mjs',
 } as const;
 const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
+/**
+ * Delay before the deferred "first-failure" re-probe of the node peer ID
+ * fires after `refreshMemoryResolverState` reports a missing peerId at
+ * register time. Gives the daemon a grace window to finish startup when
+ * the gateway registers before `/api/status` is healthy. Subsequent
+ * recovery is handled by the on-demand `ensureNodePeerId` fired from the
+ * resolver when an actual call needs the peerId. Codex Bug B9.
+ */
+const NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS = 5_000;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
@@ -59,6 +68,22 @@ export class DkgNodePlugin {
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private nodePeerId: string | undefined;
   /**
+   * In-flight handle for the node peer ID probe, used to debounce
+   * concurrent `ensureNodePeerId` calls so multiple resolver fires do not
+   * stampede `/api/status`. Null when no probe is running. Codex Bug B9.
+   */
+  private peerIdProbeInFlight: Promise<void> | null = null;
+  /**
+   * Timer for the one-shot deferred retry after a failed initial probe
+   * at register time. Belt-and-suspenders with `ensureNodePeerId`: the
+   * lazy re-probe is the primary recovery path, but the deferred retry
+   * covers the case where a deployment sits idle between register and
+   * the first `dkg_memory_import` / slot search call. Codex Bug B9.
+   */
+  private peerIdDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Cached API handle used by `ensureNodePeerId` for logging. Set on register. */
+  private memoryResolverApi: OpenClawPluginApi | null = null;
+  /**
    * Resolver wired to the live channel-plugin session-state map + a cached
    * list of subscribed context graphs for the write-path clarification
    * response. The `getSession` lookup returns the UI-selected project CG
@@ -68,16 +93,30 @@ export class DkgNodePlugin {
    * the CG to fire a second `/api/query` against the project's `'memory'`
    * WM assertion; `dkg_memory_import` uses it as the fallback target CG
    * when the agent does not supply one explicitly.
+   *
+   * `getDefaultAgentAddress` fires a best-effort `ensureNodePeerId()`
+   * when the cached peerId is still undefined. This keeps the B2
+   * retryable-clarification loop from soft-bricking permanently when the
+   * register-time probe hit a cold daemon: the next turn's resolver call
+   * self-heals the state. Codex Bug B9.
    */
   private readonly memorySessionResolver: DkgMemorySessionResolver = {
     getSession: (sessionKey: string | undefined): DkgMemorySession | undefined => {
       const projectContextGraphId = this.channelPlugin?.getSessionProjectContextGraphId(sessionKey);
+      if (this.nodePeerId === undefined) {
+        void this.ensureNodePeerId();
+      }
       return {
         projectContextGraphId,
         agentAddress: this.nodePeerId,
       };
     },
-    getDefaultAgentAddress: () => this.nodePeerId,
+    getDefaultAgentAddress: () => {
+      if (this.nodePeerId === undefined) {
+        void this.ensureNodePeerId();
+      }
+      return this.nodePeerId;
+    },
     listAvailableContextGraphs: () => this.availableContextGraphCache,
   };
   private availableContextGraphCache: string[] = [];
@@ -169,6 +208,12 @@ export class DkgNodePlugin {
       }
       this.memoryPlugin.register(api);
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
+
+      // Cache the API handle so `ensureNodePeerId` can log from the lazy
+      // re-probe call tree, which fires outside of any register() scope
+      // when a later resolver call asks for the default agent address.
+      // Codex Bug B9.
+      this.memoryResolverApi = api;
 
       // Best-effort: populate node peer ID + subscribed context-graph cache
       // for the memory resolver. Both are non-blocking; failures just leave
@@ -415,6 +460,10 @@ export class DkgNodePlugin {
   async stop(): Promise<void> {
     // Stop integration modules
     this.clearLocalAgentIntegrationRetry();
+    if (this.peerIdDeferredRetryTimer) {
+      clearTimeout(this.peerIdDeferredRetryTimer);
+      this.peerIdDeferredRetryTimer = null;
+    }
     await this.channelPlugin?.stop();
   }
 
@@ -428,19 +477,23 @@ export class DkgNodePlugin {
    * cache from the daemon. Non-blocking; failures warn and leave caches
    * empty so the resolver falls back to single-graph reads and an empty
    * needs_clarification list on writes.
+   *
+   * When the peer-ID probe leaves `nodePeerId` undefined (daemon startup
+   * race, `/api/status` 5xx, network flap), schedules a deferred one-shot
+   * retry so a gateway that sits idle until the first `dkg_memory_import`
+   * call still recovers. The primary recovery path is the on-demand
+   * `ensureNodePeerId` fired by the resolver. Codex Bug B9.
    */
   private async refreshMemoryResolverState(api: OpenClawPluginApi): Promise<void> {
     if (this.availableContextGraphsRefreshing) return;
     this.availableContextGraphsRefreshing = true;
     try {
-      try {
-        const status = await this.client.getStatus();
-        if (status.ok && status.peerId) {
-          this.nodePeerId = status.peerId;
-        }
-      } catch (err: any) {
-        api.logger.debug?.(`[dkg-memory] Could not read daemon peer ID: ${err?.message ?? err}`);
-      }
+      // Route through `ensureNodePeerId` so the in-flight promise guard
+      // is populated while this register-time probe runs. Any resolver
+      // call that fires concurrently (e.g., a memory slot search during
+      // the same tick) will await the same promise instead of firing a
+      // duplicate /api/status call. Codex Bug B9.
+      await this.ensureNodePeerId();
       try {
         const result = await this.client.listContextGraphs();
         const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
@@ -460,6 +513,80 @@ export class DkgNodePlugin {
     } finally {
       this.availableContextGraphsRefreshing = false;
     }
+
+    if (this.nodePeerId === undefined) {
+      this.schedulePeerIdDeferredRetry(api);
+    }
+  }
+
+  /**
+   * Single-shot `/api/status` call that updates `nodePeerId` on success
+   * and logs on failure. Pulled out of `refreshMemoryResolverState` so it
+   * can be reused by `ensureNodePeerId` without dragging the CG cache
+   * refresh along. Does NOT debounce — callers are responsible for
+   * preventing concurrent calls (see `ensureNodePeerId`'s in-flight
+   * promise guard).
+   */
+  private async probeNodePeerIdOnce(api: OpenClawPluginApi): Promise<void> {
+    try {
+      const status = await this.client.getStatus();
+      if (status.ok && status.peerId) {
+        this.nodePeerId = status.peerId;
+      }
+    } catch (err: any) {
+      api.logger.debug?.(`[dkg-memory] Could not read daemon peer ID: ${err?.message ?? err}`);
+    }
+  }
+
+  /**
+   * On-demand best-effort re-probe of the node peer ID, fired by the
+   * memory resolver when a caller asks for the default agent address and
+   * the cached peerId is still undefined. Debounced via
+   * `peerIdProbeInFlight`: concurrent callers share the same promise so
+   * a burst of resolver fires collapses to one `/api/status` call.
+   *
+   * Returns immediately without firing if:
+   * - `nodePeerId` is already populated (no-op),
+   * - the memory resolver API was never cached (register() hasn't run or
+   *   memory module was disabled — nothing to probe against),
+   * - a probe is already in flight.
+   *
+   * Codex Bug B9 — fixes the "register-time one-shot probe fails →
+   * permanent soft-brick" case where every subsequent turn got B2's
+   * retryable clarification with no actual retry path.
+   */
+  private ensureNodePeerId(): Promise<void> {
+    if (this.nodePeerId !== undefined) return Promise.resolve();
+    const api = this.memoryResolverApi;
+    if (!api) return Promise.resolve();
+    if (this.peerIdProbeInFlight) return this.peerIdProbeInFlight;
+
+    const probe = this.probeNodePeerIdOnce(api).finally(() => {
+      this.peerIdProbeInFlight = null;
+    });
+    this.peerIdProbeInFlight = probe;
+    return probe;
+  }
+
+  /**
+   * Schedules a one-shot deferred retry of the peer-ID probe. Cheap
+   * belt-and-suspenders for the case where a gateway registers against a
+   * daemon that is still booting and then sits idle for seconds before
+   * the first resolver call would fire `ensureNodePeerId` lazily. No-op
+   * if a retry is already scheduled or if `nodePeerId` has already been
+   * populated by a concurrent lazy probe. Codex Bug B9.
+   */
+  private schedulePeerIdDeferredRetry(api: OpenClawPluginApi): void {
+    if (this.peerIdDeferredRetryTimer) return;
+    this.peerIdDeferredRetryTimer = setTimeout(() => {
+      this.peerIdDeferredRetryTimer = null;
+      if (this.nodePeerId !== undefined) return;
+      void this.probeNodePeerIdOnce(api);
+    }, NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS);
+    // Node's `Timer.unref()` keeps the deferred retry from holding the
+    // event loop open past shutdown. Missing on some non-Node runtimes
+    // (e.g. browser fakes), so guard with optional chaining.
+    (this.peerIdDeferredRetryTimer as any)?.unref?.();
   }
 
   // ---------------------------------------------------------------------------

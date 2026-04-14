@@ -1157,4 +1157,228 @@ describe('DkgNodePlugin', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  describe('node peer ID lazy re-probe (Codex B9)', () => {
+    // Helper: makes a fetch stub that routes /api/status calls through a
+    // user-supplied handler and counts them. /api/context-graph/list (fired
+    // by listContextGraphs in the same refresh) always resolves empty so
+    // we don't have to care about its shape in these tests.
+    function makeFetchStub(statusHandler: (callIndex: number) => Response | Promise<Response>) {
+      const statusCalls: Array<{ url: string }> = [];
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          const idx = statusCalls.length;
+          statusCalls.push({ url });
+          return statusHandler(idx);
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(JSON.stringify({ contextGraphs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      return { fetchFn, statusCalls };
+    }
+
+    function makeMockApi(): OpenClawPluginApi {
+      return {
+        config: {},
+        registrationMode: 'full' as const,
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: () => {},
+        on: () => {},
+        logger: { info: () => {}, warn: () => {}, debug: () => {} },
+      } as unknown as OpenClawPluginApi;
+    }
+
+    // Drain enough event-loop turns for a fire-and-forget fetch chain
+    // (`ensureNodePeerId` → `probeNodePeerIdOnce` → `getStatus` → `fetch`
+    // → response.json → state assignment → `.finally` cleanup) to
+    // actually settle. Real-world fetch chains are ~15-20 microtask
+    // hops; a generous count here is cheaper than a wall-clock wait.
+    const flushMicrotasks = async () => {
+      for (let i = 0; i < 50; i++) {
+        await Promise.resolve();
+      }
+    };
+
+    it('lazily re-probes peer ID when the register-time probe failed', async () => {
+      // First /api/status fire rejects (daemon not ready). Second fire
+      // (triggered lazily by a resolver call) succeeds.
+      const { fetchFn, statusCalls } = makeFetchStub((idx) => {
+        if (idx === 0) {
+          return new Response('daemon starting', { status: 503 });
+        }
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:test-peer' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Drain the register-time probe (it fires-and-forgets).
+        await flushMicrotasks();
+        // Register-time probe saw a 503, so peerId is still undefined and
+        // any call to getDefaultAgentAddress reflects that.
+        expect((plugin as any).nodePeerId).toBeUndefined();
+        const resolver = (plugin as any).memorySessionResolver;
+        const firstCall = resolver.getDefaultAgentAddress();
+        expect(firstCall).toBeUndefined();
+        // That call triggered a lazy re-probe. Let it complete.
+        await flushMicrotasks();
+        // Now the cached peer ID is populated; subsequent resolver calls
+        // see it immediately, no further fetch fire.
+        const statusCallsBefore = statusCalls.length;
+        const secondCall = resolver.getDefaultAgentAddress();
+        expect(secondCall).toBe('did:dkg:agent:test-peer');
+        expect(statusCalls.length).toBe(statusCallsBefore);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('debounces concurrent resolver fires to a single in-flight probe', async () => {
+      // All /api/status fires succeed. But a single burst of 10 resolver
+      // calls before any drain must produce exactly ONE fetch to
+      // /api/status (1 from register + 0 from the burst, since the
+      // register-time probe is in flight and the burst should await it).
+      let resolveStatus: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => {
+        resolveStatus = resolve;
+      });
+      const { fetchFn, statusCalls } = makeFetchStub(async () => {
+        await gate;
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:debounced' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        // The register-time probe has already started and is parked on
+        // the gate. 10 resolver calls in a burst must NOT each fire a
+        // new /api/status because the in-flight probe guard collapses
+        // them onto the same pending promise.
+        const resolver = (plugin as any).memorySessionResolver;
+        for (let i = 0; i < 10; i++) {
+          resolver.getDefaultAgentAddress();
+        }
+        // Only one /api/status call fired (the register-time one).
+        expect(statusCalls.length).toBe(1);
+        // Release the gate; drain; probe completes.
+        resolveStatus!();
+        await flushMicrotasks();
+        // After drain, the cache is populated; a new resolver call returns
+        // the peerId without firing a third /api/status.
+        const finalCall = resolver.getDefaultAgentAddress();
+        expect(finalCall).toBe('did:dkg:agent:debounced');
+        expect(statusCalls.length).toBe(1);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('recovers on every subsequent call when /api/status keeps failing', async () => {
+      // Permanent failure. Every resolver call returns undefined (so B2's
+      // retryable clarification surfaces to the caller), and every call
+      // triggers a re-probe attempt — but the in-flight debounce means
+      // bursts within a single drain window collapse to one fetch fire.
+      const { fetchFn, statusCalls } = makeFetchStub(() => {
+        return new Response('daemon down', { status: 503 });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        // One call from register-time probe (that saw the 503).
+        const initialCalls = statusCalls.length;
+        expect(initialCalls).toBeGreaterThanOrEqual(1);
+
+        const resolver = (plugin as any).memorySessionResolver;
+
+        // Call the resolver, let its probe resolve (to 503), call again.
+        // Each cycle should trigger ONE new /api/status call — not
+        // zero (previous "soft-brick" behavior), not ten.
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await flushMicrotasks();
+        const afterFirstLazy = statusCalls.length;
+        expect(afterFirstLazy).toBe(initialCalls + 1);
+
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await flushMicrotasks();
+        const afterSecondLazy = statusCalls.length;
+        expect(afterSecondLazy).toBe(initialCalls + 2);
+
+        // Never throws, never loops forever. Just keeps returning
+        // undefined and keeps re-probing on demand.
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('does NOT re-probe when the register-time probe already succeeded', async () => {
+      // Register-time probe hits /api/status once and resolves. Burst of
+      // resolver calls afterwards hits exactly ZERO additional /api/status
+      // fires, because `nodePeerId` is cached.
+      const { fetchFn, statusCalls } = makeFetchStub(() => {
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:happy-path' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:happy-path');
+        const baselineCalls = statusCalls.length;
+        const resolver = (plugin as any).memorySessionResolver;
+        for (let i = 0; i < 20; i++) {
+          expect(resolver.getDefaultAgentAddress()).toBe('did:dkg:agent:happy-path');
+        }
+        expect(statusCalls.length).toBe(baselineCalls);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
 });

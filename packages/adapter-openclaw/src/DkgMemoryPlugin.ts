@@ -16,11 +16,22 @@
 import type { DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
-  MemorySearchOptions,
-  MemorySearchResult,
-  OpenClawMemorySearchManager,
   OpenClawPluginApi,
 } from './types.js';
+
+// NOTE: This file is scheduled for rewrite in Slice 3 of the
+// openclaw-dkg-primary-memory effort. Types below temporarily bridge the
+// legacy (Phase-0) shape with the vendored upstream types now declared in
+// `./types.js` so the package continues to compile between slices.
+type LegacyMemorySearchOptions = { limit?: number; threshold?: number };
+type LegacyMemorySearchResult = { path: string; content: string; score?: number };
+type LegacyMemorySearchManager = {
+  search(query: string, options?: LegacyMemorySearchOptions): Promise<LegacyMemorySearchResult[]>;
+  readFile(path: string): Promise<string | null>;
+  status(): Promise<{ ready: boolean; indexedFiles?: number; lastSync?: number }>;
+  sync?(): Promise<void>;
+  close?(): Promise<void>;
+};
 
 const AGENT_MEMORY_CONTEXT_GRAPH = 'agent-memory';
 
@@ -33,7 +44,7 @@ const NS = {
   dkg: 'http://dkg.io/ontology/',
 };
 
-export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
+export class DkgMemoryPlugin implements LegacyMemorySearchManager {
   private api: OpenClawPluginApi | null = null;
 
   constructor(
@@ -129,7 +140,7 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
   // MemorySearchManager interface
   // ---------------------------------------------------------------------------
 
-  async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
+  async search(query: string, options?: LegacyMemorySearchOptions): Promise<LegacyMemorySearchResult[]> {
     const limit = options?.limit ?? 10;
 
     // Strategy: search across both curated memories and chat message text.
@@ -264,7 +275,7 @@ function buildSearchSparql(query: string, limit: number): string {
  * Format SPARQL results into MemorySearchResult[].
  * Computes a simple keyword-overlap relevance score.
  */
-function formatSearchResults(result: any, query: string): MemorySearchResult[] {
+function formatSearchResults(result: any, query: string): LegacyMemorySearchResult[] {
   // DKG daemon returns { result: { bindings: [...] } } (singular "result")
   const bindings: any[] = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
   const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);

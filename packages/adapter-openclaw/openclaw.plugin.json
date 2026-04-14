@@ -3,6 +3,7 @@
   "name": "DKG Node UI Bridge",
   "version": "0.0.1",
   "description": "Connects a local OpenClaw agent to a DKG V10 node for node-backed chat, memory, and agent-network capabilities.",
+  "kind": "memory",
   "channels": ["dkg-ui"],
   "configSchema": {
     "type": "object",

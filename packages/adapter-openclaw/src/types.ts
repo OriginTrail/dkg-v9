@@ -1,16 +1,16 @@
 /**
  * OpenClaw plugin API types + DKG integration types.
  *
- * These mirror the OpenClaw runtime API surface that plugins interact with.
- * The full types live in the OpenClaw runtime; these are the subset needed
- * to build a DKG adapter plugin.
- *
- * Types marked "(spike)" are based on documented OpenClaw APIs but have not
- * yet been tested against a live runtime.  Spike A / B validate them.
+ * Upstream memory types in the bottom half of this file are vendored from
+ * the OpenClaw source tree — `src/plugins/memory-state.ts` and
+ * `packages/memory-host-sdk/src/host/types.ts` at commit
+ * `dae060390b1d17aa949c4a1a0c12fbc3b1eedb79`. `@openclaw/plugin-sdk` does
+ * not publicly export memory types, so they are mirrored here instead of
+ * imported. Resync on OpenClaw minor-version bumps.
  */
 
 // ---------------------------------------------------------------------------
-// Core OpenClaw types (verified — used by existing DkgNodePlugin)
+// Core OpenClaw plugin API surface
 // ---------------------------------------------------------------------------
 
 export interface OpenClawPluginApi {
@@ -21,8 +21,6 @@ export interface OpenClawPluginApi {
   registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
   on(event: string, handler: (...args: any[]) => void): void;
   logger: { info?(...args: any[]): void; warn?(...args: any[]): void; debug?(...args: any[]): void };
-
-  // --- Extended APIs (spike — may not be available in all versions) ---
 
   /** Register a bidirectional channel plugin. */
   registerChannel?(opts: { plugin: OpenClawChannelAdapter; dock?: unknown }): void;
@@ -44,6 +42,12 @@ export interface OpenClawPluginApi {
 
   /** Route an inbound channel message through the session system. */
   routeInboundMessage?(message: ChannelInboundMessage): Promise<ChannelOutboundReply>;
+
+  /**
+   * Register the memory-slot capability. Optional on the type so adapters
+   * can feature-detect older gateway versions at runtime.
+   */
+  registerMemoryCapability?(capability: MemoryPluginCapability): void;
 
   /** Workspace directory path (set by gateway). */
   workspaceDir?: string;
@@ -68,7 +72,7 @@ export interface OpenClawToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// Channel types (spike A)
+// Channel types
 // ---------------------------------------------------------------------------
 
 /** Inbound message from an external channel into OpenClaw. */
@@ -98,7 +102,7 @@ export interface ChannelOutboundReply {
 }
 
 /**
- * Channel adapter interface (spike).
+ * Channel adapter interface.
  *
  * Mirrors OpenClaw's ChannelPlugin contract — channels are bidirectional
  * message transports.  The adapter registers one of these per channel.
@@ -135,37 +139,155 @@ export interface OpenClawChannelAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Memory types (spike B)
+// Vendored upstream memory types
+// ---------------------------------------------------------------------------
+// Source: `src/plugins/memory-state.ts` + `packages/memory-host-sdk/src/host/types.ts`
+// at OpenClaw commit `dae060390b1d17aa949c4a1a0c12fbc3b1eedb79`.
+// Resync on minor-version bumps.
 // ---------------------------------------------------------------------------
 
-export interface MemorySearchResult {
-  /** Source identifier (file path or graph URI). */
-  path: string;
-  /** Matched content snippet. */
-  content: string;
-  /** Relevance score (0–1, higher = more relevant). */
-  score?: number;
-}
+/** Discriminator for where a `MemorySearchResult` originated. */
+export type MemorySource = 'memory' | 'sessions';
 
-export interface MemorySearchOptions {
-  /** Maximum results to return. */
-  limit?: number;
-  /** Minimum relevance score threshold. */
-  threshold?: number;
+/** Minimal citation metadata attached to a search hit. Shape intentionally loose. */
+export interface MemoryCitation {
+  kind?: string;
+  ref?: string;
+  label?: string;
+  [key: string]: unknown;
 }
 
 /**
- * Memory search manager interface (spike).
- *
- * Mirrors OpenClaw's MemorySearchManager — strictly read-only.
- * Write capture is handled separately via hooks + file watchers.
+ * Upstream search result shape. `path` is an opaque identifier (file path or
+ * graph-backed synthetic URI). `startLine`/`endLine` are `1` for graph-backed
+ * backends that have no natural line concept. `snippet` is the matched text,
+ * typically truncated. `source` distinguishes per-project memory hits from
+ * session-history hits.
  */
-export interface OpenClawMemorySearchManager {
+export interface MemorySearchResult {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+  source: MemorySource;
+  citation?: MemoryCitation;
+}
+
+/** Search opts the memory slot passes through. */
+export interface MemorySearchOptions {
+  maxResults?: number;
+  minScore?: number;
+  sessionKey?: string;
+}
+
+/**
+ * Upstream `readFile` request shape. Non-nullable return per upstream contract
+ * (`readFile` cannot signal "not found" structurally — callers must inspect
+ * `text`). V10 memory is graph-native, so the DKG provider returns an empty
+ * shell unconditionally.
+ */
+export interface MemoryReadFileRequest {
+  relPath: string;
+  from?: number;
+  lines?: number;
+}
+
+export interface MemoryReadFileResult {
+  text: string;
+  path: string;
+}
+
+/**
+ * Synchronous status block returned by `MemorySearchManager.status()`.
+ * `backend` is a closed union (`"builtin" | "qmd"`) in the upstream contract;
+ * the DKG provider reports `"builtin"` as a pragmatic lie because no
+ * `"custom"` option exists upstream. Logged as an upstream gap.
+ */
+export interface MemoryProviderStatus {
+  backend: 'builtin' | 'qmd';
+  provider: string;
+  model?: string;
+  vector?: { enabled: boolean; available: boolean };
+  fts?: { enabled: boolean; available: boolean };
+  cache?: { enabled: boolean };
+  batch?: { enabled: boolean };
+  sources?: readonly MemorySource[];
+  workspaceDir?: string;
+  custom?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/**
+ * Upstream probe result shape. The only documented fields are `ok` and an
+ * optional `error` string. No structured `notAvailable` field — logged as an
+ * upstream gap.
+ */
+export interface MemoryEmbeddingProbeResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Upstream `MemorySearchManager` contract — what `registerMemoryCapability`
+ * expects from a plugin's memory runtime. The DKG provider implements this
+ * against real V10 primitives (assertion-scoped WM SPARQL queries) rather
+ * than the file-backed pattern `memory-core` / `memory-lancedb` use.
+ */
+export interface MemorySearchManager {
   search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
-  readFile(path: string): Promise<string | null>;
-  status(): Promise<{ ready: boolean; indexedFiles?: number; lastSync?: number }>;
+  readFile(request: MemoryReadFileRequest): Promise<MemoryReadFileResult>;
+  status(): MemoryProviderStatus;
+  probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult>;
+  probeVectorAvailability(): Promise<MemoryEmbeddingProbeResult>;
   sync?(): Promise<void>;
   close?(): Promise<void>;
+}
+
+/** Factory call parameters — upstream passes cfg + agent + session. */
+export interface MemoryRuntimeRequest {
+  cfg?: Record<string, unknown>;
+  agentId?: string;
+  sessionKey?: string;
+  purpose?: string;
+}
+
+/** Factory result — a search manager plus optional non-fatal error. */
+export interface MemoryRuntimeResult {
+  manager: MemorySearchManager;
+  error?: string;
+}
+
+/**
+ * Upstream `MemoryPluginRuntime` shape. `getMemorySearchManager` is the
+ * per-(cfg, agentId, sessionKey) factory; a slot-filling plugin is expected
+ * to return a manager instance or an error-wrapped result.
+ */
+export interface MemoryPluginRuntime {
+  getMemorySearchManager(request: MemoryRuntimeRequest): Promise<MemoryRuntimeResult>;
+  resolveMemoryBackendConfig?(request: { cfg?: Record<string, unknown>; agentId?: string }): Record<string, unknown>;
+  closeAllMemorySearchManagers?(): Promise<void>;
+}
+
+/**
+ * Prompt-section builder — emits the memory region of the system prompt.
+ * Called synchronously during prompt assembly.
+ */
+export type MemoryPromptSectionBuilder = (params: {
+  availableTools: Set<string>;
+  citationsMode?: string;
+}) => string[];
+
+/**
+ * Full capability object handed to `api.registerMemoryCapability`. All four
+ * fields optional — the minimum is `{ runtime }`, which is what the DKG
+ * adapter registers.
+ */
+export interface MemoryPluginCapability {
+  runtime?: MemoryPluginRuntime;
+  promptBuilder?: MemoryPromptSectionBuilder;
+  flushPlanResolver?: (params: { cfg?: Record<string, unknown>; nowMs?: number }) => unknown;
+  publicArtifacts?: { listArtifacts: (...args: any[]) => Promise<unknown> };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,11 +302,14 @@ export interface DkgOpenClawConfig {
   memory?: {
     enabled?: boolean;
     /**
-     * Path to the memory files directory.
-     * Default: auto-detected from workspace (MEMORY.md parent).
+     * @deprecated v0/Phase-0 file-watcher config. Retained for backward
+     * compatibility with existing workspace configs; ignored by v1.
      */
     memoryDir?: string;
-    /** File-watcher debounce interval in ms.  Default: 1500. */
+    /**
+     * @deprecated v0/Phase-0 file-watcher config. Retained for backward
+     * compatibility with existing workspace configs; ignored by v1.
+     */
     watchDebounceMs?: number;
   };
 

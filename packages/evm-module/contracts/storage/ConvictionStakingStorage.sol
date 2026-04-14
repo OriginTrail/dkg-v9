@@ -81,6 +81,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint40 lockEpochs,
         uint8 multiplier
     ) external onlyContracts {
+        require(identityId != 0, "Zero node");
         require(positions[tokenId].raw == 0, "Position exists");
         require(raw > 0, "Zero raw");
         require(multiplier >= 1, "Bad multiplier");
@@ -95,7 +96,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             expiryEpoch: expiryEpoch,
             multiplier: multiplier,
             identityId: identityId,
-            lastClaimedEpoch: currentEpoch == 0 ? 0 : currentEpoch - 1
+            lastClaimedEpoch: currentEpoch - 1
         });
 
         // Apply diff: full effective stake enters at currentEpoch
@@ -126,7 +127,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         Position storage pos = positions[tokenId];
         require(pos.raw > 0, "No position");
         require(newLockEpochs > 0, "Zero lock");
-        require(newMultiplier >= 1, "Bad multiplier");
+        // 1x is the post-expiry rest state — re-committing at 1x would leave
+        // lockEpochs/expiryEpoch non-zero while the diff curve stays flat,
+        // a drift that downstream reward math cannot distinguish from a real
+        // boosted lock. Force every relock to carry an actual multiplier.
+        require(newMultiplier >= 2, "Bad multiplier");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         // Relock is a post-expiry re-commit: prior lock must be done (or never existed)
@@ -136,20 +141,15 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint72 identityId = pos.identityId;
 
         // Position is currently at raw*1 (permanent, post-expiry). Lift to raw*newMultiplier.
-        if (newMultiplier > 1) {
-            int256 boost = int256(uint256(raw)) * int256(uint256(newMultiplier - 1));
-            effectiveStakeDiff[currentEpoch] += boost;
-            nodeEffectiveStakeDiff[identityId][currentEpoch] += boost;
+        int256 boost = int256(uint256(raw)) * int256(uint256(newMultiplier - 1));
+        effectiveStakeDiff[currentEpoch] += boost;
+        nodeEffectiveStakeDiff[identityId][currentEpoch] += boost;
 
-            uint40 newExpiry = uint40(currentEpoch) + newLockEpochs;
-            effectiveStakeDiff[newExpiry] -= boost;
-            nodeEffectiveStakeDiff[identityId][newExpiry] -= boost;
+        uint40 newExpiry = uint40(currentEpoch) + newLockEpochs;
+        effectiveStakeDiff[newExpiry] -= boost;
+        nodeEffectiveStakeDiff[identityId][newExpiry] -= boost;
 
-            pos.expiryEpoch = newExpiry;
-        } else {
-            pos.expiryEpoch = uint40(currentEpoch) + newLockEpochs;
-        }
-
+        pos.expiryEpoch = newExpiry;
         pos.lockEpochs = newLockEpochs;
         pos.multiplier = newMultiplier;
 
@@ -162,6 +162,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     }
 
     function updateOnRedelegate(uint256 tokenId, uint72 newIdentityId) external onlyContracts {
+        require(newIdentityId != 0, "Zero node");
         Position storage pos = positions[tokenId];
         require(pos.raw > 0, "No position");
         uint72 oldIdentityId = pos.identityId;
@@ -284,6 +285,23 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
     function getNodeLastFinalizedEpoch(uint72 identityId) external view returns (uint256) {
         return nodeLastFinalizedEpoch[identityId];
+    }
+
+    // ============================================================
+    //                     External finalizers
+    // ============================================================
+
+    // Hub contracts (notably Phase 11 reward math) can amortize the
+    // O(currentEpoch - lastFinalizedEpoch) simulate path into a single
+    // write by calling these before reading getTotalEffectiveStakeAtEpoch /
+    // getNodeEffectiveStakeAtEpoch across a long dormant window.
+
+    function finalizeEffectiveStakeUpTo(uint256 epoch) external onlyContracts {
+        _finalizeEffectiveStakeUpTo(epoch);
+    }
+
+    function finalizeNodeEffectiveStakeUpTo(uint72 identityId, uint256 epoch) external onlyContracts {
+        _finalizeNodeEffectiveStakeUpTo(identityId, epoch);
     }
 
     // ============================================================

@@ -11,6 +11,7 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ContextGraphs} from "./ContextGraphs.sol";
+import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
@@ -31,13 +32,14 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
 /**
  * @title KnowledgeAssetsV10
- * @notice V10 publish contract — wires together:
+ * @notice V10 publish + update contract — wires together:
  *   - ContextGraphs facade (3 curator types, atomic KC↔CG bind)
+ *   - ContextGraphStorage (direct read for `kcToContextGraph` on update)
  *   - ContextGraphValueStorage (per-CG value ledger for value-weighted challenges)
  *   - DKGPublishingConvictionNFT (publisher discount NFT; auto-resolves agent→account)
  *   - KnowledgeCollectionStorage (V8-compatible data model)
  *
- * Two public entry points:
+ * Four public entry points (two publish + two update, mirrored design):
  *   - `publish`        — conviction path. NFT covers the cost. TRAC accounting
  *                        was already done at `createAccount` time, so this
  *                        path does NOT touch `_addTokens` or `_distributeTokens`
@@ -45,20 +47,41 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *   - `publishDirect`  — market-rate path. Pulls TRAC from caller/paymaster
  *                        and distributes across the epoch range via
  *                        `_distributeTokens`.
+ *   - `update`         — conviction path for UPDATES. Charges only the DELTA
+ *                        between `newTokenAmount` and the KC's current
+ *                        `tokenAmount` via `coverPublishingCost`. Metadata-only
+ *                        updates (`delta == 0`) skip payment entirely.
+ *   - `updateDirect`   — market-rate update. Pulls delta TRAC via `_addTokens`
+ *                        and distributes it over the REMAINING lifetime via
+ *                        `_distributeTokens`.
  *
- * Both paths share the core sequence (sig verification → auth → validate →
- * KCS create → atomic CG bind → CG value write → per-node produced-value
- * bookkeeping) via the internal `_executePublishCore` helper.
+ * Both publish paths share `_executePublishCore`. Both update paths share
+ * `_executeUpdateCore`. Each core runs: sig verification → authorization →
+ * validation → KCS mutation → atomic CG value delta write → per-node
+ * produced-value bookkeeping. No TRAC movement happens in the cores — the
+ * public entries branch on payment path.
  *
  * ACK digest prefix (H5 closure): `block.chainid || address(this)` pins a
  * signed ACK to this contract on this chain. Replay across chains / forks
  * / contract redeployments is rejected at signature verification.
  *
  * Publisher digest field order (N26 closure): `(publisherNodeIdentityId,
- * contextGraphId, merkleRoot)` — matches spec `07_EVM_MODULE.md:164`.
+ * contextGraphId, merkleRoot)` — matches spec `07_EVM_MODULE.md:164`. For
+ * updates the same order is used with the new merkle root.
  *
- * Authorization (N17 closure): `isAuthorizedPublisher` is called with
- * `msg.sender` (the paying principal), NOT the recovered node signer.
+ * Authorization:
+ *   - publish: N17 closure — `isAuthorizedPublisher(msg.sender)` via facade.
+ *   - update:  N16 closure — ERC-1155 balanceOf gate. The caller must hold at
+ *              least one minted KA token in the KC's token range. Replaces the
+ *              broken "latestPublisher == msg.sender" V9 gate, which trivially
+ *              authorized the most recent merkle-root signer rather than the
+ *              paying owner.
+ *
+ * Byte-size ceiling (decision #4 closure): updates may GROW `newByteSize`
+ * beyond the original value, as long as the new `tokenAmount` covers the new
+ * size × remaining lifetime at the current stake-weighted ask. The
+ * `originalByteSize` ceiling mapping is REMOVED; byte-size audit provenance
+ * lives in the KCS `KnowledgeCollectionByteSizeUpdated` event history.
  */
 contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "KnowledgeAssetsV10";
@@ -83,6 +106,31 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         bytes32[] vs;
     }
 
+    /**
+     * @notice V10 update input (grouped to bypass the 16-arg stack limit).
+     *
+     * `newTokenAmount` is the NEW TOTAL `tokenAmount` for the KC (not a delta).
+     * KAV10 computes `delta = newTokenAmount - currentTokenAmount` internally
+     * and charges the caller only for the delta via the conviction or direct
+     * path. Metadata-only updates (`delta == 0`) are free but still require
+     * fresh publisher + ACK signatures.
+     */
+    struct UpdateParams {
+        uint256 id;
+        string updateOperationId;
+        bytes32 newMerkleRoot;
+        uint88 newByteSize;
+        uint96 newTokenAmount;
+        uint256 mintKnowledgeAssetsAmount;
+        uint256[] knowledgeAssetsToBurn;
+        uint72 publisherNodeIdentityId;
+        bytes32 publisherNodeR;
+        bytes32 publisherNodeVS;
+        uint72[] identityIds;
+        bytes32[] r;
+        bytes32[] vs;
+    }
+
     // --- Hub-resolved dependencies ---
 
     AskStorage public askStorage;
@@ -98,20 +146,42 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     IdentityStorage public identityStorage;
     StakingStorage public stakingStorage;
     ContextGraphs public contextGraphs;
+    ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
     IDKGPublishingConvictionNFT public publishingConvictionNFT;
-
-    // --- Persistent state ---
-
-    // Tracks the original (maximum) byte size paid for at creation time.
-    // Updates can shrink below this but never exceed it without additional payment.
-    mapping(uint256 => uint88) public originalByteSize;
 
     // --- Errors ---
 
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
     error ZeroEpochs();
+
+    // --- Update-specific errors (V10 Phase 8 Task 2) ---
+
+    /// @dev Caller is not an owner of any minted token in this KC's ERC-1155
+    ///      token range. Replaces the broken `latestPublisher == msg.sender`
+    ///      gate (N16 closure).
+    error NotKnowledgeCollectionTokenHolder(uint256 kcId, address caller);
+
+    /// @dev Update would reduce the KC's `tokenAmount` below its current
+    ///      value. Rebates are not supported — a publisher that wants to
+    ///      downsize must let the KC expire and republish. (decision #4)
+    error CannotShrinkTokenAmount(uint96 currentTokenAmount, uint96 newTokenAmount);
+
+    /// @dev Caller is attempting a paid update (`newTokenAmount >
+    ///      currentTokenAmount`) but the KC has no full epoch of remaining
+    ///      lifetime (`currentEpoch == endEpoch`). No distribution vehicle
+    ///      exists for the extra tokens — the publisher must extend the
+    ///      lifetime via `extendKnowledgeCollectionLifetime` before growing
+    ///      byte size or tokenAmount in the final epoch.
+    error NoRemainingLifetimeForDelta(uint256 kcId, uint40 currentEpoch, uint40 endEpoch);
+
+    /// @dev KC has no CG binding recorded (`kcToContextGraph[kcId] == 0`).
+    ///      This is a corrupt-state assertion: publish atomically binds
+    ///      kcId → cgId, so a missing binding indicates a Phase 7 storage
+    ///      invariant was violated. Update cannot proceed without knowing
+    ///      the CG because the CG value ledger needs the target cgId.
+    error MissingContextGraphBinding(uint256 kcId);
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -142,6 +212,15 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         address cgAddr = hub.getContractAddress("ContextGraphs");
         if (cgAddr == address(0)) revert ZeroAddressDependency("ContextGraphs");
         contextGraphs = ContextGraphs(cgAddr);
+
+        // ContextGraphStorage is resolved directly for read-only `kcToContextGraph`
+        // lookups on the update path. The facade does not expose a KC→CG view
+        // getter, and caching the storage here avoids a double-hop SLOAD via
+        // `contextGraphs.contextGraphStorage()` on every update. Writes still
+        // go through the facade (auth + atomic bind in `publish`).
+        address cgsAddr = hub.getAssetStorageAddress("ContextGraphStorage");
+        if (cgsAddr == address(0)) revert ZeroAddressDependency("ContextGraphStorage");
+        contextGraphStorage = ContextGraphStorage(cgsAddr);
 
         address cgvAddr = hub.getContractAddress("ContextGraphValueStorage");
         if (cgvAddr == address(0)) revert ZeroAddressDependency("ContextGraphValueStorage");
@@ -322,8 +401,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.tokenAmount,
             p.isImmutable
         );
-
-        originalByteSize[kcId] = p.byteSize;
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---
 
@@ -509,69 +586,280 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     }
 
     // ========================================================================
-    // V10 Update (works with KnowledgeCollectionStorage, not V9 KnowledgeAssetsStorage)
+    // V10 Update Entries
     // ========================================================================
 
     /**
-     * @notice Update an existing knowledge collection. Only the latest publisher
-     *         (the address that pushed the most recent merkle root) may call this.
+     * @notice Update an existing knowledge collection via publisher conviction
+     *         account (discounted path). Closes N16, N19 (local ceiling removal),
+     *         and decision #4.
      *
-     * NOTE: This function currently does not charge an update fee. The V9 update
-     * fee model (10% + excess-byte cost) is tightly coupled to V9 epoch/reward
-     * accounting. A V10-native fee model will be added in a later task.
+     * Authorization (N16 closure): the caller (`msg.sender`) must hold at least
+     * one minted ERC-1155 knowledge-asset token in this KC's token range. This
+     * replaces the broken V9 "latestPublisher == msg.sender" gate, which
+     * conflated merkle-root authorship with KC ownership and let any node
+     * operator impersonate the publisher on update.
      *
-     * @param id Knowledge collection ID (from publish)
-     * @param newMerkleRoot New merkle root for the updated data
-     * @param newByteSize Updated byte size (must not exceed original)
-     * @param mintAmount Number of new KA tokens to mint (0 if unchanged)
-     * @param burnTokenIds Token IDs to burn (empty if unchanged)
+     * Delta-only payment semantics (decision #4 interpretation): the caller
+     * passes `newTokenAmount` as the NEW TOTAL `tokenAmount` for the KC. KAV10
+     * charges only `delta = newTokenAmount - currentTokenAmount` via
+     * `coverPublishingCost`. Rebates are rejected (`CannotShrinkTokenAmount`).
+     * Metadata-only updates (`delta == 0`) bypass `coverPublishingCost`
+     * entirely — no conviction spend, no zero-value NFT hop.
+     *
+     * Double-count prevention (same reasoning as `publish`): conviction-path
+     * TRAC was already distributed by the NFT's `createAccount` /`topUp` at
+     * lock time, so this path MUST NOT call `_addTokens` / `_distributeTokens`.
+     *
+     * @param p Update parameters (see `UpdateParams` struct).
      */
-    function updateKnowledgeCollection(
-        uint256 id,
-        bytes32 newMerkleRoot,
-        uint88 newByteSize,
-        uint256 mintAmount,
-        uint256[] calldata burnTokenIds
-    ) external {
+    function update(UpdateParams calldata p) external {
+        (uint96 deltaTokenAmount, , ) = _executeUpdateCore(p);
+
+        if (deltaTokenAmount > 0) {
+            // Spend publisher allowance for the delta only. NFT reverts
+            // NoConvictionAccount(msg.sender) if caller is not registered
+            // as an agent on any active account.
+            publishingConvictionNFT.coverPublishingCost(msg.sender, deltaTokenAmount);
+        }
+    }
+
+    /**
+     * @notice Update an existing knowledge collection at market rate (no
+     *         conviction discount).
+     *
+     * Pulls `delta` TRAC from `msg.sender` (or `paymaster` if valid) and
+     * distributes it across the REMAINING lifetime via `_distributeTokens`.
+     * Metadata-only updates (`delta == 0`) skip both the token pull and the
+     * distribution entirely.
+     *
+     * @param p Update parameters.
+     * @param paymaster Paymaster address for cost coverage, or `address(0)`
+     *                  to pull from `msg.sender` directly.
+     */
+    function updateDirect(UpdateParams calldata p, address paymaster) external {
+        (uint96 deltaTokenAmount, uint40 remainingEpochs, uint40 currentEpoch) = _executeUpdateCore(p);
+
+        if (deltaTokenAmount > 0) {
+            _addTokens(deltaTokenAmount, paymaster);
+            _distributeTokens(deltaTokenAmount, uint256(remainingEpochs), currentEpoch);
+        }
+    }
+
+    // ========================================================================
+    // Internal: Shared update core
+    // ========================================================================
+
+    /**
+     * @notice Signature verification + auth + validation + KCS mutation +
+     *         atomic CG value delta write.
+     *
+     * Both `update` and `updateDirect` run this before branching on payment
+     * path. No TRAC movement happens here — the caller's path handles that.
+     *
+     * @return deltaTokenAmount Delta between `newTokenAmount` and the KC's
+     *         current on-chain tokenAmount. Zero on metadata-only updates.
+     * @return remainingEpochs Number of "epoch units" from `currentEpoch` to
+     *         `endEpoch`, exclusive on the tail partial. Matches `p.epochs`
+     *         semantics from `_executePublishCore` so `_distributeTokens` can
+     *         be reused verbatim in `updateDirect`.
+     * @return currentEpoch The current epoch (cached for `_distributeTokens`).
+     */
+    function _executeUpdateCore(
+        UpdateParams calldata p
+    )
+        internal
+        returns (uint96 deltaTokenAmount, uint40 remainingEpochs, uint40 currentEpoch)
+    {
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
 
-        address latestPublisher = kcs.getLatestMerkleRootPublisher(id);
-        require(latestPublisher != address(0), "Knowledge collection does not exist");
-        if (latestPublisher != msg.sender) {
-            revert KnowledgeAssetsLib.NotBatchPublisher(id, msg.sender);
-        }
+        // --- 1. Read current KC metadata (needed for validation + auth) ---
 
-        (, , , uint88 oldByteSize, , uint40 endEpoch, uint96 existingTokenAmount, bool isImmutable) =
-            kcs.getKnowledgeCollectionMetadata(id);
+        (
+            ,
+            ,
+            uint256 minted,
+            ,
+            ,
+            uint40 endEpoch,
+            uint96 currentTokenAmount,
+            bool isImmutable
+        ) = kcs.getKnowledgeCollectionMetadata(p.id);
 
         if (isImmutable) {
-            revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(id);
+            revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(p.id);
         }
 
-        uint256 currentEpoch = chronos.getCurrentEpoch();
-        if (currentEpoch > endEpoch) {
-            revert KnowledgeCollectionLib.KnowledgeCollectionExpired(id, currentEpoch, endEpoch);
+        currentEpoch = uint40(chronos.getCurrentEpoch());
+        if (uint256(currentEpoch) > uint256(endEpoch)) {
+            revert KnowledgeCollectionLib.KnowledgeCollectionExpired(
+                p.id,
+                uint256(currentEpoch),
+                uint256(endEpoch)
+            );
         }
 
-        uint88 ceiling = originalByteSize[id];
-        if (ceiling == 0) {
-            // First update for a pre-tracking collection — persist the ceiling
-            ceiling = oldByteSize;
-            originalByteSize[id] = ceiling;
-        }
-        require(newByteSize <= ceiling, "Cannot increase byte size without additional payment");
-        require(burnTokenIds.length == 0, "Token burning not yet supported in V10 updates");
+        // Remaining lifetime in "publish epoch units" — matches `p.epochs`
+        // semantics in `_executePublishCore`, where `endEpoch = startEpoch +
+        // epochs`. `_distributeTokens` consumes this as the partial-current
+        // + full-middle + partial-final split, and `addCGValueForEpochRange`
+        // pins its diff over `[currentEpoch, currentEpoch + remainingEpochs)`,
+        // retracting at `endEpoch`. Matches the publish-time retraction point.
+        remainingEpochs = endEpoch - currentEpoch;
 
+        // --- 2. CG binding lookup (required for value delta write) ---
+
+        uint256 contextGraphId = contextGraphStorage.kcToContextGraph(p.id);
+        if (contextGraphId == 0) {
+            // Post-Phase-7 invariant: publish atomically binds kcId → cgId
+            // via `contextGraphs.registerKnowledgeCollection`. Zero here
+            // means corrupt state (KC created outside publish, or Phase 7
+            // migration gap). Fail loudly — silently authorizing without a
+            // CG would orphan the KC from value-weighted challenges.
+            revert MissingContextGraphBinding(p.id);
+        }
+
+        // --- 3. Signature verification ---
+
+        // Publisher digest (N26 field order: publisherNodeIdentityId,
+        // contextGraphId, merkleRoot). Prefixed with block.chainid +
+        // address(this) for H5 cross-chain / cross-deployment replay pin.
+        // The CG id comes from on-chain state, not from the caller — a
+        // signer cannot redirect an update to a different CG by lying about
+        // it in the signed payload.
+        bytes32 publisherDigest = keccak256(
+            abi.encodePacked(
+                block.chainid,
+                address(this),
+                p.publisherNodeIdentityId,
+                contextGraphId,
+                p.newMerkleRoot
+            )
+        );
+        _verifySignature(
+            p.publisherNodeIdentityId,
+            ECDSA.toEthSignedMessageHash(publisherDigest),
+            p.publisherNodeR,
+            p.publisherNodeVS
+        );
+
+        // ACK digest — covers EVERY mutable field the update can change so a
+        // stale ACK can't be replayed with different byte size, different
+        // token amount, different mint/burn counts, or a different kc id. The
+        // burn id list is digested by its `keccak256` so an arbitrary-length
+        // array folds into a fixed-size `bytes32` without blowing out the
+        // packed digest. H5 prefix pins replay to (chain, contract).
+        bytes32 ackDigest = keccak256(
+            abi.encodePacked(
+                block.chainid,
+                address(this),
+                p.publisherNodeIdentityId,
+                contextGraphId,
+                p.id,
+                p.newMerkleRoot,
+                uint256(p.newByteSize),
+                uint256(p.newTokenAmount),
+                p.mintKnowledgeAssetsAmount,
+                keccak256(abi.encodePacked(p.knowledgeAssetsToBurn))
+            )
+        );
+        _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
+
+        // --- 4. Validate the new total + compute delta ---
+
+        // No rebates: new total must be >= current total. A publisher that
+        // wants to "shrink" must let the KC expire and republish.
+        if (p.newTokenAmount < currentTokenAmount) {
+            revert CannotShrinkTokenAmount(currentTokenAmount, p.newTokenAmount);
+        }
+        deltaTokenAmount = p.newTokenAmount - currentTokenAmount;
+
+        // If there's a delta to pay for, require at least one remaining
+        // epoch to distribute it over. `remainingEpochs == 0` means we're in
+        // the KC's final epoch (currentEpoch == endEpoch): the CG value
+        // ledger would revert ZeroLifetime and _distributeTokens would
+        // divide by zero. Fail early with a caller-facing diagnostic.
+        if (deltaTokenAmount > 0 && remainingEpochs == 0) {
+            revert NoRemainingLifetimeForDelta(p.id, currentEpoch, endEpoch);
+        }
+
+        // Same pricing function as publish — applied to the NEW total over
+        // the REMAINING lifetime. If `newByteSize` grew, the expected cost
+        // grows proportionally and `newTokenAmount` must cover it (else
+        // `InvalidTokenAmount`). For metadata-only updates where
+        // `remainingEpochs == 0`, expected == 0 and the check trivially
+        // passes (we already gated the delta > 0 case above).
+        _validateTokenAmount(
+            uint256(p.newByteSize),
+            uint256(remainingEpochs),
+            p.newTokenAmount,
+            false
+        );
+
+        // --- 5. ERC-1155 ownership auth (N16 closure) ---
+
+        // The caller MUST hold at least one minted KA token in this KC's
+        // token range. This replaces the V9 `latestPublisher == msg.sender`
+        // gate which was both incorrect (the merkle-root signer is the node
+        // operator, not the paying publisher) and unilaterally mutable by
+        // any node that had pushed the last root.
+        //
+        // Token range: KCS mints into `[(id - 1) * MAX_SIZE + 1,
+        // (id - 1) * MAX_SIZE + 1 + minted)` (half-open). The
+        // `KnowledgeCollectionStorage.balanceOf(address, uint256, uint256)`
+        // overload returns the popcount of owned tokens in `[start, stop)`.
+        uint256 maxKcSize = kcs.KNOWLEDGE_COLLECTION_MAX_SIZE();
+        uint256 startTokenId = (p.id - 1) * maxKcSize + 1;
+        uint256 stopTokenId = startTokenId + minted;
+        if (kcs.balanceOf(msg.sender, startTokenId, stopTokenId) == 0) {
+            revert NotKnowledgeCollectionTokenHolder(p.id, msg.sender);
+        }
+
+        // --- 6. Apply KCS mutation (new merkle root, bytes, tokens, mint/burn) ---
+
+        // `msg.sender` (the paying publisher) is recorded as the new merkle
+        // root author AND is the recipient of any newly minted KA tokens.
+        // `p.updateOperationId` is the off-chain correlation id emitted on
+        // `KnowledgeCollectionUpdated`. KCS internally reconciles its
+        // `_totalTokenAmount` counter from old → new.
         kcs.updateKnowledgeCollection(
             msg.sender,
-            id,
-            "",
-            newMerkleRoot,
-            mintAmount,
-            burnTokenIds,
-            newByteSize,
-            existingTokenAmount
+            p.id,
+            p.updateOperationId,
+            p.newMerkleRoot,
+            p.mintKnowledgeAssetsAmount,
+            p.knowledgeAssetsToBurn,
+            p.newByteSize,
+            p.newTokenAmount
         );
+
+        // --- 7. CG value delta + per-node produced-value bookkeeping ---
+
+        // Skip on metadata-only updates — the CG value storage reverts on
+        // `value == 0` (and `remainingEpochs == 0` was already gated above
+        // when delta > 0, so by here either delta > 0 AND remainingEpochs > 0,
+        // or delta == 0 and we short-circuit).
+        if (deltaTokenAmount > 0) {
+            // Write the delta CG value over the REMAINING lifetime so the
+            // per-epoch contribution crystallizes into the CG value cumulative
+            // the same way a fresh publish does. Retraction diff lands at
+            // `endEpoch`, matching publish's retraction point.
+            contextGraphValueStorage.addCGValueForEpochRange(
+                contextGraphId,
+                uint256(currentEpoch),
+                uint256(remainingEpochs),
+                uint256(deltaTokenAmount)
+            );
+
+            // Track per-node produced value for the delta. Uses BASE delta
+            // (not discounted effective spend) so the scoring reflects data
+            // value added, not publisher economics — identical to publish.
+            epochStorage.addEpochProducedKnowledgeValue(
+                p.publisherNodeIdentityId,
+                currentEpoch,
+                deltaTokenAmount
+            );
+        }
     }
 
     // ========================================================================
@@ -579,11 +867,15 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     // ========================================================================
 
     function _distributeTokens(uint96 tokenAmount, uint256 epochs, uint40 currentEpoch) internal {
-        // `epochs > 0` is guaranteed by the `ZeroEpochs` guard in
-        // `_executePublishCore`. No defensive re-check needed — the only
-        // caller is `publishDirect`, which runs through the core helper
-        // first. `extendKnowledgeCollectionLifetime` does NOT call this
-        // helper (it hits `addTokensToEpochRange` directly).
+        // `epochs > 0` is guaranteed by every caller:
+        //   - `publishDirect` → `_executePublishCore` rejects `p.epochs == 0`
+        //     with `ZeroEpochs` before reaching this helper.
+        //   - `updateDirect` → `_executeUpdateCore` rejects
+        //     `deltaTokenAmount > 0 && remainingEpochs == 0` with
+        //     `NoRemainingLifetimeForDelta`, and only calls `_distributeTokens`
+        //     inside an `if (deltaTokenAmount > 0)` gate.
+        // No defensive re-check needed. `extendKnowledgeCollectionLifetime`
+        // does NOT call this helper (it hits `addTokensToEpochRange` directly).
 
         uint256 epochLengthInSeconds = chronos.epochLength();
         uint256 timeRemainingInCurrentEpoch = chronos.timeUntilNextEpoch();

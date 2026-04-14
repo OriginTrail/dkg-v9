@@ -151,22 +151,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "kcId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "caller",
-        "type": "address"
-      }
-    ],
-    "name": "NotKnowledgeCollectionTokenHolder",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint8",
         "name": "bits",
         "type": "uint8"

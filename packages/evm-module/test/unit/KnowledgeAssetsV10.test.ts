@@ -809,7 +809,7 @@ describe('@unit KnowledgeAssetsV10', () => {
     // ----------------------------------------------------------------------
     // T1.7: update fresh ACK + payment + balanceOf gate
     // ----------------------------------------------------------------------
-    describe('T1.7: update — ACK / payment / balanceOf gate', () => {
+    describe('T1.7: update — ACK / payment / policy-branch auth', () => {
       async function publishBaselineKC(): Promise<{
         creator: SignerWithAddress;
         cgId: bigint;
@@ -913,8 +913,15 @@ describe('@unit KnowledgeAssetsV10', () => {
         ).to.not.be.reverted;
       });
 
-      // -- T1.7c: non-token-holder caller reverts --
-      it('T1.7c: reverts NotKnowledgeCollectionTokenHolder when caller holds no KA tokens', async () => {
+      // -- T1.7c: unauthorized (non-publisher) caller reverts --
+      //
+      // Baseline uses an OPEN CG, where update auth pins to the ORIGINAL
+      // publisher (`merkleRoots[0].publisher`). Any non-publisher caller
+      // reverts `UnauthorizedPublisher`, regardless of KA token ownership.
+      // This is the policy-branch auth gate (Codex Round 4 Finding 3);
+      // replaces the earlier `balanceOf`-based `NotKnowledgeCollectionTokenHolder`
+      // gate, which was hijackable under ERC-1155Delta transferability.
+      it('T1.7c: reverts UnauthorizedPublisher when caller is not the original publisher', async () => {
         const base = await publishBaselineKC();
         const stranger = accounts[15];
         const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7c-new'));
@@ -939,16 +946,16 @@ describe('@unit KnowledgeAssetsV10', () => {
           updateOperationId: 't1.7c-update',
         });
 
-        // Stranger doesn't own any KA tokens in this KC's range.
-        await TokenContract.connect(stranger).approve(kav10Address, delta);
-        // Give stranger balance so the revert isn't due to TRAC shortfall.
+        // Give stranger TRAC + approval so the revert is auth-only, not
+        // a shortfall in allowance or balance.
         await TokenContract.connect(accounts[0]).transfer(stranger.address, delta);
+        await TokenContract.connect(stranger).approve(kav10Address, delta);
 
         await expect(
           KAV10.connect(stranger).updateDirect(up, ethers.ZeroAddress),
         )
-          .to.be.revertedWithCustomError(KAV10, 'NotKnowledgeCollectionTokenHolder')
-          .withArgs(base.kcId, stranger.address);
+          .to.be.revertedWithCustomError(KAV10, 'UnauthorizedPublisher')
+          .withArgs(base.cgId, stranger.address);
       });
 
       // -- T1.7d: rebate (newTokenAmount < current) reverts --
@@ -1229,6 +1236,76 @@ describe('@unit KnowledgeAssetsV10', () => {
           .to.be.revertedWithCustomError(KCS, 'NotPartOfKnowledgeCollection')
           .withArgs(base.kcId, outOfRangeTokenId);
       });
+
+      // -- T1.7j: KA token transfer does NOT grant update authority --
+      //
+      // Codex Round 4 Finding 3. Baseline publishes in an open CG. The
+      // original publisher transfers 1 KA token to a stranger via
+      // `safeTransferFrom`. Pre-fix, the `balanceOf(stranger, kcRange) > 0`
+      // gate would have authorized the stranger to rotate the merkle
+      // root, mint new KAs, and burn existing KAs. Post-fix, open-CG
+      // update auth is pinned to `merkleRoots[0].publisher` (the original
+      // paying principal), so holding a transferred KA token buys
+      // nothing. Locks the exploit closed.
+      it('T1.7j: KA token transfer to stranger does NOT grant update auth', async () => {
+        const base = await publishBaselineKC();
+        const stranger = accounts[16];
+
+        // Transfer 1 KA from the original publisher to the stranger.
+        const maxSize = await KCS.KNOWLEDGE_COLLECTION_MAX_SIZE();
+        const firstTokenId = (base.kcId - 1n) * maxSize + 1n;
+        await KCS.connect(base.creator).safeTransferFrom(
+          base.creator.address,
+          stranger.address,
+          firstTokenId,
+          1n,
+          '0x',
+        );
+        // Sanity: stranger now holds the transferred token.
+        expect(
+          await KCS['balanceOf(address,uint256,uint256)'](
+            stranger.address,
+            firstTokenId,
+            firstTokenId + 1n,
+          ),
+        ).to.equal(1n);
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7j-new'));
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount: base.tokenAmount, // metadata-only update
+          mintKnowledgeAssetsAmount: 1n,
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.7j-update',
+        });
+
+        // Stranger's update attempt reverts even though they now hold a
+        // KA token from the KC. The revert comes from the open-CG
+        // original-publisher pin, NOT from the balanceOf gate.
+        await expect(
+          KAV10.connect(stranger).updateDirect(up, ethers.ZeroAddress),
+        )
+          .to.be.revertedWithCustomError(KAV10, 'UnauthorizedPublisher')
+          .withArgs(base.cgId, stranger.address);
+
+        // Positive sanity: the original publisher, who no longer holds
+        // token `firstTokenId` (it's with the stranger), can still
+        // update via the original-publisher pin. Locks "original
+        // publisher retains rights even after selling a KA token".
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress),
+        ).to.not.be.reverted;
+      });
     });
 
     // ----------------------------------------------------------------------
@@ -1421,6 +1498,74 @@ describe('@unit KnowledgeAssetsV10', () => {
         await expect(KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress))
           .to.be.revertedWithCustomError(KAV10, 'NoRemainingLifetimeForDelta')
           .withArgs(base.kcId, now, meta[5]);
+      });
+
+      // -- T1.8d: mid-lifetime byte-size growth with zero delta reverts --
+      //
+      // Codex Round 4 Finding 2. The pre-fix validation compared the
+      // CUMULATIVE `newTokenAmount` against `remainingEpochs` —
+      // late in a KC's lifetime, most of the cumulative has already been
+      // paid out to past epoch pools, so the check was too permissive: a
+      // publisher could double the byteSize near the end of the lifetime
+      // with `delta == 0` because the cumulative still "covered" the
+      // smaller remaining window on paper, even though the actual
+      // undistributed reward pool was a fraction of the new footprint's
+      // cost.
+      //
+      // Post-fix, the check charges `delta` alone against the MARGINAL
+      // cost of `(newByteSize - currentByteSize) × remainingEpochs`, so
+      // any growth without matching delta reverts regardless of where
+      // in the lifetime the update lands.
+      //
+      // This test advances to the middle of the KC's lifetime, then
+      // attempts to double the byte size with `delta == 0`. Pre-fix this
+      // would silently succeed; post-fix it reverts
+      // `InvalidTokenAmount`.
+      it('T1.8d: mid-lifetime byte-size growth without delta reverts (Codex R4 F2)', async () => {
+        const base = await publishBaselineKCWithAsk();
+
+        // Advance to roughly the middle of the KC's lifetime. With epochs
+        // == 5, we advance 3 epochs so `remainingEpochs == 2`. At that
+        // point the pre-fix cumulative check would let a doubled byte
+        // size through with delta == 0 because `newTokenAmount (5 TRAC)
+        // >= expected(newByteSize=2048, remainingEpochs=2) == 4 TRAC`.
+        const epochLen = Number(await ChronosContract.epochLength());
+        for (let i = 0; i < 3; i++) {
+          await time.increase(epochLen + 1);
+        }
+        const now = await ChronosContract.getCurrentEpoch();
+        const meta = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        // Sanity: current epoch is strictly inside the KC's lifetime, so
+        // `NoRemainingLifetimeForDelta` does NOT short-circuit this test.
+        expect(now).to.be.lt(meta[5]);
+        expect(meta[5] - now).to.be.gt(0n);
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.8d-new'));
+        // Load-bearing: byte size DOUBLES, tokenAmount UNCHANGED (delta == 0).
+        const newByteSize = base.byteSize * 2n;
+        const newTokenAmount = base.tokenAmount;
+
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize,
+          newTokenAmount,
+          mintKnowledgeAssetsAmount: 1n,
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.8d-update',
+        });
+
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress),
+        ).to.be.revertedWithCustomError(KAV10, 'InvalidTokenAmount');
       });
     });
   });

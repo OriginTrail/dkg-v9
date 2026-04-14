@@ -71,11 +71,18 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * Authorization:
  *   - publish: N17 closure — `isAuthorizedPublisher(msg.sender)` via facade.
- *   - update:  N16 closure — ERC-1155 balanceOf gate. The caller must hold at
- *              least one minted KA token in the KC's token range. Replaces the
- *              broken "latestPublisher == msg.sender" V9 gate, which trivially
- *              authorized the most recent merkle-root signer rather than the
- *              paying owner.
+ *   - update:  policy-branch gate in `_executeUpdateCore`. Curated CGs
+ *              (`publishPolicy == 0`) delegate to
+ *              `isAuthorizedPublisher(cgId, msg.sender)` via the facade so
+ *              EOA / Safe curators and PCA agents inherit update rights
+ *              automatically. Open CGs (`publishPolicy == 1`) have no curator
+ *              authority to delegate to, so update auth pins to the ORIGINAL
+ *              publisher (`merkleRoots[0].publisher`) — the paying principal
+ *              recorded at publish time. Replaces the initial V10 ERC-1155
+ *              `balanceOf(msg.sender, kcRange) > 0` gate (which was hijackable
+ *              via ERC-1155Delta token transfers) and the V9
+ *              `latestPublisher == msg.sender` gate (which gated on
+ *              node-operator key, not the paying principal).
  *
  * Byte-size ceiling (decision #4 closure): updates may GROW `newByteSize`
  * beyond the original value, as long as the new `tokenAmount` covers the new
@@ -157,11 +164,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     error ZeroEpochs();
 
     // --- Update-specific errors (V10 Phase 8 Task 2) ---
-
-    /// @dev Caller is not an owner of any minted token in this KC's ERC-1155
-    ///      token range. Replaces the broken `latestPublisher == msg.sender`
-    ///      gate (N16 closure).
-    error NotKnowledgeCollectionTokenHolder(uint256 kcId, address caller);
 
     /// @dev Update would reduce the KC's `tokenAmount` below its current
     ///      value. Rebates are not supported — a publisher that wants to
@@ -403,11 +405,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         currentEpoch = uint40(chronos.getCurrentEpoch());
 
         // Publisher of record + ERC-1155 KA token recipient = `msg.sender`
-        // (the paying agent). This is the principal that the N16 update
-        // auth gate (`balanceOf(msg.sender, kcRange) > 0`) checks against
-        // — passing the recovered node signer here would mint the KA
-        // tokens to the node operator wallet, breaking publish→update
-        // coherence on the conviction path.
+        // (the paying agent). This address is stored as
+        // `merkleRoots[0].publisher` in KCS and serves as the update-auth
+        // pin for open CGs (which have no curator authority to delegate
+        // to). Passing the recovered node signer here would record the
+        // node operator wallet as the original publisher and break
+        // publish→update coherence for open-CG publishers.
         kcId = kcs.createKnowledgeCollection(
             msg.sender,
             p.publishOperationId,
@@ -637,11 +640,16 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      *         account (discounted path). Closes N16, N19 (local ceiling removal),
      *         and decision #4.
      *
-     * Authorization (N16 closure): the caller (`msg.sender`) must hold at least
-     * one minted ERC-1155 knowledge-asset token in this KC's token range. This
-     * replaces the broken V9 "latestPublisher == msg.sender" gate, which
-     * conflated merkle-root authorship with KC ownership and let any node
-     * operator impersonate the publisher on update.
+     * Authorization: policy-branch gate in `_executeUpdateCore`. Curated CGs
+     * delegate to the facade (`isAuthorizedPublisher`), which handles
+     * EOA/Safe direct-equality and PCA live-resolve + agent delegation so
+     * the authorized principal set tracks CG NFT transfers and PCA agent
+     * cycling without off-chain coordination. Open CGs pin auth to
+     * `merkleRoots[0].publisher` (the original paying principal at publish
+     * time), because open CGs have no curator to delegate to. Replaces the
+     * initial ERC-1155 `balanceOf` gate, which was unsound under
+     * ERC-1155Delta transferability: any downstream buyer of a single KA
+     * token inherited full update authority.
      *
      * Delta-only payment semantics (decision #4 interpretation): the caller
      * passes `newTokenAmount` as the NEW TOTAL `tokenAmount` for the KC. KAV10
@@ -728,9 +736,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // eventually become un-updatable. Switching to this scalar getter
         // keeps the update cost constant. (Codex round 3 finding 1.)
 
+        // `minted` is intentionally discarded: the old N16 `balanceOf` auth
+        // gate needed the KC's minted count to compute the token range, but
+        // the policy-branch auth gate below no longer touches token ranges.
         (
             uint256 preUpdateMerkleRootCount,
-            uint256 minted,
+            ,
             uint88 currentByteSize,
             uint40 endEpoch,
             uint96 currentTokenAmount,
@@ -847,10 +858,9 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // nothing to amortize a new commitment over. Any new TRAC delta OR
         // any byte-size growth is rejected — both need a future window to
         // land in (`_distributeTokens` would divide by zero on delta > 0,
-        // and `_validateTokenAmount(newByteSize, 0, _)` would compute an
-        // expected cost of ZERO, silently letting byte-size growth through
-        // for free). Gating ONLY on `delta > 0` left that byte-size-growth
-        // bypass open — extend the guard to catch both.
+        // and the byte-size growth validation below would compute an
+        // expected cost of ZERO at `remainingEpochs == 0`, silently letting
+        // growth through for free).
         if (
             remainingEpochs == 0 &&
             (deltaTokenAmount > 0 || p.newByteSize > currentByteSize)
@@ -858,48 +868,72 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert NoRemainingLifetimeForDelta(p.id, currentEpoch, endEpoch);
         }
 
-        // Same pricing function as publish — applied to the NEW total over
-        // the REMAINING lifetime. Only run the validation when there is a
-        // genuine economic change:
-        //   - delta > 0 (publisher is paying additional TRAC), OR
-        //   - byteSize is growing (publisher is committing to a larger
-        //     storage footprint and must pay for it).
+        // Byte-size growth cost check. Charges `delta` against the MARGINAL
+        // cost of the growth (`newByteSize - currentByteSize`) over the
+        // REMAINING lifetime, not against the cumulative `newTokenAmount`.
         //
-        // Pure metadata-only updates (delta == 0 AND newByteSize <=
-        // currentByteSize) are re-attestations of existing data and do NOT
-        // re-run the price check. Re-running it would mean a rising
-        // `stakeWeightedAverageAsk` between publish and update could block
-        // routine merkle-root rotations even though no new economics are
-        // being introduced. The original publish already validated the cost
-        // at publish-time ask, and `newTokenAmount >= currentTokenAmount` is
-        // enforced unconditionally above, so the staker reward pool's
-        // commitment is preserved or grown.
-        if (deltaTokenAmount > 0 || p.newByteSize > currentByteSize) {
+        // Why not validate cumulative `newTokenAmount` vs `remainingEpochs`:
+        // `newTokenAmount` is the TOTAL historical commitment, most of
+        // which has already been distributed into PAST epoch pools by the
+        // time the update lands. Late in a KC's lifetime (say, epoch 9 of
+        // 10), ~90% of the cumulative has already been paid out to past
+        // stakers. Validating `newTokenAmount` against the remaining
+        // window would credit that sunk commitment as future funding,
+        // letting a publisher double the byteSize at epoch 9/10 with
+        // ZERO new TRAC. The cumulative looks sufficient, but the actual
+        // undistributed reward pool for the remaining window would be
+        // fractions of the new footprint's cost. Charging only the
+        // marginal cost of the GROWTH, payable by `delta` over the
+        // REMAINING window, closes that hole.
+        //
+        // Pure metadata-only updates (`newByteSize <= currentByteSize`,
+        // regardless of delta) skip this check entirely — they are
+        // re-attestations of existing data (merkle-root rotation) or pure
+        // over-funding TRAC top-ups, and the original publish-time
+        // validation still governs the underlying economic surface. Gating
+        // on `delta > 0` instead would block routine root rotations under
+        // a rising stake-weighted ask.
+        if (p.newByteSize > currentByteSize) {
+            uint256 byteSizeGrowth = uint256(p.newByteSize) - uint256(currentByteSize);
             _validateTokenAmount(
-                uint256(p.newByteSize),
+                byteSizeGrowth,
                 uint256(remainingEpochs),
-                p.newTokenAmount,
+                deltaTokenAmount,
                 false
             );
         }
 
-        // --- 5. ERC-1155 ownership auth (N16 closure) ---
+        // --- 5. Update authorization (policy-branch) ---
 
-        // The caller MUST hold at least one minted KA token in this KC's
-        // token range. This replaces the V9 `latestPublisher == msg.sender`
-        // gate which was both incorrect (the merkle-root signer is the node
-        // operator, not the paying publisher) and unilaterally mutable by
-        // any node that had pushed the last root.
+        // Open CGs (`publishPolicy == 1`) have no curator authority, so
+        // `isAuthorizedPublisher` returns true for ANY non-zero caller
+        // there — using it as the update gate would let random addresses
+        // rotate merkle roots on other publishers' KCs. Pin open-CG update
+        // auth to `merkleRoots[0].publisher` instead (the original paying
+        // principal at publish time).
         //
-        // Token range: KCS mints into `[(id - 1) * MAX_SIZE + 1,
-        // (id - 1) * MAX_SIZE + 1 + minted)` (half-open). The
-        // `KnowledgeCollectionStorage.balanceOf(address, uint256, uint256)`
-        // overload returns the popcount of owned tokens in `[start, stop)`.
-        uint256 maxKcSize = kcs.KNOWLEDGE_COLLECTION_MAX_SIZE();
-        uint256 startTokenId = (p.id - 1) * maxKcSize + 1;
-        uint256 stopTokenId = startTokenId + minted;
-        if (kcs.balanceOf(msg.sender, startTokenId, stopTokenId) == 0) {
-            revert NotKnowledgeCollectionTokenHolder(p.id, msg.sender);
+        // Curated CGs delegate to `isAuthorizedPublisher` via the facade,
+        // which handles EOA/Safe direct-equality and PCA live-resolve +
+        // agent mapping. This means an EOA/Safe curator transfer (via the
+        // CG NFT's storage-rotated `publishAuthority`) and PCA agent
+        // cycling both automatically flow through to update rights, with
+        // no stale-authority drift.
+        //
+        // Replaces the initial `balanceOf(msg.sender, kcRange) > 0` gate,
+        // which was unsound because ERC-1155Delta KA tokens are
+        // transferable via `safeTransferFrom`. Under the old gate, any
+        // downstream recipient of a single KA token from a KC gained full
+        // update authority — could rotate the merkle root, mint new KAs,
+        // burn existing KAs — trivially hijacking KCs whose tokens had
+        // moved to a secondary holder.
+        (uint8 publishPolicy, ) = contextGraphStorage.getPublishPolicy(contextGraphId);
+        if (publishPolicy == 1) {
+            address originalPublisher = kcs.getMerkleRootPublisherByIndex(p.id, 0);
+            if (msg.sender != originalPublisher) {
+                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, msg.sender);
+            }
+        } else if (!contextGraphs.isAuthorizedPublisher(contextGraphId, msg.sender)) {
+            revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, msg.sender);
         }
 
         // --- 6. Apply KCS mutation (new merkle root, bytes, tokens, mint/burn) ---

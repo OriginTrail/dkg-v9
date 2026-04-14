@@ -193,6 +193,61 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     }
 
     // ========================================================================
+    // Conviction multiplier tier ladder
+    // ========================================================================
+    //
+    // NOTE: The S1 brief's Q5 tier table had a typo — it listed
+    // `lockEpochs == 1 → 1.5e18`, which would clash with the rest of the
+    // V10 system where the 1.5x tier lives at `lockEpochs == 2`. Aligned
+    // here with `ConvictionStakingStorage.expectedMultiplier18` (the
+    // authoritative storage-side source of truth) and with
+    // `Staking.convictionMultiplier`. Accepting the typo would cause
+    // every `createConviction(_, _, 1)` to revert at the storage
+    // "Tier mismatch" check, because `expectedMultiplier18(1) == 1e18`
+    // while the helper would have returned `1.5e18`. Reconciled set:
+    // {0, 2, 3, 6, 12}.
+    //
+    // Discrete, exact-match tier table — no snap-down semantics. Values
+    // that don't land on one of the tiers revert. This is stricter than
+    // `Staking.convictionMultiplier` (which uses snap-down `>=` branches):
+    // `createConviction` / `convertToNFT` are the only entry points that
+    // invoke this function with a user-supplied `lockEpochs`, and any
+    // value outside the valid set is an API error that must not round
+    // down silently to a lower tier (a user passing 4 silently snapping
+    // to tier 3 would commit the user to a different lock than they
+    // intended).
+    //
+    // Why `0 → SCALE18` rather than a revert at the helper level:
+    //   The post-expiry rest state in `ConvictionStakingStorage` is
+    //   encoded as `lockEpochs == 0 → 1x` (line 99 of that contract), and
+    //   reward-math callers may re-invoke this helper with a position's
+    //   current `lockEpochs` after expiry has driven the tier back to
+    //   the rest state. See Phase 5 decisions doc Q5 for the full
+    //   reasoning. The `lockEpochs == 0` *policy* check lives in
+    //   `createConviction` / `convertToNFT` themselves — they MUST
+    //   reject `lockEpochs == 0` via their own validation, but the
+    //   helper stays tolerant for reward-math callers.
+    //
+    // Why `lockEpochs == 1` is NOT in the valid set:
+    //   Storage-side `expectedMultiplier18(1) == 1e18` means the lock-1
+    //   tier is functionally indistinguishable from the rest state (no
+    //   boost). `ConvictionStakingStorage.updateOnRelock` explicitly
+    //   rejects `newLockEpochs < 2` as "Lock too short" — the V10 system
+    //   treats `lockEpochs >= 2` as the floor for a meaningful
+    //   commitment. The NFT API mirrors that invariant.
+    //
+    // @param lockEpochs Lock duration in epochs.
+    // @return multiplier18 1e18-scaled tier multiplier.
+    function _convictionMultiplier(uint256 lockEpochs) internal pure returns (uint256) {
+        if (lockEpochs == 0) return SCALE18;             // rest state: 1.0x
+        if (lockEpochs == 2) return (15 * SCALE18) / 10; // 1.5x
+        if (lockEpochs == 3) return 2 * SCALE18;         // 2.0x
+        if (lockEpochs == 6) return (35 * SCALE18) / 10; // 3.5x
+        if (lockEpochs == 12) return 6 * SCALE18;        // 6.0x
+        revert InvalidLockEpochs();
+    }
+
+    // ========================================================================
     // ERC-721 overrides — accrued-interest transfer model (Phase 5 Q8)
     // ========================================================================
     //

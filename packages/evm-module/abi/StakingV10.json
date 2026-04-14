@@ -392,7 +392,7 @@
     ],
     "name": "claim",
     "outputs": [],
-    "stateMutability": "view",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

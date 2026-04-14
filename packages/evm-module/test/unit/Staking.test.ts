@@ -2869,6 +2869,37 @@ describe('Staking contract', function () {
     ).to.be.revertedWithCustomError(Staking, 'ZeroTokenAmount');
   });
 
+  it('_recordStake: reverts with ProfileDoesntExist for an unregistered identityId', async () => {
+    // Mirror of the V8 `stake()` guard. Without the profileExists modifier
+    // the write path would happily stash stake against a ghost identityId and
+    // _addNodeToShardingTable would insert a phantom node at
+    // sha256(profileStorage.getNodeId(identityId)) — which resolves to
+    // sha256("") for a missing profile — so this test locks the invariant
+    // and the Phase 4 phantom-stake bug cannot reappear.
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+    const minStake = await ParametersStorage.minimumStake();
+    const ghostIdentityId = 9999;
+
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](1n, ghostIdentityId, minStake, 12),
+    ).to.be.revertedWithCustomError(Staking, 'ProfileDoesntExist');
+
+    // And no phantom state leaked past the revert
+    expect(
+      await StakingStorage.getDelegatorStakeBase(
+        ghostIdentityId,
+        tokenIdKey(1n),
+      ),
+    ).to.equal(0);
+    expect(await StakingStorage.getNodeStake(ghostIdentityId)).to.equal(0);
+    expect(await ShardingTableStorage.nodeExists(ghostIdentityId)).to.equal(
+      false,
+    );
+  });
+
   it('_recordStake: multiple tokenIds for same (delegator, node) pair are independent', async () => {
     const { identityId } = await createProfile();
     const nftSigner = accounts[5];
@@ -2920,10 +2951,20 @@ describe('Staking contract', function () {
     }
   });
 
-  it('_recordStake: key-space disjointness — keccak256(address) never equals bytes32(smallTokenId)', async () => {
-    // Structural collision-impossibility check. Covers a non-probabilistic
-    // guarantee: keccak256 outputs on realistic addresses always have non-zero
-    // high bytes, while bytes32(smallTokenId) has only low bytes set.
+  it('_recordStake: key-space disjointness — sampled keccak256(address) never equals bytes32(smallTokenId)', async () => {
+    // Empirical sample — not a structural proof. `keccak256` outputs are
+    // uniform over the full 256-bit space, so a collision with
+    // `bytes32(smallTokenId)` is mathematically possible but has probability
+    // ≈ 2⁻¹⁶⁰ per hash when `tokenId < 2⁹⁶`. We cannot prove the key spaces
+    // are structurally disjoint, only that they are disjoint for realistic
+    // inputs with overwhelming probability.
+    //
+    // This test locks the empirical guarantee for real Hardhat signer
+    // addresses and small tokenIds: the first 20 bytes of each sampled
+    // keccak256 are non-zero (which would require a 2⁻¹⁶⁰ freak event to
+    // fail), and `bytes32(tokenId)` for `tokenId < 2⁹⁶` is zero across its
+    // first 20 bytes by construction. Disjoint high-byte patterns →
+    // disjoint values → no collision.
     const addrs = [
       accounts[0].address,
       accounts[1].address,
@@ -2935,19 +2976,20 @@ describe('Staking contract', function () {
       const v8 = hre.ethers.keccak256(
         hre.ethers.solidityPacked(['address'], [addr]),
       );
-      // keccak256 output occupies the full 256 bits (vanishing probability of
-      // leading zero bytes beyond 2 — assert the key has a high-bit nonzero).
-      // The 12th byte from the left (index 12) spans the uint(96) divide.
-      const highNibbles = v8.slice(2, 2 + 24); // first 12 bytes hex
-      expect(highNibbles).to.not.equal('000000000000000000000000');
+      // Assert at least one of the first 20 bytes of keccak256(address) is
+      // non-zero. Probability of failure on any real address ≈ 2⁻¹⁶⁰.
+      const v8High20 = v8.slice(2, 2 + 40); // first 20 bytes as hex
+      expect(v8High20).to.not.equal('0'.repeat(40));
 
       for (let t = 0n; t < 10n; t++) {
         const nftKey = tokenIdKey(t);
+        // For `tokenId < 2⁹⁶` (all practical NFT counters), the first 20
+        // bytes of `bytes32(tokenId)` are zero by construction — the cast
+        // only touches the low 12 bytes.
+        expect(nftKey.slice(2, 2 + 40)).to.equal('0'.repeat(40));
+        // Therefore the two values cannot be equal without a 2⁻¹⁶⁰ freak
+        // collision in keccak256.
         expect(v8).to.not.equal(nftKey);
-        // bytes32(smallTokenId) has all its high 24 bytes zero
-        expect(nftKey.slice(2, 2 + 48)).to.equal(
-          '000000000000000000000000000000000000000000000000',
-        );
       }
     }
   });

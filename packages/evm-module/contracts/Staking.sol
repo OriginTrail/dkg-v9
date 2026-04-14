@@ -965,7 +965,11 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      *         `StakingStorage`. Callable ONLY by the Hub-registered
      *         `DKGStakingConvictionNFT` contract.
      *
-     * @dev Delegator key scheme: `bytes32(tokenId)`, disjoint from the V8
+     * @dev Source: V10 implementation plan Phase 4 ("two-layer staking
+     *      wire") — see `.ai/v10-implementation-plan.md` §"Phase 4 —
+     *      `Staking._recordStake` permissioned internal entry".
+     *
+     *      Delegator key scheme: `bytes32(tokenId)`, disjoint from the V8
      *      legacy `keccak256(abi.encodePacked(delegator))` key space. This is
      *      what allows multiple NFT positions for the same (delegator, node)
      *      pair to be settled independently.
@@ -980,7 +984,11 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      *      Gate: `onlyContracts` ensures the caller is a Hub-registered
      *      contract; the explicit `msg.sender` check pins the caller to the
      *      DKGStakingConvictionNFT contract specifically, so no other
-     *      Hub-registered contract can spoof NFT-backed stake.
+     *      Hub-registered contract can spoof NFT-backed stake. The
+     *      `profileExists` modifier mirrors the V8 `stake()` guard and
+     *      prevents phantom nodes — without it `_addNodeToShardingTable`
+     *      would happily insert a ghost node at `sha256("")` for any
+     *      unregistered `identityId`.
      *
      *      The leading underscore in the function name reflects its semantic
      *      role as the internal entry of the two-layer wire, even though the
@@ -988,7 +996,7 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      *      cross-contract.
      *
      * @param tokenId     NFT position id — also the delegator key (bytes32(tokenId))
-     * @param identityId  Target node
+     * @param identityId  Target node (must be an existing profile)
      * @param amount      Stake amount in TRAC (>0)
      * @param lockEpochs  Conviction lock duration (recorded in the event only;
      *                    authoritative lock data lives in `ConvictionStakingStorage`)
@@ -998,7 +1006,7 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint96 amount,
         uint40 lockEpochs
-    ) external onlyContracts {
+    ) external onlyContracts profileExists(identityId) {
         if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
             revert StakingLib.OnlyConvictionNFT();
         }

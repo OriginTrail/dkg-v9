@@ -836,13 +836,53 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   });
 
   const agentToolsContext = {
-    query: (sparql: string, opts?: { contextGraphId?: string; graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean }) => agent.query(sparql, opts),
-    share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.share(contextGraphId, quads, opts),
+    query: (
+      sparql: string,
+      opts?: {
+        contextGraphId?: string;
+        graphSuffix?: '_shared_memory';
+        includeSharedMemory?: boolean;
+        view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+        agentAddress?: string;
+        assertionName?: string;
+        subGraphName?: string;
+      },
+    ) => agent.query(sparql, opts),
+    share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean; subGraphName?: string }) =>
+      agent.share(contextGraphId, quads, opts),
+    createAssertion: async (
+      contextGraphId: string,
+      name: string,
+      opts?: { subGraphName?: string },
+    ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> => {
+      try {
+        const assertionUri = await agent.assertion.create(contextGraphId, name, opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined);
+        return { assertionUri, alreadyExists: false };
+      } catch (err: any) {
+        if (err?.message?.includes('already exists')) {
+          return { assertionUri: null, alreadyExists: true };
+        }
+        throw err;
+      }
+    },
+    writeAssertion: async (
+      contextGraphId: string,
+      name: string,
+      quads: any[],
+      opts?: { subGraphName?: string },
+    ): Promise<{ written: number }> => {
+      await agent.assertion.write(contextGraphId, name, quads, opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined);
+      return { written: quads.length };
+    },
     publishFromSharedMemory: (contextGraphId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearSharedMemoryAfter?: boolean }) => agent.publishFromSharedMemory(contextGraphId, selection, opts),
     createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
-  const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
+  const memoryManager = new ChatMemoryManager(
+    agentToolsContext,
+    config.llm ?? { apiKey: '' },
+    { agentAddress: agent.peerId },
+  );
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
@@ -3093,8 +3133,11 @@ async function handleRequest(
   }
 
   // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, attachmentRefs?, ... }
-  // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
-  // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
+  // Called by the adapter to persist an OpenClaw turn into the `'chat-turns'`
+  // Working Memory assertion of the `'agent-context'` context graph (the
+  // ChatMemoryManager default since the openclaw-dkg-primary-memory retarget).
+  // Uses the same ChatMemoryManager pathway as the node-owned local-agent
+  // chat flow — chat-turn content never reaches Shared Working Memory in v1.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;

@@ -4,7 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
-import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
+import { type ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
@@ -490,43 +490,19 @@ export async function handleNodeUIRequest(
     }
   }
 
-  if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
-    let body: string;
-    try {
-      body = await readBody(req, IMPORT_MAX_BYTES);
-    } catch (err) {
-      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
-      throw err;
-    }
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON body' });
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return json(res, 400, { error: 'Request body must be a JSON object' });
-    }
-    const { text, source, useLlm } = parsed;
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return json(res, 400, { error: 'Missing or empty "text" field' });
-    }
-    const importSource = IMPORT_SOURCES.includes(source) ? source : 'other';
-    try {
-      const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
-      return json(res, 200, result);
-    } catch (err: any) {
-      console.error('[node-ui] Import memories failed:', err);
-      return json(res, 500, { error: 'Failed to import memories' });
-    }
-  }
+  // POST /api/memory/import was retired as part of the
+  // openclaw-dkg-primary-memory work. It was a V9 relic that required LLM
+  // API keys on the node and wrote dkg:ImportedMemory ad-hoc types into a
+  // throwaway sidecar graph. Callers should use the adapter's
+  // dkg_memory_import tool (DkgMemoryPlugin) or direct
+  // /api/assertion/:name/write against a real context graph.
 
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
     try {
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 200, { contextGraphId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 200, { contextGraphId: 'agent-context', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 
@@ -679,6 +655,4 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
     req.on('error', reject);
   });
 }
-
-const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 

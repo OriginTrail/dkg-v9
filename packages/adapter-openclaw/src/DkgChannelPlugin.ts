@@ -1220,8 +1220,10 @@ export class DkgChannelPlugin {
   }
 
   /**
-   * Persist a chat turn to the DKG agent-memory graph.
-   * Fire-and-forget — errors are logged but don't affect the reply.
+   * Persist a chat turn into the `'chat-turns'` Working Memory assertion of
+   * the `'agent-context'` context graph via the daemon's
+   * `/api/openclaw-channel/persist-turn` route. Fire-and-forget — errors
+   * are logged but don't affect the reply.
    */
   private async persistTurn(
     userMessage: string,

@@ -356,6 +356,9 @@ describe('DkgChannelPlugin', () => {
     expect(reply.text).toBe('Attached reply');
     expect(dispatched.ctx).toMatchObject({
       BodyForAgent: expect.stringContaining('Attached Working Memory items:'),
+      RawBody: 'Summarize these files.',
+      CommandBody: 'Summarize these files.',
+      BodyForCommands: 'Summarize these files.',
       AttachmentRefs: attachmentRefs,
     });
     await new Promise((resolve) => setTimeout(resolve, 10));

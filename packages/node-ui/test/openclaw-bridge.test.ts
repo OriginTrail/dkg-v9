@@ -189,6 +189,7 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain('Stored only');
     expect(panelRight).toContain('selectedCompletedAttachments.length === 0');
+    expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
   });
 
   it('merges reloaded local history with live messages', () => {

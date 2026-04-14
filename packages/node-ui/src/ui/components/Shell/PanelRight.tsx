@@ -694,7 +694,7 @@ function ConnectedAgentsTab(props: {
                     <div className="v10-local-agent-attachment-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
                       {message.attachments.map((attachment) => (
                         <span
-                          key={attachment.id}
+                          key={attachment.id ?? attachment.assertionUri ?? attachment.fileHash}
                           className="v10-local-agent-attachment-chip"
                           style={{
                             padding: '2px 8px',

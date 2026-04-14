@@ -423,6 +423,30 @@ describe('OpenClaw persist-turn validation', () => {
     expect(store.query).not.toHaveBeenCalled();
   });
 
+  it('accepts sub-graph attachment refs and verifies them against the root meta graph', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/decisions/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: vi.fn().mockResolvedValue({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          contentType: '"application/pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+    expect(String(store.query.mock.calls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
+    expect(String(store.query.mock.calls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/chat-doc>');
+  });
+
   it('rejects forged attachment refs when graph metadata does not match', async () => {
     const attachmentRefs = [{
       assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',

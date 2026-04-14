@@ -596,9 +596,9 @@ export class DkgChannelPlugin {
     const ctxPayload = {
       Body: formattedBody,
       BodyForAgent: agentBody,
-      RawBody: agentBody,
-      CommandBody: agentBody,
-      BodyForCommands: agentBody,
+      RawBody: text,
+      CommandBody: text,
+      BodyForCommands: text,
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,

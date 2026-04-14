@@ -2319,6 +2319,20 @@ function parseOpenClawAttachmentTripleCount(raw: string | undefined): number | u
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function isOpenClawAttachmentAssertionUriForContextGraph(assertionUri: string, contextGraphId: string): boolean {
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  if (!assertionUri.startsWith(prefix)) return false;
+  const remainder = assertionUri.slice(prefix.length);
+  if (remainder.startsWith('assertion/')) {
+    return remainder.length > 'assertion/'.length;
+  }
+  const assertionMarker = remainder.indexOf('/assertion/');
+  if (assertionMarker <= 0) return false;
+  const subGraphName = remainder.slice(0, assertionMarker);
+  const validation = validateSubGraphName(subGraphName);
+  return validation.valid;
+}
+
 function extractionRecordMatchesOpenClawAttachmentRef(
   ref: OpenClawAttachmentRef,
   record: ExtractionStatusRecord,
@@ -2347,7 +2361,7 @@ export async function verifyOpenClawAttachmentRefsProvenance(
   for (const ref of attachmentRefs) {
     if (!isSafeIri(ref.assertionUri)) return undefined;
     if (ref.rootEntity && !isSafeIri(ref.rootEntity)) return undefined;
-    if (!ref.assertionUri.startsWith(`did:dkg:context-graph:${ref.contextGraphId}/assertion/`)) return undefined;
+    if (!isOpenClawAttachmentAssertionUriForContextGraph(ref.assertionUri, ref.contextGraphId)) return undefined;
 
     const extractionRecord = getExtractionStatusRecord(extractionStatus, ref.assertionUri);
     if (extractionRecord) {

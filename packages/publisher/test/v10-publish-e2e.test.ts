@@ -286,7 +286,6 @@ describe('V10 Publish E2E', () => {
       tokenAmount: 50n,
       isImmutable: false,
       paymaster: ethers.ZeroAddress,
-      convictionAccountId: 0n,
       publisherNodeIdentityId: 1n,
       publisherSignature: {
         r: ethers.getBytes(pubSig.r),

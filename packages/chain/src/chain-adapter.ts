@@ -190,7 +190,7 @@ export interface ConvictionAccountInfo {
 
 // ----- V10 publish types -----
 
-export interface V10PublishParams {
+export interface V10PublishDirectParams {
   publishOperationId: string;
   contextGraphId: bigint;
   merkleRoot: Uint8Array;
@@ -199,8 +199,13 @@ export interface V10PublishParams {
   epochs: number;
   tokenAmount: bigint;
   isImmutable: boolean;
+  /**
+   * Paymaster address. `ethers.ZeroAddress` means the caller pays TRAC
+   * directly. Non-zero means the paymaster covers the cost. The adapter
+   * splits this field out of the struct and passes it as the second
+   * argument to `KnowledgeAssetsV10.publishDirect(PublishParams, paymaster)`.
+   */
   paymaster: string;
-  convictionAccountId: bigint;
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
@@ -340,7 +345,7 @@ export interface ChainAdapter {
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
   // V10 publish (KnowledgeAssetsV10 contract — writes to KnowledgeCollectionStorage)
-  createKnowledgeAssetsV10?(params: V10PublishParams): Promise<OnChainPublishResult>;
+  createKnowledgeAssetsV10?(params: V10PublishDirectParams): Promise<OnChainPublishResult>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;

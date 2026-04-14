@@ -23,7 +23,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishParams,
+  V10PublishDirectParams,
   V10UpdateKCParams,
   ConvictionAccountInfo,
 } from './chain-adapter.js';
@@ -1148,7 +1148,7 @@ export class EVMChainAdapter implements ChainAdapter {
     return network.chainId;
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
     await this.init();
 
     if (!this.contracts.knowledgeAssetsV10) {

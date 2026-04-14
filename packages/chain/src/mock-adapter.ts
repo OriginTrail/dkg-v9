@@ -22,7 +22,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishParams,
+  V10PublishDirectParams,
   V10UpdateKCParams,
 } from './chain-adapter.js';
 
@@ -773,7 +773,7 @@ export class MockChainAdapter implements ChainAdapter {
     return 31337n;
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }
@@ -804,7 +804,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endKAId.toString(),
       isImmutable: params.isImmutable,
       contextGraphId: params.contextGraphId.toString(),
-      convictionAccountId: params.convictionAccountId.toString(),
+      paymaster: params.paymaster,
     });
 
     const result = this.txResult(true);

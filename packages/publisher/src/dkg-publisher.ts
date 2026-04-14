@@ -1133,7 +1133,6 @@ export class DKGPublisher implements Publisher {
           tokenAmount,
           isImmutable: false,
           paymaster: ethers.ZeroAddress,
-          convictionAccountId: 0n,
           publisherNodeIdentityId: identityId,
           publisherSignature: {
             r: ethers.getBytes(pubSig.r),

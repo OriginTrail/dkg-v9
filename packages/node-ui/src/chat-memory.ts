@@ -101,12 +101,92 @@ const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
+const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
+
+interface ChatAttachmentRef {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
 
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
+}
+
+function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  if (!fileName || !contextGraphId || !assertionUri || !fileHash) return null;
+
+  const normalized: ChatAttachmentRef = {
+    fileName,
+    contextGraphId,
+    assertionUri,
+    fileHash,
+  };
+  if (typeof record.id === 'string' && record.id.trim()) normalized.id = record.id.trim();
+  if (typeof record.assertionName === 'string' && record.assertionName.trim()) normalized.assertionName = record.assertionName.trim();
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
+    normalized.extractionStatus = record.extractionStatus;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) normalized.rootEntity = record.rootEntity.trim();
+  return normalized;
+}
+
+function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const refs = raw
+    .map((entry) => normalizeChatAttachmentRef(entry))
+    .filter((entry): entry is ChatAttachmentRef => entry != null);
+  return refs.length > 0 ? refs : undefined;
+}
+
+function parseNestedJsonLiteral(value: string): unknown {
+  let current: unknown = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== 'string') return current;
+    const trimmed = current.trim();
+    if (!trimmed) return undefined;
+    try {
+      current = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatAttachmentRefs(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
 }
 
 function parseRdfInt(value: string): number {
@@ -300,7 +380,12 @@ export class ChatMemoryManager {
     userMessage: string,
     assistantReply: string,
     toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
-    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending'; failureReason?: string | null },
+    opts?: {
+      turnId?: string;
+      persistenceState?: 'stored' | 'failed' | 'pending';
+      failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
+    },
   ): Promise<void> {
     await this.ensureInitialized();
     const userTs = new Date();
@@ -359,6 +444,16 @@ export class ChatMemoryManager {
         { subject: userMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
         { subject: assistantMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
       );
+    }
+
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: userMsgUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
     }
 
     if (toolCalls?.length) {
@@ -636,6 +731,7 @@ export class ChatMemoryManager {
       turnId?: string;
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
       failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
     }>;
   } | null> {
     await this.ensureInitialized();
@@ -649,12 +745,13 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?failureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
+          OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
@@ -675,6 +772,7 @@ export class ChatMemoryManager {
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),
           turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+          attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
           persistStatus: (() => {
             const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
             if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {

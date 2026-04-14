@@ -17,6 +17,17 @@ export interface DkgClientOptions {
   timeoutMs?: number;
 }
 
+export interface OpenClawAttachmentRef {
+  assertionUri: string;
+  fileHash: string;
+  contextGraphId: string;
+  fileName: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
 export interface LocalAgentIntegrationCapabilities {
   localChat?: boolean;
   connectFromUi?: boolean;
@@ -24,6 +35,7 @@ export interface LocalAgentIntegrationCapabilities {
   dkgPrimaryMemory?: boolean;
   wmImportPipeline?: boolean;
   nodeServedSkill?: boolean;
+  chatAttachments?: boolean;
 }
 
 export interface LocalAgentIntegrationTransport {
@@ -158,6 +170,7 @@ export class DkgDaemonClient {
     opts?: {
       turnId?: string;
       toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+      attachmentRefs?: OpenClawAttachmentRef[];
       persistenceState?: 'stored' | 'failed' | 'pending';
       failureReason?: string | null;
     },
@@ -168,6 +181,7 @@ export class DkgDaemonClient {
       assistantReply,
       turnId: opts?.turnId,
       toolCalls: opts?.toolCalls,
+      attachmentRefs: opts?.attachmentRefs,
       persistenceState: opts?.persistenceState,
       failureReason: opts?.failureReason,
     });

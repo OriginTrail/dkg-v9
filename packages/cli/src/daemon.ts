@@ -1310,6 +1310,7 @@ function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationC
   const capabilities: LocalAgentIntegrationCapabilities = {};
   const keys: (keyof LocalAgentIntegrationCapabilities)[] = [
     'localChat',
+    'chatAttachments',
     'connectFromUi',
     'installNode',
     'dkgPrimaryMemory',
@@ -2224,12 +2225,14 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   assistantReply?: unknown;
   persistenceState?: unknown;
   failureReason?: unknown;
+  attachmentRefs?: unknown;
 }): payload is {
   sessionId: string;
   userMessage: string;
   assistantReply: string;
   turnId?: unknown;
   toolCalls?: unknown;
+  attachmentRefs?: unknown;
   persistenceState?: unknown;
   failureReason?: unknown;
 } {
@@ -2243,11 +2246,233 @@ export function isValidOpenClawPersistTurnPayload(payload: {
       || typeof payload.failureReason === 'string'
     )
     && (
+      payload.attachmentRefs === undefined
+      || normalizeOpenClawAttachmentRefs(payload.attachmentRefs) !== undefined
+    )
+    && (
       payload.persistenceState === undefined
       || payload.persistenceState === 'stored'
       || payload.persistenceState === 'failed'
       || payload.persistenceState === 'pending'
     );
+}
+
+export interface OpenClawAttachmentRef {
+  assertionUri: string;
+  fileHash: string;
+  contextGraphId: string;
+  fileName: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
+function normalizeOpenClawAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
+  if (!isPlainRecord(raw)) return null;
+  const assertionUri = typeof raw.assertionUri === 'string' ? raw.assertionUri.trim() : '';
+  const fileHash = typeof raw.fileHash === 'string' ? raw.fileHash.trim() : '';
+  const contextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
+  const fileName = typeof raw.fileName === 'string' ? raw.fileName.trim() : '';
+  if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
+
+  const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof raw.detectedContentType === 'string' && raw.detectedContentType.trim()) {
+    normalized.detectedContentType = raw.detectedContentType.trim();
+  }
+  if (raw.extractionStatus === 'completed') {
+    normalized.extractionStatus = raw.extractionStatus;
+  } else if (raw.extractionStatus !== undefined) {
+    return null;
+  }
+  if (typeof raw.tripleCount === 'number' && Number.isFinite(raw.tripleCount) && raw.tripleCount >= 0) {
+    normalized.tripleCount = raw.tripleCount;
+  }
+  if (typeof raw.rootEntity === 'string' && raw.rootEntity.trim()) {
+    normalized.rootEntity = raw.rootEntity.trim();
+  }
+  return normalized;
+}
+
+export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const refs: OpenClawAttachmentRef[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeOpenClawAttachmentRef(entry);
+    if (!normalized) return undefined;
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+export function hasOpenClawChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function unescapeOpenClawAttachmentLiteralBody(raw: string): string {
+  let decoded = '';
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch !== '\\') {
+      decoded += ch;
+      continue;
+    }
+
+    const next = raw[i + 1];
+    if (!next) {
+      decoded += '\\';
+      break;
+    }
+
+    if (next === 'u' || next === 'U') {
+      const hexLength = next === 'u' ? 4 : 8;
+      const hex = raw.slice(i + 2, i + 2 + hexLength);
+      if (/^[0-9A-Fa-f]+$/.test(hex) && hex.length === hexLength) {
+        const codePoint = Number.parseInt(hex, 16);
+        if (codePoint <= 0x10FFFF) {
+          decoded += String.fromCodePoint(codePoint);
+          i += 1 + hexLength;
+          continue;
+        }
+      }
+      decoded += `\\${next}`;
+      i += 1;
+      continue;
+    }
+
+    const escaped = ({
+      t: '\t',
+      b: '\b',
+      n: '\n',
+      r: '\r',
+      f: '\f',
+      '"': '"',
+      "'": "'",
+      '\\': '\\',
+    } as Record<string, string>)[next];
+
+    if (escaped !== undefined) {
+      decoded += escaped;
+    } else {
+      decoded += `\\${next}`;
+    }
+    i += 1;
+  }
+
+  return decoded;
+}
+
+function stripOpenClawAttachmentLiteral(raw: string | undefined): string {
+  if (!raw) return '';
+  const match = raw.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
+  return match ? unescapeOpenClawAttachmentLiteralBody(match[1]) : raw;
+}
+
+function parseOpenClawAttachmentTripleCount(raw: string | undefined): number | undefined {
+  const value = stripOpenClawAttachmentLiteral(raw).trim();
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isOpenClawAttachmentAssertionUriForContextGraph(assertionUri: string, contextGraphId: string): boolean {
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  if (!assertionUri.startsWith(prefix)) return false;
+  const remainder = assertionUri.slice(prefix.length);
+  if (remainder.startsWith('assertion/')) {
+    return remainder.length > 'assertion/'.length;
+  }
+  const assertionMarker = remainder.indexOf('/assertion/');
+  if (assertionMarker <= 0) return false;
+  const subGraphName = remainder.slice(0, assertionMarker);
+  const validation = validateSubGraphName(subGraphName);
+  return validation.valid;
+}
+
+function extractionRecordMatchesOpenClawAttachmentRef(
+  ref: OpenClawAttachmentRef,
+  record: ExtractionStatusRecord,
+): boolean {
+  if (record.status !== 'completed') return false;
+  if (record.fileHash !== ref.fileHash) return false;
+  if (record.fileName && record.fileName !== ref.fileName) return false;
+  if (
+    ref.detectedContentType
+    && normalizeDetectedContentType(ref.detectedContentType) !== normalizeDetectedContentType(record.detectedContentType)
+  ) {
+    return false;
+  }
+  if (ref.extractionStatus && ref.extractionStatus !== 'completed') return false;
+  if (ref.tripleCount != null && ref.tripleCount !== record.tripleCount) return false;
+  if (ref.rootEntity && ref.rootEntity !== record.rootEntity) return false;
+  return true;
+}
+
+export async function verifyOpenClawAttachmentRefsProvenance(
+  agent: Pick<DKGAgent, 'store'>,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): Promise<OpenClawAttachmentRef[] | undefined> {
+  if (!attachmentRefs) return attachmentRefs;
+
+  for (const ref of attachmentRefs) {
+    if (!isSafeIri(ref.assertionUri)) return undefined;
+    if (ref.rootEntity && !isSafeIri(ref.rootEntity)) return undefined;
+    if (!isOpenClawAttachmentAssertionUriForContextGraph(ref.assertionUri, ref.contextGraphId)) return undefined;
+
+    const extractionRecord = getExtractionStatusRecord(extractionStatus, ref.assertionUri);
+    if (extractionRecord) {
+      if (!extractionRecordMatchesOpenClawAttachmentRef(ref, extractionRecord)) return undefined;
+      if (extractionRecord.fileName === ref.fileName) continue;
+    }
+
+    const metaGraph = contextGraphMetaUri(ref.contextGraphId);
+    const metaResult = await agent.store.query(`
+      SELECT ?fileHash ?contentType ?rootEntity ?tripleCount ?sourceFileName WHERE {
+        GRAPH <${metaGraph}> {
+          <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash .
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceContentType> ?contentType }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/rootEntity> ?rootEntity }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/structuralTripleCount> ?tripleCount }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileName> ?sourceFileName }
+        }
+      }
+      LIMIT 1
+    `) as { bindings?: Array<Record<string, string>> };
+    const binding = metaResult?.bindings?.[0];
+    if (!binding) return undefined;
+
+    if (stripOpenClawAttachmentLiteral(binding.fileHash ?? '') !== ref.fileHash) return undefined;
+    const storedContentType = stripOpenClawAttachmentLiteral(binding.contentType ?? '').trim();
+    if (
+      ref.detectedContentType
+      && storedContentType
+      && normalizeDetectedContentType(ref.detectedContentType) !== normalizeDetectedContentType(storedContentType)
+    ) {
+      return undefined;
+    }
+    if (ref.extractionStatus && ref.extractionStatus !== 'completed') return undefined;
+
+    const storedTripleCount = parseOpenClawAttachmentTripleCount(binding.tripleCount ?? '');
+    if (ref.tripleCount != null && storedTripleCount != null && ref.tripleCount !== storedTripleCount) {
+      return undefined;
+    }
+    const storedFileName = stripOpenClawAttachmentLiteral(binding.sourceFileName ?? '').trim();
+    if (storedFileName && storedFileName !== ref.fileName) return undefined;
+
+    const storedRootEntity = typeof binding.rootEntity === 'string'
+      ? binding.rootEntity.replace(/[<>]/g, '').trim()
+      : '';
+    if (ref.rootEntity && storedRootEntity && ref.rootEntity !== storedRootEntity) return undefined;
+  }
+
+  return attachmentRefs;
 }
 
 let _standaloneCache: boolean | null = null;
@@ -2620,18 +2845,28 @@ async function handleRequest(
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity? }
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
   // returns the agent's reply.
   if (req.method === 'POST' && path === '/api/openclaw-channel/send') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
+    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
     const corrId = correlationId ?? crypto.randomUUID();
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
@@ -2651,7 +2886,12 @@ async function handleRequest(
             bridgeAuthToken,
             { 'Content-Type': 'application/json' },
           ),
-          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          body: JSON.stringify({
+            text,
+            correlationId: corrId,
+            identity: identity ?? 'owner',
+            ...(attachmentRefs ? { attachmentRefs } : {}),
+          }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
@@ -2693,16 +2933,26 @@ async function handleRequest(
     );
   }
 
-  // POST /api/openclaw-channel/stream  { text, correlationId, identity? }
+  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, attachmentRefs? }
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === 'POST' && path === '/api/openclaw-channel/stream') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
+    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
     const corrId = correlationId ?? crypto.randomUUID();
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
@@ -2725,7 +2975,12 @@ async function handleRequest(
               'Accept': 'text/event-stream',
             },
           ),
-          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          body: JSON.stringify({
+            text,
+            correlationId: corrId,
+            identity: identity ?? 'owner',
+            ...(attachmentRefs ? { attachmentRefs } : {}),
+          }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
@@ -2798,7 +3053,7 @@ async function handleRequest(
     );
   }
 
-  // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
+  // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, attachmentRefs?, ... }
   // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
   // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
@@ -2809,10 +3064,18 @@ async function handleRequest(
     if (!isValidOpenClawPersistTurnPayload(payload)) {
       return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls, persistenceState, failureReason } = payload;
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason } = payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? toolCalls as Array<{ name: string; args: Record<string, unknown>; result: unknown }>
       : undefined;
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(attachmentRefs);
+    if (attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
+    const verifiedAttachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (attachmentRefs != null && verifiedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const normalizedTurnId = typeof turnId === 'string' ? turnId : crypto.randomUUID();
     const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
       ? persistenceState
@@ -2829,6 +3092,7 @@ async function handleRequest(
         {
           turnId: normalizedTurnId,
           persistenceState: normalizedPersistenceState,
+          attachmentRefs: verifiedAttachmentRefs,
           failureReason: normalizedFailureReason,
         },
       );
@@ -3304,6 +3568,13 @@ async function handleRequest(
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      const assertionUri = contextGraphAssertionUri(
+        contextGraphId,
+        agent.peerId,
+        assertionName,
+        subGraphName,
+      );
+      extractionStatus.delete(assertionUri);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
@@ -3378,6 +3649,7 @@ async function handleRequest(
         : undefined;
     const ontologyRef = textField('ontologyRef');
     const subGraphName = textField('subGraphName');
+    const uploadedFilename = filePart.filename?.trim() ?? '';
 
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -3474,6 +3746,7 @@ async function handleRequest(
       setExtractionStatusRecord(extractionStatus, assertionUri, {
         status: 'in_progress',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         detectedContentType,
         pipelineUsed,
         tripleCount: 0,
@@ -3489,6 +3762,7 @@ async function handleRequest(
       const failedRecord: ExtractionStatusRecord = {
         status: 'failed',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
         detectedContentType,
         pipelineUsed: failedPipelineUsed,
@@ -3550,6 +3824,7 @@ async function handleRequest(
       const skippedRecord: ExtractionStatusRecord = {
         status: 'skipped',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         detectedContentType,
         pipelineUsed: null,
         tripleCount: 0,
@@ -3779,7 +4054,6 @@ async function handleRequest(
     // the same content-addressed subject. Symmetric to row 15
     // (`dkg:sourceContentType`). Skipped entirely when the upload
     // didn't carry a filename (matches the row 20 optional pattern).
-    const uploadedFilename = filePart.filename?.trim() ?? '';
     if (uploadedFilename.length > 0) {
       metaQuads.push({
         subject: assertionUri,
@@ -4011,6 +4285,7 @@ async function handleRequest(
     const completedRecord: ExtractionStatusRecord = {
       status: 'completed',
       fileHash: fileStoreEntry.keccak256,
+      ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
       ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed,

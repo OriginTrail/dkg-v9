@@ -1,6 +1,10 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useJourneyStore } from '../../stores/journey.js';
+import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
+  importFile,
+  type ImportFileResult,
+  type LocalAgentChatAttachmentRef,
   type LocalAgentIntegration,
   type LocalAgentHistoryMessage,
   type LocalAgentStreamEvent,
@@ -24,6 +28,19 @@ interface LocalAgentMessage {
   content: string;
   ts?: string;
   streaming?: boolean;
+  attachments?: LocalAgentChatAttachmentRef[];
+}
+
+type LocalAgentAttachmentStatus = 'queued' | 'uploading' | 'completed' | 'skipped' | 'error';
+
+interface LocalAgentAttachmentDraft {
+  id: string;
+  file: File;
+  contextGraphId: string;
+  assertionName: string;
+  status: LocalAgentAttachmentStatus;
+  result?: ImportFileResult;
+  error?: string;
 }
 
 interface AgentInfo {
@@ -74,6 +91,54 @@ function formatLocalTimestamp(value?: string): string {
   return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileBadge(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  if (['md', 'txt', 'csv', 'json', 'xml', 'yaml', 'yml'].includes(ext)) return 'TXT';
+  if (['pdf'].includes(ext)) return 'PDF';
+  if (['docx', 'doc'].includes(ext)) return 'DOC';
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return 'IMG';
+  if (['py', 'ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rs', 'c', 'cpp'].includes(ext)) return 'CODE';
+  return 'FILE';
+}
+
+function buildAttachmentSummary(attachments: LocalAgentChatAttachmentRef[]): string {
+  if (attachments.length === 0) return '';
+  const names = attachments.map((attachment) => attachment.fileName);
+  if (names.length <= 2) {
+    return `Attached ${names.join(' and ')}.`;
+  }
+  return `Attached ${names[0]} and ${names.length - 1} more files.`;
+}
+
+function isSendableAttachmentDraft(draft: LocalAgentAttachmentDraft): boolean {
+  return draft.status === 'queued' || draft.status === 'completed';
+}
+
+function getProjectDisplayName(projects: ContextGraph[], projectId: string): string {
+  return projects.find((project) => project.id === projectId)?.name ?? projectId;
+}
+
+function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatAttachmentRef | null {
+  if (draft.status !== 'completed' || !draft.result) return null;
+  return {
+    id: draft.id,
+    fileName: draft.file.name,
+    contextGraphId: draft.contextGraphId,
+    assertionName: draft.assertionName,
+    assertionUri: draft.result.assertionUri,
+    fileHash: draft.result.fileHash,
+    detectedContentType: draft.result.detectedContentType,
+    extractionStatus: 'completed',
+    tripleCount: draft.result.extraction.tripleCount ?? draft.result.extraction.triplesWritten,
+  };
+}
+
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
   return {
@@ -81,8 +146,9 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     uri: message.uri,
     turnId: message.turnId,
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
-    content: message.text,
+    content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
+    attachments: message.attachmentRefs,
   };
 }
 
@@ -416,6 +482,13 @@ function ConnectedAgentsTab(props: {
   onLocalInputChange: (value: string) => void;
   onSendLocalMessage: () => void;
   localSending: boolean;
+  activeProjectId: string | null;
+  availableProjects: ContextGraph[];
+  projectsLoading: boolean;
+  onSelectProject: (projectId: string) => void;
+  attachments: LocalAgentAttachmentDraft[];
+  onAddAttachments: (files: FileList | File[]) => void;
+  onRemoveAttachment: (id: string) => void;
 }) {
   const {
     integrations,
@@ -438,7 +511,21 @@ function ConnectedAgentsTab(props: {
     onLocalInputChange,
     onSendLocalMessage,
     localSending,
+    activeProjectId,
+    availableProjects,
+    projectsLoading,
+    onSelectProject,
+    attachments,
+    onAddAttachments,
+    onRemoveAttachment,
   } = props;
+  const selectedAttachmentDrafts = attachments;
+  const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
+  const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
+  const attachmentTargetsLabel = attachmentTargetIds.length === 1
+    ? getProjectDisplayName(availableProjects, attachmentTargetIds[0]!)
+    : `${attachmentTargetIds.length} projects`;
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   const sortedIntegrations = [...integrations].sort(compareLocalAgentIntegrations);
   const connectedAgents = sortedIntegrations.filter((item) => item.persistentChat);
@@ -610,6 +697,24 @@ function ConnectedAgentsTab(props: {
                     {message.content}
                     {message.streaming && <span className="v10-chat-cursor" />}
                   </div>
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="v10-local-agent-attachment-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                      {message.attachments.map((attachment) => (
+                        <span
+                          key={attachment.id ?? attachment.assertionUri ?? attachment.fileHash}
+                          className="v10-local-agent-attachment-chip"
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: 999,
+                            background: 'var(--panel-elevated)',
+                            fontSize: 11,
+                          }}
+                        >
+                          {attachment.fileName}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {message.ts && (
                     <span className={`v10-local-agent-msg-time ${message.role}`}>
                       {message.ts}
@@ -620,31 +725,145 @@ function ConnectedAgentsTab(props: {
               <div ref={localChatEndRef} />
             </div>
             <div className="v10-agent-input-area">
-              <input
-                type="text"
-                placeholder={
-                  showingSessionHistory
-                    ? `Reconnect ${selected.name} to resume live chat...`
-                    : selected.chatReady
-                    ? `Message ${selected.name}...`
-                    : selected.status === 'connecting'
-                      ? `${selected.name} is still connecting...`
-                      : `${selected.name} bridge offline...`
-                }
-                className="v10-agent-input"
-                value={localInput}
-                onChange={(e) => onLocalInputChange(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    onSendLocalMessage();
-                  }
-                }}
-                disabled={inputDisabled}
-              />
-              <button className="v10-agent-send-btn" onClick={onSendLocalMessage} disabled={inputDisabled || !localInput.trim()}>
-                Send
-              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+                {selectedAttachmentDrafts.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {selectedAttachmentDrafts.map((attachment) => {
+                      const triples = attachment.result?.extraction.tripleCount ?? attachment.result?.extraction.triplesWritten;
+                      const targetLabel = getProjectDisplayName(availableProjects, attachment.contextGraphId);
+                      const statusLabel = attachment.status === 'queued'
+                        ? 'Queued - imports on send'
+                        : attachment.status === 'uploading'
+                          ? 'Importing'
+                          : attachment.status === 'completed'
+                            ? triples != null
+                              ? `Ready - ${triples} triples`
+                              : 'Ready'
+                            : attachment.status === 'skipped'
+                              ? 'Stored only - not sent'
+                              : attachment.error ?? 'Failed';
+                      return (
+                        <div
+                          key={attachment.id}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            padding: '6px 10px',
+                            borderRadius: 999,
+                            border: '1px solid var(--border-subtle)',
+                            background: 'var(--panel-elevated)',
+                            fontSize: 12,
+                          }}
+                        >
+                          <span style={{ fontWeight: 700 }}>{fileBadge(attachment.file.name)}</span>
+                          <span>{attachment.file.name}</span>
+                          <span style={{ color: 'var(--text-tertiary)' }}>{formatFileSize(attachment.file.size)}</span>
+                          <span style={{ color: 'var(--text-tertiary)' }}>To {targetLabel}</span>
+                          <span style={{ color: attachment.status === 'error' ? 'var(--accent-red)' : 'var(--text-tertiary)' }}>
+                            {statusLabel}
+                          </span>
+                          <button
+                            className="v10-agents-refresh"
+                            onClick={() => onRemoveAttachment(attachment.id)}
+                            title="Remove attachment"
+                            disabled={localSending}
+                            style={{ padding: '2px 8px' }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                  <label className="v10-local-agent-copy" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    New attachments target:
+                    <select
+                      value={activeProjectId ?? ''}
+                      onChange={(e) => onSelectProject(e.target.value)}
+                      disabled={projectsLoading || availableProjects.length === 0}
+                      style={{ minWidth: 220 }}
+                    >
+                      <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
+                      {availableProjects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      ref={attachmentInputRef}
+                      type="file"
+                      multiple
+                      style={{ display: 'none' }}
+                      onChange={(e) => {
+                        if (e.target.files) {
+                          onAddAttachments(e.target.files);
+                          e.target.value = '';
+                        }
+                      }}
+                    />
+                    <button
+                      className="v10-agents-refresh"
+                      onClick={() => attachmentInputRef.current?.click()}
+                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
+                    >
+                      Attach files
+                    </button>
+                  </div>
+                </div>
+                {selectedAttachmentDrafts.length > 0 && (
+                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
+                    {attachmentTargetIds.length === 1
+                      ? `Queued files keep their stored target: ${attachmentTargetsLabel}.`
+                      : 'Queued files keep their stored targets and may span multiple projects.'}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder={
+                      showingSessionHistory
+                        ? `Reconnect ${selected.name} to resume live chat...`
+                        : selected.chatReady
+                        ? `Message ${selected.name}...`
+                        : selected.status === 'connecting'
+                          ? `${selected.name} is still connecting...`
+                          : `${selected.name} bridge offline...`
+                    }
+                    className="v10-agent-input"
+                    value={localInput}
+                    onChange={(e) => onLocalInputChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        onSendLocalMessage();
+                      }
+                    }}
+                    disabled={inputDisabled}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    className="v10-agent-send-btn"
+                    onClick={onSendLocalMessage}
+                    disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
+                  >
+                    Send
+                  </button>
+                </div>
+                {!activeProjectId && (
+                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
+                    Choose a target above before attaching files.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )
@@ -763,10 +982,15 @@ export function PanelRight() {
   const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
   const [localSendingByConversation, setLocalSendingByConversation] = useState<Record<string, boolean>>({});
   const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
+  const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useState<Record<string, LocalAgentAttachmentDraft[]>>({});
 
   const localAbortRef = useRef<AbortController | null>(null);
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
+  const availableProjects = useProjectsStore((state) => state.contextGraphs);
+  const projectsLoading = useProjectsStore((state) => state.loading);
+  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
+  const setActiveProject = useProjectsStore((state) => state.setActiveProject);
 
   const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
   const {
@@ -796,7 +1020,9 @@ export function PanelRight() {
   const localSending = selectedConversationKey
     ? (localSendingByConversation[selectedConversationKey] ?? false)
     : false;
-
+  const selectedAttachmentDrafts = selectedConversationKey
+    ? (attachmentDraftsByConversation[selectedConversationKey] ?? [])
+    : [];
   const scrollLocalChatToBottom = useCallback(() => {
     localChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
@@ -827,6 +1053,108 @@ export function PanelRight() {
       [conversationKey]: value,
     }));
   }, []);
+
+  const updateAttachmentDrafts = useCallback((
+    conversationKey: string,
+    updater: (drafts: LocalAgentAttachmentDraft[]) => LocalAgentAttachmentDraft[],
+  ) => {
+    setAttachmentDraftsByConversation((prev) => ({
+      ...prev,
+      [conversationKey]: updater(prev[conversationKey] ?? []),
+    }));
+  }, []);
+
+  const addAttachmentsForConversation = useCallback((
+    conversationKey: string,
+    files: FileList | File[],
+    contextGraphId: string,
+  ) => {
+    const incoming = Array.from(files);
+    if (incoming.length === 0) return;
+
+    const existingKeys = new Set(
+      (attachmentDraftsByConversation[conversationKey] ?? []).map((draft) =>
+        `${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`),
+    );
+    const uniqueFiles = incoming.filter((file) => {
+      const key = `${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`;
+      if (existingKeys.has(key)) return false;
+      existingKeys.add(key);
+      return true;
+    });
+
+    if (uniqueFiles.length === 0) return;
+
+    const drafts = uniqueFiles.map((file) => ({
+      id: `${conversationKey}:${file.name}:${file.size}:${file.lastModified}:${crypto.randomUUID()}`,
+      file,
+      contextGraphId,
+      assertionName: `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
+      status: 'queued' as const,
+    }));
+
+    updateAttachmentDrafts(conversationKey, (prev) => [...prev, ...drafts]);
+  }, [attachmentDraftsByConversation, updateAttachmentDrafts]);
+
+  const prepareAttachmentDraftsForSend = useCallback(async (
+    conversationKey: string,
+    drafts: LocalAgentAttachmentDraft[],
+  ): Promise<LocalAgentAttachmentDraft[]> => {
+    const processed: LocalAgentAttachmentDraft[] = [];
+
+    for (const draft of drafts) {
+      if (draft.status === 'completed' || draft.status === 'skipped') {
+        processed.push(draft);
+        continue;
+      }
+
+      updateAttachmentDrafts(conversationKey, (prev) =>
+        prev.map((item) => (item.id === draft.id
+          ? { ...item, status: 'uploading', error: undefined }
+          : item)),
+      );
+
+      try {
+        const result = await importFile(draft.assertionName, draft.contextGraphId, draft.file);
+        const nextStatus: LocalAgentAttachmentStatus = result.extraction.status === 'completed'
+          ? 'completed'
+          : result.extraction.status === 'skipped'
+            ? 'skipped'
+            : 'error';
+        const nextDraft: LocalAgentAttachmentDraft = {
+          ...draft,
+          status: nextStatus,
+          result,
+          error: result.extraction.error,
+        };
+        processed.push(nextDraft);
+        updateAttachmentDrafts(conversationKey, (prev) =>
+          prev.map((item) => (item.id === draft.id ? nextDraft : item)),
+        );
+      } catch (err: any) {
+        const nextDraft: LocalAgentAttachmentDraft = {
+          ...draft,
+          status: 'error',
+          error: err?.message ?? 'Upload failed',
+        };
+        processed.push(nextDraft);
+        updateAttachmentDrafts(conversationKey, (prev) =>
+          prev.map((item) => (item.id === draft.id ? nextDraft : item)),
+        );
+      }
+    }
+
+    return processed;
+  }, [updateAttachmentDrafts]);
+
+  const removeAttachmentForConversation = useCallback((conversationKey: string, attachmentId: string) => {
+    updateAttachmentDrafts(conversationKey, (prev) => prev.filter((draft) => draft.id !== attachmentId));
+  }, [updateAttachmentDrafts]);
+
+  const clearCompletedAttachmentsForConversation = useCallback((conversationKey: string, sentAttachmentIds: string[]) => {
+    const sent = new Set(sentAttachmentIds);
+    updateAttachmentDrafts(conversationKey, (prev) => prev.filter((draft) => !sent.has(draft.id)));
+  }, [updateAttachmentDrafts]);
 
   const setSelectedIntegration = useCallback((
     integrationId: string,
@@ -981,31 +1309,49 @@ export function PanelRight() {
     const integration = selectedIntegration;
     const conversation = selectedConversation;
     const text = localInput.trim();
-    if (!integration?.chatSupported || !integration.chatReady || !text || localSending || !conversation) return;
+    const drafts = selectedAttachmentDrafts;
+    const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);
+    if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && !hasSendableDrafts)) return;
     const integrationId = integration.id;
     const conversationKey = conversation.stateKey;
-    const correlationId = crypto.randomUUID();
-
-    const userId = `local:${conversationKey}:${correlationId}:user`;
-    const assistantId = `local:${conversationKey}:${correlationId}:assistant`;
-    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    updateLocalMessages(conversationKey, (prev) => [
-      ...prev,
-      { id: userId, turnId: correlationId, role: 'user', content: text, ts: now },
-      { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
-    ]);
-    setLocalInputForConversation(conversationKey, '');
     setLocalSendingForConversation(conversationKey, true);
     setConnectError(null);
-
-    const controller = new AbortController();
-    localAbortRef.current = controller;
+    let controller: AbortController | null = null;
+    let assistantId = '';
 
     try {
+      const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);
+      const attachments = processedDrafts
+        .map((draft) => draftToAttachmentRef(draft))
+        .filter((item): item is LocalAgentChatAttachmentRef => item != null);
+      if (!text && attachments.length === 0) {
+        return;
+      }
+
+      const correlationId = crypto.randomUUID();
+      const messageText = text || buildAttachmentSummary(attachments);
+      const attachmentIds = attachments
+        .map((attachment) => attachment.id)
+        .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
+      const userId = `local:${conversationKey}:${correlationId}:user`;
+      assistantId = `local:${conversationKey}:${correlationId}:assistant`;
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      updateLocalMessages(conversationKey, (prev) => [
+        ...prev,
+        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, attachments },
+        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
+      ]);
+      setLocalInputForConversation(conversationKey, '');
+
+      controller = new AbortController();
+      localAbortRef.current = controller;
+
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
-        signal: controller.signal,
+        signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
+        attachments,
         onEvent: (event: LocalAgentStreamEvent) => {
           if (event.type === 'text_delta') {
             updateLocalMessages(conversationKey, (prev) =>
@@ -1029,22 +1375,27 @@ export function PanelRight() {
             : message,
         ),
       );
+      if (attachmentIds.length > 0) {
+        clearCompletedAttachmentsForConversation(conversationKey, attachmentIds);
+      }
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
-      updateLocalMessages(conversationKey, (prev) =>
-        prev.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                content: err?.name === 'AbortError'
-                  ? 'Request cancelled.'
-                  : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
-                streaming: false,
-              }
-            : message,
-        ),
-      );
+      if (assistantId) {
+        updateLocalMessages(conversationKey, (prev) =>
+          prev.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: err?.name === 'AbortError'
+                    ? 'Request cancelled.'
+                    : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
+                  streaming: false,
+                }
+              : message,
+          ),
+        );
+      }
       void refreshLocalIntegrations();
     } finally {
       setLocalSendingForConversation(conversationKey, false);
@@ -1055,9 +1406,12 @@ export function PanelRight() {
     loadSessions,
     localInput,
     localSending,
+    prepareAttachmentDraftsForSend,
+    selectedAttachmentDrafts,
     refreshLocalIntegrations,
     selectedConversation,
     selectedIntegration,
+    clearCompletedAttachmentsForConversation,
     setLocalInputForConversation,
     setLocalSendingForConversation,
     stage,
@@ -1115,6 +1469,20 @@ export function PanelRight() {
     setMode('agents');
   }, [setSelectedIntegration]);
 
+  const handleSelectProject = useCallback((projectId: string) => {
+    setActiveProject(projectId || null);
+  }, [setActiveProject]);
+
+  const handleAddAttachments = useCallback((files: FileList | File[]) => {
+    if (!selectedConversationKey || !activeProjectId) return;
+    void addAttachmentsForConversation(selectedConversationKey, files, activeProjectId);
+  }, [activeProjectId, addAttachmentsForConversation, selectedConversationKey]);
+
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    if (!selectedConversationKey) return;
+    removeAttachmentForConversation(selectedConversationKey, attachmentId);
+  }, [removeAttachmentForConversation, selectedConversationKey]);
+
   return (
     <div className="v10-panel-right">
       <div className="v10-agent-mode-tabs">
@@ -1160,6 +1528,13 @@ export function PanelRight() {
           onLocalInputChange={(value) => setLocalInputForConversation(selectedConversationKey, value)}
           onSendLocalMessage={sendLocalMessage}
           localSending={localSending}
+          activeProjectId={activeProjectId}
+          availableProjects={availableProjects}
+          projectsLoading={projectsLoading}
+          onSelectProject={handleSelectProject}
+          attachments={selectedAttachmentDrafts}
+          onAddAttachments={handleAddAttachments}
+          onRemoveAttachment={handleRemoveAttachment}
         />
       )}
 

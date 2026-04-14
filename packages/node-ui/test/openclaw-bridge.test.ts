@@ -64,6 +64,15 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('fetchLocalAgentHistory');
     expect(apiSrc).toContain('streamLocalAgentChat');
   });
+
+  it('keeps the local-agent contract attachment-aware', () => {
+    expect(apiSrc).toContain('LocalAgentChatAttachmentRef');
+    expect(apiSrc).toContain('chatAttachments?: boolean');
+    expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
+    expect(apiSrc).toContain('attachmentRefs');
+    expect(apiSrc).toContain("extractionStatus?: 'completed';");
+    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("extractionStatus: 'completed'");
+  });
 });
 
 describe('OpenClaw daemon endpoints', () => {
@@ -91,6 +100,28 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/TIMEOUT_MS/);
     expect(daemonSrc).toMatch(/POLL_MS/);
     expect(daemonSrc).toMatch(/timedOut/);
+  });
+
+  it('does not default OpenClaw chatAttachments in daemon-owned registry surfaces', () => {
+    const definitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf("openclaw: {"),
+      daemonSrc.indexOf('hermes: {'),
+    );
+    const registerAdapterBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/register-adapter"),
+      daemonSrc.indexOf('// GET /api/settings', daemonSrc.indexOf("// POST /api/register-adapter")),
+    );
+    expect(definitionsBlock).not.toContain('chatAttachments: true');
+    expect(registerAdapterBlock).not.toContain('chatAttachments: true');
+  });
+
+  it('discarding an imported assertion evicts its cached extraction status', () => {
+    const discardBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/assertion/:name/discard"),
+      daemonSrc.indexOf("// POST /api/assertion/:name/import-file"),
+    );
+    expect(discardBlock).toContain('const assertionUri = contextGraphAssertionUri(');
+    expect(discardBlock).toContain('extractionStatus.delete(assertionUri);');
   });
 
   it('chat-openclaw persists outbound messages', () => {
@@ -174,6 +205,61 @@ describe('PanelRight UI - connected agent flow', () => {
   it('keeps the interface future-friendly for Hermes', () => {
     expect(panelRight).toContain('Hermes');
     expect(panelRight).toContain('same local-agent contract');
+  });
+
+  it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
+    expect(panelRight).toContain('Attach files');
+    expect(panelRight).toContain('New attachments target:');
+    expect(panelRight).toContain('Choose a project');
+    expect(panelRight).toContain("value={activeProjectId ?? ''}");
+    expect(panelRight).not.toContain('{activeProjectId ? (');
+    expect(panelRight).toContain('Stored only');
+    expect(panelRight).toContain('Queued - imports on send');
+    expect(panelRight).toContain('Queued files keep their stored target');
+    expect(panelRight).toContain('To {targetLabel}');
+    expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
+  });
+
+  it('imports local-agent attachments on send instead of on selection', () => {
+    const addAttachmentsBlock = panelRight.slice(
+      panelRight.indexOf('const addAttachmentsForConversation'),
+      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+    );
+    const sendLocalMessageBlock = panelRight.slice(
+      panelRight.indexOf('const sendLocalMessage'),
+      panelRight.indexOf('const connectIntegration'),
+    );
+
+    expect(addAttachmentsBlock).not.toContain('await importFile(');
+    expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain("if (!text && attachments.length === 0) {");
+    expect(panelRight).not.toContain('selectedCompletedAttachments');
+  });
+
+  it('dedupes selected files per target project instead of globally per conversation', () => {
+    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
+    expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
+  });
+
+  it('only enables attachment-only sends when at least one draft is sendable', () => {
+    expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
+    expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
+    expect(panelRight).toContain('Choose a target above before attaching files.');
+  });
+
+  it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
+    expect(panelRight).toContain('content: message.text || buildAttachmentSummary(message.attachmentRefs ?? [])');
+    expect(panelRight).toContain('const messageText = text || buildAttachmentSummary(attachments);');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text, {');
+  });
+
+  it('persists verified attachment refs separately from assistant tool calls', () => {
+    const persistTurnBlock = readCliFile('daemon.ts');
+    expect(persistTurnBlock).toContain('await memoryManager.storeChatExchange(');
+    expect(persistTurnBlock).toContain('normalizedToolCalls,');
+    expect(persistTurnBlock).not.toContain('mergePersistedToolCalls(');
+    expect(persistTurnBlock).not.toContain('buildOpenClawAttachmentToolCalls(');
+    expect(persistTurnBlock).toContain('sourceFileName');
   });
 
   it('merges reloaded local history with live messages', () => {

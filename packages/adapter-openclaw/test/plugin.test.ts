@@ -1021,7 +1021,9 @@ describe('DkgNodePlugin', () => {
     plugin.register(fullRuntimeApi);
 
     const fullToolNames = fullRuntimeTools.map((tool) => tool.name);
-    expect(fullToolNames).toContain('dkg_memory_search');
+    // Reads go through the memory slot (registerMemoryCapability), not a
+    // DKG-branded tool. Writes still use an explicit dkg_memory_import tool.
+    expect(fullToolNames).not.toContain('dkg_memory_search');
     expect(fullToolNames).toContain('dkg_memory_import');
   });
 

@@ -1,260 +1,342 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DkgMemoryPlugin } from '../src/DkgMemoryPlugin.js';
+import {
+  DkgMemoryPlugin,
+  DkgMemorySearchManager,
+  buildDkgMemoryRuntime,
+  AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
+  PROJECT_MEMORY_ASSERTION,
+  type DkgMemorySession,
+  type DkgMemorySessionResolver,
+} from '../src/DkgMemoryPlugin.js';
 import { DkgDaemonClient } from '../src/dkg-client.js';
-import type { OpenClawPluginApi } from '../src/types.js';
+import type {
+  MemoryPluginCapability,
+  MemoryRuntimeRequest,
+  OpenClawPluginApi,
+} from '../src/types.js';
 
-function makeApi(): OpenClawPluginApi {
+type RegisterToolSpy = ReturnType<typeof vi.fn>;
+type RegisterMemoryCapabilitySpy = ReturnType<typeof vi.fn>;
+
+interface MockApi extends OpenClawPluginApi {
+  registerTool: RegisterToolSpy;
+  registerHook: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  registerMemoryCapability: RegisterMemoryCapabilitySpy;
+}
+
+function makeApi(): MockApi {
   return {
     config: {},
     registerTool: vi.fn(),
     registerHook: vi.fn(),
     on: vi.fn(),
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    registerMemoryCapability: vi.fn(),
   };
 }
 
-describe('DkgMemoryPlugin', () => {
+function makeResolver(
+  overrides?: Partial<DkgMemorySession> & { available?: string[] },
+): DkgMemorySessionResolver {
+  return {
+    getSession: () => ({
+      projectContextGraphId: overrides?.projectContextGraphId,
+      agentAddress: overrides?.agentAddress ?? 'did:dkg:agent:test',
+    }),
+    getDefaultAgentAddress: () => overrides?.agentAddress ?? 'did:dkg:agent:test',
+    listAvailableContextGraphs: () => overrides?.available ?? [],
+  };
+}
+
+describe('DkgMemoryPlugin.register', () => {
   let client: DkgDaemonClient;
   let plugin: DkgMemoryPlugin;
 
   beforeEach(() => {
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
-    plugin = new DkgMemoryPlugin(client, { enabled: true });
+    plugin = new DkgMemoryPlugin(client, { enabled: true }, makeResolver());
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('should register dkg_memory_search and dkg_memory_import tools', () => {
+  it('calls api.registerMemoryCapability exactly once with a runtime factory', () => {
     const api = makeApi();
     plugin.register(api);
 
-    const calls = (api.registerTool as any).mock.calls;
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    const capability = api.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
+  });
+
+  it('registers dkg_memory_import as a conventional tool (not dkg_memory_search)', () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    const calls = api.registerTool.mock.calls;
     const toolNames = calls.map((c: any) => c[0].name);
-    expect(toolNames).toContain('dkg_memory_search');
     expect(toolNames).toContain('dkg_memory_import');
+    expect(toolNames).not.toContain('dkg_memory_search');
   });
 
-  it('search should return formatted results from SPARQL', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: {
-        bindings: [
-          { uri: { value: 'urn:dkg:memory:1' }, text: { value: 'TypeScript patterns' }, type: { value: 'memory' } },
-          { uri: { value: 'urn:dkg:memory:2' }, text: { value: 'TypeScript testing guide' }, type: { value: 'memory' } },
-        ],
-      },
+  it('dkg_memory_import returns needs_clarification when no CG can be resolved', async () => {
+    const api = makeApi();
+    plugin.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+    const result = await importTool.execute('call-1', { text: 'some memory' });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload).toHaveProperty('availableContextGraphs');
+  });
+
+  it('dkg_memory_import writes into the memory assertion when an explicit CG is provided', async () => {
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+
+    const api = makeApi();
+    plugin.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+    const result = await importTool.execute('call-1', {
+      text: 'Prefers dark mode',
+      contextGraphId: 'research-x',
     });
 
-    const api = makeApi();
-    plugin.register(api);
-    const results = await plugin.search('TypeScript');
-
-    expect(results).toHaveLength(2);
-    expect(results[0].content).toBe('TypeScript patterns');
-    expect(results[0].path).toContain('memory');
-    expect(results[0].score).toBeGreaterThan(0);
+    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION, undefined);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const [cg, assertion, quads] = writeSpy.mock.calls[0];
+    expect(cg).toBe('research-x');
+    expect(assertion).toBe(PROJECT_MEMORY_ASSERTION);
+    expect(Array.isArray(quads)).toBe(true);
+    // Minimal schema-aligned shape: schema:Thing + schema:description + schema:dateCreated + schema:creator
+    expect(quads.length).toBe(4);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('stored');
+    expect(payload.contextGraphId).toBe('research-x');
+    expect(payload.assertionName).toBe(PROJECT_MEMORY_ASSERTION);
   });
 
-  it('search should return empty array on error', async () => {
-    vi.spyOn(client, 'query').mockRejectedValueOnce(new Error('daemon offline'));
+  it('dkg_memory_import passes subGraphName through to createAssertion and writeAssertion', async () => {
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
 
     const api = makeApi();
-    plugin.register(api);
-    const results = await plugin.search('anything');
-
-    expect(results).toEqual([]);
-  });
-
-  it('readFile should return text from SPARQL result', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: {
-        bindings: [
-          { text: { value: '# MEMORY\n\nSome content here' } },
-        ],
-      },
+    const pluginWithResolver = new DkgMemoryPlugin(client, { enabled: true }, makeResolver({
+      available: ['research-x'],
+    }));
+    pluginWithResolver.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+    await importTool.execute('call-1', {
+      text: 'a protocol decision',
+      contextGraphId: 'research-x',
+      subGraphName: 'protocols',
     });
 
-    const api = makeApi();
-    plugin.register(api);
-    const content = await plugin.readFile('MEMORY.md');
-
-    expect(content).toBe('# MEMORY\n\nSome content here');
-  });
-
-  it('readFile should return null when not found', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    const content = await plugin.readFile('nonexistent.md');
-
-    expect(content).toBeNull();
-  });
-
-  it('status should report ready from daemon stats', async () => {
-    vi.spyOn(client, 'getMemoryStats').mockResolvedValueOnce({
-      initialized: true,
-      messageCount: 42,
-      totalTriples: 500,
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    const s = await plugin.status();
-
-    expect(s.ready).toBe(true);
-    expect(s.indexedFiles).toBe(500);
-  });
-
-  it('status should report not ready on error', async () => {
-    vi.spyOn(client, 'getMemoryStats').mockRejectedValueOnce(new Error('offline'));
-
-    const api = makeApi();
-    plugin.register(api);
-    const s = await plugin.status();
-
-    expect(s.ready).toBe(false);
-  });
-
-  it('dkg_memory_search tool should delegate to search()', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: {
-        bindings: [
-          { uri: { value: 'urn:1' }, text: { value: 'found it' }, type: { value: 'memory' } },
-        ],
-      },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-
-    const toolCall = (api.registerTool as any).mock.calls.find((c: any) => c[0].name === 'dkg_memory_search');
-    expect(toolCall).toBeTruthy();
-
-    const tool = toolCall[0];
-    const result = await tool.execute('call-1', { query: 'test query' });
-    expect(result.content[0].text).toContain('found it');
-  });
-
-  it('search should include short keywords like "UI" and "AI"', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: {
-        bindings: [
-          { uri: { value: 'urn:1' }, text: { value: 'UI patterns' }, type: { value: 'memory' } },
-        ],
-      },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    const results = await plugin.search('UI');
-
-    expect(results).toHaveLength(1);
-    // Verify the SPARQL query includes the short keyword
-    const sparql = querySpy.mock.calls[0][0];
-    expect(sparql).toContain('ui');
-  });
-
-  it('search should generate SPARQL matching dkg:ImportedMemory', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    await plugin.search('test search');
-
-    const sparql = querySpy.mock.calls[0][0];
-    expect(sparql).toContain('ImportedMemory');
-  });
-
-  it('search should query shared memory graph with includeSharedMemory: true', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    await plugin.search('test');
-
-    const opts = querySpy.mock.calls[0][1];
-    expect(opts).toEqual(
-      expect.objectContaining({
-        contextGraphId: 'agent-memory',
-        includeSharedMemory: true,
-      }),
+    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION, { subGraphName: 'protocols' });
+    expect(writeSpy).toHaveBeenCalledWith(
+      'research-x',
+      PROJECT_MEMORY_ASSERTION,
+      expect.any(Array),
+      { subGraphName: 'protocols' },
     );
   });
 
-  it('readFile should query shared memory graph with includeSharedMemory: true', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
-
+  it('dkg_memory_import rejects empty text with a tool-level error', async () => {
     const api = makeApi();
     plugin.register(api);
-    await plugin.readFile('MEMORY.md');
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+    const result = await importTool.execute('call-1', { text: '  ' });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toMatch(/text/);
+  });
+});
 
-    const opts = querySpy.mock.calls[0][1];
-    expect(opts).toEqual(
-      expect.objectContaining({
-        contextGraphId: 'agent-memory',
-        includeSharedMemory: true,
-      }),
-    );
+describe('DkgMemorySearchManager', () => {
+  let client: DkgDaemonClient;
+
+  beforeEach(() => {
+    client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
   });
 
-  it('search should handle DKG daemon N-Triples binding format', async () => {
-    // DKG daemon returns raw N-Triples literals, not { value: "..." } objects
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      result: {
-        bindings: [
-          { uri: 'urn:dkg:memory:file:MEMORY.md', text: '"PostgreSQL is the preferred database"', type: '"memory"' },
-        ],
-      },
-    });
-
-    const api = makeApi();
-    plugin.register(api);
-    const results = await plugin.search('database');
-
-    expect(results).toHaveLength(1);
-    expect(results[0].content).toBe('PostgreSQL is the preferred database');
-    expect(results[0].path).toContain('memory');
-    expect(results[0].path).toContain('urn:dkg:memory:file:MEMORY.md');
-    expect(results[0].score).toBe(1);
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('readFile should handle DKG daemon N-Triples binding format', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
-      result: {
-        bindings: [
-          { text: '"# MEMORY\\nContent here"' },
-        ],
-      },
+  describe('readFile', () => {
+    it('returns an empty shell for any relPath without calling the daemon', async () => {
+      const querySpy = vi.spyOn(client, 'query');
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const result = await manager.readFile({ relPath: 'MEMORY.md' });
+      expect(result).toEqual({ text: '', path: 'MEMORY.md' });
+      expect(querySpy).not.toHaveBeenCalled();
     });
-
-    const api = makeApi();
-    plugin.register(api);
-    const content = await plugin.readFile('MEMORY.md');
-
-    expect(content).toBe('# MEMORY\nContent here');
   });
 
-  it('search should escape special characters in keywords', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
+  describe('status', () => {
+    it('returns a synchronous MemoryProviderStatus with backend=builtin and provider=dkg', () => {
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const status = manager.status();
+      expect(status.backend).toBe('builtin');
+      expect(status.provider).toBe('dkg');
+      expect(status.vector).toEqual({ enabled: false, available: false });
+      expect(status.fts).toEqual({ enabled: false, available: false });
+      expect(status.sources).toEqual(['memory', 'sessions']);
+    });
+  });
+
+  describe('probes', () => {
+    it('probeEmbeddingAvailability returns ok:false with an explanation', async () => {
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const result = await manager.probeEmbeddingAvailability();
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeTypeOf('string');
     });
 
-    const api = makeApi();
-    plugin.register(api);
-    await plugin.search('test "injection');
+    it('probeVectorAvailability returns ok:false with an explanation', async () => {
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const result = await manager.probeVectorAvailability();
+      expect(result.ok).toBe(false);
+      expect(result.error).toBeTypeOf('string');
+    });
+  });
 
-    const sparql = querySpy.mock.calls[0][0];
-    // The double-quote in the keyword should be escaped with backslash
-    expect(sparql).toContain('\\"injection');
+  describe('search', () => {
+    it('issues one /api/query against agent-context / chat-turns when no project CG is resolved', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+
+      await manager.search('hello world');
+
+      expect(querySpy).toHaveBeenCalledTimes(1);
+      const opts = querySpy.mock.calls[0][1]!;
+      expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
+      expect(opts.view).toBe('working-memory');
+      expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
+      expect(opts.agentAddress).toBe('did:dkg:agent:test');
+    });
+
+    it('issues two parallel /api/query calls when a project CG is resolved', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      await manager.search('hello world');
+
+      expect(querySpy).toHaveBeenCalledTimes(2);
+      const firstOpts = querySpy.mock.calls[0][1]!;
+      const secondOpts = querySpy.mock.calls[1][1]!;
+      const optsByCg: Record<string, any> = {
+        [firstOpts.contextGraphId!]: firstOpts,
+        [secondOpts.contextGraphId!]: secondOpts,
+      };
+      expect(optsByCg[AGENT_CONTEXT_GRAPH].assertionName).toBe(CHAT_TURNS_ASSERTION);
+      expect(optsByCg[AGENT_CONTEXT_GRAPH].view).toBe('working-memory');
+      expect(optsByCg['research-x'].assertionName).toBe(PROJECT_MEMORY_ASSERTION);
+      expect(optsByCg['research-x'].view).toBe('working-memory');
+    });
+
+    it('merges results from both graphs and tags them with the correct source', async () => {
+      vi.spyOn(client, 'query')
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:1' }, text: { value: 'session hello world note' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:2' }, text: { value: 'project hello world memory' } },
+            ],
+          },
+        });
+
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      const results = await manager.search('hello world');
+      expect(results).toHaveLength(2);
+      const sources = results.map(r => r.source).sort();
+      expect(sources).toEqual(['memory', 'sessions']);
+      for (const r of results) {
+        expect(r.startLine).toBe(1);
+        expect(r.endLine).toBe(1);
+        expect(typeof r.path).toBe('string');
+        expect(typeof r.snippet).toBe('string');
+        expect(r.score).toBeGreaterThanOrEqual(0);
+        expect(r.score).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('degrades to the succeeding graph when one query fails', async () => {
+      vi.spyOn(client, 'query')
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: { value: 'urn:m:1' }, text: { value: 'session match hit' } }] } })
+        .mockRejectedValueOnce(new Error('project cg offline'));
+
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      const results = await manager.search('match');
+      expect(results).toHaveLength(1);
+      expect(results[0].source).toBe('sessions');
+    });
+
+    it('returns an empty array for queries with no meaningful keywords', async () => {
+      const querySpy = vi.spyOn(client, 'query');
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const results = await manager.search('a');
+      expect(results).toEqual([]);
+      expect(querySpy).not.toHaveBeenCalled();
+    });
+
+    it('respects maxResults when merging results', async () => {
+      vi.spyOn(client, 'query').mockResolvedValue({
+        result: {
+          bindings: Array.from({ length: 20 }, (_, i) => ({
+            uri: { value: `urn:m:${i}` },
+            text: { value: `hello world item ${i}` },
+          })),
+        },
+      });
+
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+      const results = await manager.search('hello world', { maxResults: 5 });
+      expect(results.length).toBeLessThanOrEqual(5);
+    });
+  });
+});
+
+describe('buildDkgMemoryRuntime', () => {
+  it('returns a factory that yields a DkgMemorySearchManager wired to the given resolver', async () => {
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const runtime = buildDkgMemoryRuntime(client, makeResolver());
+
+    const request: MemoryRuntimeRequest = { sessionKey: 'test-session' };
+    const result = await runtime.getMemorySearchManager(request);
+    expect(result.manager).toBeInstanceOf(DkgMemorySearchManager);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('resolveMemoryBackendConfig reports kind=dkg and the agent-context graph', () => {
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const runtime = buildDkgMemoryRuntime(client, makeResolver());
+    const cfg = runtime.resolveMemoryBackendConfig!({});
+    expect(cfg.kind).toBe('dkg');
+    expect(cfg.agentContextGraph).toBe(AGENT_CONTEXT_GRAPH);
   });
 });

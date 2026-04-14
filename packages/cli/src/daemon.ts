@@ -4724,6 +4724,9 @@ async function handleRequest(
 
     // Session linking (if session URI provided)
     if (sessionUri && typeof sessionUri === 'string') {
+      if (!isSafeIri(sessionUri)) {
+        return jsonResponse(res, 400, { error: 'Invalid sessionUri: contains characters unsafe for RDF IRIs' });
+      }
       quads.push({
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',

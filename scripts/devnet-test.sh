@@ -1703,22 +1703,22 @@ echo "--- 26b: Turn is queryable as ConversationTurn in SWM ---"
 MEMORY_SETTLE_S="${MEMORY_SETTLE_S:-3}"
 sleep "$MEMORY_SETTLE_S"
 TURN_TYPE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"SELECT ?s WHERE { ?s a <http://schema.org/ConversationTurn> . FILTER(CONTAINS(STR(?s),'turn/')) } LIMIT 10\",
+  \"sparql\":\"ASK { <$TURN_URI> a <http://schema.org/ConversationTurn> }\",
   \"contextGraphId\":\"$MEMORY_CG\",
   \"view\":\"shared-working-memory\"
 }")
-TURN_TYPE_CT=$(safe_bindings_count "$TURN_TYPE_Q")
-if [[ "$TURN_TYPE_CT" == "PARSE_ERR" ]]; then
+TURN_TYPE_VAL=$(echo "$TURN_TYPE_Q" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null || echo "ERR")
+if [[ "$TURN_TYPE_VAL" == "yes" ]]; then
+  ok "Turn $TURN_URI is typed as ConversationTurn in SWM"
+elif [[ "$TURN_TYPE_VAL" == "ERR" ]]; then
   fail "ConversationTurn type query returned unparseable response: ${TURN_TYPE_Q:0:200}"
-elif [[ "$TURN_TYPE_CT" -ge 1 ]]; then
-  ok "Turn is typed as ConversationTurn in SWM ($TURN_TYPE_CT)"
 else
-  fail "Turn type ConversationTurn not found in SWM ($TURN_TYPE_CT)"
+  fail "Turn $TURN_URI not found as ConversationTurn in SWM"
 fi
 
 echo "--- 26c: Turn has schema:description quad ---"
 TURN_DESC_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"SELECT ?desc WHERE { ?s a <http://schema.org/ConversationTurn> . ?s <http://schema.org/description> ?desc . FILTER(CONTAINS(STR(?s),'turn/')) } LIMIT 1\",
+  \"sparql\":\"SELECT ?desc WHERE { <$TURN_URI> <http://schema.org/description> ?desc } LIMIT 1\",
   \"contextGraphId\":\"$MEMORY_CG\",
   \"view\":\"shared-working-memory\"
 }")
@@ -1733,7 +1733,7 @@ fi
 
 echo "--- 26d: Turn has agent attribution ---"
 TURN_AGENT_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"SELECT ?agent WHERE { ?s a <http://schema.org/ConversationTurn> . ?s <http://schema.org/agent> ?agent . FILTER(CONTAINS(STR(?s),'turn/')) } LIMIT 1\",
+  \"sparql\":\"SELECT ?agent WHERE { <$TURN_URI> <http://schema.org/agent> ?agent } LIMIT 1\",
   \"contextGraphId\":\"$MEMORY_CG\",
   \"view\":\"shared-working-memory\"
 }")
@@ -1807,7 +1807,7 @@ if [[ "$SEARCH_CT" == "ERR" ]]; then
 elif [[ "$SEARCH_CT" -ge 1 ]]; then
   ok "Memory search returned $SEARCH_CT results for 'Tri-Modal Memory'"
 else
-  warn "Memory search returned 0 results (vector leg may need LLM key)"
+  fail "Memory search returned 0 results — ingested turn not searchable via SPARQL/text"
 fi
 
 echo "--- 26i: Memory search scoped — no cross-CG leakage ---"
@@ -1842,7 +1842,7 @@ BAD_SESSION_RESP=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout 
     \"role\":\"user\",
     \"sessionUri\":\"has spaces and {braces}\"
   }")
-[[ "$BAD_SESSION_RESP" == "400" ]] && ok "Invalid sessionUri rejected (HTTP 400)" || warn "Invalid sessionUri returned HTTP $BAD_SESSION_RESP (expected 400)"
+[[ "$BAD_SESSION_RESP" == "400" ]] && ok "Invalid sessionUri rejected (HTTP 400)" || fail "Invalid sessionUri returned HTTP $BAD_SESSION_RESP (expected 400)"
 
 echo "--- 26k: Turn gossips to other nodes via SWM ---"
 sleep "$GOSSIP_WAIT_S"

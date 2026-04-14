@@ -4619,6 +4619,9 @@ async function handleRequest(
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (sessionUri && typeof sessionUri === 'string' && !isSafeIri(sessionUri)) {
+      return jsonResponse(res, 400, { error: 'Invalid sessionUri: contains characters unsafe for RDF IRIs' });
+    }
 
     const targetLayer = layer === 'wm' ? 'wm' : 'swm';
     const agentDid = `did:dkg:agent:${agent.peerId}`;
@@ -4724,9 +4727,6 @@ async function handleRequest(
 
     // Session linking (if session URI provided)
     if (sessionUri && typeof sessionUri === 'string') {
-      if (!isSafeIri(sessionUri)) {
-        return jsonResponse(res, 400, { error: 'Invalid sessionUri: contains characters unsafe for RDF IRIs' });
-      }
       quads.push({
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',

@@ -2102,7 +2102,13 @@ export class DKGAgent {
     // Only the curator/creator can register a CG on-chain
     const owner = await this.getContextGraphOwner(id);
     const selfDid = `did:dkg:agent:${this.peerId}`;
-    if (owner && owner !== selfDid) {
+    if (!owner) {
+      throw new Error(
+        `Context graph "${id}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    if (owner !== selfDid) {
       throw new Error(
         `Only the context graph creator can register it on-chain. ` +
         `Creator=${owner}, current=${selfDid}`,
@@ -2231,7 +2237,13 @@ export class DKGAgent {
     // Only the curator/creator can manage the allowlist
     const owner = await this.getContextGraphOwner(contextGraphId);
     const selfDid = `did:dkg:agent:${this.peerId}`;
-    if (owner && owner !== selfDid) {
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    if (owner !== selfDid) {
       throw new Error(
         `Only the context graph creator can manage invitations. ` +
         `Creator=${owner}, current=${selfDid}`,
@@ -2469,14 +2481,13 @@ export class DKGAgent {
     const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
-    // Write a placeholder creator so getContextGraphOwner()/assertParanetOwner()
-    // have something to work with immediately. For CGs we actually own (daemon
-    // config), this is the correct value. For CGs we're subscribing to, the real
-    // creator's ontology quads will arrive via sync and overwrite this.
+    // Bootstrap the minimal ontology definition. Do NOT write dkg:creator
+    // here — this is a local helper for both owned and subscribed CGs. The
+    // authoritative creator triple is written by createContextGraph() for
+    // CGs we own, and arrives via sync for CGs we subscribe to.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
@@ -3996,6 +4007,19 @@ export class DKGAgent {
         onChainId: p.contextGraphId,
       });
       this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+
+      // Persist the on-chain ID to the ontology graph so the publisher's
+      // VM registration guard can find it via RDF (it has no access to
+      // the in-memory subscribedContextGraphs map).
+      const cgUri = paranetDataGraphUri(p.name);
+      const ontoGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      await this.store.insert([{
+        subject: cgUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
+        object: `"${p.contextGraphId}"`,
+        graph: ontoGraph,
+      }]);
+
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }

@@ -133,22 +133,12 @@ export class GossipPublishHandler {
                 .filter(q => duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)
                 .map(q => q.object),
             );
-            // Extract incoming dkg:creator triples for duplicates so we can
-            // replace the placeholder written by ensureContextGraphLocal().
-            const incomingCreators = normalized.filter(q =>
-              duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.DKG_CREATOR,
-            );
-            // Delete existing placeholder creators before inserting the authoritative ones
-            for (const cq of incomingCreators) {
-              await this.store.deleteByPattern({
-                graph: cq.graph,
-                subject: cq.subject,
-                predicate: DKG_ONTOLOGY.DKG_CREATOR,
-              });
-            }
+            // Drop ALL definition triples for already-known CGs, including
+            // dkg:creator. Gossip is unauthenticated so we cannot trust
+            // creator claims — the authoritative creator triple arrives via
+            // the authenticated sync protocol.
             normalized = normalized.filter(q =>
-              (duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.DKG_CREATOR)
-              || (!duplicateUris.has(q.subject) && !activityUris.has(q.subject)),
+              !duplicateUris.has(q.subject) && !activityUris.has(q.subject),
             );
           }
 
@@ -175,6 +165,19 @@ export class GossipPublishHandler {
         if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
           this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.paranetId}"`);
           return;
+        }
+        // If no allowlist found, check if _meta has been synced yet.
+        // null can mean "open CG" or "haven't synced _meta yet". Until
+        // sync completes, default to deny for safety. Skip this check
+        // for system paranets (agents/ontology) which are always open.
+        if (allowedPeers === null
+          && request.paranetId !== SYSTEM_PARANETS.AGENTS
+          && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
+          const sub = this.subscribedContextGraphs.get(request.paranetId);
+          if (sub && !sub.synced) {
+            this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
+            return;
+          }
         }
       }
 

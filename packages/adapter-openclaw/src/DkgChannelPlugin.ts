@@ -249,13 +249,23 @@ export class DkgChannelPlugin {
       this.api?.logger.warn?.(
         `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
       );
+      this.clearPendingTurnPersistence();
     }
+    this.stopDrainDeadlineAt = null;
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
     const job = this.pendingTurnPersistence.get(correlationId);
     if (job?.timer) clearTimeout(job.timer);
     this.pendingTurnPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private clearPendingTurnPersistence(): void {
+    for (const job of this.pendingTurnPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingTurnPersistence.clear();
     this.notifyStopIdle();
   }
 

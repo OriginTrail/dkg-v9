@@ -1007,6 +1007,7 @@ describe('DkgChannelPlugin', () => {
       await vi.advanceTimersByTimeAsync(1_500);
       await stopPromise;
       expect(stopSettled).toBe(true);
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
 
       expect(storeSpy).toHaveBeenCalledTimes(1);
       expect(storeSpy).toHaveBeenCalledWith(

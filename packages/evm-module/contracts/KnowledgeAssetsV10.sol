@@ -689,7 +689,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             KnowledgeCollectionLib.MerkleRoot[] memory merkleRoots,
             ,
             uint256 minted,
-            ,
+            uint88 currentByteSize,
             ,
             uint40 endEpoch,
             uint96 currentTokenAmount,
@@ -807,17 +807,29 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
 
         // Same pricing function as publish — applied to the NEW total over
-        // the REMAINING lifetime. If `newByteSize` grew, the expected cost
-        // grows proportionally and `newTokenAmount` must cover it (else
-        // `InvalidTokenAmount`). For metadata-only updates where
-        // `remainingEpochs == 0`, expected == 0 and the check trivially
-        // passes (we already gated the delta > 0 case above).
-        _validateTokenAmount(
-            uint256(p.newByteSize),
-            uint256(remainingEpochs),
-            p.newTokenAmount,
-            false
-        );
+        // the REMAINING lifetime. Only run the validation when there is a
+        // genuine economic change:
+        //   - delta > 0 (publisher is paying additional TRAC), OR
+        //   - byteSize is growing (publisher is committing to a larger
+        //     storage footprint and must pay for it).
+        //
+        // Pure metadata-only updates (delta == 0 AND newByteSize <=
+        // currentByteSize) are re-attestations of existing data and do NOT
+        // re-run the price check. Re-running it would mean a rising
+        // `stakeWeightedAverageAsk` between publish and update could block
+        // routine merkle-root rotations even though no new economics are
+        // being introduced. The original publish already validated the cost
+        // at publish-time ask, and `newTokenAmount >= currentTokenAmount` is
+        // enforced unconditionally above, so the staker reward pool's
+        // commitment is preserved or grown.
+        if (deltaTokenAmount > 0 || p.newByteSize > currentByteSize) {
+            _validateTokenAmount(
+                uint256(p.newByteSize),
+                uint256(remainingEpochs),
+                p.newTokenAmount,
+                false
+            );
+        }
 
         // --- 5. ERC-1155 ownership auth (N16 closure) ---
 

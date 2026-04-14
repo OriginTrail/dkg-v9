@@ -19,14 +19,15 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  * Publisher digest (N26 field order — publish AND update):
  *   (publisherNodeIdentityId, contextGraphId, merkleRoot_or_newMerkleRoot)
  *
- * ACK digest (publish):
- *   publisher fields || knowledgeAssetsAmount || uint256(byteSize)
- *   || uint256(epochs) || uint256(tokenAmount)
+ * ACK digest (publish) — spec `03_PROTOCOL_CORE.md:2104`, decision #25 Option B
+ * (`V10_CONTRACTS_REDESIGN_v2.md:549`). NOTE: the ACK digest does NOT include
+ * `publisherNodeIdentityId` — that field is in the publisher digest only:
+ *   contextGraphId || merkleRoot || knowledgeAssetsAmount
+ *   || uint256(byteSize) || uint256(epochs) || uint256(tokenAmount)
  *
- * ACK digest (update):
- *   publisher fields (with on-chain contextGraphId)
- *   || id || preUpdateMerkleRootCount || newMerkleRoot
- *   || uint256(newByteSize) || uint256(newTokenAmount)
+ * ACK digest (update) — same separation rule:
+ *   contextGraphId (from on-chain) || id || preUpdateMerkleRootCount
+ *   || newMerkleRoot || uint256(newByteSize) || uint256(newTokenAmount)
  *   || mintKnowledgeAssetsAmount
  *   || keccak256(abi.encodePacked(knowledgeAssetsToBurn))
  *
@@ -70,11 +71,14 @@ export function buildPublisherDigest(
 
 /**
  * Build publish ACK digest. See contract `_executePublishCore`.
+ *
+ * Field set per spec `03_PROTOCOL_CORE.md:2104` and decision #25 Option B
+ * (`V10_CONTRACTS_REDESIGN_v2.md:549`). Does NOT include
+ * `publisherNodeIdentityId` — that field is in the publisher digest only.
  */
 export function buildPublishAckDigest(
   chainId: bigint,
   kav10Address: string,
-  publisherNodeIdentityId: number | bigint,
   contextGraphId: bigint,
   merkleRoot: string,
   knowledgeAssetsAmount: number | bigint,
@@ -86,7 +90,6 @@ export function buildPublishAckDigest(
     [
       'uint256', // chainId
       'address', // kav10Address
-      'uint72',  // publisherNodeIdentityId
       'uint256', // contextGraphId
       'bytes32', // merkleRoot
       'uint256', // knowledgeAssetsAmount
@@ -97,7 +100,6 @@ export function buildPublishAckDigest(
     [
       chainId,
       kav10Address,
-      publisherNodeIdentityId,
       contextGraphId,
       merkleRoot,
       knowledgeAssetsAmount,
@@ -122,7 +124,6 @@ export function buildPublishAckDigest(
 export function buildUpdateAckDigest(
   chainId: bigint,
   kav10Address: string,
-  publisherNodeIdentityId: number | bigint,
   contextGraphId: bigint,
   id: bigint,
   preUpdateMerkleRootCount: bigint,
@@ -141,7 +142,6 @@ export function buildUpdateAckDigest(
     [
       'uint256', // chainId
       'address', // kav10Address
-      'uint72',  // publisherNodeIdentityId
       'uint256', // contextGraphId (from storage)
       'uint256', // id
       'uint256', // preUpdateMerkleRootCount
@@ -154,7 +154,6 @@ export function buildUpdateAckDigest(
     [
       chainId,
       kav10Address,
-      publisherNodeIdentityId,
       contextGraphId,
       id,
       preUpdateMerkleRootCount,
@@ -221,7 +220,6 @@ export async function buildPublishParams(args: {
   const ackDigest = buildPublishAckDigest(
     args.chainId,
     args.kav10Address,
-    args.publisherIdentityId,
     args.contextGraphId,
     args.merkleRoot,
     args.knowledgeAssetsAmount,
@@ -287,7 +285,6 @@ export async function buildUpdateParams(args: {
   const ackDigest = buildUpdateAckDigest(
     args.chainId,
     args.kav10Address,
-    args.publisherIdentityId,
     args.contextGraphId,
     args.id,
     args.preUpdateMerkleRootCount,

@@ -347,12 +347,20 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.publisherNodeVS
         );
 
-        // ACK digest (H5: same chain/contract prefix as publisher digest).
+        // ACK digest. H5 chain/contract prefix mirrors the publisher digest.
+        // Field set per spec `03_PROTOCOL_CORE.md:2104` and decision #25 Option B
+        // (`V10_CONTRACTS_REDESIGN_v2.md:549`):
+        //   (chainid, address(this), contextGraphId, merkleRoot,
+        //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount)
+        // The publisher node identity is NOT part of the ACK digest — it lives
+        // only in the publisher digest above. ACK signers attest to the
+        // publication's economic + content shape; the publishing node is a
+        // separate authority verified separately. Mixing the two would break
+        // off-chain spec-conformant signers.
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
                 block.chainid,
                 address(this),
-                p.publisherNodeIdentityId,
                 p.contextGraphId,
                 p.merkleRoot,
                 p.knowledgeAssetsAmount,
@@ -771,11 +779,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // metadata snapshot above, so signers and the contract agree on the
         // exact version they're attesting.
         uint256 preUpdateMerkleRootCount = merkleRoots.length;
+        // Same field-set rule as publish: NO `publisherNodeIdentityId` in the
+        // ACK digest. The publishing node is verified separately above. Spec
+        // ref: `03_PROTOCOL_CORE.md:2104` (publish ACK shape — update mirrors
+        // the same separation).
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
                 block.chainid,
                 address(this),
-                p.publisherNodeIdentityId,
                 contextGraphId,
                 p.id,
                 preUpdateMerkleRootCount,

@@ -548,7 +548,6 @@ describe('@unit KnowledgeAssetsV10', () => {
         const rightAckDigest = buildPublishAckDigest(
           chainId,
           kav10Address,
-          publisherIdentityId,
           cgId,
           merkleRoot,
           knowledgeAssetsAmount,
@@ -594,6 +593,100 @@ describe('@unit KnowledgeAssetsV10', () => {
     });
 
     // ----------------------------------------------------------------------
+    // T1.5b: ACK digest spec-conformance regression (Codex BLOCKER 1)
+    //
+    // Spec `03_PROTOCOL_CORE.md:2104` + decision #25 Option B
+    // (`V10_CONTRACTS_REDESIGN_v2.md:549`) define the publish ACK digest as:
+    //   (block.chainid, address(this), contextGraphId, merkleRoot,
+    //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount)
+    //
+    // An earlier draft of the contract incorrectly included
+    // `publisherNodeIdentityId` in the ACK digest. This regression locks in
+    // the spec-conformant shape: signing the WRONG (with-identityId) shape
+    // must revert.
+    // ----------------------------------------------------------------------
+    describe('T1.5b: ACK digest spec-conformance regression', () => {
+      it('rejects an ACK signed with the deprecated (publisherNodeIdentityId-included) shape', async () => {
+        const creator = getDefaultKCCreator(accounts);
+        const { publishingNode, publisherIdentityId, receivingNodes, receiverIdentityIds } =
+          await setupNodes();
+
+        const cgId = await createOpenCG(creator);
+        const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.5b-root'));
+        const tokenAmount = ethers.parseEther('100');
+        const epochs = 2;
+        const knowledgeAssetsAmount = 10;
+        const byteSize = 1000;
+
+        // Correct publisher digest (publisher-side is fine).
+        const publisherDigest = buildPublisherDigest(
+          chainId,
+          kav10Address,
+          publisherIdentityId,
+          cgId,
+          merkleRoot,
+        );
+
+        // WRONG ACK digest: mirrors the deprecated layout that included
+        // publisherNodeIdentityId. The contract computes the correct shape
+        // (without identityId) so recovery yields a different signer.
+        const wrongAckDigest = ethers.solidityPackedKeccak256(
+          [
+            'uint256', // chainId
+            'address', // kav10Address
+            'uint72',  // publisherNodeIdentityId (DEPRECATED — must NOT be in ACK)
+            'uint256', // contextGraphId
+            'bytes32', // merkleRoot
+            'uint256', // knowledgeAssetsAmount
+            'uint256', // byteSize
+            'uint256', // epochs
+            'uint256', // tokenAmount
+          ],
+          [
+            chainId,
+            kav10Address,
+            publisherIdentityId,
+            cgId,
+            merkleRoot,
+            knowledgeAssetsAmount,
+            byteSize,
+            epochs,
+            tokenAmount,
+          ],
+        );
+
+        const sig = await signPublishDigests(
+          publishingNode,
+          receivingNodes,
+          publisherDigest,
+          wrongAckDigest,
+        );
+
+        const p = {
+          publishOperationId: 't1.5b-op',
+          contextGraphId: cgId,
+          merkleRoot,
+          knowledgeAssetsAmount,
+          byteSize,
+          epochs,
+          tokenAmount,
+          isImmutable: false,
+          publisherNodeIdentityId: publisherIdentityId,
+          publisherNodeR: sig.publisherR,
+          publisherNodeVS: sig.publisherVS,
+          identityIds: receiverIdentityIds,
+          r: sig.receiverRs,
+          vs: sig.receiverVSs,
+        };
+
+        await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+        await expect(
+          KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
+        ).to.be.reverted;
+      });
+    });
+
+    // ----------------------------------------------------------------------
     // T1.6: H5 ACK digest cross-chain replay rejection
     // ----------------------------------------------------------------------
     describe('T1.6: H5 cross-chain replay rejection', () => {
@@ -622,7 +715,6 @@ describe('@unit KnowledgeAssetsV10', () => {
         const ackDigest = buildPublishAckDigest(
           mainnetChainId,
           kav10Address,
-          publisherIdentityId,
           cgId,
           merkleRoot,
           knowledgeAssetsAmount,

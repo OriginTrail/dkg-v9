@@ -195,7 +195,7 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
+      nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex, match.index)}</React.Fragment>);
     }
 
     const token = match[0];
@@ -204,14 +204,14 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
     } else if (token.startsWith('`') && token.endsWith('`')) {
       nodes.push(<code key={`md-${key++}`}>{token.slice(1, -1)}</code>);
     } else {
-      nodes.push(token);
+      nodes.push(<React.Fragment key={`md-${key++}`}>{token}</React.Fragment>);
     }
 
     lastIndex = match.index + token.length;
   }
 
   if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
+    nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex)}</React.Fragment>);
   }
 
   return nodes;
@@ -518,7 +518,7 @@ function formatLocalAgentErrorMessage(
   return message;
 }
 
-function ConnectedAgentsTab(props: {
+export function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
   selectedIntegration: LocalAgentIntegration | null;
@@ -1427,10 +1427,6 @@ export function PanelRight() {
       controller = new AbortController();
       localAbortRef.current = controller;
       const contextEntries = buildChatContextEntries(availableProjects, activeProjectId);
-      console.debug('[local-agent] outgoing contextEntries', {
-        activeProjectId,
-        contextEntries,
-      });
 
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,

@@ -592,6 +592,31 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     log('Added "group:plugins" to tools.alsoAllow');
   }
 
+  // Elect the adapter into OpenClaw's memory slot. Combined with
+  // "kind": "memory" in openclaw.plugin.json and api.registerMemoryCapability(...)
+  // inside DkgNodePlugin.register(), this replaces the default memory-core
+  // plugin with the DKG-backed provider.
+  if (!config.plugins.slots || typeof config.plugins.slots !== 'object') {
+    config.plugins.slots = {};
+  }
+  // Wrong-slot guard: the context-engine slot is for a different plugin kind;
+  // accidentally writing our adapter ID there would be a bug.
+  if (config.plugins.slots.contextEngine === pluginId) {
+    throw new Error(
+      `Refusing to merge adapter: plugins.slots.contextEngine is set to "${pluginId}" ` +
+      `but the adapter declares kind: "memory". Clear plugins.slots.contextEngine first.`,
+    );
+  }
+  if (config.plugins.slots.memory !== pluginId) {
+    if (config.plugins.slots.memory && config.plugins.slots.memory !== pluginId) {
+      log(`plugins.slots.memory was "${config.plugins.slots.memory}" — overwriting with "${pluginId}"`);
+    }
+    config.plugins.slots.memory = pluginId;
+    log(`Set plugins.slots.memory = "${pluginId}"`);
+  } else {
+    log(`plugins.slots.memory already = "${pluginId}"`);
+  }
+
   const updated = JSON.stringify(config, null, 2) + '\n';
   if (updated === raw) {
     log('openclaw.json already up to date — no changes needed');
@@ -694,7 +719,62 @@ export async function verifySetup(apiPort: number): Promise<void> {
     warn('wallets.json not found');
   }
 
+  // Memory-authority post-install invariants. See the openclaw-dkg-primary-memory
+  // plan §5.8 / §7 B1,B2,B13 gates.
+  verifyMemorySlotInvariants();
+
   log(`Node UI: http://127.0.0.1:${apiPort}/ui`);
+}
+
+/**
+ * Memory-authority invariants that must hold after setup:
+ *   (a) ~/.openclaw/openclaw.json plugins.slots.memory === "adapter-openclaw"
+ *   (b) ~/.openclaw/openclaw.json plugins.slots.contextEngine !== "adapter-openclaw"
+ *   (c) packages/adapter-openclaw/openclaw.plugin.json has "kind": "memory"
+ * Logged as pass/fail per invariant. Non-throwing (warns on failure) so
+ * that a partial install is still surfaced rather than hidden.
+ */
+export function verifyMemorySlotInvariants(): void {
+  const openclawConfigPath = join(openclawDir(), 'openclaw.json');
+  if (!existsSync(openclawConfigPath)) {
+    warn(`Memory-slot verification skipped: openclaw.json not found at ${openclawConfigPath}`);
+    return;
+  }
+
+  try {
+    const raw = readFileSync(openclawConfigPath, 'utf-8');
+    const config = JSON.parse(raw);
+    const slotMemory = config?.plugins?.slots?.memory;
+    if (slotMemory === 'adapter-openclaw') {
+      log('[verify] plugins.slots.memory === "adapter-openclaw" ✓');
+    } else {
+      warn(`[verify] plugins.slots.memory !== "adapter-openclaw" (got: ${JSON.stringify(slotMemory)}) — memory slot election FAILED`);
+    }
+    const slotContextEngine = config?.plugins?.slots?.contextEngine;
+    if (slotContextEngine !== 'adapter-openclaw') {
+      log(`[verify] plugins.slots.contextEngine !== "adapter-openclaw" ✓`);
+    } else {
+      warn(`[verify] plugins.slots.contextEngine === "adapter-openclaw" — wrong-slot guard FAILED`);
+    }
+  } catch (err: any) {
+    warn(`[verify] Could not parse ${openclawConfigPath}: ${err.message}`);
+  }
+
+  const manifestPath = join(adapterRoot(), 'openclaw.plugin.json');
+  if (!existsSync(manifestPath)) {
+    warn(`[verify] openclaw.plugin.json not found at ${manifestPath} — manifest kind check SKIPPED`);
+    return;
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    if (manifest?.kind === 'memory') {
+      log('[verify] openclaw.plugin.json has "kind": "memory" ✓');
+    } else {
+      warn(`[verify] openclaw.plugin.json kind !== "memory" (got: ${JSON.stringify(manifest?.kind)}) — manifest declaration FAILED`);
+    }
+  } catch (err: any) {
+    warn(`[verify] Could not parse ${manifestPath}: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

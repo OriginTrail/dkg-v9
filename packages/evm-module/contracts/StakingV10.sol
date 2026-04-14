@@ -986,13 +986,196 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      * @notice Walk unclaimed epochs for the position, accumulate reward,
      *         and bank it into the `ConvictionStakingStorage` rewards
      *         bucket via `increaseRewards`. Updates `lastClaimedEpoch`.
+     * @param staker   Original NFT owner / caller (unused in the body —
+     *                 ownership is enforced at `DKGStakingConvictionNFT.claim`
+     *                 via `ownerOf` before this function is ever reached;
+     *                 kept in the signature so every `onlyConvictionNFT`
+     *                 entry point shares the same call shape).
+     * @param tokenId  Target position.
+     *
+     * @dev Flow (auto-compound into the `rewards` bucket — no wallet transfer):
+     *        1. Read position; `identityId == 0` → `PositionNotFound`
+     *           (defense-in-depth; the NFT wrapper's `ownerOf` check
+     *           already rejects un-minted tokenIds).
+     *        2. Compute the claim window `[pos.lastClaimedEpoch + 1
+     *           .. currentEpoch - 1]`. If empty (fresh position or
+     *           genesis `currentEpoch <= 1`), return as a no-op — no
+     *           emit, no storage writes.
+     *        3. Settle the delegator's score index at `currentEpoch`
+     *           BEFORE we mutate any stake base. This mirrors the
+     *           `stake` / `relock` / `redelegate` / `finalizeWithdrawal`
+     *           pattern and is required because we are about to call
+     *           `setDelegatorStakeBase` which changes the score-earning
+     *           base from `raw + rewardsOld` to `raw + rewardsNew`.
+     *        4. Walk the window and accumulate reward. Per-epoch
+     *           effective stake:
+     *              e <  expiryEpoch → raw*mult18/1e18 + rewardsSnapshot
+     *              e >= expiryEpoch → raw + rewardsSnapshot
+     *           `rewardsSnapshot` is `pos.rewards` captured once before
+     *           the walk — matching the spec's semantics of "the
+     *           compounded rewards value at the time of claim".
+     *        5. Per-epoch reward:
+     *              reward_e = effStake_e * nodeEpochScorePerStake[e] / 1e18
+     *           scale matches V8 `_prepareForStakeChange`
+     *           (`scoreEarned18 = stakeBase * scorePerStakeDiff36 / SCALE18`).
+     *           In the V8 address-keyed path the score is further converted
+     *           to TRAC via `reward = delegatorScore18 * netNodeRewards /
+     *           nodeScore18` — that conversion lives in Phase 11, which will
+     *           replace this formula with the actual Paymaster flow. Phase 5
+     *           treats the score-weighted effective stake as the reward TRAC
+     *           stub so the claim bookkeeping path can be unit-tested end-to-end.
+     *        6. If the window produced zero reward (all scores were zero or
+     *           the Paymaster was empty), advance `lastClaimedEpoch` to
+     *           skip the walk on the next call but emit nothing and skip
+     *           the node/total stake mutation.
+     *        7. Otherwise: `increaseRewards` + `setDelegatorStakeBase` to
+     *           `raw + rewardsNew` (per the Phase 5 decision that the
+     *           delegator base tracks the composite, mirroring the
+     *           `redelegate` / `finalizeWithdrawal` precedent) + per-node
+     *           and global `increaseNodeStake` / `increaseTotalStake` +
+     *           `setLastClaimedEpoch` + emit `RewardsClaimed`.
+     *
+     *      **TRAC source — Phase 11.** Phase 5 `claim` does NOT pull TRAC
+     *      from any external source. The StakingStorage vault must be
+     *      pre-funded with the reward TRAC by Phase 11's Paymaster /
+     *      EpochStorage integration; unit tests simulate this by calling
+     *      `Token.mint(stakingStorage, rewardTotal)` before `claim`. If
+     *      the vault is under-funded, `increaseNodeStake` +
+     *      `increaseTotalStake` still succeed (they are pure accounting
+     *      mutations), but a later `finalizeWithdrawal` would revert on
+     *      the `transferStake` underflow. It is Phase 11's responsibility
+     *      to keep the vault funded in step with reward accrual.
      */
     function claim(
         address staker,
         uint256 tokenId
-    ) external view onlyConvictionNFT {
-        staker; tokenId;
-        revert("NotImplemented");
+    ) external onlyConvictionNFT {
+        staker; // unused — see NatSpec. Kept in the signature so every
+                // `onlyConvictionNFT` entry point shares the same call
+                // shape from the NFT wrapper.
+
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        if (pos.identityId == 0) revert PositionNotFound();
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        // Genesis guard: Chronos floors `getCurrentEpoch()` at 1, so
+        // `currentEpoch - 1 == 0` on the very first epoch. The claim
+        // window `[last+1 .. 0]` is empty but we underflow-guard first
+        // to keep the subtraction below safe.
+        if (currentEpoch <= 1) return;
+
+        uint256 claimFromEpoch = uint256(pos.lastClaimedEpoch) + 1;
+        uint256 claimToEpoch = currentEpoch - 1;
+        if (claimFromEpoch > claimToEpoch) return; // nothing to claim — no-op
+
+        // Settle the delegator's score-per-stake index at `currentEpoch`
+        // BEFORE mutating any stake base. Without this, a subsequent V8-
+        // style reward claim at the same (identityId, delegatorKey) would
+        // read `lastSettledScorePerStake` against a stale base and collect
+        // score that belongs to the pre-compound delegation. Matches the
+        // stake / relock / redelegate / finalizeWithdrawal pattern in this
+        // contract — `prepareForStakeChange` is `external onlyContracts`
+        // on the V8 `Staking` contract and StakingV10 is Hub-registered.
+        bytes32 delegatorKey = bytes32(tokenId);
+        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+
+        // Local cache to avoid repeated SLOAD in the walk loop.
+        uint256 raw = uint256(pos.raw);
+        uint256 mult18 = uint256(pos.multiplier18);
+        uint256 rewardsSnapshot = uint256(pos.rewards);
+        uint256 expiryEpoch = uint256(pos.expiryEpoch);
+        uint72 identityId = pos.identityId;
+
+        uint256 rewardTotal = 0;
+        for (uint256 e = claimFromEpoch; e <= claimToEpoch; e++) {
+            // Per-epoch effective stake.
+            // Pre-expiry: raw earns its multiplier, rewards earn 1x.
+            // Post-expiry (e >= expiryEpoch): raw earns 1x, rewards earn 1x.
+            // `expiryEpoch == 0` (lock-0 rest state) falls straight into the
+            // post-expiry branch on the first epoch.
+            uint256 effStake;
+            if (expiryEpoch != 0 && e < expiryEpoch) {
+                effStake = (raw * mult18) / SCALE18 + rewardsSnapshot;
+            } else {
+                effStake = raw + rewardsSnapshot;
+            }
+
+            // Per-epoch score-per-stake from RandomSamplingStorage.
+            // `nodeEpochScorePerStake[e][identityId]` is stored at 1e36
+            // scale (score18 * SCALE18 / totalNodeStake_wei — see
+            // `RandomSampling.submitProof` at `:273`). Dividing by 1e18
+            // gives a 1e18-scaled score value matching V8's
+            // `_prepareForStakeChange` dimensional output:
+            //   scoreEarned18 = stakeBase * scorePerStakeDiff36 / SCALE18
+            // In the V8 reward path this `scoreEarned18` is further
+            // converted to TRAC via `reward = delegatorScore18 *
+            // netNodeRewards / nodeScore18`, where netNodeRewards comes
+            // from `epochStorage.getEpochPool(...) * nodeScore18 /
+            // allNodesScore18 - operatorFee`. That conversion is Phase 11's
+            // responsibility; Phase 5 treats the 1e18-scaled score as the
+            // reward TRAC stub so the claim bookkeeping can be exercised
+            // end-to-end under unit test.
+            //
+            // NOTE: Unlike a "cumulative index" design, V8's
+            // `nodeEpochScorePerStake` is PER-EPOCH — each epoch's value
+            // is the score-per-stake accrued within that epoch alone. No
+            // `[e] - [e-1]` subtraction is needed (or correct).
+            uint256 scorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(
+                e,
+                identityId
+            );
+
+            rewardTotal += (effStake * scorePerStake36) / SCALE18;
+        }
+
+        if (rewardTotal == 0) {
+            // No-reward window — still advance `lastClaimedEpoch` so the
+            // next claim doesn't redo the (cold, but potentially long)
+            // walk. No event, no stake mutation: this is not an economic
+            // event, just a cursor advance.
+            convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
+            return;
+        }
+
+        // 1. Bank the reward into the split-bucket rewards accumulator.
+        //    `increaseRewards` updates `pos.rewards` and the conviction-layer
+        //    effective-stake diff at `currentEpoch` (rewards always contribute
+        //    at 1x, no expiry delta).
+        convictionStorage.increaseRewards(tokenId, uint96(rewardTotal));
+
+        // 2. Update the `StakingStorage` delegator base to reflect the
+        //    composite `raw + rewardsNew`. Phase 5 decision (withdrawal
+        //    precedent): the delegator base tracks the full composite
+        //    per-delegator balance, not raw alone. The pre-claim base was
+        //    `raw + rewardsOld`, so we can write
+        //    `raw + rewardsOld + rewardTotal = raw + rewardsNew`. Using
+        //    `setDelegatorStakeBase` (not `increaseDelegatorStakeBase`)
+        //    keeps the write shape symmetric with the withdrawal path
+        //    that shrinks the base.
+        uint96 newBase = uint96(raw + rewardsSnapshot + rewardTotal);
+        stakingStorage.setDelegatorStakeBase(identityId, delegatorKey, newBase);
+
+        // 3. Node + total stake increments. These track the full
+        //    composite delegator balance, mirroring the V8
+        //    `claimDelegatorRewards` restake path (Staking.sol:630-632).
+        stakingStorage.increaseNodeStake(identityId, uint96(rewardTotal));
+        stakingStorage.increaseTotalStake(uint96(rewardTotal));
+
+        // 4. Advance the position's claim cursor to the walked boundary so
+        //    subsequent calls in the same epoch are pure no-ops.
+        convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
+
+        // TODO(Phase 11): transfer `rewardTotal` TRAC from Paymaster /
+        // EpochStorage into the StakingStorage vault. Phase 5 assumes the
+        // TRAC is already in the vault (via Phase 11's reward flow on
+        // mainnet, or via `Token.mint(stakingStorage, amount)` in unit
+        // tests). Claim bookkeeping does NOT revert on an under-funded
+        // vault — it is Phase 11's responsibility to keep the vault
+        // funded in step with reward accrual, and a later
+        // `finalizeWithdrawal` would surface the discrepancy as a
+        // `transferStake` underflow.
+
+        emit RewardsClaimed(tokenId, uint96(rewardTotal));
     }
 
     /**

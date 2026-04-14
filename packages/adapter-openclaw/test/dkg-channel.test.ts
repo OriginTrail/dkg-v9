@@ -658,6 +658,53 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('processInboundStream should persist the completed reply when final completion was already queued before the consumer stopped iterating', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Complete reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-finished-before-return', 'owner');
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text_delta', delta: 'Complete reply' },
+    });
+    await expect(stream.return(undefined)).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Complete reply',
+      { turnId: 'corr-stream-finished-before-return' },
+    );
+  });
+
   it('processInboundStream should surface a real error when the agent returns no text', async () => {
     const mockRuntime = {
       channel: {

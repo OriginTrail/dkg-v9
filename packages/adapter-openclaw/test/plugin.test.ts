@@ -399,7 +399,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('keeps a stored gatewayUrl when the current gateway object has no URL-affecting settings', async () => {
+  it('derives the current local gatewayUrl when gateway routing is active and the current gateway object has no URL-affecting settings', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -457,7 +457,7 @@ describe('DkgNodePlugin', () => {
       expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
-          gatewayUrl: 'http://10.0.0.5:18789',
+          gatewayUrl: 'http://127.0.0.1:18789',
         },
       });
     } finally {
@@ -466,7 +466,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('keeps a stored gatewayUrl when gateway tls config only sets enabled=false', async () => {
+  it('derives the current local gatewayUrl when gateway tls config only sets enabled=false', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -522,7 +522,7 @@ describe('DkgNodePlugin', () => {
       expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
-          gatewayUrl: 'http://10.0.0.5:18789',
+          gatewayUrl: 'http://127.0.0.1:18789',
         },
       });
     } finally {

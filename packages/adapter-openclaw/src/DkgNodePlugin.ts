@@ -303,7 +303,10 @@ export class DkgNodePlugin {
     const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
 
-    const gatewayBaseUrl = this.resolveGatewayBaseUrl(api, existing?.gatewayUrl);
+    const gatewayBaseUrl = this.resolveGatewayBaseUrl(
+      api,
+      this.channelPlugin.isUsingGatewayRoute ? undefined : existing?.gatewayUrl,
+    );
     if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
       transport.gatewayUrl = gatewayBaseUrl;
     }

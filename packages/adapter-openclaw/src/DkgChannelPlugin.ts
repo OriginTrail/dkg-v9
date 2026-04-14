@@ -725,6 +725,8 @@ export class DkgChannelPlugin {
     const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
 
     let replyText = '';
+    let dispatchTerminal: 'done' | 'error' | null = null;
+    let dispatchFailureMessage: string | null = null;
     const deliver = async (payload: any) => {
       const t = payload?.text;
       if (t) {
@@ -759,8 +761,16 @@ export class DkgChannelPlugin {
         );
 
     dispatchFn()
-      .then(() => push({ type: 'done' }))
-      .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
+      .then(() => {
+        dispatchTerminal = 'done';
+        push({ type: 'done' });
+      })
+      .catch((err: any) => {
+        dispatchTerminal = 'error';
+        const dispatchFailure = err instanceof Error ? err : new Error(String(err));
+        dispatchFailureMessage = dispatchFailure.message;
+        push({ type: 'error', error: dispatchFailure });
+      });
 
     // Yield events as they arrive
     let terminalState: 'cancelled' | 'completed' | 'failed' = 'cancelled';
@@ -794,6 +804,27 @@ export class DkgChannelPlugin {
     } finally {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
+
+      if (terminalState === 'cancelled') {
+        const queuedTerminal = [...queue].reverse().find(
+          (item): item is { type: 'done' } | { type: 'error'; error: Error } =>
+            item.type === 'done' || item.type === 'error',
+        );
+        if (queuedTerminal?.type === 'done' || dispatchTerminal === 'done') {
+          try {
+            finalText = finalizeAgentReplyText(replyText);
+            terminalState = 'completed';
+          } catch (err) {
+            terminalState = 'failed';
+            failureReason = getErrorMessage(err);
+          }
+        } else if (queuedTerminal?.type === 'error' || dispatchTerminal === 'error') {
+          const queuedTerminalError: Error | null =
+            queuedTerminal && queuedTerminal.type === 'error' ? queuedTerminal.error : null;
+          terminalState = 'failed';
+          failureReason = queuedTerminalError?.message ?? dispatchFailureMessage ?? failureReason;
+        }
+      }
 
       if (terminalState === 'completed' && finalText) {
         this.queueTurnPersistence(text, finalText, correlationId, identity, undefined, true);

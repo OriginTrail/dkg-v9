@@ -146,7 +146,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     uri: message.uri,
     turnId: message.turnId,
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
-    content: message.text,
+    content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
     attachments: message.attachmentRefs,
   };
@@ -1356,7 +1356,7 @@ export function PanelRight() {
       controller = new AbortController();
       localAbortRef.current = controller;
 
-      const result = await streamLocalAgentChat(integrationId, messageText, {
+      const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,

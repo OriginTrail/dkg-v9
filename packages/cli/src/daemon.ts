@@ -2338,6 +2338,7 @@ function extractionRecordMatchesOpenClawAttachmentRef(
 ): boolean {
   if (record.status !== 'completed') return false;
   if (record.fileHash !== ref.fileHash) return false;
+  if (record.fileName && record.fileName !== ref.fileName) return false;
   if (
     ref.detectedContentType
     && normalizeDetectedContentType(ref.detectedContentType) !== normalizeDetectedContentType(record.detectedContentType)
@@ -2365,17 +2366,18 @@ export async function verifyOpenClawAttachmentRefsProvenance(
     const extractionRecord = getExtractionStatusRecord(extractionStatus, ref.assertionUri);
     if (extractionRecord) {
       if (!extractionRecordMatchesOpenClawAttachmentRef(ref, extractionRecord)) return undefined;
-      continue;
+      if (extractionRecord.fileName === ref.fileName) continue;
     }
 
     const metaGraph = contextGraphMetaUri(ref.contextGraphId);
     const metaResult = await agent.store.query(`
-      SELECT ?fileHash ?contentType ?rootEntity ?tripleCount WHERE {
+      SELECT ?fileHash ?contentType ?rootEntity ?tripleCount ?sourceFileName WHERE {
         GRAPH <${metaGraph}> {
           <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash .
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceContentType> ?contentType }
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/rootEntity> ?rootEntity }
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/structuralTripleCount> ?tripleCount }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileName> ?sourceFileName }
         }
       }
       LIMIT 1
@@ -2398,6 +2400,8 @@ export async function verifyOpenClawAttachmentRefsProvenance(
     if (ref.tripleCount != null && storedTripleCount != null && ref.tripleCount !== storedTripleCount) {
       return undefined;
     }
+    const storedFileName = stripOpenClawAttachmentLiteral(binding.sourceFileName ?? '').trim();
+    if (!storedFileName || storedFileName !== ref.fileName) return undefined;
 
     const storedRootEntity = typeof binding.rootEntity === 'string'
       ? binding.rootEntity.replace(/[<>]/g, '').trim()
@@ -2421,6 +2425,25 @@ export function buildOpenClawAttachmentToolCalls(
       fileHash: ref.fileHash,
     },
   }));
+}
+
+function mergePersistedToolCalls(
+  normalizedToolCalls: Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined {
+  const attachmentToolCalls = buildOpenClawAttachmentToolCalls(attachmentRefs);
+  if (!normalizedToolCalls?.length && !attachmentToolCalls?.length) return undefined;
+
+  const merged = [...(normalizedToolCalls ?? [])];
+  for (const call of attachmentToolCalls ?? []) {
+    const alreadyPresent = merged.some((existing) =>
+      existing.name === call.name
+      && isPlainRecord(existing.args)
+      && existing.args.assertionUri === call.args.assertionUri,
+    );
+    if (!alreadyPresent) merged.push(call);
+  }
+  return merged;
 }
 
 let _standaloneCache: boolean | null = null;
@@ -3027,12 +3050,13 @@ async function handleRequest(
     const normalizedFailureReason = typeof failureReason === 'string'
       ? failureReason
       : (failureReason === null ? null : undefined);
+    const persistedToolCalls = mergePersistedToolCalls(normalizedToolCalls, verifiedAttachmentRefs);
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
-        normalizedToolCalls,
+        persistedToolCalls,
         {
           turnId: normalizedTurnId,
           persistenceState: normalizedPersistenceState,
@@ -3593,6 +3617,7 @@ async function handleRequest(
         : undefined;
     const ontologyRef = textField('ontologyRef');
     const subGraphName = textField('subGraphName');
+    const uploadedFilename = filePart.filename?.trim() ?? '';
 
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -3689,6 +3714,7 @@ async function handleRequest(
       setExtractionStatusRecord(extractionStatus, assertionUri, {
         status: 'in_progress',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         detectedContentType,
         pipelineUsed,
         tripleCount: 0,
@@ -3704,6 +3730,7 @@ async function handleRequest(
       const failedRecord: ExtractionStatusRecord = {
         status: 'failed',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
         detectedContentType,
         pipelineUsed: failedPipelineUsed,
@@ -3765,6 +3792,7 @@ async function handleRequest(
       const skippedRecord: ExtractionStatusRecord = {
         status: 'skipped',
         fileHash: fileStoreEntry.keccak256,
+        ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
         detectedContentType,
         pipelineUsed: null,
         tripleCount: 0,
@@ -3994,7 +4022,6 @@ async function handleRequest(
     // the same content-addressed subject. Symmetric to row 15
     // (`dkg:sourceContentType`). Skipped entirely when the upload
     // didn't carry a filename (matches the row 20 optional pattern).
-    const uploadedFilename = filePart.filename?.trim() ?? '';
     if (uploadedFilename.length > 0) {
       metaQuads.push({
         subject: assertionUri,
@@ -4226,6 +4253,7 @@ async function handleRequest(
     const completedRecord: ExtractionStatusRecord = {
       status: 'completed',
       fileHash: fileStoreEntry.keccak256,
+      ...(uploadedFilename ? { fileName: uploadedFilename } : {}),
       ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed,

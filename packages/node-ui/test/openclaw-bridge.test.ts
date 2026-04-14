@@ -243,13 +243,26 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Choose a target above before attaching files.');
   });
 
+  it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
+    expect(panelRight).toContain('content: message.text || buildAttachmentSummary(message.attachmentRefs ?? [])');
+    expect(panelRight).toContain('const messageText = text || buildAttachmentSummary(attachments);');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text, {');
+  });
+
+  it('persists imported attachment tool calls alongside verified attachment refs', () => {
+    const persistTurnBlock = readCliFile('daemon.ts');
+    expect(persistTurnBlock).toContain('const persistedToolCalls = mergePersistedToolCalls(normalizedToolCalls, verifiedAttachmentRefs);');
+    expect(persistTurnBlock).toContain('buildOpenClawAttachmentToolCalls(attachmentRefs)');
+    expect(persistTurnBlock).toContain('sourceFileName');
+  });
+
   it('merges reloaded local history with live messages', () => {
     expect(panelRight).toContain('function mergeLocalAgentMessages');
     expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
   });
 
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
-    expect(panelRight).toContain('streamLocalAgentChat(integrationId, messageText');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text');
   });
 
   it('does not clear attached agents on a transient integrations refresh failure', () => {

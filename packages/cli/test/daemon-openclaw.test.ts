@@ -408,6 +408,7 @@ describe('OpenClaw persist-turn validation', () => {
       ['did:dkg:context-graph:cg1/assertion/chat-doc', {
         status: 'completed',
         fileHash: 'sha256:abc123',
+        fileName: 'chat-doc.pdf',
         detectedContentType: 'application/pdf',
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
@@ -436,6 +437,7 @@ describe('OpenClaw persist-turn validation', () => {
       ['did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc', {
         status: 'completed',
         fileHash: 'sha256:abc123',
+        fileName: 'chat-doc.pdf',
         detectedContentType: 'application/pdf',
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
@@ -464,6 +466,7 @@ describe('OpenClaw persist-turn validation', () => {
         bindings: [{
           fileHash: '"sha256:abc123"',
           contentType: '"application/pdf"',
+          sourceFileName: '"chat-doc.pdf"',
         }],
       }),
     };
@@ -492,6 +495,28 @@ describe('OpenClaw persist-turn validation', () => {
       verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
     ).resolves.toBeUndefined();
     expect(store.query).toHaveBeenCalledOnce();
+  });
+
+  it('rejects attachment refs when the stored source file name does not match', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'spoofed.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: vi.fn().mockResolvedValue({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          sourceFileName: '"chat-doc.pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toBeUndefined();
   });
 
   it('rejects forged attachment refs when graph metadata does not match', async () => {

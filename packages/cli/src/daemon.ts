@@ -2305,10 +2305,71 @@ export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmen
   return refs;
 }
 
+export function hasOpenClawChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function unescapeOpenClawAttachmentLiteralBody(raw: string): string {
+  let decoded = '';
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch !== '\\') {
+      decoded += ch;
+      continue;
+    }
+
+    const next = raw[i + 1];
+    if (!next) {
+      decoded += '\\';
+      break;
+    }
+
+    if (next === 'u' || next === 'U') {
+      const hexLength = next === 'u' ? 4 : 8;
+      const hex = raw.slice(i + 2, i + 2 + hexLength);
+      if (/^[0-9A-Fa-f]+$/.test(hex) && hex.length === hexLength) {
+        const codePoint = Number.parseInt(hex, 16);
+        if (codePoint <= 0x10FFFF) {
+          decoded += String.fromCodePoint(codePoint);
+          i += 1 + hexLength;
+          continue;
+        }
+      }
+      decoded += `\\${next}`;
+      i += 1;
+      continue;
+    }
+
+    const escaped = ({
+      t: '\t',
+      b: '\b',
+      n: '\n',
+      r: '\r',
+      f: '\f',
+      '"': '"',
+      "'": "'",
+      '\\': '\\',
+    } as Record<string, string>)[next];
+
+    if (escaped !== undefined) {
+      decoded += escaped;
+    } else {
+      decoded += `\\${next}`;
+    }
+    i += 1;
+  }
+
+  return decoded;
+}
+
 function stripOpenClawAttachmentLiteral(raw: string | undefined): string {
   if (!raw) return '';
   const match = raw.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
-  return match ? match[1] : raw;
+  return match ? unescapeOpenClawAttachmentLiteralBody(match[1]) : raw;
 }
 
 function parseOpenClawAttachmentTripleCount(raw: string | undefined): number | undefined {
@@ -2825,13 +2886,15 @@ async function handleRequest(
     let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
-    const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
-    const corrId = correlationId ?? crypto.randomUUID();
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const { text, correlationId, identity } = payload;
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
+    const corrId = correlationId ?? crypto.randomUUID();
     const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
     if (payload.attachmentRefs != null && attachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
@@ -2909,13 +2972,15 @@ async function handleRequest(
     let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
-    const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
-    const corrId = correlationId ?? crypto.randomUUID();
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const { text, correlationId, identity } = payload;
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
+    const corrId = correlationId ?? crypto.randomUUID();
     const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
     if (payload.attachmentRefs != null && attachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });

@@ -9,6 +9,7 @@ import {
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
+  hasOpenClawChatTurnContent,
   isLoopbackClientIp,
   buildOpenClawAttachmentToolCalls,
   normalizeOpenClawAttachmentRefs,
@@ -366,6 +367,22 @@ describe('OpenClaw persist-turn validation', () => {
     ]);
   });
 
+  it('allows attachment-only chat turns only when at least one attachment ref is present', () => {
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+        fileHash: 'sha256:abc123',
+        contextGraphId: 'cg1',
+        fileName: 'chat-doc.pdf',
+      },
+    ];
+
+    expect(hasOpenClawChatTurnContent('', attachmentRefs)).toBe(true);
+    expect(hasOpenClawChatTurnContent('Summarize this.', undefined)).toBe(true);
+    expect(hasOpenClawChatTurnContent('', [])).toBe(false);
+    expect(hasOpenClawChatTurnContent(undefined, attachmentRefs)).toBe(false);
+  });
+
   it('rejects malformed attachment refs in persist-turn payloads', () => {
     expect(isValidOpenClawPersistTurnPayload({
       sessionId: 'openclaw:dkg-ui',
@@ -477,6 +494,28 @@ describe('OpenClaw persist-turn validation', () => {
     expect(String(store.query.mock.calls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
     expect(String(store.query.mock.calls[0][0])).not.toContain('did:dkg:context-graph:cg1/decisions/_meta');
     expect(String(store.query.mock.calls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc>');
+  });
+
+  it('unescapes RDF string literals before comparing stored source file names', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'report "final".pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: vi.fn().mockResolvedValue({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          sourceFileName: '"report \\"final\\".pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
   });
 
   it('rejects completed attachment refs after the extraction cache entry is gone and the meta graph no longer has the assertion', async () => {

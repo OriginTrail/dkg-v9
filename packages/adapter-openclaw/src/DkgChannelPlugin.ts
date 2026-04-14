@@ -88,13 +88,30 @@ function normalizeAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefi
   return refs;
 }
 
+function hasInboundChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function sanitizeAttachmentPromptField(raw: string | undefined, fallback: string): string {
+  const normalize = (value: string | undefined): string => (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return JSON.stringify(normalize(raw) || normalize(fallback));
+}
+
 function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): string {
   const lines = attachmentRefs.map((ref) => {
-    const label = ref.fileName ?? ref.assertionUri;
-    const graph = ref.contextGraphId ? ` in ${ref.contextGraphId}` : '';
-    const contentType = ref.detectedContentType ? ` [${ref.detectedContentType}]` : '';
+    const label = sanitizeAttachmentPromptField(ref.fileName, ref.assertionUri || 'attachment');
+    const graph = ref.contextGraphId ? ` in ${sanitizeAttachmentPromptField(ref.contextGraphId, 'unknown context graph')}` : '';
+    const contentType = ref.detectedContentType
+      ? ` [${sanitizeAttachmentPromptField(ref.detectedContentType, 'unknown content type')}]`
+      : '';
     const status = ref.extractionStatus ? ` (${ref.extractionStatus})` : '';
-    return `- ${label}${graph}${contentType}${status} -> ${ref.assertionUri}`;
+    return `- ${label}${graph}${contentType}${status} -> ${sanitizeAttachmentPromptField(ref.assertionUri, 'unknown assertion')}`;
   });
   return ['Attached Working Memory items:', ...lines].join('\n');
 }
@@ -1232,18 +1249,17 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       try {
         const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
         if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+          return;
+        }
+        const { text, correlationId, identity } = parsed;
+        if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
           return;
         }
         const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs });
@@ -1290,17 +1306,16 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
       if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      const { text, correlationId, identity } = parsed;
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
 
@@ -1339,17 +1354,16 @@ export class DkgChannelPlugin {
   private async handleGatewayRoute(req: any, res: any): Promise<void> {
     try {
       const body = typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req));
-      const { text, correlationId, identity } = body;
-      if (!text || !correlationId) {
-        res.writeHead?.(400, { 'Content-Type': 'application/json' });
-        res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       const attachmentRefs = normalizeAttachmentRefs(body.attachmentRefs);
       if (body.attachmentRefs != null && attachmentRefs === undefined) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      const { text, correlationId, identity } = body;
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
 

@@ -10,8 +10,8 @@ import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.s
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
-import {PublishingConvictionAccount} from "./PublishingConvictionAccount.sol";
 import {ContextGraphs} from "./ContextGraphs.sol";
+import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
 import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
@@ -23,21 +23,67 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
+import {IDKGPublishingConvictionNFT} from "./interfaces/IDKGPublishingConvictionNFT.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
 /**
  * @title KnowledgeAssetsV10
- * @notice V10 publish contract — evolves V8 KnowledgeCollection with:
- *   - V10 ACK digest: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount)))
- *   - Dynamic signature count from ParametersStorage.minimumRequiredSignatures()
- *   - Conviction account payment (PublishingConvictionAccount integration)
- *   - Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility
+ * @notice V10 publish contract — wires together:
+ *   - ContextGraphs facade (3 curator types, atomic KC↔CG bind)
+ *   - ContextGraphValueStorage (per-CG value ledger for value-weighted challenges)
+ *   - DKGPublishingConvictionNFT (publisher discount NFT; auto-resolves agent→account)
+ *   - KnowledgeCollectionStorage (V8-compatible data model)
+ *
+ * Two public entry points:
+ *   - `publish`        — conviction path. NFT covers the cost. TRAC accounting
+ *                        was already done at `createAccount` time, so this
+ *                        path does NOT touch `_addTokens` or `_distributeTokens`
+ *                        (double-count prevention).
+ *   - `publishDirect`  — market-rate path. Pulls TRAC from caller/paymaster
+ *                        and distributes across the epoch range via
+ *                        `_distributeTokens`.
+ *
+ * Both paths share the core sequence (sig verification → auth → validate →
+ * KCS create → atomic CG bind → CG value write → per-node produced-value
+ * bookkeeping) via the internal `_executePublishCore` helper.
+ *
+ * ACK digest prefix (H5 closure): `block.chainid || address(this)` pins a
+ * signed ACK to this contract on this chain. Replay across chains / forks
+ * / contract redeployments is rejected at signature verification.
+ *
+ * Publisher digest field order (N26 closure): `(publisherNodeIdentityId,
+ * contextGraphId, merkleRoot)` — matches spec `07_EVM_MODULE.md:164`.
+ *
+ * Authorization (N17 closure): `isAuthorizedPublisher` is called with
+ * `msg.sender` (the paying principal), NOT the recovered node signer.
  */
 contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "KnowledgeAssetsV10";
     string private constant _VERSION = "10.0.0";
+
+    // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
+
+    struct PublishParams {
+        string publishOperationId;
+        uint256 contextGraphId;
+        bytes32 merkleRoot;
+        uint256 knowledgeAssetsAmount;
+        uint88 byteSize;
+        uint40 epochs;
+        uint96 tokenAmount;
+        bool isImmutable;
+        uint72 publisherNodeIdentityId;
+        bytes32 publisherNodeR;
+        bytes32 publisherNodeVS;
+        uint72[] identityIds;
+        bytes32[] r;
+        bytes32[] vs;
+    }
+
+    // --- Hub-resolved dependencies ---
 
     AskStorage public askStorage;
     EpochStorage public epochStorage;
@@ -50,14 +96,20 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
-    PublishingConvictionAccount public convictionAccount;
     ContextGraphs public contextGraphs;
+    ContextGraphValueStorage public contextGraphValueStorage;
+    IDKGPublishingConvictionNFT public publishingConvictionNFT;
+
+    // --- Persistent state ---
 
     // Tracks the original (maximum) byte size paid for at creation time.
     // Updates can shrink below this but never exceed it without additional payment.
     mapping(uint256 => uint88) public originalByteSize;
 
-    error ConvictionAccountNotConfigured();
+    // --- Errors ---
+
+    error ZeroAddressDependency(string name);
+    error ZeroContextGraphId();
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -80,17 +132,21 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
 
-        try hub.getContractAddress("PublishingConvictionAccount") returns (address addr) {
-            convictionAccount = PublishingConvictionAccount(addr);
-        } catch {
-            // conviction not yet deployed — convictionAccountId > 0 will revert
-        }
+        // V10 new dependencies — fail-fast. Each MUST be Hub-registered at
+        // KAV10 initialize() time. The Phase 7 transitional try/catch tolerance
+        // is removed: Phase 8 makes ContextGraphs + CG value + NFT mandatory.
 
-        try hub.getContractAddress("ContextGraphs") returns (address addr) {
-            contextGraphs = ContextGraphs(addr);
-        } catch {
-            // ContextGraphs not yet deployed
-        }
+        address cgAddr = hub.getContractAddress("ContextGraphs");
+        if (cgAddr == address(0)) revert ZeroAddressDependency("ContextGraphs");
+        contextGraphs = ContextGraphs(cgAddr);
+
+        address cgvAddr = hub.getContractAddress("ContextGraphValueStorage");
+        if (cgvAddr == address(0)) revert ZeroAddressDependency("ContextGraphValueStorage");
+        contextGraphValueStorage = ContextGraphValueStorage(cgvAddr);
+
+        address nftAddr = hub.getContractAddress("DKGPublishingConvictionNFT");
+        if (nftAddr == address(0)) revert ZeroAddressDependency("DKGPublishingConvictionNFT");
+        publishingConvictionNFT = IDKGPublishingConvictionNFT(nftAddr);
     }
 
     function name() public pure virtual returns (string memory) {
@@ -102,124 +158,173 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     }
 
     // ========================================================================
-    // V10 Publish
+    // V10 Publish Entries
     // ========================================================================
 
     /**
-     * @notice Publish Knowledge Assets using V10 ACK verification.
+     * @notice Publish via publisher conviction account (discounted path).
      *
-     * Core nodes sign: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaAmount, byteSize, epochs, tokenAmount))).
-     * Signature count is read from ParametersStorage.minimumRequiredSignatures().
-     * Payment via conviction account (discounted) or market rate (V8 path).
-     * Writes to KnowledgeCollectionStorage for V8 RandomSampling compatibility.
+     * The publishing agent (`msg.sender`) must be registered under an active
+     * conviction NFT account via `DKGPublishingConvictionNFT.registerAgent`.
+     * The NFT auto-resolves the paying account from `agentToAccountId[msg.sender]`
+     * inside `coverPublishingCost` — KAV10 does NOT accept a caller-supplied
+     * account id (N28 closure).
      *
-     * @param publishOperationId Off-chain correlation ID (emitted in event)
-     * @param contextGraphId On-chain context graph ID (used in ACK digest)
-     * @param merkleRoot Canonical merkle root of the published triples
-     * @param knowledgeAssetsAmount Number of KA tokens to mint
-     * @param byteSize Public byte size of the dataset
-     * @param epochs Storage duration in epochs
-     * @param tokenAmount TRAC payment (base cost before any conviction discount)
-     * @param isImmutable If true, this collection cannot be updated
-     * @param paymaster Paymaster address (ignored when convictionAccountId > 0)
-     * @param convictionAccountId 0 = market rate, N = use conviction account N
-     * @param publisherNodeIdentityId Core node identity hosting this data
-     * @param publisherNodeR Publisher node signature R
-     * @param publisherNodeVS Publisher node signature compact VS
-     * @param identityIds ACK signer identity IDs (variable length, >= minimumRequiredSignatures)
-     * @param r ACK signature R values
-     * @param vs ACK signature compact VS values
-     * @return Knowledge collection ID
+     * Double-count prevention (decision #17 + H critical):
+     * The NFT's `createAccount` already wrote the full `committedTRAC` into
+     * `EpochStorage.addTokensToEpochRange` across the 12-epoch lock window.
+     * This path therefore MUST NOT call `_addTokens` or `_distributeTokens` —
+     * doing so would double-count TRAC in the staker reward pool.
+     *
+     * @param p All publish parameters (see `PublishParams` struct).
+     * @return kcId Newly created knowledge collection id.
      */
-    function createKnowledgeAssets(
-        string calldata publishOperationId,
-        uint256 contextGraphId,
-        bytes32 merkleRoot,
-        uint256 knowledgeAssetsAmount,
-        uint88 byteSize,
-        uint40 epochs,
-        uint96 tokenAmount,
-        bool isImmutable,
-        address paymaster,
-        uint256 convictionAccountId,
-        uint72 publisherNodeIdentityId,
-        bytes32 publisherNodeR,
-        bytes32 publisherNodeVS,
-        uint72[] calldata identityIds,
-        bytes32[] calldata r,
-        bytes32[] calldata vs
-    ) external returns (uint256) {
-        _verifySignature(
-            publisherNodeIdentityId,
-            ECDSA.toEthSignedMessageHash(
-                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
-            ),
-            publisherNodeR,
-            publisherNodeVS
+    function publish(PublishParams calldata p) external returns (uint256 kcId) {
+        uint40 currentEpoch;
+        (currentEpoch, kcId) = _executePublishCore(p);
+
+        // Spend publisher allowance. NFT reverts NoConvictionAccount(msg.sender)
+        // if caller is not registered as an agent on any active account.
+        // Discounted amount is discarded here — the NFT emits `CostCovered`
+        // with full detail for off-chain accounting.
+        publishingConvictionNFT.coverPublishingCost(msg.sender, p.tokenAmount);
+
+        // Per-node produced value for scoring. Uses BASE `tokenAmount`, not
+        // `discountedCost`: a node's produced-value score reflects the data
+        // value the publisher declared, not the cheaper effective spend.
+        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
+
+        return kcId;
+    }
+
+    /**
+     * @notice Publish at market rate (no conviction discount).
+     *
+     * Pulls TRAC from `msg.sender` (or `paymaster` if valid) and distributes
+     * it across the epoch range via `_distributeTokens`. No conviction NFT
+     * involvement — nothing to auto-resolve, nothing to double-count.
+     *
+     * @param p Publish parameters.
+     * @param paymaster Paymaster address for cost coverage, or `address(0)`
+     *                  to pull from `msg.sender` directly.
+     * @return kcId Newly created knowledge collection id.
+     */
+    function publishDirect(
+        PublishParams calldata p,
+        address paymaster
+    ) external returns (uint256 kcId) {
+        (uint40 currentEpoch, uint256 coreKcId) = _executePublishCore(p);
+
+        // Pull funds + distribute to the reward pool across the epoch range.
+        _addTokens(p.tokenAmount, paymaster);
+        _distributeTokens(p.tokenAmount, p.epochs, currentEpoch);
+
+        // Per-node produced value. BASE amount — same rationale as `publish`.
+        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
+
+        return coreKcId;
+    }
+
+    // ========================================================================
+    // Internal: Shared publish core
+    // ========================================================================
+
+    /**
+     * @notice Signature verification + auth + validation + KCS create +
+     *         atomic CG bind + CG value write.
+     *
+     * Both `publish` and `publishDirect` run this before branching on
+     * payment path. No TRAC movement happens here — the caller's path
+     * handles that.
+     */
+    function _executePublishCore(
+        PublishParams calldata p
+    ) internal returns (uint40 currentEpoch, uint256 kcId) {
+        // --- 1. Signature verification ---
+
+        // Publisher digest (N26: field order = publisherNodeIdentityId, contextGraphId, merkleRoot).
+        // H5: prefix with (block.chainid, address(this)) to pin replay to this chain + contract.
+        bytes32 publisherDigest = keccak256(
+            abi.encodePacked(
+                block.chainid,
+                address(this),
+                p.publisherNodeIdentityId,
+                p.contextGraphId,
+                p.merkleRoot
+            )
         );
+        bytes32 publisherEthDigest = ECDSA.toEthSignedMessageHash(publisherDigest);
+        _verifySignature(p.publisherNodeIdentityId, publisherEthDigest, p.publisherNodeR, p.publisherNodeVS);
 
-        bytes32 ackDigest = keccak256(abi.encodePacked(
-            contextGraphId,
-            merkleRoot,
-            knowledgeAssetsAmount,
-            uint256(byteSize),
-            uint256(epochs),
-            uint256(tokenAmount)
-        ));
-        _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
-
-        // Recover the publisher's wallet from the publisher signature — not msg.sender,
-        // because the tx may be submitted by a different operational wallet (round-robin).
-        address publisherWallet = ECDSA.recover(
-            ECDSA.toEthSignedMessageHash(
-                keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
-            ),
-            publisherNodeR,
-            publisherNodeVS
+        // ACK digest (H5: same chain/contract prefix as publisher digest).
+        bytes32 ackDigest = keccak256(
+            abi.encodePacked(
+                block.chainid,
+                address(this),
+                p.publisherNodeIdentityId,
+                p.contextGraphId,
+                p.merkleRoot,
+                p.knowledgeAssetsAmount,
+                uint256(p.byteSize),
+                uint256(p.epochs),
+                uint256(p.tokenAmount)
+            )
         );
+        _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
 
-        if (address(contextGraphs) != address(0) && contextGraphId > 0) {
-            // V10.0: curated CGs require the publishAuthority to be an EOA whose
-            // signature matches publisherWallet. Contract authorities (multisigs, PCAs)
-            // require ERC-1271 verification or a delegation registry — deferred to V10.x.
-            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet)) {
-                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, publisherWallet);
-            }
+        // Recover publisher wallet from the (already verified) signature.
+        // This is the address that actually signed the merkle root — KCS
+        // stores it as the merkle-root author, NOT the paying agent.
+        address publisherWallet = ECDSA.recover(publisherEthDigest, p.publisherNodeR, p.publisherNodeVS);
+
+        // --- 2. CG existence + validation (revert before any state mutation) ---
+
+        // Decision #3: contextGraphId == 0 is forbidden. No legacy path.
+        if (p.contextGraphId == 0) revert ZeroContextGraphId();
+
+        // H7: SafeCast guards the uint96 cast in _validateTokenAmount.
+        _validateTokenAmount(p.byteSize, p.epochs, p.tokenAmount, false);
+
+        // N17: pass the PAYING PRINCIPAL (msg.sender of this tx — the
+        // publishing agent), NOT the recovered node signer. This is the
+        // fix for the V9 bug at KAV10.sol:188 that passed publisherWallet.
+        if (!contextGraphs.isAuthorizedPublisher(p.contextGraphId, msg.sender)) {
+            revert KnowledgeAssetsLib.UnauthorizedPublisher(p.contextGraphId, msg.sender);
         }
+
+        // --- 3. Create KC in storage ---
 
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
-        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
+        currentEpoch = uint40(chronos.getCurrentEpoch());
 
-        uint256 id = kcs.createKnowledgeCollection(
+        kcId = kcs.createKnowledgeCollection(
             publisherWallet,
-            publishOperationId,
-            merkleRoot,
-            knowledgeAssetsAmount,
-            byteSize,
+            p.publishOperationId,
+            p.merkleRoot,
+            p.knowledgeAssetsAmount,
+            p.byteSize,
             currentEpoch,
-            currentEpoch + epochs,
-            tokenAmount,
-            isImmutable
+            currentEpoch + p.epochs,
+            p.tokenAmount,
+            p.isImmutable
         );
 
-        originalByteSize[id] = byteSize;
+        originalByteSize[kcId] = p.byteSize;
 
-        _validateTokenAmount(byteSize, epochs, tokenAmount, false);
+        // --- 4. N20: atomic CG↔KC binding + CG value diff ---
 
-        uint96 effectiveAmount = tokenAmount;
-        if (convictionAccountId > 0) {
-            if (address(convictionAccount) == address(0)) {
-                revert ConvictionAccountNotConfigured();
-            }
-            effectiveAmount = convictionAccount.coverPublishingCost(convictionAccountId, tokenAmount, msg.sender);
-        } else {
-            _addTokens(tokenAmount, paymaster);
-        }
+        // Facade write: kcToContextGraph[kcId] = cgId AND contextGraphKCList[cgId].push(kcId).
+        contextGraphs.registerKnowledgeCollection(p.contextGraphId, kcId);
 
-        _distributeTokens(effectiveAmount, epochs, currentEpoch);
-        epochStorage.addEpochProducedKnowledgeValue(publisherNodeIdentityId, currentEpoch, effectiveAmount);
-
-        return id;
+        // Per-CG + global value ledger for value-weighted random challenges.
+        // Uses BASE `tokenAmount` — value weighting tracks data value, not
+        // publisher economics (discounted cost is irrelevant here).
+        contextGraphValueStorage.addCGValueForEpochRange(
+            p.contextGraphId,
+            uint256(currentEpoch),
+            uint256(p.epochs),
+            uint256(p.tokenAmount)
+        );
     }
 
     // ========================================================================
@@ -335,12 +440,19 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         Chronos chron = chronos;
 
         uint256 stakeWeightedAverageAsk = askStorage.getStakeWeightedAverageAsk();
+        // H7: `SafeCast.toUint96` reverts on overflow instead of silently
+        // truncating. A publisher sending `stakeWeightedAverageAsk * byteSize
+        // * epochs / 1024` > uint96.max (~79 bn TRAC) MUST revert — silent
+        // truncation would make a catastrophically underpaid publish look
+        // correctly-paid because `tokenAmount` would match the wrapped cost.
         uint96 expectedTokenAmount;
         if (includeCurrentEpoch) {
             uint256 totalStorageTime = (epochs * 1e18) + (chron.timeUntilNextEpoch() * 1e18) / chron.epochLength();
-            expectedTokenAmount = uint96((stakeWeightedAverageAsk * byteSize * totalStorageTime) / 1024 / 1e18);
+            expectedTokenAmount = SafeCast.toUint96(
+                (stakeWeightedAverageAsk * byteSize * totalStorageTime) / 1024 / 1e18
+            );
         } else {
-            expectedTokenAmount = uint96((stakeWeightedAverageAsk * byteSize * epochs) / 1024);
+            expectedTokenAmount = SafeCast.toUint96((stakeWeightedAverageAsk * byteSize * epochs) / 1024);
         }
 
         if (tokenAmount < expectedTokenAmount) {
@@ -382,9 +494,9 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      *
      * NOTE: This function currently does not charge an update fee. The V9 update
      * fee model (10% + excess-byte cost) is tightly coupled to V9 epoch/reward
-     * accounting. A V10-native fee model will be added before mainnet launch.
+     * accounting. A V10-native fee model will be added in a later task.
      *
-     * @param id Knowledge collection ID (from createKnowledgeAssets)
+     * @param id Knowledge collection ID (from publish)
      * @param newMerkleRoot New merkle root for the updated data
      * @param newByteSize Updated byte size (must not exceed original)
      * @param mintAmount Number of new KA tokens to mint (0 if unchanged)

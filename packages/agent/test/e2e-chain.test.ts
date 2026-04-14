@@ -212,9 +212,9 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('publishes knowledge through agent (on-chain finality)', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
-    const contextGraphId = 'test-chain-paranet';
-    await agents[0].createContextGraph({
-      id: contextGraphId,
+    const paranetId = 'test-chain-paranet';
+    await agents[0].createParanet({
+      id: paranetId,
       name: 'Chain Test Paranet',
       description: 'E2E test with real blockchain',
     });

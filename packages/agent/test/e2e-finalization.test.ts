@@ -384,7 +384,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
   // ── Workspace cleanup: clearSharedMemoryAfter flag ────────────────────────
 
-  it('publishFromSharedMemory with clearSharedMemoryAfter removes workspace data', async (ctx) => {
+  it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 

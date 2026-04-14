@@ -800,4 +800,499 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await StakingStorage.getTotalStake()).to.equal(totalBefore);
     });
   });
+
+  // =====================================================================
+  // createWithdrawal / cancelWithdrawal / finalizeWithdrawal
+  // =====================================================================
+  //
+  // Phase 5 split-bucket withdrawal semantics:
+  //   pre-expiry  : amount ≤ pos.rewards (only compounded rewards, raw locked)
+  //   post-expiry : amount ≤ pos.raw + pos.rewards (full drain allowed)
+  //
+  // The 15-day delay timer is enforced regardless of lock state. Withdrawal
+  // keys are stored under the V10-disjoint `bytes32(tokenId)` delegator key
+  // in the same `StakingStorage.withdrawals` mapping the V8 path uses — no
+  // collision because V8 uses `keccak256(address)`.
+  //
+  // Rewards injection for tests: SV10-claim isn't implemented yet, so we
+  // simulate a claim by calling the hub-owner-privileged storage mutators
+  // directly (`onlyContracts` permits the hub owner). We touch four
+  // storage slots atomically so the test state remains internally
+  // consistent with "what a future SV10-claim would leave":
+  //
+  //   1. ConvictionStakingStorage.increaseRewards(tokenId, amount)
+  //        — updates pos.rewards + conviction-layer effective-stake diff.
+  //   2. StakingStorage.increaseDelegatorStakeBase(id, bytes32(tokenId), amount)
+  //        — the delegator base is the `raw + rewards` composite in
+  //          StakingStorage post-claim; redelegate precedent in Phase 4
+  //          writes `totalAmount = raw + rewards` to this slot.
+  //   3. StakingStorage.increaseNodeStake(id, amount) +
+  //      StakingStorage.increaseTotalStake(amount)
+  //        — node- and global-level stake also track raw + rewards.
+  //   4. Token.mint(StakingStorageAddress, amount)
+  //        — top up the vault so finalizeWithdrawal's transferStake does
+  //          not underflow on the rewards portion. A real claim would draw
+  //          these tokens from the reward pool; the test shortcut is
+  //          equivalent for the purposes of exercising the withdraw path.
+  //
+  // This helper is used only in the withdrawal describe blocks — other
+  // blocks do not need rewards.
+
+  const injectRewards = async (
+    tokenId: bigint,
+    identityId: number,
+    amount: bigint,
+  ) => {
+    const stakingStorageAddr = await StakingStorage.getAddress();
+    // Top up the vault so the later transferStake has enough TRAC.
+    await Token.mint(stakingStorageAddr, amount);
+    // Conviction-layer rewards bucket + diff.
+    await ConvictionStakingStorageContract.connect(accounts[0]).increaseRewards(
+      tokenId,
+      amount,
+    );
+    // StakingStorage delegator base, node stake, total stake — mirrors the
+    // state a hypothetical SV10-claim would leave behind.
+    await StakingStorage.connect(accounts[0]).increaseDelegatorStakeBase(
+      identityId,
+      tokenIdKey(tokenId),
+      amount,
+    );
+    await StakingStorage.connect(accounts[0]).increaseNodeStake(identityId, amount);
+    await StakingStorage.connect(accounts[0]).increaseTotalStake(amount);
+  };
+
+  // WITHDRAWAL_DELAY is hardcoded at 15 days in StakingV10 (Phase 5 Q6).
+  const WITHDRAWAL_DELAY_SECONDS = 15 * 24 * 60 * 60;
+
+  describe('createWithdrawal (→ StakingV10.createWithdrawal)', () => {
+    it('reverts if not owner (non-owner caller)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2); // post-expiry so raw would otherwise be withdrawable
+      // accounts[4] does not own tokenId 0 — wrapper-layer guard.
+      await expect(
+        NFT.connect(accounts[4]).createWithdrawal(0, 100n),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('reverts on amount == 0 at the NFT wrapper layer', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, 0),
+      ).to.be.revertedWithCustomError(NFT, 'ZeroAmount');
+    });
+
+    it('reverts pre-expiry when amount > rewards (rewards bucket empty)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+      // Pre-expiry (12-epoch lock still active). Rewards bucket is empty
+      // since SV10-claim has not run. Withdrawable = 0; any positive
+      // amount trips InsufficientWithdrawable.
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, 1n),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'InsufficientWithdrawable');
+    });
+
+    it('reverts post-expiry when amount > raw + rewards', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2); // post-expiry
+      // raw=1000 TRAC, rewards=0 → withdrawable=1000. 1001 is one wei too many.
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, amount + 1n),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'InsufficientWithdrawable');
+    });
+
+    it('reverts if withdrawal already requested', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      // Second request on the same tokenId fails — one pending at a time.
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, 50n),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalAlreadyRequested');
+    });
+
+    it('happy path pre-expiry: withdraws from rewards bucket only (raw still locked)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Inject 500 rewards — SV10-claim proxy. Raw is still locked
+      // (12-epoch lock untouched) but the rewards bucket is now drainable.
+      const rewards = hre.ethers.parseEther('500');
+      await injectRewards(0n, identityId, rewards);
+
+      const tx = await NFT.connect(accounts[0]).createWithdrawal(0, rewards);
+      const blockNumber = (await tx.wait())!.blockNumber;
+      const block = await hre.ethers.provider.getBlock(blockNumber);
+      const expectedReleaseAt = BigInt(block!.timestamp) + BigInt(WITHDRAWAL_DELAY_SECONDS);
+
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'WithdrawalCreated')
+        .withArgs(0n, rewards, expectedReleaseAt);
+
+      // Withdrawal is recorded under the V10 delegator key.
+      const [reqAmount, indexedOut, releaseAt] =
+        await StakingStorage.getDelegatorWithdrawalRequest(identityId, tokenIdKey(0));
+      expect(reqAmount).to.equal(rewards);
+      expect(indexedOut).to.equal(0n);
+      expect(releaseAt).to.equal(expectedReleaseAt);
+    });
+
+    it('happy path post-expiry: withdraws from raw (rewards bucket empty)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2); // post-expiry → raw is withdrawable
+
+      const tx = await NFT.connect(accounts[0]).createWithdrawal(0, amount);
+      await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
+
+      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(reqAmount).to.equal(amount);
+    });
+
+    it('happy path post-expiry: full drain amount = raw + rewards', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      // Inject 300 rewards before expiry — simulates a claim landing
+      // during the lock period (the rewards earn 1x, raw earns multiplier).
+      const rewards = hre.ethers.parseEther('300');
+      await injectRewards(0n, identityId, rewards);
+
+      await advanceEpochs(2); // post-expiry
+      const total = amount + rewards;
+      const tx = await NFT.connect(accounts[0]).createWithdrawal(0, total);
+      await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
+
+      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(reqAmount).to.equal(total);
+    });
+
+    it('direct StakingV10.createWithdrawal call from non-NFT caller reverts via gate', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await expect(
+        StakingV10Contract.connect(accounts[0]).createWithdrawal(
+          accounts[0].address,
+          0,
+          100n,
+        ),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+  });
+
+  describe('cancelWithdrawal (→ StakingV10.cancelWithdrawal)', () => {
+    it('reverts if not owner (non-owner caller)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      await expect(
+        NFT.connect(accounts[4]).cancelWithdrawal(0),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('reverts if no withdrawal was requested', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await expect(
+        NFT.connect(accounts[0]).cancelWithdrawal(0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
+    });
+
+    it('happy path: clears pending request and emits WithdrawalCancelled', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+
+      const tx = await NFT.connect(accounts[0]).cancelWithdrawal(0);
+      await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCancelled').withArgs(0n);
+      await expect(tx).to.emit(NFT, 'WithdrawalCancelled').withArgs(0n);
+
+      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(reqAmount).to.equal(0n);
+    });
+
+    it('happy path: cancel allows a new withdrawal to be requested', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      await NFT.connect(accounts[0]).cancelWithdrawal(0);
+      // A fresh request with a different amount succeeds now that the
+      // WithdrawalAlreadyRequested guard is cleared.
+      await NFT.connect(accounts[0]).createWithdrawal(0, 200n);
+      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(reqAmount).to.equal(200n);
+    });
+
+    it('direct StakingV10.cancelWithdrawal call from non-NFT caller reverts via gate', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      await expect(
+        StakingV10Contract.connect(accounts[0]).cancelWithdrawal(accounts[0].address, 0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+  });
+
+  describe('finalizeWithdrawal (→ StakingV10.finalizeWithdrawal)', () => {
+    it('reverts if not owner (non-owner caller)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      await expect(
+        NFT.connect(accounts[4]).finalizeWithdrawal(0),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('reverts if no withdrawal was requested', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await expect(
+        NFT.connect(accounts[0]).finalizeWithdrawal(0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
+    });
+
+    it('reverts if delay not elapsed (14 days is not enough)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      // 14 days is one day short of the 15-day delay.
+      await time.increase(14 * 24 * 60 * 60);
+      await expect(
+        NFT.connect(accounts[0]).finalizeWithdrawal(0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalDelayPending');
+    });
+
+    it('happy path partial raw withdrawal post-expiry: TRAC refunded, stake decremented, NFT alive', async () => {
+      const { identityId } = await createProfile();
+      const minStake = await ParametersStorage.minimumStake();
+      // Use minStake so the node enters the sharding table, then partially
+      // withdraw so nodeStake stays above minStake → sharding stays put.
+      const amount = minStake * 2n;
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2); // post-expiry
+
+      const withdrawAmount = minStake / 2n;
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+
+      const stakerBalBefore = await Token.balanceOf(accounts[0].address);
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+
+      const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
+        .withArgs(0n, withdrawAmount, 0n);
+
+      // TRAC returned to staker.
+      expect(await Token.balanceOf(accounts[0].address)).to.equal(
+        stakerBalBefore + withdrawAmount,
+      );
+
+      // Totals decremented.
+      expect(await StakingStorage.getTotalStake()).to.equal(
+        totalStakeBefore - withdrawAmount,
+      );
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(
+        nodeStakeBefore - withdrawAmount,
+      );
+
+      // Delegator base: (raw+rewards) - withdrawn = amount - withdrawAmount.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(amount - withdrawAmount);
+
+      // Position mutated: raw drained by withdrawAmount (rewards bucket was empty).
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(amount - withdrawAmount);
+      expect(pos.rewards).to.equal(0n);
+      // identityId preserved → position is still considered "existing".
+      expect(pos.identityId).to.equal(identityId);
+
+      // NFT still alive (partial drain).
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
+
+      // Withdrawal request cleared.
+      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(reqAmount).to.equal(0n);
+    });
+
+    it('happy path full drain post-expiry: NFT is burned, sharding table node removed', async () => {
+      const { identityId } = await createProfile();
+      const minStake = await ParametersStorage.minimumStake();
+      // Fund exactly minStake so a full drain drops nodeStake to 0 < minStake.
+      await mintAndApprove(accounts[0], minStake);
+      await NFT.connect(accounts[0]).createConviction(identityId, minStake, 1);
+
+      const ShardingTableStorage = await hre.ethers.getContract<
+        import('../../typechain').ShardingTableStorage
+      >('ShardingTableStorage');
+      // Node was inserted at stake time (raw = minStake).
+      expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
+
+      await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+
+      await NFT.connect(accounts[0]).finalizeWithdrawal(0);
+
+      // NFT burned → ownerOf reverts with ERC721NonexistentToken.
+      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+        NFT,
+        'ERC721NonexistentToken',
+      );
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
+
+      // Node stake drained.
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(0n);
+      // Sharding table: node dropped below minStake → removed.
+      expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
+    });
+
+    it('happy path rewards-first draw pre-expiry: amount ≤ rewards drains rewards only, raw untouched', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const rewards = hre.ethers.parseEther('500');
+      await injectRewards(0n, identityId, rewards);
+
+      // Pre-expiry (12 epoch lock) — only rewards bucket is drainable.
+      const withdrawAmount = hre.ethers.parseEther('200');
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+
+      const stakerBalBefore = await Token.balanceOf(accounts[0].address);
+      const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
+      // rewardsDraw = 200, rawDraw = 0
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
+        .withArgs(0n, 0n, withdrawAmount);
+
+      expect(await Token.balanceOf(accounts[0].address)).to.equal(
+        stakerBalBefore + withdrawAmount,
+      );
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(amount); // raw untouched, lock still active
+      expect(pos.rewards).to.equal(rewards - withdrawAmount);
+
+      // NFT still alive — position has raw > 0.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    });
+
+    it('happy path split draw post-expiry: amount > rewards drains rewards fully + raw for remainder', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      // Inject rewards before expiry — they earn 1x, raw earns its multiplier.
+      const rewards = hre.ethers.parseEther('300');
+      await injectRewards(0n, identityId, rewards);
+
+      await advanceEpochs(2); // post-expiry
+
+      // Withdraw more than rewards: rewards drained fully (300) +
+      // raw drained for the remainder (200). Total = 500.
+      const withdrawAmount = hre.ethers.parseEther('500');
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+
+      const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
+
+      // Split: rawDraw = 500 - 300 = 200, rewardsDraw = 300.
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
+        .withArgs(0n, hre.ethers.parseEther('200'), rewards);
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(amount - hre.ethers.parseEther('200')); // 800 left
+      expect(pos.rewards).to.equal(0n);
+
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    });
+
+    it('direct StakingV10.finalizeWithdrawal call from non-NFT caller reverts via gate', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      await expect(
+        StakingV10Contract.connect(accounts[0]).finalizeWithdrawal(accounts[0].address, 0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+  });
 });

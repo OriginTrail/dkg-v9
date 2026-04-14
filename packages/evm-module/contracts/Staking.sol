@@ -974,12 +974,24 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      *      what allows multiple NFT positions for the same (delegator, node)
      *      pair to be settled independently.
      *
-     *      Token transfer: this function performs pure on-chain accounting.
-     *      The caller (`DKGStakingConvictionNFT`) is responsible for moving
-     *      `amount` TRAC to `StakingStorage` before invoking this function.
-     *      That keeps the staking-side logic symmetrical with the V8
-     *      `stake()` path (both end with TRAC held by `StakingStorage`)
-     *      without forcing an extra allowance hop through this contract.
+     *      Trust model (grill-me-decisions.md — "Staker Conviction Flow"):
+     *      this function is pure on-chain accounting and performs NO token
+     *      transfer. The resolved flow is:
+     *         user -approve-> DKGStakingConvictionNFT
+     *         user -> NFT.createConviction(...)
+     *         NFT  -transferFrom(user, stakingStorage, amount)-> StakingStorage
+     *         NFT  -> Staking._recordStake(...)  // this function
+     *      TRAC flows user → StakingStorage in ONE hop and never sits in the
+     *      NFT contract (grill-me: "TRAC should go to StakingStorage at
+     *      creation time, not sit in NFT contract" / "Stakers always get
+     *      their TRAC because it's already in StakingStorage from day
+     *      one"). This entry therefore trusts the caller to have already
+     *      moved TRAC before invoking it; the trust boundary is enforced
+     *      by the double gate (`onlyContracts` + explicit
+     *      `DKGStakingConvictionNFT` identity check) and by the fact that
+     *      the only permitted caller is a Hub-registered, audited contract.
+     *      Any future caller added to the Hub under that name inherits the
+     *      same obligation: move the TRAC first, then call.
      *
      *      Gate: `onlyContracts` ensures the caller is a Hub-registered
      *      contract; the explicit `msg.sender` check pins the caller to the
@@ -1017,19 +1029,29 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         StakingStorage ss = stakingStorage;
         bytes32 delegatorKey = bytes32(tokenId);
 
-        // Freshness invariant: reject replays of the same tokenId on this
-        // node. V10 treats each NFT as an immutable create-once position
+        // Freshness invariant: reject replays of the same tokenId on ANY
+        // node. V10 treats each NFT as a create-once, one-position entity
         // (Phase 0d removed the legacy `increaseStake` top-up path as a
         // gaming vector — every additional stake must be a new NFT with
-        // its own conviction commitment). Without this guard, a caller
-        // bug that re-entered `_recordStake` with the same tokenId would
-        // double-count `nodeStake`/`totalStake` via the `+= amount` write
-        // while `setDelegatorStakeBase` overwrote the delegator base back
-        // to the latest amount, corrupting accounting by the inflated
-        // delta. Phase 5's NFT contract is expected to mint unique
-        // tokenIds; this defensive check enforces the invariant at the
-        // Staking entry regardless.
-        if (ss.getDelegatorStakeBase(identityId, delegatorKey) != 0) {
+        // its own conviction commitment, and an NFT is bound to exactly
+        // one node for its lifetime). Without a global guard, a buggy or
+        // malicious caller could:
+        //   - replay on the SAME node → `+= amount` writes would
+        //     double-count `nodeStake`/`totalStake` while
+        //     `setDelegatorStakeBase` overwrote the delegator base back
+        //     to the latest amount, corrupting accounting by the
+        //     inflated delta; or
+        //   - replay on a DIFFERENT node → the per-(node, key) bucket
+        //     would be fresh, so a per-node guard would miss it, and
+        //     the same tokenId would end up staked on two nodes at once
+        //     — semantic violation, double-pays rewards.
+        // StakingStorage already maintains `delegatorNodes[bytes32(key)]`
+        // via `_updateDelegatorActivity` on every `setDelegatorStakeBase`
+        // write, so `getDelegatorNodesCount(delegatorKey)` is the
+        // authoritative global-scope check: non-zero iff this tokenId is
+        // currently registered on ANY node. Zero gas overhead vs. the
+        // per-node read it replaces.
+        if (ss.getDelegatorNodesCount(delegatorKey) != 0) {
             revert StakingLib.TokenIdAlreadyRecorded(tokenId, identityId);
         }
 

@@ -2900,7 +2900,7 @@ describe('Staking contract', function () {
     );
   });
 
-  it('_recordStake: replaying the same tokenId reverts with TokenIdAlreadyRecorded and accounting stays consistent', async () => {
+  it('_recordStake: replaying the same tokenId on the same node reverts with TokenIdAlreadyRecorded and accounting stays consistent', async () => {
     // V10 model: each NFT is an immutable create-once position. A caller bug
     // that re-submits the same tokenId must not double-count nodeStake /
     // totalStake while overwriting the delegator base. Without the freshness
@@ -2936,6 +2936,64 @@ describe('Staking contract', function () {
     expect(await StakingStorage.getTotalStake()).to.equal(
       totalBefore + firstAmount,
     );
+  });
+
+  it('_recordStake: replaying the same tokenId on a DIFFERENT node reverts with TokenIdAlreadyRecorded (global scope)', async () => {
+    // An NFT is bound to exactly one node for its lifetime. A per-(node,
+    // tokenId) guard would miss this replay because the fresh node's
+    // bucket is empty — the tokenId would end up staked on two nodes at
+    // once, double-paying rewards. The fix checks
+    // `getDelegatorNodesCount(bytes32(tokenId))` which tracks all nodes
+    // this tokenId is currently registered on.
+    const { identityId: identityA } = await createProfile();
+    const { identityId: identityB } = await createProfile(
+      accounts[0],
+      accounts[2],
+    );
+    expect(identityA).to.not.equal(identityB);
+
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const amountA = 500n;
+    const totalBefore = await StakingStorage.getTotalStake();
+
+    // First call: record tokenId 13 on node A.
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](13n, identityA, amountA, 12);
+
+    // Sanity: tokenId 13 is now registered on exactly one node.
+    expect(
+      await StakingStorage.getDelegatorNodesCount(tokenIdKey(13n)),
+    ).to.equal(1n);
+
+    // Cross-node replay: same tokenId, different node — must revert.
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](13n, identityB, 777n, 6),
+    )
+      .to.be.revertedWithCustomError(Staking, 'TokenIdAlreadyRecorded')
+      .withArgs(13n, identityB);
+
+    // Node A still has the first record, node B untouched, totals unchanged
+    // past the first call.
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityA, tokenIdKey(13n)),
+    ).to.equal(amountA);
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityB, tokenIdKey(13n)),
+    ).to.equal(0n);
+    expect(await StakingStorage.getNodeStake(identityA)).to.equal(amountA);
+    expect(await StakingStorage.getNodeStake(identityB)).to.equal(0n);
+    expect(await StakingStorage.getTotalStake()).to.equal(
+      totalBefore + amountA,
+    );
+    // Still registered on exactly one node.
+    expect(
+      await StakingStorage.getDelegatorNodesCount(tokenIdKey(13n)),
+    ).to.equal(1n);
   });
 
   it('_recordStake: baselines delegatorLastSettled to the current nodeEpochScorePerStake (score-earned-before-NFT safety)', async () => {

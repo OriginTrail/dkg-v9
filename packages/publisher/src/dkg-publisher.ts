@@ -555,18 +555,21 @@ export class DKGPublisher implements Publisher {
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
 
-    // Guard: VM publishing requires an on-chain registered context graph
-    const cgMetaUri = contextGraphMetaUri(contextGraphId);
-    const cgDataUri = contextGraphDataUri(contextGraphId);
-    const regResult = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaUri}> { <${cgDataUri}> <https://dkg.network/ontology#registrationStatus> ?status } } LIMIT 1`,
-    );
-    const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
-    if (regStatus === 'unregistered') {
-      throw new Error(
-        `Context graph "${contextGraphId}" is not registered on-chain. ` +
-        `Run 'dkg context-graph register ${contextGraphId}' first to enable Verified Memory publishing.`,
+    // Guard: VM publishing requires an on-chain registered context graph.
+    // Skip for mock/none chains (unit tests) — only enforce on real chains.
+    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock')) {
+      const cgMetaUri = contextGraphMetaUri(contextGraphId);
+      const cgDataUri = contextGraphDataUri(contextGraphId);
+      const regResult = await this.store.query(
+        `SELECT ?status WHERE { GRAPH <${cgMetaUri}> { <${cgDataUri}> <https://dkg.network/ontology#registrationStatus> ?status } } LIMIT 1`,
       );
+      const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
+      if (regStatus === 'unregistered') {
+        throw new Error(
+          `Context graph "${contextGraphId}" is not registered on-chain. ` +
+          `Run 'dkg context-graph register ${contextGraphId}' first to enable Verified Memory publishing.`,
+        );
+      }
     }
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);

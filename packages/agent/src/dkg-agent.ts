@@ -1940,6 +1940,8 @@ export class DKGAgent {
     accessPolicy?: number;
     /** Peer allowlist for curated CGs. Omit for open CGs. */
     allowedPeers?: string[];
+    /** Identity IDs for private CG access control (chain-based). */
+    participantIdentityIds?: bigint[];
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
   }): Promise<void> {
@@ -1988,11 +1990,25 @@ export class DKGAgent {
           graph: cgMetaGraph,
         });
       }
-      // Always include the curator in the allowlist
       quads.push({
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
         object: `"${this.peerId}"`,
+        graph: cgMetaGraph,
+      });
+    }
+
+    // Store participant identity IDs for private CG access control (chain-based)
+    const creatorIdentityId = await this.chain.getIdentityId();
+    const participantIdentityIds = new Set<bigint>(opts.participantIdentityIds ?? []);
+    if (creatorIdentityId > 0n) {
+      participantIdentityIds.add(creatorIdentityId);
+    }
+    for (const participantIdentityId of participantIdentityIds) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+        object: `"${participantIdentityId.toString()}"`,
         graph: cgMetaGraph,
       });
     }

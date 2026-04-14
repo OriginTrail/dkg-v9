@@ -810,7 +810,8 @@ async function fetchLocalAgentHistoryBySessionId(
       limit,
       order: 'desc',
     });
-    return session.messages
+    return [...session.messages]
+      .reverse()
       .map((message) => ({
         uri: message.uri || buildFallbackHistoryMessageUri(message),
         text: message.text,

@@ -388,15 +388,15 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(panelRight).toContain('Connect OpenClaw');
   });
 
-  it('fetchOpenClawLocalHistory requests the newest turns from /api/memory/sessions/:sessionId and returns chronological order', async () => {
+  it('fetchOpenClawLocalHistory requests the newest turns from /api/memory/sessions/:sessionId and normalizes them back to chronological order for chat display', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         session: 'openclaw:dkg-ui',
         messages: [
-          { uri: 'urn:dkg:chat:msg:user-1', text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
-          { uri: 'urn:dkg:chat:msg:user-2', text: 'second', author: 'user', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
           { uri: 'urn:dkg:chat:msg:agent-3', text: 'third', author: 'agent', ts: '2026-03-11T10:02:00Z', turnId: 'turn-3' },
+          { uri: 'urn:dkg:chat:msg:user-2', text: 'second', author: 'user', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          { uri: 'urn:dkg:chat:msg:user-1', text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
         ],
       }),
     });
@@ -456,14 +456,14 @@ describe('OpenClaw bridge behavioral tests', () => {
     })).toBe(false);
   });
 
-  it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread', async () => {
+  it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread, while returning chronological rows', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         session: 'openclaw:dkg-ui:worker-1',
         messages: [
-          { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
           { uri: 'urn:dkg:chat:msg:worker-agent-2', text: 'worker reply', author: 'agent', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
         ],
       }),
     });
@@ -490,16 +490,16 @@ describe('OpenClaw bridge behavioral tests', () => {
     const firstWindow = {
       session: 'openclaw:dkg-ui',
       messages: [
-        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
         { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
       ],
     };
     const shiftedWindow = {
       session: 'openclaw:dkg-ui',
       messages: [
-        { uri: 'urn:dkg:chat:msg:user-older', text: 'older context', author: 'user', ts: '2026-03-11T09:59:00Z' },
-        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
         { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-older', text: 'older context', author: 'user', ts: '2026-03-11T09:59:00Z' },
       ],
     };
     const fakeFetch = vi.fn()

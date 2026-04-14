@@ -182,7 +182,7 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[1].author).toBe('agent');
   });
 
-  it('getSession can request the latest session window and returns it in chronological order', async () => {
+  it('getSession can request the latest session window in descending backend order', async () => {
     mockQuery
       .mockResolvedValueOnce({ bindings: [] })
       .mockResolvedValueOnce({
@@ -196,11 +196,11 @@ describe('ChatMemoryManager', () => {
     const session = await manager.getSession('test-session-latest', { limit: 3, order: 'desc' });
 
     expect(session).not.toBeNull();
-    expect(session!.messages.map((message) => message.text)).toEqual(['Oldest', 'Middle', 'Newest']);
+    expect(session!.messages.map((message) => message.text)).toEqual(['Newest', 'Middle', 'Oldest']);
     expect(session!.messages.map((message) => message.uri)).toEqual([
-      'urn:dkg:chat:msg:user-1',
-      'urn:dkg:chat:msg:user-2',
       'urn:dkg:chat:msg:agent-3',
+      'urn:dkg:chat:msg:user-2',
+      'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.mock.calls[1][0]);
     expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?failureReason');

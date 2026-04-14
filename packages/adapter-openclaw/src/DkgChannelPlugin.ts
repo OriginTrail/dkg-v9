@@ -84,6 +84,7 @@ export class DkgChannelPlugin {
   private readonly maxInFlight = 3;
   private stopping = false;
   private readonly stopWaiters: Array<() => void> = [];
+  private stopDrainDeadlineAt: number | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -98,6 +99,7 @@ export class DkgChannelPlugin {
 
   register(api: OpenClawPluginApi): void {
     this.stopping = false;
+    this.stopDrainDeadlineAt = null;
     this.api = api;
     const log = api.logger;
 
@@ -211,6 +213,7 @@ export class DkgChannelPlugin {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
 
     // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
@@ -280,6 +283,12 @@ export class DkgChannelPlugin {
       this.stopWaiters.push(waiter);
       this.notifyStopIdle();
     });
+  }
+
+  private canContinuePersistenceAttempt(allowDuringShutdown: boolean): boolean {
+    if (!this.stopping) return true;
+    if (!allowDuringShutdown) return false;
+    return (this.stopDrainDeadlineAt ?? 0) > Date.now();
   }
 
   // ---------------------------------------------------------------------------
@@ -957,10 +966,10 @@ export class DkgChannelPlugin {
     opts?: PersistTurnOptions,
     allowDuringShutdown = false,
   ): void {
-    if ((this.stopping && !allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
+    if (!this.canContinuePersistenceAttempt(allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
 
     const attemptPersist = (attempt: number): void => {
-      if (this.stopping && !allowDuringShutdown) return;
+      if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
       this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
       void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
         .then(() => {
@@ -971,7 +980,7 @@ export class DkgChannelPlugin {
           if (!currentJob) {
             return;
           }
-          if (this.stopping) {
+          if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
             this.deletePendingTurnPersistence(correlationId);
             return;
           }
@@ -989,7 +998,7 @@ export class DkgChannelPlugin {
             `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
           );
           const timer = setTimeout(() => {
-            if (this.stopping) {
+            if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
               this.deletePendingTurnPersistence(correlationId);
               return;
             }

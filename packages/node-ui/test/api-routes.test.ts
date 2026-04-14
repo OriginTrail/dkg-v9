@@ -188,15 +188,21 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
   });
 
-  it('passes session history limit and descending ordering through to memoryManager.getSession()', async () => {
+  it('passes session history limit and descending ordering through to memoryManager.getSession() without reordering the backend result', async () => {
     const memoryManager = {
       getSession: vi.fn().mockResolvedValue({
         session: 'session-1',
         messages: [
           {
+            uri: 'urn:dkg:chat:msg:agent-2',
+            author: 'agent',
+            text: 'newest',
+            ts: '2026-04-14T08:00:01Z',
+          },
+          {
             uri: 'urn:dkg:chat:msg:user-1',
             author: 'user',
-            text: 'latest',
+            text: 'older',
             ts: '2026-04-14T08:00:00Z',
             failureReason: 'timeout',
           },
@@ -228,7 +234,10 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
     expect(parseJsonBody(state.body)).toMatchObject({
       session: 'session-1',
-      messages: [{ uri: 'urn:dkg:chat:msg:user-1', failureReason: 'timeout' }],
+      messages: [
+        { uri: 'urn:dkg:chat:msg:agent-2', text: 'newest' },
+        { uri: 'urn:dkg:chat:msg:user-1', failureReason: 'timeout' },
+      ],
     });
   });
 

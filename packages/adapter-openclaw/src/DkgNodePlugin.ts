@@ -289,6 +289,15 @@ export class DkgNodePlugin {
     if (bridgePort > 0) {
       transport.bridgeUrl = `http://127.0.0.1:${bridgePort}`;
       transport.healthUrl = `${transport.bridgeUrl}/health`;
+    } else {
+      const existingBridgeUrl = existing?.bridgeUrl?.trim();
+      const existingHealthUrl = existing?.healthUrl?.trim();
+      if (existingBridgeUrl) {
+        transport.bridgeUrl = existingBridgeUrl;
+      }
+      if (existingHealthUrl) {
+        transport.healthUrl = existingHealthUrl;
+      }
     }
 
     return transport;

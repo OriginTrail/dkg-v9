@@ -667,10 +667,9 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
-      const orderedBindings = order === 'DESC' ? [...bindings].reverse() : bindings;
       return {
         session: sessionId,
-        messages: orderedBindings.map((mb: any) => ({
+        messages: bindings.map((mb: any) => ({
           uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),

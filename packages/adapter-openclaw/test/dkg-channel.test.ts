@@ -900,4 +900,78 @@ describe('DkgChannelPlugin', () => {
       vi.useRealTimers();
     }
   });
+
+  it('stop should retry a shutdown-allowed final turn persistence attempt within the bounded drain window', async () => {
+    vi.useFakeTimers();
+    try {
+      let resumeDispatch!: () => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockRejectedValueOnce(new Error('temporary daemon outage'))
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-retry', 'owner');
+      await expect(stream.next()).resolves.toEqual({
+        done: false,
+        value: { type: 'text_delta', delta: 'Reply before shutdown' },
+      });
+
+      const nextItem = stream.next();
+      const stopPromise = plugin.stop();
+      resumeDispatch();
+      await expect(nextItem).resolves.toEqual({
+        done: false,
+        value: { type: 'final', text: 'Reply before shutdown', correlationId: 'corr-stream-stop-retry' },
+      });
+      await expect(stream.next()).resolves.toEqual({ done: true, value: undefined });
+
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(stopSettled).toBe(true);
+      expect(storeSpy).toHaveBeenLastCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stream-stop-retry' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

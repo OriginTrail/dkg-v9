@@ -424,6 +424,27 @@ describe('local agent integration registry helpers', () => {
     });
   });
 
+  it('normalizes runtime-only disconnect patches into disabled local-agent updates', () => {
+    const normalized = normalizeExplicitLocalAgentDisconnectBody({
+      runtime: {
+        status: 'disconnected',
+        ready: true,
+        lastError: 'stale error',
+      },
+      metadata: { source: 'node-ui' },
+    });
+
+    expect(normalized).toEqual({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: 'stale error',
+      },
+    });
+  });
+
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
 
@@ -514,6 +535,44 @@ describe('local agent integration registry helpers', () => {
 
     expect(reconnected.enabled).toBe(true);
     expect(reconnected.metadata?.userDisabled).toBe(false);
+  });
+
+  it('forces runtime-status disconnect updates into a disabled stored integration', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            localChat: true,
+          },
+          metadata: {
+            source: 'node-ui',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const disconnected = updateLocalAgentIntegration(config, 'openclaw', {
+      runtime: {
+        status: 'disconnected',
+        ready: true,
+      },
+    });
+
+    expect(disconnected.enabled).toBe(false);
+    expect(disconnected.status).toBe('disconnected');
+    expect(disconnected.runtime.ready).toBe(false);
+    expect(disconnected.metadata?.userDisabled).toBe(true);
+    expect(hasConfiguredLocalAgentChat(config, 'openclaw')).toBe(false);
+    expect(getOpenClawChannelTargets(config)).toEqual([]);
   });
 
   it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy for an already attached integration', async () => {

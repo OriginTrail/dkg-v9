@@ -1362,15 +1362,15 @@ function isExplicitLocalAgentDisconnectPatch(patch: Pick<LocalAgentIntegrationCo
 }
 
 export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, unknown>): Record<string, unknown> {
-  if (body.enabled !== false) return body;
   const runtime = isPlainRecord(body.runtime) ? body.runtime : undefined;
-  if (runtime?.status === 'disconnected') return body;
+  if (body.enabled !== false && runtime?.status !== 'disconnected') return body;
   return {
     ...body,
+    enabled: false,
     runtime: {
       ...(runtime ?? {}),
       status: 'disconnected',
-      ready: typeof runtime?.ready === 'boolean' ? runtime.ready : false,
+      ready: false,
       lastError: runtime?.lastError ?? null,
     },
   };
@@ -1531,6 +1531,8 @@ export function updateLocalAgentIntegration(
   const patch = extractLocalAgentIntegrationPatch(body);
   const next = mergeLocalAgentIntegrationConfig(existing, patch);
   if (isExplicitLocalAgentDisconnectPatch(patch)) {
+    next.enabled = false;
+    next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };
     next.metadata = { ...(next.metadata ?? {}), userDisabled: true };
   } else if (patch.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
     next.metadata = { ...(next.metadata ?? {}), userDisabled: false };

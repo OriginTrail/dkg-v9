@@ -865,6 +865,50 @@ describe('@unit DKGStakingConvictionNFT', () => {
   // WITHDRAWAL_DELAY is hardcoded at 15 days in StakingV10 (Phase 5 Q6).
   const WITHDRAWAL_DELAY_SECONDS = 15 * 24 * 60 * 60;
 
+  // Pre-finalize helper — after a long `time.increase` crosses many Chronos
+  // epochs, the next ConvictionStakingStorage mutator has to walk every
+  // dirty-prefix epoch to catch `totalEffectiveStakeAtEpoch[e]` up to the
+  // current cursor, and that linear loop blows past hardhat's per-tx
+  // `gas: 15_000_000` cap for anything longer than ~40 epochs in the
+  // dirty window. We break the walk into smaller chunks by calling the
+  // external `finalizeEffectiveStakeUpTo` / `finalizeNodeEffectiveStakeUpTo`
+  // entries as the hub owner (both `onlyContracts` permit the hub owner
+  // via `HubDependent._checkHubContract`), so each call fits easily under
+  // the cap. This is test-only scaffolding; the corresponding production
+  // path during a real 15-day withdrawal would either amortize the work
+  // across many mutator calls over the delay window or be kept cheap by
+  // the unchanged `firstDirty`/`lastFinalizedEpoch` fast-paths in
+  // `_finalizeEffectiveStakeUpTo`.
+  const preFinalizeDormantEpochs = async (identityId: number) => {
+    const currentEpoch = Number(await ChronosContract.getCurrentEpoch());
+    const lastGlobal = Number(await ConvictionStakingStorageContract.getLastFinalizedEpoch());
+    const lastNode = Number(
+      await ConvictionStakingStorageContract.getNodeLastFinalizedEpoch(identityId),
+    );
+    const target = currentEpoch - 1;
+    // Chunked walk — 50 epochs per call is well under the 15M cap.
+    const chunkSize = 50;
+    for (let e = lastGlobal + chunkSize; e <= target; e += chunkSize) {
+      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeEffectiveStakeUpTo(e);
+    }
+    if (lastGlobal < target) {
+      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeEffectiveStakeUpTo(
+        target,
+      );
+    }
+    for (let e = lastNode + chunkSize; e <= target; e += chunkSize) {
+      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeNodeEffectiveStakeUpTo(
+        identityId,
+        e,
+      );
+    }
+    if (lastNode < target) {
+      await ConvictionStakingStorageContract.connect(
+        accounts[0],
+      ).finalizeNodeEffectiveStakeUpTo(identityId, target);
+    }
+  };
+
   describe('createWithdrawal (→ StakingV10.createWithdrawal)', () => {
     it('reverts if not owner (non-owner caller)', async () => {
       const { identityId } = await createProfile();
@@ -1138,6 +1182,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const withdrawAmount = minStake / 2n;
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      // Crossing the 15-day delay advances Chronos by ~360 epochs; pre-
+      // finalize the dormant window so `decreaseRaw`'s in-mutator
+      // finalize is O(1) instead of gas-bombing past the tx cap.
+      await preFinalizeDormantEpochs(identityId);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
       const totalStakeBefore = await StakingStorage.getTotalStake();
@@ -1201,6 +1249,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2); // post-expiry
       await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      await preFinalizeDormantEpochs(identityId);
 
       await NFT.connect(accounts[0]).finalizeWithdrawal(0);
 
@@ -1230,6 +1279,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const withdrawAmount = hre.ethers.parseEther('200');
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      await preFinalizeDormantEpochs(identityId);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
@@ -1267,6 +1317,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const withdrawAmount = hre.ethers.parseEther('500');
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+      await preFinalizeDormantEpochs(identityId);
 
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
 

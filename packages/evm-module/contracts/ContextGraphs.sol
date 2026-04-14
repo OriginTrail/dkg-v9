@@ -330,10 +330,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      *
      *      View-only — no state mutations.
      *
-     *      N17 note: the external signature intentionally matches the V9
-     *      callsite at KAV10.sol:188 (`(uint256, address)`). The bug that
-     *      KAV10 passes `publisherWallet` (the recovered node signer)
-     *      instead of the paying principal is a Phase 8 caller-side fix.
+     *      N17 note: the external signature intentionally takes the paying
+     *      principal as `publisher` rather than the recovered publisher-node
+     *      signer. The matching caller-side fix lives in `KnowledgeAssetsV10`
+     *      Phase 8 — `_executePublishCore` and `_executeUpdateCore` both pass
+     *      `msg.sender` here instead of the recovered node wallet.
      */
     function isAuthorizedPublisher(
         uint256 contextGraphId,

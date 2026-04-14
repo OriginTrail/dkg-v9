@@ -686,7 +686,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // --- 1. Read current KC metadata (needed for validation + auth) ---
 
         (
-            ,
+            KnowledgeCollectionLib.MerkleRoot[] memory merkleRoots,
             ,
             uint256 minted,
             ,
@@ -759,6 +759,18 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // burn id list is digested by its `keccak256` so an arbitrary-length
         // array folds into a fixed-size `bytes32` without blowing out the
         // packed digest. H5 prefix pins replay to (chain, contract).
+        //
+        // Replay protection: the digest binds the PRE-UPDATE merkle-root chain
+        // length. KCS appends to `merkleRoots[]` on every successful update, so
+        // every successful update increments this counter and invalidates any
+        // ACK that was signed against an earlier value. Without this binding,
+        // a captured update ACK could be replayed against a later state of the
+        // same KC — for paid updates the attacker would burn their own TRAC,
+        // but a `delta == 0` (metadata-only) ACK could be replayed for free to
+        // roll the merkle root back. The pre-update length is read from the
+        // metadata snapshot above, so signers and the contract agree on the
+        // exact version they're attesting.
+        uint256 preUpdateMerkleRootCount = merkleRoots.length;
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
                 block.chainid,
@@ -766,6 +778,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 p.publisherNodeIdentityId,
                 contextGraphId,
                 p.id,
+                preUpdateMerkleRootCount,
                 p.newMerkleRoot,
                 uint256(p.newByteSize),
                 uint256(p.newTokenAmount),

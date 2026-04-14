@@ -2724,6 +2724,39 @@ export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmen
   return refs;
 }
 
+export interface OpenClawChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function normalizeOpenClawChatContextEntry(
+  raw: unknown,
+): OpenClawChatContextEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === "string" ? record.key.trim() : "";
+  const label = typeof record.label === "string" ? record.label.trim() : "";
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+export function normalizeOpenClawChatContextEntries(
+  raw: unknown,
+): OpenClawChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: OpenClawChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeOpenClawChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
+}
+
 export function hasOpenClawChatTurnContent(
   text: unknown,
   attachmentRefs: OpenClawAttachmentRef[] | undefined,

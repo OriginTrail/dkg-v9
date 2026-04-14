@@ -831,14 +831,14 @@ function ConnectedAgentsTab(props: {
                   </div>
                 )}
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                  <label className="v10-local-agent-copy" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    New attachments target:
+                <div className="v10-local-agent-toolbar">
+                  <label className="v10-local-agent-target-picker">
+                    <span className="v10-local-agent-target-label">Project</span>
                     <select
+                      className="v10-local-agent-target-select"
                       value={activeProjectId ?? ''}
                       onChange={(e) => onSelectProject(e.target.value)}
                       disabled={projectsLoading || availableProjects.length === 0}
-                      style={{ minWidth: 220 }}
                     >
                       <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
                       {availableProjects.map((project) => (
@@ -849,27 +849,7 @@ function ConnectedAgentsTab(props: {
                     </select>
                   </label>
 
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      ref={attachmentInputRef}
-                      type="file"
-                      multiple
-                      style={{ display: 'none' }}
-                      onChange={(e) => {
-                        if (e.target.files) {
-                          onAddAttachments(e.target.files);
-                          e.target.value = '';
-                        }
-                      }}
-                    />
-                    <button
-                      className="v10-agents-refresh"
-                      onClick={() => attachmentInputRef.current?.click()}
-                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
-                    >
-                      Attach files
-                    </button>
-                  </div>
+                  <div className="v10-local-agent-toolbar-actions" />
                 </div>
                 {selectedAttachmentDrafts.length > 0 && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
@@ -879,37 +859,62 @@ function ConnectedAgentsTab(props: {
                   </div>
                 )}
 
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input
-                    type="text"
-                    placeholder={
-                      showingSessionHistory
-                        ? `Reconnect ${selected.name} to resume live chat...`
-                        : selected.chatReady
-                        ? `Message ${selected.name}...`
-                        : selected.status === 'connecting'
-                          ? `${selected.name} is still connecting...`
-                          : `${selected.name} bridge offline...`
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files) {
+                      onAddAttachments(e.target.files);
+                      e.target.value = '';
                     }
-                    className="v10-agent-input"
-                    value={localInput}
-                    onChange={(e) => onLocalInputChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        onSendLocalMessage();
+                  }}
+                />
+
+                <div className="v10-local-agent-composer-row">
+                  <div className="v10-local-agent-composer-shell">
+                    <button
+                      type="button"
+                      className="v10-agent-send-btn secondary v10-local-agent-inline-attach"
+                      onClick={() => attachmentInputRef.current?.click()}
+                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
+                      title="Attach files"
+                      aria-label="Attach files"
+                    >
+                      <span aria-hidden="true">📎</span>
+                      <span>Upload file</span>
+                    </button>
+                    <textarea
+                      placeholder={
+                        showingSessionHistory
+                          ? `Reconnect ${selected.name} to resume live chat...`
+                          : selected.chatReady
+                          ? `Message ${selected.name}...`
+                          : selected.status === 'connecting'
+                            ? `${selected.name} is still connecting...`
+                            : `${selected.name} bridge offline...`
                       }
-                    }}
-                    disabled={inputDisabled}
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    className="v10-agent-send-btn"
-                    onClick={onSendLocalMessage}
-                    disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
-                  >
-                    Send
-                  </button>
+                      className="v10-agent-input"
+                      value={localInput}
+                      onChange={(e) => onLocalInputChange(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          onSendLocalMessage();
+                        }
+                      }}
+                      disabled={inputDisabled}
+                      rows={3}
+                    />
+                    <button
+                      className="v10-agent-send-btn v10-local-agent-inline-send"
+                      onClick={onSendLocalMessage}
+                      disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
                 {!activeProjectId && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>

@@ -208,15 +208,17 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
-    expect(panelRight).toContain('Attach files');
-    expect(panelRight).toContain('New attachments target:');
+    expect(panelRight).toContain('aria-label="Attach files"');
+    expect(panelRight).toContain('Upload file');
+    expect(panelRight).toContain('📎');
+    expect(panelRight).toContain('Target');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain("value={activeProjectId ?? ''}");
     expect(panelRight).not.toContain('{activeProjectId ? (');
     expect(panelRight).toContain('Stored only');
     expect(panelRight).toContain('Queued - imports on send');
     expect(panelRight).toContain('Queued files keep their stored target');
-    expect(panelRight).toContain('To {targetLabel}');
+    expect(panelRight).not.toContain('To {targetLabel}');
     expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
   });
 

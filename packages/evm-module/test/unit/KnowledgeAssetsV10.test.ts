@@ -1081,6 +1081,145 @@ describe('@unit KnowledgeAssetsV10', () => {
         const metaAfter = await KCS.getKnowledgeCollectionMetadata(base.kcId);
         expect(metaAfter[6]).to.equal(newTokenAmount);
       });
+
+      // -- T1.7g: true metadata-only update (mint=0, burn=[], delta=0) --
+      //
+      // Codex Round 2 finding: KCS unconditionally called
+      // `mintKnowledgeAssetsTokens` which reverts `MintZeroQuantity` when
+      // amount == 0, blocking the metadata-only rotation path. Fix guards
+      // the mint in KCS. This test locks the fix by running a pure
+      // merkle-root rotation with no mint, no burn, no payment delta.
+      it('T1.7g: true metadata-only update (mint=0, burn=[], delta=0) succeeds', async () => {
+        const base = await publishBaselineKC();
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7g-new'));
+
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount: base.tokenAmount,
+          mintKnowledgeAssetsAmount: 0n, // load-bearing: no mint
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.7g-update',
+        });
+
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress),
+        ).to.not.be.reverted;
+
+        // Merkle root rotated; minted count unchanged.
+        const roots = await KCS.getMerkleRoots(base.kcId);
+        expect(roots.length).to.equal(2);
+        expect(roots[1].merkleRoot).to.equal(newMerkleRoot);
+        expect(roots[1].publisher).to.equal(base.creator.address);
+        const metaAfter = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        expect(metaAfter[2]).to.equal(10n);
+        expect(metaAfter[6]).to.equal(base.tokenAmount);
+      });
+
+      // -- T1.7h: burn-list happy path (Codex Round 2, Fix A positive) --
+      //
+      // Regression for `_burnBatch` inverted range check. Pre-fix, the
+      // condition reverted on tokens INSIDE the KC's range. Post-fix, the
+      // caller can burn their own KC's KA tokens via updateDirect.
+      it('T1.7h: update with a valid burn list burns the caller-owned KA tokens', async () => {
+        const base = await publishBaselineKC();
+
+        const maxSize = await KCS.KNOWLEDGE_COLLECTION_MAX_SIZE();
+        const firstTokenId = (base.kcId - 1n) * maxSize + 1n;
+
+        // Sanity: caller owns the token BEFORE the update.
+        expect(
+          await KCS['balanceOf(address,uint256,uint256)'](
+            base.creator.address,
+            firstTokenId,
+            firstTokenId + 1n,
+          ),
+        ).to.equal(1n);
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7h-new'));
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount: base.tokenAmount,
+          mintKnowledgeAssetsAmount: 0n,
+          knowledgeAssetsToBurn: [firstTokenId],
+          updateOperationId: 't1.7h-update',
+        });
+
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress),
+        ).to.not.be.reverted;
+
+        // Caller no longer owns the token.
+        expect(
+          await KCS['balanceOf(address,uint256,uint256)'](
+            base.creator.address,
+            firstTokenId,
+            firstTokenId + 1n,
+          ),
+        ).to.equal(0n);
+
+        // Token recorded in KC's burned[] list.
+        const metaAfter = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        const burnedList = metaAfter[1];
+        expect(burnedList.length).to.equal(1);
+        expect(burnedList[0]).to.equal(firstTokenId);
+      });
+
+      // -- T1.7i: out-of-range burn reverts (Codex Round 2, Fix A negative) --
+      //
+      // The burn-range gate must still reject tokens from a DIFFERENT KC.
+      // A caller that owns tokens from KC #2 must NOT be able to pass them
+      // to an update on KC #1 — the inverted pre-fix code let this through.
+      it('T1.7i: update with out-of-range burn token reverts NotPartOfKnowledgeCollection', async () => {
+        const base = await publishBaselineKC();
+
+        // Token ID from KC #2's range (not KC #1's). KC #1 has
+        // [1, 1 + minted); KC #2 has [1 + MAX_SIZE, 1 + MAX_SIZE + minted).
+        const maxSize = await KCS.KNOWLEDGE_COLLECTION_MAX_SIZE();
+        const outOfRangeTokenId = maxSize + 1n;
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7i-new'));
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount: base.tokenAmount,
+          mintKnowledgeAssetsAmount: 0n,
+          knowledgeAssetsToBurn: [outOfRangeTokenId],
+          updateOperationId: 't1.7i-update',
+        });
+
+        await expect(KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress))
+          .to.be.revertedWithCustomError(KCS, 'NotPartOfKnowledgeCollection')
+          .withArgs(base.kcId, outOfRangeTokenId);
+      });
     });
 
     // ----------------------------------------------------------------------

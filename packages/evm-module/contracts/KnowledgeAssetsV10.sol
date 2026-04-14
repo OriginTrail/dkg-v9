@@ -468,6 +468,31 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         epochStorage.addTokensToEpochRange(1, endEpoch, endEpoch + epochs, tokenAmount);
         _addTokens(tokenAmount, paymaster);
 
+        // Phase 1+8 cross-phase fix: extending a KC's lifetime adds value to
+        // the CG it belongs to, so the CG's value-weighted random-sampling
+        // contribution must grow accordingly. Without this write the CG would
+        // undercount extended KCs at challenge selection time.
+        //
+        // V10 KCs always have a CG binding (Phase 7 invariant). Legacy V8 KCs
+        // — created before atomic CG bind landed — return cgId == 0; in that
+        // case we skip the CG value write so the V8 lifetime-extension path
+        // keeps working unchanged.
+        if (epochs > 0 && tokenAmount > 0) {
+            uint256 cgId = contextGraphStorage.kcToContextGraph(id);
+            if (cgId != 0) {
+                // Pin the diff over the EXTENSION window only, starting at
+                // the (old) endEpoch — the original publish window already
+                // wrote its own diff at publish time and that contribution
+                // retracts at the original endEpoch as designed.
+                contextGraphValueStorage.addCGValueForEpochRange(
+                    cgId,
+                    uint256(endEpoch),
+                    uint256(epochs),
+                    uint256(tokenAmount)
+                );
+            }
+        }
+
         ParanetKnowledgeCollectionsRegistry pkar = paranetKnowledgeCollectionsRegistry;
 
         bytes32 knowledgeCollectionId = pkar.getParanetId(keccak256(abi.encodePacked(address(kcs), id)));

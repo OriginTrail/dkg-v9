@@ -1399,5 +1399,103 @@ describe('@unit KnowledgeAssetsV10', () => {
           .withArgs(1n, now, meta[5]);
       });
     });
+
+    // ----------------------------------------------------------------------
+    // T2.6: extendKnowledgeCollectionLifetime writes CG value delta
+    //
+    // Codex Fix 2: extending a KC's lifetime adds value to the CG it belongs
+    // to. Pre-fix, `extendKnowledgeCollectionLifetime` wrote to EpochStorage
+    // but skipped `ContextGraphValueStorage`, so future value-weighted random
+    // sampling undercounted extended KCs.
+    //
+    // Post-fix, the extension span writes a positive CG value diff at the
+    // (old) endEpoch and a matching negative diff at (old endEpoch + epochs).
+    // ----------------------------------------------------------------------
+    describe('T2.6: extendKnowledgeCollectionLifetime writes CG value delta', () => {
+      it('adds a CG value diff over the extension window', async () => {
+        const creator = getDefaultKCCreator(accounts);
+        const nodes = await setupNodes();
+        const cgId = await createOpenCG(creator);
+
+        const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t2.6-root'));
+        const tokenAmount = ethers.parseEther('100');
+        const epochs = 2;
+        const byteSize = 1000;
+
+        const p = await buildPublishParams({
+          chainId,
+          kav10Address,
+          publishingNode: nodes.publishingNode,
+          receivingNodes: nodes.receivingNodes,
+          publisherIdentityId: nodes.publisherIdentityId,
+          receiverIdentityIds: nodes.receiverIdentityIds,
+          contextGraphId: cgId,
+          merkleRoot,
+          knowledgeAssetsAmount: 10,
+          byteSize,
+          epochs,
+          tokenAmount,
+          isImmutable: false,
+          publishOperationId: 't2.6-publish',
+        });
+        await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+        const kcId = 1n;
+        await KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress);
+
+        const meta = await KCS.getKnowledgeCollectionMetadata(kcId);
+        const originalEndEpoch = meta[5];
+
+        // Extension parameters. `extensionEpochs` is the duration of the
+        // extension window; `extensionTokenAmount` is the TRAC paid for it.
+        // Together they define the CG value diff we're asserting.
+        const extensionEpochs = 3n;
+        const extensionTokenAmount = ethers.parseEther('30');
+        const expectedPerEpoch = extensionTokenAmount / extensionEpochs;
+
+        // Capture diffs BEFORE extension so we can assert the delta is
+        // EXACTLY the extension's per-epoch contribution (the original
+        // publish already wrote its own diffs at publish time; we don't
+        // want to include those in the delta).
+        const positiveDiffBefore = await CGValueStorage.cgValueDiff(
+          cgId,
+          originalEndEpoch,
+        );
+        const negativeDiffBefore = await CGValueStorage.cgValueDiff(
+          cgId,
+          originalEndEpoch + extensionEpochs,
+        );
+
+        // Fund + execute extension.
+        await TokenContract.connect(creator).approve(
+          kav10Address,
+          extensionTokenAmount,
+        );
+        await KAV10
+          .connect(creator)
+          .extendKnowledgeCollectionLifetime(
+            kcId,
+            extensionEpochs,
+            extensionTokenAmount,
+            ethers.ZeroAddress,
+          );
+
+        // Assert the extension's positive + negative diffs landed exactly at
+        // the extension window boundaries, with the right per-epoch value.
+        const positiveDiffAfter = await CGValueStorage.cgValueDiff(
+          cgId,
+          originalEndEpoch,
+        );
+        const negativeDiffAfter = await CGValueStorage.cgValueDiff(
+          cgId,
+          originalEndEpoch + extensionEpochs,
+        );
+        expect(positiveDiffAfter - positiveDiffBefore).to.equal(expectedPerEpoch);
+        expect(negativeDiffBefore - negativeDiffAfter).to.equal(expectedPerEpoch);
+
+        // KCS endEpoch advanced as expected.
+        const newMeta = await KCS.getKnowledgeCollectionMetadata(kcId);
+        expect(newMeta[5]).to.equal(originalEndEpoch + extensionEpochs);
+      });
+    });
   });
 });

@@ -2217,12 +2217,29 @@ export class DKGAgent {
     const paranetUri = paranetDataGraphUri(contextGraphId);
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
-    await this.store.insert([{
+    // If this is the first allowlist entry (CG was open), also add our own
+    // peer ID so the curator doesn't lock themselves out.
+    const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
+    const quadsToInsert: Quad[] = [];
+
+    if (existingAllowlist === null || existingAllowlist.length === 0) {
+      const curatorPeerId = escapeSparqlLiteral(this.peerId);
+      quadsToInsert.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+        object: `"${curatorPeerId}"`,
+        graph: cgMetaGraph,
+      });
+    }
+
+    quadsToInsert.push({
       subject: paranetUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
       object: `"${escapedPeerId}"`,
       graph: cgMetaGraph,
-    }]);
+    });
+
+    await this.store.insert(quadsToInsert);
 
     // Allowlist updates are in _meta and propagate to peers via the
     // authenticated sync protocol, not unauthenticated gossip.
@@ -2461,32 +2478,10 @@ export class DKGAgent {
 
     this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
 
-    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-    const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
-    const nquads = broadcastQuads.map(q => {
-      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
-    }).join('\n');
-
-    const msg = encodePublishRequest({
-      ual: `did:dkg:context-graph:${opts.id}`,
-      nquads: new TextEncoder().encode(nquads),
-      paranetId: SYSTEM_PARANETS.ONTOLOGY,
-      kas: [],
-      publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: '',
-      startKAId: 0,
-      endKAId: 0,
-      chainId: '',
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
-    });
-
-    try {
-      await this.gossip.publish(ontologyTopic, msg);
-    } catch {
-      // No peers subscribed — ok during boot
-    }
+    // Do NOT broadcast ontology quads from ensureContextGraphLocal —
+    // this is a local bootstrapping helper. The real creator broadcasts
+    // via createContextGraph(). Broadcasting here would falsely claim
+    // dkg:creator = self for CGs we're merely subscribing to.
   }
 
   // ── ENDORSE ─���────────────────────────────────────────────────────────
@@ -3916,7 +3911,7 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToContextGraph(id, { trackSyncScope: false });
+        this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
       this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);

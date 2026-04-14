@@ -557,7 +557,9 @@ export class DKGPublisher implements Publisher {
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
-    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock')) {
+    // Also skip when publishContextGraphId is set (remap flow) — the source
+    // CG may be unregistered while the target CG is already on-chain.
+    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock') && !options?.publishContextGraphId) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
 

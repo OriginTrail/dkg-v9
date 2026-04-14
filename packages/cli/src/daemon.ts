@@ -3436,6 +3436,7 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, revealOnChain, accessPolicy } = JSON.parse(body);
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
       const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });
       return jsonResponse(res, 200, {
@@ -3462,6 +3463,7 @@ async function handleRequest(
     if (!contextGraphId || !targetPeerId) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "peerId"' });
     }
+    if (!isValidContextGraphId(contextGraphId)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
       await agent.inviteToContextGraph(contextGraphId, targetPeerId);
       return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId });

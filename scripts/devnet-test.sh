@@ -1988,11 +1988,14 @@ else
 fi
 
 echo "--- 27i: Create curated CG with allowedPeers ---"
+# Fetch real peer IDs from the running devnet nodes
+NODE1_PEER=$(json_get "$(c "http://127.0.0.1:9201/api/info")" peerId)
+NODE2_PEER=$(json_get "$(c "http://127.0.0.1:9202/api/info")" peerId)
 CURATED_CG_ID="curated-cg-test-$(date +%s)"
 CURATED_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
   \"id\":\"$CURATED_CG_ID\",
   \"name\":\"Curated Test CG\",
-  \"allowedPeers\":[\"peer-abc-123\",\"peer-def-456\"]
+  \"allowedPeers\":[\"$NODE1_PEER\",\"$NODE2_PEER\"]
 }")
 CURATED_OK=$(json_get "$CURATED_RESP" created)
 [[ "$CURATED_OK" == "$CURATED_CG_ID" ]] && ok "Curated CG created with allowedPeers" || fail "Curated CG creation: $CURATED_RESP"
@@ -2000,10 +2003,10 @@ CURATED_OK=$(json_get "$CURATED_RESP" created)
 echo "--- 27j: Invite peer to context graph ---"
 INVITE_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/invite" -d "{
   \"contextGraphId\":\"$CURATED_CG_ID\",
-  \"peerId\":\"peer-new-789\"
+  \"peerId\":\"$NODE2_PEER\"
 }")
 INVITE_OK=$(json_get "$INVITE_RESP" invited)
-[[ "$INVITE_OK" == "peer-new-789" ]] && ok "Peer invited to curated CG" || fail "Peer invite: $INVITE_RESP"
+[[ "$INVITE_OK" == "$NODE2_PEER" ]] && ok "Peer invited to curated CG" || fail "Peer invite: $INVITE_RESP"
 
 echo "--- 27k: Register non-existent CG should return 404 ---"
 http_post_capture "http://127.0.0.1:9201/api/context-graph/register" \

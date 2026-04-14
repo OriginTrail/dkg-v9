@@ -100,7 +100,11 @@ export class GossipPublishHandler {
       // Drop any _meta quads from gossip — _meta state (allowlists, registration
       // status, curator) is security-critical and must only propagate via the
       // authenticated sync protocol, not unauthenticated gossip.
-      const filteredQuads = quads.filter(q => !q.graph.endsWith('/_meta'));
+      // Match both raw `/_meta` suffix and percent-encoded variants.
+      const filteredQuads = quads.filter(q => {
+        const g = q.graph;
+        return !g.endsWith('/_meta') && !decodeURIComponent(g).endsWith('/_meta');
+      });
       let normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
 
       // When receiving ontology-topic broadcasts, skip context graph definition
@@ -159,17 +163,24 @@ export class GossipPublishHandler {
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
-      } else if (fromPeerId) {
-        // For CG-specific topics, enforce peer allowlist (curated CGs).
+      } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.paranetId);
-        if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
-          this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.paranetId}"`);
-          return;
+
+        // Curated CGs: require sender identity and allowlist membership
+        if (allowedPeers !== null) {
+          if (!fromPeerId) {
+            this.log.warn(ctx, `Gossip publish rejected: no sender identity for curated context graph "${request.paranetId}"`);
+            return;
+          }
+          if (!allowedPeers.includes(fromPeerId)) {
+            this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.paranetId}"`);
+            return;
+          }
         }
-        // If no allowlist found, check if _meta has been synced yet.
-        // null can mean "open CG" or "haven't synced _meta yet". Until
-        // sync completes, default to deny for safety. Skip this check
-        // for system paranets (agents/ontology) which are always open.
+
+        // Open CGs that haven't synced _meta yet: deny until sync completes.
+        // null allowlist + synced=false could mean curated-but-not-yet-fetched.
+        // System paranets (agents/ontology) are exempt — always open.
         if (allowedPeers === null
           && request.paranetId !== SYSTEM_PARANETS.AGENTS
           && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {

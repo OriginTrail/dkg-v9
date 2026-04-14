@@ -2230,8 +2230,8 @@ export class DKGAgent {
         publisherSignatureVs: new Uint8Array(0),
       });
       await this.gossip.publish(ontologyTopic, regMsg);
-    } catch {
-      // Peers may not be subscribed yet
+    } catch (err) {
+      this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return { onChainId };
@@ -2277,11 +2277,11 @@ export class DKGAgent {
     const paranetUri = paranetDataGraphUri(contextGraphId);
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
-    // If this is the first allowlist entry (CG was open), also add our own
-    // peer ID so the curator doesn't lock themselves out.
     const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
     const quadsToInsert: Quad[] = [];
 
+    // If this is the first allowlist entry (CG was open), also add our own
+    // peer ID so the curator doesn't lock themselves out.
     if (existingAllowlist === null || existingAllowlist.length === 0) {
       const curatorPeerId = escapeSparqlLiteral(this.peerId);
       quadsToInsert.push({
@@ -2290,6 +2290,12 @@ export class DKGAgent {
         object: `"${curatorPeerId}"`,
         graph: cgMetaGraph,
       });
+    }
+
+    // Skip if already in the allowlist (idempotent)
+    if (existingAllowlist?.includes(peerId)) {
+      this.log.info(ctx, `Peer ${peerId} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
     }
 
     quadsToInsert.push({

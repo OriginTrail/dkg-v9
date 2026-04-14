@@ -2857,10 +2857,10 @@ async function handleRequest(
       tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
 
       // Re-tag vector store embeddings from swm → vm only after confirmed publish
-      if (vectorStore && result.kaManifest?.length && result.status !== 'tentative') {
+      if (vectorStore && result.kaManifest?.length && result.status === 'confirmed') {
         for (const ka of result.kaManifest) {
           try {
-            await vectorStore.updateLayer({ entityUri: ka.rootEntity, contextGraphId: paranetId, newLayer: 'vm' });
+            await vectorStore.updateLayer({ entityUri: ka.rootEntity, contextGraphId: paranetId, fromLayer: 'swm', newLayer: 'vm' });
           } catch { /* best-effort */ }
         }
       }

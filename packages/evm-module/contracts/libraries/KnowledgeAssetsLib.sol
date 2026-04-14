@@ -95,4 +95,26 @@ library KnowledgeAssetsLib {
     error AgentParticipantAlreadyExists(uint256 contextGraphId, address agent);
     error AgentParticipantNotFound(uint256 contextGraphId, address agent);
     error KCAlreadyRegisteredToContextGraph(uint256 kcId, uint256 existingContextGraphId);
+
+    // ----- PCA coherence validation (facade-enforced on create/update paths) -----
+    /// @dev Caller passed a non-zero PCA accountId but the DKGPublishingConvictionNFT
+    ///      is not currently resolvable via Hub (not deployed, not registered, or
+    ///      Hub returned address(0)). Fail-closed: a caller that wants PCA mode
+    ///      must deploy the NFT first, or use EOA/Safe mode instead.
+    error PCANotResolvable(uint256 accountId);
+
+    /// @dev Caller passed a non-zero PCA accountId but the NFT has no token minted
+    ///      for that accountId (ownerOf reverted). The account does not exist.
+    error PCAAccountDoesNotExist(uint256 accountId);
+
+    /// @dev Caller passed a PCA pair whose publishAuthority does NOT match the
+    ///      actual owner of the NFT at accountId. Closes a silent-broadening
+    ///      authorization vector: a mismatched pair would otherwise stack an
+    ///      EOA direct-authority match AND a PCA-agent match on the same CG,
+    ///      granting TWO distinct curators.
+    error PCAAuthorityMismatch(
+        uint256 accountId,
+        address claimedAuthority,
+        address actualOwner
+    );
 }

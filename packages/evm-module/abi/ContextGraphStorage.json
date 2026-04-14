@@ -643,6 +643,32 @@
     "type": "event"
   },
   {
+    "inputs": [],
+    "name": "MAX_HOSTING_NODES",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_PARTICIPANT_AGENTS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -841,6 +867,30 @@
       {
         "internalType": "uint256",
         "name": "publishAuthorityAccountId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getContextGraphKCAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "kcId",
         "type": "uint256"
       }
     ],

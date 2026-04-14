@@ -172,13 +172,21 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     it('writes all fields into storage correctly', async () => {
-      const authority = accounts[5].address;
+      // Set up a real PCA account so the coherence check
+      // (authority == ownerOf(accountId)) passes. accounts[0] has the
+      // initial TRAC supply and becomes the NFT owner.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      const authority = accounts[0].address;
       const agents = [accounts[3].address, accounts[4].address];
       await Facade.connect(accounts[0]).createContextGraph(
-        hosts(), agents, 2, 42, 0, authority, 777,
+        hosts(), agents, 2, 42, 0, authority, pcaAccountId,
       );
 
-      const cg = await Storage.getContextGraph(1);
+      // pcaAccountId is 1 (first NFT mint) and the PCA CG takes token id 1
+      // as well (first CG mint). The two ERC-721 registries are independent,
+      // so both can reuse id 1.
+      const cgId = 1n;
+      const cg = await Storage.getContextGraph(cgId);
       expect(cg.owner_).to.equal(accounts[0].address);
       expect(cg.hostingNodes).to.deep.equal(hosts());
       expect(cg.participantAgents).to.deep.equal(agents);
@@ -187,7 +195,7 @@ describe('@unit ContextGraphs (facade)', () => {
       expect(cg.active).to.be.true;
       expect(cg.publishPolicy).to.equal(0);
       expect(cg.publishAuthority).to.equal(authority);
-      expect(cg.publishAuthorityAccountId).to.equal(777);
+      expect(cg.publishAuthorityAccountId).to.equal(pcaAccountId);
     });
 
     it('defaults authority to msg.sender when curated + zero authority passed', async () => {
@@ -328,15 +336,18 @@ describe('@unit ContextGraphs (facade)', () => {
       ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
     });
 
-    it('curated + accountId != 0 (PCA) with non-zero authority is valid', async () => {
-      // PCA curator type: authority acts as an ownership marker, accountId
-      // is the lookup key for registered agents.
+    it('curated + accountId != 0 (PCA) with coherent authority is valid', async () => {
+      // PCA curator type: the authority MUST equal ownerOf(accountId) in
+      // the NFT (see _validatePCACoherence — closes a silent-broadening
+      // vector). Set up a real PCA account with accounts[0] as the owner.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
       await Facade.connect(accounts[0]).createContextGraph(
-        hosts(), noAgents(), 2, 0, 0, accounts[5].address, 777,
+        hosts(), noAgents(), 2, 0, 0, accounts[0].address, pcaAccountId,
       );
-      const policy = await Storage.getPublishPolicy(1);
-      expect(policy.publishAuthority).to.equal(accounts[5].address);
-      expect(await Storage.getPublishAuthorityAccountId(1)).to.equal(777);
+      const cgId = 1n;
+      const policy = await Storage.getPublishPolicy(cgId);
+      expect(policy.publishAuthority).to.equal(accounts[0].address);
+      expect(await Storage.getPublishAuthorityAccountId(cgId)).to.equal(pcaAccountId);
     });
 
     it('curated + accountId == 0 (EOA/Safe) with non-zero authority is valid', async () => {
@@ -361,6 +372,125 @@ describe('@unit ContextGraphs (facade)', () => {
           hosts(), noAgents(), 2, 0, 1, ethers.ZeroAddress, 99,
         ),
       ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    });
+  });
+
+  // =========================================================================
+  // PCA coherence validation (Codex followup — MEDIUM)
+  // =========================================================================
+  //
+  // Validates the facade-level (publishAuthority, publishAuthorityAccountId)
+  // coherence gate that closes the "silent broadening" authorization vector
+  // where a mismatched pair would stack EOA + PCA curators on the same CG.
+  //
+  // The gate fires on every write path that touches PCA config: create,
+  // updatePublishPolicy, updatePublishAuthority.
+  describe('PCA coherence validation', () => {
+    it('create: happy path — authority matches ownerOf(accountId)', async () => {
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      await expect(
+        Facade.connect(accounts[0]).createContextGraph(
+          hosts(), noAgents(), 2, 0, 0, accounts[0].address, pcaAccountId,
+        ),
+      ).to.emit(Storage, 'ContextGraphCreated');
+    });
+
+    it('create: reverts with PCAAuthorityMismatch when authority is not the NFT owner', async () => {
+      // accounts[0] owns the PCA NFT at pcaAccountId. accounts[5] is the
+      // claimed authority but does NOT own the NFT. Mismatched pair must
+      // be rejected.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      await expect(
+        Facade.connect(accounts[0]).createContextGraph(
+          hosts(), noAgents(), 2, 0, 0, accounts[5].address, pcaAccountId,
+        ),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAuthorityMismatch')
+        .withArgs(pcaAccountId, accounts[5].address, accounts[0].address);
+    });
+
+    it('create: reverts with PCAAccountDoesNotExist on unminted accountId', async () => {
+      // accountId 999 has never been minted — ownerOf(999) reverts with
+      // OZ ERC721NonexistentToken, which the facade catches and rethrows
+      // as PCAAccountDoesNotExist.
+      await expect(
+        Facade.connect(accounts[0]).createContextGraph(
+          hosts(), noAgents(), 2, 0, 0, accounts[0].address, 999,
+        ),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAccountDoesNotExist')
+        .withArgs(999);
+    });
+
+    it('create: accountId == 0 skips the coherence check (non-PCA EOA)', async () => {
+      // Any authority, accountId=0: coherence is skipped, storage's
+      // EOA/Safe curator path stores the authority verbatim.
+      await expect(
+        Facade.connect(accounts[0]).createContextGraph(
+          hosts(), noAgents(), 2, 0, 0, accounts[5].address, 0,
+        ),
+      ).to.emit(Storage, 'ContextGraphCreated');
+    });
+
+    it('create: open policy with accountId 0 still works (unaffected by gate)', async () => {
+      await expect(
+        Facade.connect(accounts[0]).createContextGraph(
+          hosts(), noAgents(), 2, 0, 1, ethers.ZeroAddress, 0,
+        ),
+      ).to.emit(Storage, 'ContextGraphCreated');
+    });
+
+    it('updatePublishPolicy: reverts with PCAAuthorityMismatch on mismatched pair', async () => {
+      await createOpenCG(accounts[0]);
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      // CG owner is accounts[0]. Try to switch to PCA with the wrong
+      // authority (accounts[5] does not own the NFT).
+      await expect(
+        Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[5].address, pcaAccountId),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAuthorityMismatch')
+        .withArgs(pcaAccountId, accounts[5].address, accounts[0].address);
+    });
+
+    it('updatePublishPolicy: reverts with PCAAccountDoesNotExist on unminted accountId', async () => {
+      await createOpenCG(accounts[0]);
+      await expect(
+        Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[0].address, 999),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAccountDoesNotExist')
+        .withArgs(999);
+    });
+
+    it('updatePublishAuthority: reverts with PCAAuthorityMismatch on mismatched pair', async () => {
+      // Start with an EOA curated CG; try to rotate to a PCA pair where
+      // the new authority does not own the NFT.
+      await createCuratedCG(accounts[0], accounts[5].address);
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      await expect(
+        Facade.connect(accounts[0]).updatePublishAuthority(1, accounts[5].address, pcaAccountId),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAuthorityMismatch')
+        .withArgs(pcaAccountId, accounts[5].address, accounts[0].address);
+    });
+
+    it('updatePublishAuthority: reverts with PCAAccountDoesNotExist on unminted accountId', async () => {
+      await createCuratedCG(accounts[0], accounts[5].address);
+      await expect(
+        Facade.connect(accounts[0]).updatePublishAuthority(1, accounts[0].address, 999),
+      )
+        .to.be.revertedWithCustomError(Facade, 'PCAAccountDoesNotExist')
+        .withArgs(999);
+    });
+
+    it('updatePublishAuthority: accountId=0 skip still allows EOA rotation', async () => {
+      // Regression: make sure the gate doesn't false-trip on plain EOA
+      // rotations (accountId == 0 short-circuits before any Hub lookup).
+      await createCuratedCG(accounts[0], accounts[5].address);
+      await expect(
+        Facade.connect(accounts[0]).updatePublishAuthority(1, accounts[6].address, 0),
+      )
+        .to.emit(Storage, 'PublishAuthorityUpdated')
+        .withArgs(1, accounts[6].address, 0);
     });
   });
 
@@ -554,12 +684,18 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     it('owner can switch open -> curated with PCA accountId', async () => {
-      await Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[5].address, 777);
-      expect(await Storage.getPublishAuthorityAccountId(1)).to.equal(777);
+      // PCA coherence requires authority == ownerOf(accountId). Set up
+      // a real PCA account owned by accounts[0] (the NFT owner) and use
+      // that accountId + address for the new PCA config.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      await Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[0].address, pcaAccountId);
+      expect(await Storage.getPublishAuthorityAccountId(1)).to.equal(pcaAccountId);
     });
 
     it('owner can switch curated -> open (clears authority and accountId)', async () => {
-      await Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[5].address, 777);
+      // Intermediate PCA step needs a coherent (authority, accountId) pair.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      await Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[0].address, pcaAccountId);
       await Facade.connect(accounts[0]).updatePublishPolicy(1, 1, ethers.ZeroAddress, 0);
       const policy = await Storage.getPublishPolicy(1);
       expect(policy.publishPolicy).to.equal(1);
@@ -610,8 +746,14 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     it('owner can switch EOA -> PCA via updatePublishAuthority', async () => {
-      await Facade.connect(accounts[0]).updatePublishAuthority(1, accounts[6].address, 777);
-      expect(await Storage.getPublishAuthorityAccountId(1)).to.equal(777);
+      // PCA coherence requires authority == ownerOf(accountId). Set up
+      // a real PCA owned by accounts[6] (the new rotated authority) so
+      // the facade's coherence gate accepts the pair.
+      const amount = ethers.parseEther('60000');
+      await TokenContract.connect(accounts[0]).transfer(accounts[6].address, amount);
+      const pcaAccountId = await createPCAAccount(accounts[6], '60000');
+      await Facade.connect(accounts[0]).updatePublishAuthority(1, accounts[6].address, pcaAccountId);
+      expect(await Storage.getPublishAuthorityAccountId(1)).to.equal(pcaAccountId);
     });
 
     it('non-owner cannot call updatePublishAuthority', async () => {
@@ -629,14 +771,17 @@ describe('@unit ContextGraphs (facade)', () => {
     it('auto-rotates authority on NFT transfer when old owner was authority', async () => {
       // Create a fresh CG where the owner is also the authority (the
       // auto-rotation condition requires `publishAuthority == previousOwner`).
+      // PCA coherence requires a real NFT account owned by the authority,
+      // so mint one for accounts[0] and use its accountId here.
+      const pcaAccountId = await createPCAAccount(accounts[0], '60000');
       await Facade.connect(accounts[0]).createContextGraph(
-        hosts(), noAgents(), 2, 0, 0, accounts[0].address, 555,
+        hosts(), noAgents(), 2, 0, 0, accounts[0].address, pcaAccountId,
       );
       const newCgId = await Storage.getLatestContextGraphId();
 
       // Pre-transfer snapshot.
       expect((await Storage.getPublishPolicy(newCgId)).publishAuthority).to.equal(accounts[0].address);
-      expect(await Storage.getPublishAuthorityAccountId(newCgId)).to.equal(555);
+      expect(await Storage.getPublishAuthorityAccountId(newCgId)).to.equal(pcaAccountId);
 
       // Transfer the NFT: Storage._update should rotate authority to the
       // new owner and clear the PCA accountId.
@@ -835,6 +980,61 @@ describe('@unit ContextGraphs (facade)', () => {
       await expect(
         Facade.connect(accounts[0]).updateQuorum(1, 0),
       ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    });
+  });
+
+  // =========================================================================
+  // registerKnowledgeCollection — Phase 8 entry point (facade wrapper)
+  // =========================================================================
+  //
+  // Validates the thin facade wrapper over ContextGraphStorage.registerKCToContextGraph.
+  // The wrapper is `onlyContracts`-gated at the facade layer and forwards to
+  // storage, which also has its own `onlyContracts` gate — the ContextGraphs
+  // facade itself is registered in Hub, so the forwarding call satisfies
+  // storage's gate transparently.
+  describe('registerKnowledgeCollection (facade wrapper)', () => {
+    beforeEach(async () => {
+      await createOpenCG(accounts[0]);
+    });
+
+    it('forwards to storage and writes the reverse + forward mappings', async () => {
+      // `storageOp` (accounts[19]) is a Hub-registered sentinel, so it
+      // passes the facade's `onlyContracts` gate. The facade then calls
+      // storage, which also enforces `onlyContracts` — it accepts the
+      // facade because ContextGraphs is itself registered in Hub via the
+      // deploy script.
+      await expect(
+        Facade.connect(storageOp).registerKnowledgeCollection(1, 100),
+      ).to.emit(Storage, 'KCRegisteredToContextGraph').withArgs(1, 100);
+
+      expect(await Storage.kcToContextGraph(100)).to.equal(1);
+      expect(await Storage.getContextGraphKCList(1)).to.deep.equal([100n]);
+      expect(await Storage.getContextGraphKCCount(1)).to.equal(1);
+    });
+
+    it('reverts when caller is not a Hub contract (facade-level gate)', async () => {
+      // A non-Hub EOA hits the facade's own `onlyContracts` gate and never
+      // reaches storage. UnauthorizedAccess is raised by the Hub lib used
+      // across the facade / storage contracts.
+      await expect(
+        Facade.connect(accounts[5]).registerKnowledgeCollection(1, 100),
+      ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
+    });
+
+    it('surfaces storage-level KCAlreadyRegisteredToContextGraph on double register', async () => {
+      await Facade.connect(storageOp).registerKnowledgeCollection(1, 100);
+      // Create a second CG and try to register the same kcId there.
+      await createOpenCG(accounts[0]);
+      await expect(
+        Facade.connect(storageOp).registerKnowledgeCollection(2, 100),
+      ).to.be.revertedWithCustomError(Storage, 'KCAlreadyRegisteredToContextGraph');
+    });
+
+    it('surfaces storage-level ContextGraphNotActive on inactive target', async () => {
+      await Storage.connect(storageOp).deactivateContextGraph(1);
+      await expect(
+        Facade.connect(storageOp).registerKnowledgeCollection(1, 100),
+      ).to.be.revertedWithCustomError(Storage, 'ContextGraphNotActive');
     });
   });
 

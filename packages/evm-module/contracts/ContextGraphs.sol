@@ -92,6 +92,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
             authority = msg.sender;
         }
 
+        // Coherence gate: when a PCA accountId is supplied, the claimed
+        // authority MUST equal the current owner of the NFT at that accountId.
+        // See _validatePCACoherence for rationale (closes "silent broadening"
+        // authorization vector where a mismatched pair stacks EOA + PCA
+        // curators on the same CG).
+        _validatePCACoherence(authority, publishAuthorityAccountId);
+
         contextGraphId = contextGraphStorage.createContextGraph(
             msg.sender,
             hostingNodes,
@@ -136,6 +143,10 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         address publishAuthority,
         uint256 publishAuthorityAccountId
     ) external onlyContextGraphOwner(contextGraphId) {
+        // Coherence gate (see _validatePCACoherence): if the new config
+        // switches to PCA mode, the authority must own the target NFT.
+        _validatePCACoherence(publishAuthority, publishAuthorityAccountId);
+
         contextGraphStorage.updatePublishPolicy(
             contextGraphId,
             publishPolicy,
@@ -149,6 +160,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         address newAuthority,
         uint256 newAuthorityAccountId
     ) external onlyContextGraphOwner(contextGraphId) {
+        // Coherence gate (see _validatePCACoherence): if the rotated
+        // authority carries a non-zero accountId, the new authority must
+        // own the target NFT.
+        _validatePCACoherence(newAuthority, newAuthorityAccountId);
+
         contextGraphStorage.updatePublishAuthority(
             contextGraphId,
             newAuthority,
@@ -260,5 +276,98 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
         uint256 publisherAccountId = IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(publisher);
         return publisherAccountId != 0 && publisherAccountId == authorityAccountId;
+    }
+
+    // --- KC registration (Phase 8 publish flow entry point) ---
+
+    /**
+     * @notice Bind a Knowledge Collection to a Context Graph via the facade.
+     * @dev Thin wrapper over `ContextGraphStorage.registerKCToContextGraph`.
+     *      Exists so Phase 8's `KnowledgeAssetsV10.createKnowledgeAssets` can
+     *      call the facade (stable interface) instead of reaching into
+     *      storage directly. `onlyContracts`-gated at the facade layer so the
+     *      entry point has one canonical caller — the KA contract — and no
+     *      direct EOA call path.
+     */
+    function registerKnowledgeCollection(
+        uint256 contextGraphId,
+        uint256 kcId
+    ) external onlyContracts {
+        contextGraphStorage.registerKCToContextGraph(contextGraphId, kcId);
+    }
+
+    // --- Internal: PCA coherence validation ---
+
+    /**
+     * @notice Enforce (authority, accountId) coherence when a CG is configured
+     *         in PCA curator mode.
+     *
+     * @dev Rationale (closes "silent broadening" authorization vector):
+     *      `isAuthorizedPublisher` ORs the EOA/Safe direct-authority branch
+     *      with the PCA-agent branch. A mismatched pair — e.g.
+     *      `publishAuthority = Alice`, `publishAuthorityAccountId = 42` where
+     *      account 42 is owned by Bob — would silently grant TWO curators to
+     *      the same CG: Alice passes the EOA branch, and Bob's registered
+     *      agents pass the PCA branch. Enforcing authority == ownerOf(accountId)
+     *      on every write path collapses this back to exactly one curator.
+     *
+     *      Fail-closed write-path behavior (stricter than read-path):
+     *        - If the NFT contract is not resolvable via Hub (not registered,
+     *          zero address, or Hub reverts), revert with `PCANotResolvable`.
+     *          Unlike `isAuthorizedPublisher`, which gracefully degrades on a
+     *          missing NFT, a write path that fails to resolve the NFT must
+     *          revert — otherwise it lets a PCA config land without validation.
+     *          Callers who want a non-PCA CG must pass accountId == 0 and use
+     *          EOA/Safe mode instead.
+     *        - If `ownerOf(accountId)` reverts (OZ's ERC721NonexistentToken),
+     *          revert with `PCAAccountDoesNotExist`.
+     *        - If the ownership check succeeds but the owner doesn't match the
+     *          claimed authority, revert with `PCAAuthorityMismatch`.
+     *
+     *      `accountId == 0` (non-PCA / EOA / Safe / open) skips the check
+     *      entirely — the authority is validated by the direct-equality
+     *      branch in `isAuthorizedPublisher`, and there's no PCA lookup
+     *      to reconcile.
+     *
+     *      `authority == address(0)` also skips: it represents either the
+     *      open-policy state (where non-zero accountId is structurally
+     *      rejected by storage with a clear "open policy" message — we
+     *      don't want to shadow that with a PCA-specific error) or a
+     *      malformed curated state that storage's own zero-authority
+     *      guard will reject downstream. Either way, deferring to storage
+     *      gives the caller the clearer diagnostic.
+     */
+    function _validatePCACoherence(
+        address authority,
+        uint256 accountId
+    ) internal view {
+        if (accountId == 0 || authority == address(0)) return;
+
+        // Fresh Hub lookup each call (same pattern as isAuthorizedPublisher).
+        // Write paths fail closed: if we can't resolve the NFT, we refuse to
+        // store an un-validatable PCA config.
+        address nftAddr;
+        try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
+            nftAddr = addr;
+        } catch {
+            revert KnowledgeAssetsLib.PCANotResolvable(accountId);
+        }
+        if (nftAddr == address(0)) {
+            revert KnowledgeAssetsLib.PCANotResolvable(accountId);
+        }
+
+        // ownerOf reverts for never-minted tokens (OZ ERC721NonexistentToken).
+        // Wrap in try/catch so we can distinguish "no such account" from
+        // a live ownership mismatch.
+        address actualOwner;
+        try IDKGPublishingConvictionNFT(nftAddr).ownerOf(accountId) returns (address owner_) {
+            actualOwner = owner_;
+        } catch {
+            revert KnowledgeAssetsLib.PCAAccountDoesNotExist(accountId);
+        }
+
+        if (actualOwner != authority) {
+            revert KnowledgeAssetsLib.PCAAuthorityMismatch(accountId, authority, actualOwner);
+        }
     }
 }

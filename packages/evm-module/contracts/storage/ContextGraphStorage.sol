@@ -317,6 +317,16 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         emit KCRegisteredToContextGraph(contextGraphId, kcId);
     }
 
+    /**
+     * @notice Return the entire KC list for a context graph as a memory array.
+     * @dev WARNING — ON-CHAIN CALLERS MUST NOT USE THIS GETTER. Gas cost is
+     *      O(n) in the list length and the ABI decode copies the full array
+     *      into memory. Phase 10 random sampling and any other on-chain
+     *      consumer MUST use `getContextGraphKCAt(cgId, index)` together
+     *      with `getContextGraphKCCount(cgId)` to fetch a single element at
+     *      a bounded cost. This full-array getter is retained for off-chain
+     *      indexers (eth_call) where the gas cost is not charged.
+     */
     function getContextGraphKCList(
         uint256 contextGraphId
     ) external view returns (uint256[] memory) {
@@ -327,6 +337,23 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint256 contextGraphId
     ) external view returns (uint256) {
         return _contextGraphKCList[contextGraphId].length;
+    }
+
+    /**
+     * @notice Return a single KC id at a given index within a CG's KC list.
+     * @dev O(1) indexed accessor for on-chain consumers (Phase 10 random
+     *      sampling). Reverts with `InvalidContextGraphConfig("kcIndex oob")`
+     *      on out-of-bounds access — empty list rejects all indices.
+     */
+    function getContextGraphKCAt(
+        uint256 contextGraphId,
+        uint256 index
+    ) external view returns (uint256 kcId) {
+        uint256[] storage list = _contextGraphKCList[contextGraphId];
+        if (index >= list.length) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("kcIndex oob");
+        }
+        return list[index];
     }
 
     // -----------------------------------------------------------------------

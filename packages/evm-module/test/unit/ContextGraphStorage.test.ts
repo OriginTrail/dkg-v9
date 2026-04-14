@@ -443,6 +443,51 @@ describe('@unit ContextGraphStorage', () => {
   });
 
   // -------------------------------------------------------------------------
+  // getContextGraphKCAt — indexed accessor for on-chain consumers
+  // -------------------------------------------------------------------------
+  //
+  // Phase 10 random sampling needs O(1) access into the KC list. The
+  // full-array getter `getContextGraphKCList` copies O(n) bytes per call,
+  // which makes it unsafe for on-chain use once CGs get large. This block
+  // pins the indexed accessor's semantics: valid index returns the right
+  // kcId, out-of-bounds and empty-list accesses revert.
+  describe('getContextGraphKCAt (indexed accessor)', () => {
+    beforeEach(async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[0].address, [10n], [], 1, 0, 1, ethers.ZeroAddress, 0,
+      );
+    });
+
+    it('returns the correct kcId at a valid index across multiple entries', async () => {
+      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
+      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 200);
+      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 300);
+
+      expect(await StorageContract.getContextGraphKCAt(1, 0)).to.equal(100);
+      expect(await StorageContract.getContextGraphKCAt(1, 1)).to.equal(200);
+      expect(await StorageContract.getContextGraphKCAt(1, 2)).to.equal(300);
+      // Count stays consistent with list length.
+      expect(await StorageContract.getContextGraphKCCount(1)).to.equal(3);
+    });
+
+    it('reverts on out-of-bounds index (equal to length)', async () => {
+      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
+      // list.length == 1, so index 1 is out-of-bounds.
+      await expect(
+        StorageContract.getContextGraphKCAt(1, 1),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+
+    it('reverts on any access against an empty list', async () => {
+      // No KCs registered for CG 1 yet — list.length == 0, so index 0 is
+      // out-of-bounds.
+      await expect(
+        StorageContract.getContextGraphKCAt(1, 0),
+      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // updatePublishAuthority — new accountId-aware update
   // -------------------------------------------------------------------------
   describe('updatePublishAuthority', () => {

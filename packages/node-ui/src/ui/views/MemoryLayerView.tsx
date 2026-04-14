@@ -81,8 +81,8 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
 
   const defaultSparql = useMemo(() => {
     if (layer === 'wm') {
-      const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-      return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1000`;
+      const cgUri = `did:dkg:context-graph:${contextGraphId}/`;
+      return `SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}") && !CONTAINS(STR(?g), "/_shared_memory") && !CONTAINS(STR(?g), "/_verified_memory")) } LIMIT 1000`;
     }
     return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
   }, [layer, contextGraphId]);

@@ -625,6 +625,33 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
     return conn?.targetUri ?? null;
   }, [entity]);
 
+  // Fetch full body from source file only for text-based content
+  const sourceContentType = useMemo(() => {
+    const vals = entity.properties.get('http://dkg.io/ontology/sourceContentType');
+    return vals?.[0] ?? null;
+  }, [entity]);
+
+  const isTruncated = desc != null && desc.length >= 1990;
+  const isTextSource = sourceContentType != null && (
+    sourceContentType.startsWith('text/') || sourceContentType === 'application/json'
+  );
+
+  const [fullBody, setFullBody] = useState<string | null>(null);
+  useEffect(() => {
+    setFullBody(null);
+    if (!sourceFile || !isTruncated || !isTextSource) return;
+    let cancelled = false;
+    const hash = sourceFile.replace('urn:dkg:file:', '');
+    const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    fetch(`/api/file/${encodeURIComponent(hash)}`, { headers })
+      .then(r => r.ok ? r.text() : null)
+      .then(text => { if (!cancelled) setFullBody(text ?? null); })
+      .catch(() => { if (!cancelled) setFullBody(null); });
+    return () => { cancelled = true; };
+  }, [sourceFile, isTruncated, isTextSource]);
+
   const [similar, setSimilar] = useState<Array<{ entityUri: string; label: string | null; similarity: number }>>([]);
   useEffect(() => {
     const label = entity.label;
@@ -686,7 +713,7 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
           </div>
         </div>
 
-        {desc && <p className="v10-dd-desc">{desc}</p>}
+        {(fullBody || desc) && <p className="v10-dd-desc" style={{ whiteSpace: 'pre-wrap' }}>{fullBody ?? desc}</p>}
 
         <div className="v10-dd-uri mono">{entity.uri}</div>
 

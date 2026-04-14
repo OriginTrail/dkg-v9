@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { join, dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
@@ -76,8 +76,6 @@ import { FileStore } from './file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from './vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
-import { readFileSync } from 'node:fs';
-
 type MarkItDownTarget = {
   platform: string;
   arch: string;
@@ -1353,6 +1351,31 @@ function normalizeLocalAgentRuntime(input: unknown): LocalAgentIntegrationRuntim
   return Object.keys(runtime).length > 0 ? runtime : undefined;
 }
 
+function isLocalAgentExplicitlyUserDisabled(
+  integration: Pick<LocalAgentIntegrationConfig, 'metadata'> | null | undefined,
+): boolean {
+  return integration?.metadata?.userDisabled === true;
+}
+
+function isExplicitLocalAgentDisconnectPatch(patch: Pick<LocalAgentIntegrationConfig, 'enabled' | 'runtime'>): boolean {
+  return patch.runtime?.status === 'disconnected';
+}
+
+export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, unknown>): Record<string, unknown> {
+  const runtime = isPlainRecord(body.runtime) ? body.runtime : undefined;
+  if (body.enabled !== false && runtime?.status !== 'disconnected') return body;
+  return {
+    ...body,
+    enabled: false,
+    runtime: {
+      ...(runtime ?? {}),
+      status: 'disconnected',
+      ready: false,
+      lastError: runtime?.lastError ?? null,
+    },
+  };
+}
+
 function mergeLocalAgentIntegrationConfig(
   base: LocalAgentIntegrationConfig | undefined,
   patch: LocalAgentIntegrationConfig,
@@ -1487,6 +1510,9 @@ export function connectLocalAgentIntegration(
     runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
   };
   const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  if (next.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
   if (id === 'openclaw') pruneLegacyOpenClawConfig(config);
@@ -1504,6 +1530,13 @@ export function updateLocalAgentIntegration(
   const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
   const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  if (isExplicitLocalAgentDisconnectPatch(patch)) {
+    next.enabled = false;
+    next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: true };
+  } else if (patch.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.id = normalizedId;
   next.updatedAt = now.toISOString();
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
@@ -1519,10 +1552,10 @@ export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): bool
     && integration.capabilities.localChat === true;
 }
 
-function hasLocalAgentTransportConfig(
-  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime' | 'enabled'> | null | undefined,
+function hasStoredLocalAgentTransportConfig(
+  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime'> | null | undefined,
 ): boolean {
-  if (!integration || integration.enabled !== true) return false;
+  if (!integration) return false;
   return Boolean(
     integration.transport?.bridgeUrl
     || integration.transport?.gatewayUrl
@@ -1716,27 +1749,89 @@ type OpenClawUiSetupCommand = {
   source: 'workspace' | 'npx';
 };
 
+type WorkspacePackageLookupDeps = {
+  fileExists?: (path: string) => boolean;
+  readFileText?: (path: string) => string;
+  readDirNames?: (path: string) => string[];
+};
+
+function resolveWorkspacePackageBinCommand(
+  packageName: string,
+  runtimeModuleUrl = import.meta.url,
+  deps: WorkspacePackageLookupDeps = {},
+): OpenClawUiSetupCommand | null {
+  const fileExists = deps.fileExists ?? existsSync;
+  const readFileText = deps.readFileText ?? ((path: string) => readFileSync(path, 'utf8'));
+  const readDirNames = deps.readDirNames ?? ((path: string) => readdirSync(path, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name));
+
+  const repoRoot = fileURLToPath(new URL('../../../', runtimeModuleUrl));
+  const packagesDir = join(repoRoot, 'packages');
+  let packageDirs: string[];
+  try {
+    packageDirs = readDirNames(packagesDir);
+  } catch {
+    return null;
+  }
+
+  for (const dirName of packageDirs) {
+    const packageJsonPath = join(packagesDir, dirName, 'package.json');
+    if (!fileExists(packageJsonPath)) continue;
+
+    try {
+      const raw = readFileText(packageJsonPath);
+      const parsed = JSON.parse(raw) as { name?: unknown; bin?: unknown };
+      if (parsed.name !== packageName || !parsed.bin) continue;
+
+      const binEntry = typeof parsed.bin === 'string'
+        ? parsed.bin
+        : typeof parsed.bin === 'object' && parsed.bin !== null
+          ? Object.values(parsed.bin as Record<string, unknown>).find((value): value is string => typeof value === 'string')
+          : undefined;
+      if (!binEntry) continue;
+
+      const binPath = resolve(packagesDir, dirName, binEntry);
+      if (!fileExists(binPath)) continue;
+
+      return {
+        command: process.execPath,
+        args: [binPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
+        source: 'workspace',
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 export function getOpenClawUiSetupCommand(
   packageName: string,
   runtimeModuleUrl = import.meta.url,
   fileExists: (path: string) => boolean = existsSync,
+  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
 ): OpenClawUiSetupCommand {
-  const setupArgs = ['setup', '--no-fund', '--no-start', '--no-verify'];
-
   if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
     const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
     if (fileExists(localSetupCliPath)) {
       return {
         command: process.execPath,
-        args: [localSetupCliPath, ...setupArgs],
+        args: [localSetupCliPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
         source: 'workspace',
       };
     }
   }
 
+  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, { fileExists, ...deps });
+  if (workspaceCommand) {
+    return workspaceCommand;
+  }
+
   return {
     command: 'npx',
-    args: ['--yes', packageName, ...setupArgs],
+    args: ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'],
     source: 'npx',
   };
 }
@@ -1868,7 +1963,7 @@ export async function connectLocalAgentIntegrationFromUi(
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
-  const hadAttachedBridgeBeforeConnect = hasLocalAgentTransportConfig(existingBeforeConnect);
+  const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
   const requested = connectLocalAgentIntegration(config, {
     ...body,
     runtime: {
@@ -1892,7 +1987,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
-  if (health.ok) {
+  if (health.ok && hadStoredTransportBeforeConnect) {
     const integration = updateLocalAgentIntegration(config, requested.id, {
       transport: transportPatchFromOpenClawTarget(config, health.target),
       runtime: {
@@ -1972,8 +2067,8 @@ export async function connectLocalAgentIntegrationFromUi(
         return;
       }
       await persistIntegrationState({
-        enabled: hadAttachedBridgeBeforeConnect ? true : false,
-        ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport
+        enabled: hadStoredTransportBeforeConnect ? true : false,
+        ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
           ? { transport: existingBeforeConnect.transport }
           : {}),
         runtime: {
@@ -2127,17 +2222,32 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   sessionId?: unknown;
   userMessage?: unknown;
   assistantReply?: unknown;
+  persistenceState?: unknown;
+  failureReason?: unknown;
 }): payload is {
   sessionId: string;
   userMessage: string;
   assistantReply: string;
   turnId?: unknown;
   toolCalls?: unknown;
+  persistenceState?: unknown;
+  failureReason?: unknown;
 } {
   return typeof payload.sessionId === 'string'
     && payload.sessionId.trim().length > 0
     && typeof payload.userMessage === 'string'
-    && typeof payload.assistantReply === 'string';
+    && typeof payload.assistantReply === 'string'
+    && (
+      payload.failureReason === undefined
+      || payload.failureReason === null
+      || typeof payload.failureReason === 'string'
+    )
+    && (
+      payload.persistenceState === undefined
+      || payload.persistenceState === 'stored'
+      || payload.persistenceState === 'failed'
+      || payload.persistenceState === 'pending'
+    );
 }
 
 let _standaloneCache: boolean | null = null;
@@ -2699,18 +2809,28 @@ async function handleRequest(
     if (!isValidOpenClawPersistTurnPayload(payload)) {
       return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls } = payload;
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls, persistenceState, failureReason } = payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? toolCalls as Array<{ name: string; args: Record<string, unknown>; result: unknown }>
       : undefined;
     const normalizedTurnId = typeof turnId === 'string' ? turnId : crypto.randomUUID();
+    const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
+      ? persistenceState
+      : 'stored';
+    const normalizedFailureReason = typeof failureReason === 'string'
+      ? failureReason
+      : (failureReason === null ? null : undefined);
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
         normalizedToolCalls,
-        { turnId: normalizedTurnId, persistenceState: 'stored' },
+        {
+          turnId: normalizedTurnId,
+          persistenceState: normalizedPersistenceState,
+          failureReason: normalizedFailureReason,
+        },
       );
       return jsonResponse(res, 200, { ok: true });
     } catch (err: any) {
@@ -4238,13 +4358,14 @@ async function handleRequest(
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
+      const normalizedParsed = normalizeExplicitLocalAgentDisconnectBody(parsed);
       const normalizedId = normalizeIntegrationId(id);
-      const disconnectRequested = parsed.enabled === false
-        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
+      const disconnectRequested = normalizedParsed.enabled === false
+        || (isPlainRecord(normalizedParsed.runtime) && normalizedParsed.runtime.status === 'disconnected');
       if (disconnectRequested && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
-      const integration = updateLocalAgentIntegration(config, id, parsed);
+      const integration = updateLocalAgentIntegration(config, id, normalizedParsed);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
@@ -4254,7 +4375,7 @@ async function handleRequest(
 
   // GET /api/integrations — aggregated view for Integrations panel
   if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
+    const [skills, contextGraphs] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
     const localAgentIntegrations = listLocalAgentIntegrations(config);
     const adapters = localAgentIntegrations.map((integration) => ({
       id: integration.id,
@@ -4264,7 +4385,7 @@ async function handleRequest(
       status: integration.status,
       capabilities: integration.capabilities,
     }));
-    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, paranets });
+    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, contextGraphs, paranets: contextGraphs });
   }
 
   // POST /api/register-adapter — legacy OpenClaw alias for /api/local-agent-integrations/connect

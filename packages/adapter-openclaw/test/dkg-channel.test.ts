@@ -603,7 +603,7 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
-  it('processInboundStream should not persist a partial reply when the consumer cancels early', async () => {
+  it('processInboundStream should wait for a still-running dispatch to settle before persisting a closed stream', async () => {
     let resumeDispatch!: () => void;
     const mockRuntime = {
       channel: {
@@ -643,10 +643,63 @@ describe('DkgChannelPlugin', () => {
       done: true,
       value: undefined,
     });
+    expect(storeSpy).not.toHaveBeenCalled();
     resumeDispatch();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(storeSpy).not.toHaveBeenCalled();
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Partial reply',
+      { turnId: 'corr-stream-cancel' },
+    );
+  });
+
+  it('processInboundStream should persist the completed reply when final completion was already queued before the consumer stopped iterating', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Complete reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-finished-before-return', 'owner');
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text_delta', delta: 'Complete reply' },
+    });
+    await expect(stream.return(undefined)).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Complete reply',
+      { turnId: 'corr-stream-finished-before-return' },
+    );
   });
 
   it('processInboundStream should surface a real error when the agent returns no text', async () => {
@@ -679,7 +732,17 @@ describe('DkgChannelPlugin', () => {
 
     const stream = plugin.processInboundStream('Hello', 'corr-stream-empty', 'owner');
     await expect(stream.next()).rejects.toThrow('Agent returned no text response');
-    expect(storeSpy).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      '[OpenClaw reply failed before completion: Agent returned no text response]',
+      {
+        turnId: 'corr-stream-empty',
+        persistenceState: 'failed',
+        failureReason: 'Agent returned no text response',
+      },
+    );
   });
 
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {
@@ -757,5 +820,325 @@ describe('DkgChannelPlugin', () => {
 
     await plugin.stop();
     await plugin.stop();
+  });
+
+  it('stop should allow a late non-stream persistence failure to retry within the bounded shutdown window', async () => {
+    vi.useFakeTimers();
+    try {
+      let rejectPersist!: (err: Error) => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockImplementationOnce(() =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPersist = reject;
+          }),
+        )
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      await plugin.processInbound('Hello', 'corr-stop-retry', 'owner');
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      const stopPromise = plugin.stop();
+      rejectPersist(new Error('late persistence failure'));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(249);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should preserve an already-scheduled shutdown-allowed persistence retry within the bounded drain window', async () => {
+    vi.useFakeTimers();
+    try {
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockRejectedValueOnce(new Error('temporary daemon outage'))
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      await plugin.processInbound('Hello', 'corr-stop-preserve-retry', 'owner');
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await Promise.resolve();
+      const stopPromise = plugin.stop();
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(storeSpy).toHaveBeenLastCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stop-preserve-retry' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('processInbound should still persist a completed non-stream reply when shutdown has already begun', async () => {
+    let resumeDispatch!: () => void;
+    let markDispatchReady!: () => void;
+    const dispatchReady = new Promise<void>((resolve) => { markDispatchReady = resolve; });
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            markDispatchReady();
+            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    let resolveStore!: () => void;
+    const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+    plugin.register(api);
+
+    const replyPromise = plugin.processInbound('Hello', 'corr-stop-nonstream', 'owner');
+    await dispatchReady;
+    const stopPromise = plugin.stop();
+    resumeDispatch();
+
+    await expect(replyPromise).resolves.toEqual({
+      text: 'Reply before shutdown',
+      correlationId: 'corr-stop-nonstream',
+    });
+
+    let stopSettled = false;
+    void stopPromise.then(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(storeSpy).toHaveBeenCalledTimes(1);
+    expect(stopSettled).toBe(false);
+
+    resolveStore();
+    await stopPromise;
+    expect(stopSettled).toBe(true);
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply before shutdown',
+      { turnId: 'corr-stop-nonstream' },
+    );
+  });
+
+  it('stop should only wait a bounded time for a final turn persistence attempt that hangs during shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      let resumeDispatch!: () => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+      plugin.register(api);
+
+      const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-store', 'owner');
+      await expect(stream.next()).resolves.toEqual({
+        done: false,
+        value: { type: 'text_delta', delta: 'Reply before shutdown' },
+      });
+
+      const nextItem = stream.next();
+      const stopPromise = plugin.stop();
+      resumeDispatch();
+      await expect(nextItem).resolves.toEqual({
+        done: false,
+        value: { type: 'final', text: 'Reply before shutdown', correlationId: 'corr-stream-stop-store' },
+      });
+      await expect(stream.next()).resolves.toEqual({ done: true, value: undefined });
+
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await stopPromise;
+      expect(stopSettled).toBe(true);
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
+
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeSpy).toHaveBeenCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stream-stop-store' },
+      );
+
+      resolveStore();
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should retry a shutdown-allowed final turn persistence attempt within the bounded drain window', async () => {
+    vi.useFakeTimers();
+    try {
+      let resumeDispatch!: () => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockRejectedValueOnce(new Error('temporary daemon outage'))
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-retry', 'owner');
+      await expect(stream.next()).resolves.toEqual({
+        done: false,
+        value: { type: 'text_delta', delta: 'Reply before shutdown' },
+      });
+
+      const nextItem = stream.next();
+      const stopPromise = plugin.stop();
+      resumeDispatch();
+      await expect(nextItem).resolves.toEqual({
+        done: false,
+        value: { type: 'final', text: 'Reply before shutdown', correlationId: 'corr-stream-stop-retry' },
+      });
+      await expect(stream.next()).resolves.toEqual({ done: true, value: undefined });
+
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(stopSettled).toBe(true);
+      expect(storeSpy).toHaveBeenLastCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stream-stop-retry' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

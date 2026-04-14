@@ -14,7 +14,11 @@
 import { readFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { DkgDaemonClient } from './dkg-client.js';
+import {
+  DkgDaemonClient,
+  type LocalAgentIntegrationRecord,
+  type LocalAgentIntegrationTransport,
+} from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
 import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
 import { WriteCapture } from './write-capture.js';
@@ -38,6 +42,7 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
 } as const;
+const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
@@ -52,6 +57,7 @@ export class DkgNodePlugin {
   /** Guard: backlog import runs at most once per plugin lifecycle. */
   private backlogImportDone: Promise<void> | null = null;
   private warnedLegacyGameConfig = false;
+  private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -170,64 +176,22 @@ export class DkgNodePlugin {
       return;
     }
 
-    const metadata = {
-      channelId: 'dkg-ui',
-      registrationMode,
-      transportMode: this.channelPlugin.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
-    };
-    const bridgeAlreadyReady = this.channelPlugin.isListening;
-    const basePayload = {
-      id: 'openclaw',
-      enabled: true,
-      description: 'Connect a local OpenClaw agent through the DKG node.',
-      transport: this.buildOpenClawTransport(),
-      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
-      manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
-      setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
-      metadata,
-    };
+    this.clearLocalAgentIntegrationRetry();
+    void this.syncLocalAgentIntegrationState(api, registrationMode);
+  }
 
-    this.client.connectLocalAgentIntegration({
-      ...basePayload,
-      runtime: {
-        status: bridgeAlreadyReady ? 'ready' : 'connecting',
-        ready: bridgeAlreadyReady,
-        lastError: null,
-      },
-    }).catch(err => {
-      api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
-    });
+  private clearLocalAgentIntegrationRetry(): void {
+    if (!this.localAgentIntegrationRetryTimer) return;
+    clearTimeout(this.localAgentIntegrationRetryTimer);
+    this.localAgentIntegrationRetryTimer = null;
+  }
 
-    if (bridgeAlreadyReady) {
-      return;
-    }
-
-    void this.channelPlugin.start()
-      .then(() => this.client.updateLocalAgentIntegration('openclaw', {
-        ...basePayload,
-        transport: this.buildOpenClawTransport(),
-        runtime: {
-          status: 'ready',
-          ready: true,
-          lastError: null,
-        },
-      }))
-      .catch(async (err: any) => {
-        api.logger.warn?.(`[dkg] OpenClaw channel startup did not reach ready state: ${err.message}`);
-        try {
-          await this.client.updateLocalAgentIntegration('openclaw', {
-            ...basePayload,
-            transport: this.buildOpenClawTransport(),
-            runtime: {
-              status: 'error',
-              ready: false,
-              lastError: err.message ?? String(err),
-            },
-          });
-        } catch (updateErr: any) {
-          api.logger.warn?.(`[dkg] Failed to persist OpenClaw channel error state: ${updateErr.message}`);
-        }
-      });
+  private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
+    if (this.localAgentIntegrationRetryTimer) return;
+    this.localAgentIntegrationRetryTimer = setTimeout(() => {
+      this.localAgentIntegrationRetryTimer = null;
+      void this.syncLocalAgentIntegrationState(api, registrationMode);
+    }, LOCAL_AGENT_STATE_RETRY_DELAY_MS);
   }
 
   private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
@@ -241,23 +205,206 @@ export class DkgNodePlugin {
     }
   }
 
-  private buildOpenClawTransport(): { kind: string; bridgeUrl?: string; healthUrl?: string } {
-    const transport: { kind: string; bridgeUrl?: string; healthUrl?: string } = {
-      kind: 'openclaw-channel',
+  private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+    const existing = await this.loadStoredOpenClawIntegration(api);
+    if (existing === undefined) {
+      api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
+      return;
+    }
+    this.clearLocalAgentIntegrationRetry();
+    if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+      api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
+      return;
+    }
+
+    const metadata = {
+      channelId: 'dkg-ui',
+      registrationMode,
+      transportMode: this.channelPlugin?.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
+    const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
+    const basePayload = {
+      id: 'openclaw',
+      enabled: true,
+      description: 'Connect a local OpenClaw agent through the DKG node.',
+      transport: this.buildOpenClawTransport(existing?.transport, api),
+      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
+      setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
+      metadata,
+    };
+
+    try {
+      await this.client.connectLocalAgentIntegration({
+        ...basePayload,
+        runtime: {
+          status: bridgeAlreadyReady ? 'ready' : 'connecting',
+          ready: bridgeAlreadyReady,
+          lastError: null,
+        },
+      });
+    } catch (err: any) {
+      api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
+      return;
+    }
+
+    if (bridgeAlreadyReady || !this.channelPlugin) {
+      return;
+    }
+
+    void this.channelPlugin.start()
+      .then(() => this.client.updateLocalAgentIntegration('openclaw', {
+        ...basePayload,
+        transport: this.buildOpenClawTransport(existing?.transport, api),
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      }))
+      .catch(async (err: any) => {
+        api.logger.warn?.(`[dkg] OpenClaw channel startup did not reach ready state: ${err.message}`);
+        try {
+          await this.client.updateLocalAgentIntegration('openclaw', {
+            ...basePayload,
+            transport: this.buildOpenClawTransport(existing?.transport, api),
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: err.message ?? String(err),
+            },
+          });
+        } catch (updateErr: any) {
+          api.logger.warn?.(`[dkg] Failed to persist OpenClaw channel error state: ${updateErr.message}`);
+        }
+      });
+  }
+
+  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
+    try {
+      return await this.client.getLocalAgentIntegration('openclaw');
+    } catch (err: any) {
+      api.logger.warn?.(`[dkg] Failed to load stored OpenClaw integration state: ${err.message}`);
+      return undefined;
+    }
+  }
+
+  private wasOpenClawExplicitlyUserDisconnected(existing: LocalAgentIntegrationRecord | null): boolean {
+    if (!existing) return false;
+    if (existing.metadata?.userDisabled === true) return true;
+    return Boolean(existing.connectedAt && existing.enabled === false && existing.runtime?.status === 'disconnected');
+  }
+
+  private buildOpenClawTransport(
+    existing?: LocalAgentIntegrationTransport,
+    api?: OpenClawPluginApi,
+  ): LocalAgentIntegrationTransport {
+    const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
+
+    const gatewayBaseUrl = this.resolveGatewayBaseUrl(
+      api,
+      this.channelPlugin.isUsingGatewayRoute ? undefined : existing?.gatewayUrl,
+    );
+    if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
+      transport.gatewayUrl = gatewayBaseUrl;
+    }
 
     const bridgePort = this.channelPlugin.bridgePort;
     if (bridgePort > 0) {
       transport.bridgeUrl = `http://127.0.0.1:${bridgePort}`;
       transport.healthUrl = `${transport.bridgeUrl}/health`;
+    } else {
+      const existingBridgeUrl = existing?.bridgeUrl?.trim();
+      const existingHealthUrl = existing?.healthUrl?.trim();
+      if (existingBridgeUrl) {
+        transport.bridgeUrl = existingBridgeUrl;
+      }
+      if (existingHealthUrl) {
+        transport.healthUrl = existingHealthUrl;
+      }
     }
 
     return transport;
   }
 
+  private resolveGatewayBaseUrl(api?: OpenClawPluginApi, existingGatewayUrl?: string): string | undefined {
+    const rawGateway = api?.config && typeof api.config === 'object'
+      ? (api.config as Record<string, unknown>).gateway
+      : undefined;
+    const gateway = rawGateway && typeof rawGateway === 'object'
+      ? rawGateway as Record<string, unknown>
+      : undefined;
+    const rawPort = gateway?.port ?? process.env.OPENCLAW_GATEWAY_PORT;
+    const tls = gateway?.tls && typeof gateway.tls === 'object'
+      ? gateway.tls as Record<string, unknown>
+      : undefined;
+    const hasCurrentGatewayConfig = this.hasGatewayConfig(gateway, rawPort, tls);
+    if (!hasCurrentGatewayConfig && existingGatewayUrl?.trim()) {
+      return existingGatewayUrl.trim();
+    }
+
+    const port = this.normalizePort(rawPort) ?? 18789;
+    const rawCustomHost = typeof gateway?.customBindHost === 'string' ? gateway.customBindHost.trim() : '';
+    const configuredHost = rawCustomHost || '127.0.0.1';
+    const host = this.normalizeGatewayHost(configuredHost);
+    const protocol = tls?.enabled === true ? 'https' : 'http';
+    return this.formatGatewayBaseUrl(protocol, host, port);
+  }
+
+  private hasGatewayConfig(
+    gateway: Record<string, unknown> | undefined,
+    rawPort: unknown,
+    tls: Record<string, unknown> | undefined,
+  ): boolean {
+    if (rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '') {
+      return true;
+    }
+    if (!gateway) return false;
+    const hasCustomBindHost = typeof gateway.customBindHost === 'string' && gateway.customBindHost.trim() !== '';
+    if (hasCustomBindHost) return true;
+    if (!tls) return false;
+    const tlsKeys = Object.keys(tls);
+    if (tlsKeys.length === 0) return false;
+    if (tlsKeys.length === 1 && tls.enabled === false) return false;
+    return true;
+  }
+
+  private formatGatewayBaseUrl(protocol: 'http' | 'https', host: string, port: number): string {
+    const formattedHost = host.includes(':') && !host.startsWith('[')
+      ? `[${host}]`
+      : host;
+    const url = new URL(`${protocol}://${formattedHost}`);
+    url.port = String(port);
+    return url.toString().replace(/\/$/, '');
+  }
+
+  private normalizePort(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+    return null;
+  }
+
+  private normalizeGatewayHost(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '0.0.0.0' || trimmed === '::' || trimmed === '[::]') {
+      return '127.0.0.1';
+    }
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  }
+
   async stop(): Promise<void> {
     // Stop integration modules
+    this.clearLocalAgentIntegrationRetry();
     this.writeCapture?.stop();
     await this.channelPlugin?.stop();
   }

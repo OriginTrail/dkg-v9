@@ -15,6 +15,7 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
@@ -281,6 +282,31 @@ describe('OpenClaw UI setup command resolution', () => {
       source: 'npx',
     });
   });
+
+  it('resolves workspace package bins from the repo root instead of packages/packages', () => {
+    const command = getOpenClawUiSetupCommand(
+      '@origintrail-official/dkg-adapter-hermes',
+      runtimeModuleUrl,
+      () => true,
+      {
+        readDirNames: (path) => {
+          expect(path).toMatch(/dkg-v9[\\/]packages$/);
+          return ['adapter-hermes'];
+        },
+        readFileText: (path) => {
+          expect(path).toMatch(/packages[\\/]adapter-hermes[\\/]package\.json$/);
+          return JSON.stringify({
+            name: '@origintrail-official/dkg-adapter-hermes',
+            bin: 'dist/setup-cli.js',
+          });
+        },
+      },
+    );
+
+    expect(command.source).toBe('workspace');
+    expect(command.command).toBe(process.execPath);
+    expect(command.args[0]).toMatch(/packages[\\/]adapter-hermes[\\/]dist[\\/]setup-cli\.js$/);
+  });
 });
 
 describe('OpenClaw persist-turn validation', () => {
@@ -301,6 +327,54 @@ describe('OpenClaw persist-turn validation', () => {
     expect(isValidOpenClawPersistTurnPayload({
       userMessage: '',
       assistantReply: '',
+    })).toBe(false);
+  });
+
+  it('accepts explicit failed and pending persistence states', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+    })).toBe(true);
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'pending',
+    })).toBe(true);
+  });
+
+  it('rejects unknown persistence states', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'cancelled',
+    })).toBe(false);
+  });
+
+  it('accepts string/null failure reasons and rejects invalid ones', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: 'timeout',
+    })).toBe(true);
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: null,
+    })).toBe(true);
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: { code: 'timeout' },
     })).toBe(false);
   });
 });
@@ -333,6 +407,44 @@ describe('daemon loopback request handling', () => {
 });
 
 describe('local agent integration registry helpers', () => {
+  it('normalizes plain enabled:false local-agent updates into explicit disconnect patches', () => {
+    const normalized = normalizeExplicitLocalAgentDisconnectBody({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+    });
+
+    expect(normalized).toEqual({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+  });
+
+  it('normalizes runtime-only disconnect patches into disabled local-agent updates', () => {
+    const normalized = normalizeExplicitLocalAgentDisconnectBody({
+      runtime: {
+        status: 'disconnected',
+        ready: true,
+        lastError: 'stale error',
+      },
+      metadata: { source: 'node-ui' },
+    });
+
+    expect(normalized).toEqual({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: 'stale error',
+      },
+    });
+  });
+
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
 
@@ -386,8 +498,95 @@ describe('local agent integration registry helpers', () => {
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
   });
 
-  it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy', async () => {
-    const config = makeConfig();
+  it('marks explicit OpenClaw disconnects as user-disabled and clears that flag on reconnect', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          metadata: {
+            source: 'node-ui',
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const disconnected = updateLocalAgentIntegration(config, 'openclaw', {
+      enabled: false,
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+
+    expect(disconnected.enabled).toBe(false);
+    expect(disconnected.metadata?.userDisabled).toBe(true);
+
+    const reconnected = connectLocalAgentIntegration(config, {
+      id: 'openclaw',
+      metadata: {
+        source: 'node-ui',
+      },
+    });
+
+    expect(reconnected.enabled).toBe(true);
+    expect(reconnected.metadata?.userDisabled).toBe(false);
+  });
+
+  it('forces runtime-status disconnect updates into a disabled stored integration', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            localChat: true,
+          },
+          metadata: {
+            source: 'node-ui',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const disconnected = updateLocalAgentIntegration(config, 'openclaw', {
+      runtime: {
+        status: 'disconnected',
+        ready: true,
+      },
+    });
+
+    expect(disconnected.enabled).toBe(false);
+    expect(disconnected.status).toBe('disconnected');
+    expect(disconnected.runtime.ready).toBe(false);
+    expect(disconnected.metadata?.userDisabled).toBe(true);
+    expect(hasConfiguredLocalAgentChat(config, 'openclaw')).toBe(false);
+    expect(getOpenClawChannelTargets(config)).toEqual([]);
+  });
+
+  it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy for an already attached integration', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
     const runSetup = vi.fn();
     const restartGateway = vi.fn();
     const waitForReady = vi.fn();
@@ -413,6 +612,100 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
+  it('UI reconnect keeps the healthy-bridge fast path after a manual OpenClaw disconnect', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: false,
+          metadata: {
+            source: 'node-ui',
+            userDisabled: true,
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'disconnected',
+            ready: false,
+          },
+        },
+      },
+    });
+    const runSetup = vi.fn();
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.runtime.ready).toBe(true);
+    expect(result.integration.metadata?.userDisabled).toBe(false);
+    expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
+  it('UI connect does not trust a healthy bridge fast-path for a first-time attach', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn().mockResolvedValue(undefined);
+    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    const waitForReady = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+    const probeHealth = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        target: 'bridge',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge still starting',
+      });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    expect(runSetup).toHaveBeenCalledTimes(1);
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('ready');
+    expect(integration?.runtime.ready).toBe(true);
   });
 
   it('does not leave a failed first-time OpenClaw attach marked as connected', async () => {
@@ -453,6 +746,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('error');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
+    expect(integration?.metadata?.userDisabled).not.toBe(true);
     expect(saveConfig).toHaveBeenCalled();
   });
 

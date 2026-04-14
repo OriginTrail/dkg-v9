@@ -1367,6 +1367,61 @@ describe('@unit KnowledgeAssetsV10', () => {
         expect(meta[3]).to.equal(newByteSize);
         expect(meta[6]).to.equal(newTokenAmount);
       });
+
+      // -- T1.8c: final-epoch byte-size growth without payment must revert --
+      //
+      // Codex Round 3: the Round-1 I1 fix gated `_validateTokenAmount` on
+      // `(delta > 0 || newByteSize > currentByteSize)` to unblock
+      // metadata-only rotations under ask drift. That closed one hole but
+      // opened another: at `currentEpoch == endEpoch` (remainingEpochs == 0)
+      // the pricing formula `ask * newByteSize * 0 / 1024` collapses to
+      // ZERO, so a caller could pass `delta == 0` AND grow byteSize and
+      // the validation would rubber-stamp it — free storage commitment.
+      //
+      // The final-epoch guard used to fire only on `delta > 0`. We now
+      // also catch byte-size growth at remainingEpochs == 0 so the
+      // commitment must have SOME future window to land in.
+      it('T1.8c: byte-size growth at final epoch reverts NoRemainingLifetimeForDelta', async () => {
+        const base = await publishBaselineKCWithAsk();
+
+        // Advance to the KC's final epoch (currentEpoch == endEpoch).
+        // T2.5 uses the same pattern with a 1-epoch KC; T1.8's baseline
+        // is a 5-epoch KC, so we need to push `epochs` epochs forward.
+        const epochLen = Number(await ChronosContract.epochLength());
+        for (let i = 0; i < base.epochs; i++) {
+          await time.increase(epochLen + 1);
+        }
+        const now = await ChronosContract.getCurrentEpoch();
+        const meta = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        expect(now).to.equal(meta[5]); // currentEpoch == endEpoch
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.8c-new'));
+        // Load-bearing: byte size GROWS, tokenAmount UNCHANGED (delta == 0).
+        const newByteSize = base.byteSize * 2n;
+        const newTokenAmount = base.tokenAmount;
+
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize,
+          newTokenAmount,
+          mintKnowledgeAssetsAmount: 1n,
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.8c-update',
+        });
+
+        await expect(KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress))
+          .to.be.revertedWithCustomError(KAV10, 'NoRemainingLifetimeForDelta')
+          .withArgs(base.kcId, now, meta[5]);
+      });
     });
   });
 

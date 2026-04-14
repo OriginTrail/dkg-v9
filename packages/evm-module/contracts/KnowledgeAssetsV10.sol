@@ -835,12 +835,18 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
         deltaTokenAmount = p.newTokenAmount - currentTokenAmount;
 
-        // If there's a delta to pay for, require at least one remaining
-        // epoch to distribute it over. `remainingEpochs == 0` means we're in
-        // the KC's final epoch (currentEpoch == endEpoch): the CG value
-        // ledger would revert ZeroLifetime and _distributeTokens would
-        // divide by zero. Fail early with a caller-facing diagnostic.
-        if (deltaTokenAmount > 0 && remainingEpochs == 0) {
+        // Final-epoch economic guard: with zero remaining lifetime there is
+        // nothing to amortize a new commitment over. Any new TRAC delta OR
+        // any byte-size growth is rejected — both need a future window to
+        // land in (`_distributeTokens` would divide by zero on delta > 0,
+        // and `_validateTokenAmount(newByteSize, 0, _)` would compute an
+        // expected cost of ZERO, silently letting byte-size growth through
+        // for free). Gating ONLY on `delta > 0` left that byte-size-growth
+        // bypass open — extend the guard to catch both.
+        if (
+            remainingEpochs == 0 &&
+            (deltaTokenAmount > 0 || p.newByteSize > currentByteSize)
+        ) {
             revert NoRemainingLifetimeForDelta(p.id, currentEpoch, endEpoch);
         }
 

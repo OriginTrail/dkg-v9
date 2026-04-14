@@ -481,6 +481,48 @@ describe('@unit KnowledgeAssetsV10', () => {
           KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
         ).to.be.revertedWithCustomError(KAV10, 'ZeroContextGraphId');
       });
+
+      // Codex-found gap: T1.3 only covered `publishDirect`. Conviction-path
+      // `publish` runs the same `_executePublishCore` so the guard applies
+      // identically, but a regression could isolate to one branch. Lock both.
+      it('rejects publish() (conviction path) with contextGraphId = 0', async () => {
+        const creator = getDefaultKCCreator(accounts);
+        const { publishingNode, publisherIdentityId, receivingNodes, receiverIdentityIds } =
+          await setupNodes();
+
+        // Creator needs a conviction NFT for `publish()` to reach the cgId
+        // guard — the guard runs AFTER signature verification but BEFORE the
+        // NFT's cost coverage. Allocate an account + register creator as an
+        // agent so the flow would otherwise succeed.
+        await createConvictionAccountWithAgent(
+          creator,
+          ethers.parseEther('50000'),
+          creator.address,
+        );
+
+        const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.3b-root'));
+        const tokenAmount = ethers.parseEther('100');
+        const p = await buildPublishParams({
+          chainId,
+          kav10Address,
+          publishingNode,
+          receivingNodes,
+          publisherIdentityId,
+          receiverIdentityIds,
+          contextGraphId: 0n,
+          merkleRoot,
+          knowledgeAssetsAmount: 10,
+          byteSize: 1000,
+          epochs: 2,
+          tokenAmount,
+          isImmutable: false,
+          publishOperationId: 't1.3b-op',
+        });
+
+        await expect(
+          KAV10.connect(creator).publish(p),
+        ).to.be.revertedWithCustomError(KAV10, 'ZeroContextGraphId');
+      });
     });
 
     // ----------------------------------------------------------------------
@@ -927,6 +969,117 @@ describe('@unit KnowledgeAssetsV10', () => {
         await expect(KAV10.connect(base.creator).updateDirect(up, ethers.ZeroAddress))
           .to.be.revertedWithCustomError(KAV10, 'CannotShrinkTokenAmount')
           .withArgs(base.tokenAmount, newTokenAmount);
+      });
+
+      // -- T1.7e: stale-ACK replay regression (Codex MEDIUM finding) --
+      //
+      // Commit 3f3554d9 added `merkleRoots.length` to the update ACK digest
+      // to prevent replays. This regression captures a valid ACK, lands
+      // the update (chain's merkleRoots.length advances from 1 → 2), then
+      // replays the SAME ACK and expects revert. Without the length binding
+      // a metadata-only ACK could be replayed for free to roll the merkle
+      // root back.
+      it('T1.7e: rejects replay of an update ACK after the chain advances', async () => {
+        const base = await publishBaselineKC();
+
+        // First update: metadata-only (delta == 0). Chain preUpdate count = 1.
+        // `mintKnowledgeAssetsAmount: 1n` mirrors T1.7b since KCS's mint
+        // helper requires > 0 (same reason T1.7b uses 1).
+        const firstRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7e-first'));
+        const up1 = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot: firstRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount: base.tokenAmount,
+          mintKnowledgeAssetsAmount: 1n,
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.7e-first',
+        });
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up1, ethers.ZeroAddress),
+        ).to.not.be.reverted;
+
+        // Chain is now at merkleRoots.length == 2. Replaying up1 must fail —
+        // the contract will compute the ACK digest with count = 2 against
+        // the signatures built against count = 1, recovering the wrong
+        // signer. The revert comes from `_verifySignature` /
+        // `_verifySignatures`, not a dedicated error.
+        await expect(
+          KAV10.connect(base.creator).updateDirect(up1, ethers.ZeroAddress),
+        ).to.be.reverted;
+      });
+
+      // -- T1.7f: conviction-path update() happy path --
+      //
+      // T1.7a-d only exercised `updateDirect`. The conviction-path `update()`
+      // shares `_executeUpdateCore` and only differs in how the delta is
+      // paid (NFT.coverPublishingCost vs _addTokens+_distributeTokens). This
+      // regression locks the conviction-path flow end-to-end.
+      it('T1.7f: conviction-path update() pays delta via NFT without touching the staker pool', async () => {
+        const base = await publishBaselineKC();
+
+        // Register the creator as a conviction agent so `coverPublishingCost`
+        // auto-resolves msg.sender -> accountId via agentToAccountId.
+        await createConvictionAccountWithAgent(
+          base.creator,
+          ethers.parseEther('50000'),
+          base.creator.address,
+        );
+
+        const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7f-new'));
+        const delta = ethers.parseEther('10');
+        const newTokenAmount = base.tokenAmount + delta;
+
+        const up = await buildUpdateParams({
+          chainId,
+          kav10Address,
+          publishingNode: base.publishingNode,
+          receivingNodes: base.receivingNodes,
+          publisherIdentityId: base.publisherIdentityId,
+          receiverIdentityIds: base.receiverIdentityIds,
+          contextGraphId: base.cgId,
+          id: base.kcId,
+          preUpdateMerkleRootCount: 1n,
+          newMerkleRoot,
+          newByteSize: base.byteSize,
+          newTokenAmount,
+          mintKnowledgeAssetsAmount: 1n,
+          knowledgeAssetsToBurn: [],
+          updateOperationId: 't1.7f-update',
+        });
+
+        // Capture staker pool BEFORE update. Conviction path MUST leave it
+        // untouched — the NFT's allowance already lives in EpochStorage.
+        const currentEpoch = await ChronosContract.getCurrentEpoch();
+        const meta = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        const endEpoch = meta[5];
+        const poolsBefore: bigint[] = [];
+        for (let e = currentEpoch; e <= endEpoch; e++) {
+          poolsBefore.push(
+            await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, e),
+          );
+        }
+
+        await expect(KAV10.connect(base.creator).update(up)).to.not.be.reverted;
+
+        // Post-condition: staker pool delta zero across the remaining window.
+        let idx = 0;
+        for (let e = currentEpoch; e <= endEpoch; e++) {
+          const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, e);
+          expect(after - poolsBefore[idx++], `epoch ${e} double-count`).to.equal(0n);
+        }
+
+        // KC metadata updated.
+        const metaAfter = await KCS.getKnowledgeCollectionMetadata(base.kcId);
+        expect(metaAfter[6]).to.equal(newTokenAmount);
       });
     });
 

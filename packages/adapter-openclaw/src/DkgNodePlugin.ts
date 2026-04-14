@@ -342,7 +342,11 @@ export class DkgNodePlugin {
     if (!gateway) return false;
     const hasCustomBindHost = typeof gateway.customBindHost === 'string' && gateway.customBindHost.trim() !== '';
     if (hasCustomBindHost) return true;
-    return Boolean(tls && Object.keys(tls).length > 0);
+    if (!tls) return false;
+    const tlsKeys = Object.keys(tls);
+    if (tlsKeys.length === 0) return false;
+    if (tlsKeys.length === 1 && tls.enabled === false) return false;
+    return true;
   }
 
   private formatGatewayBaseUrl(protocol: 'http' | 'https', host: string, port: number): string {

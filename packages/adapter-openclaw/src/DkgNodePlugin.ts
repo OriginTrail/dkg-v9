@@ -190,6 +190,10 @@ export class DkgNodePlugin {
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
     const existing = await this.loadStoredOpenClawIntegration(api);
+    if (existing === undefined) {
+      api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      return;
+    }
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
@@ -258,12 +262,12 @@ export class DkgNodePlugin {
       });
   }
 
-  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null> {
+  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
     try {
       return await this.client.getLocalAgentIntegration('openclaw');
     } catch (err: any) {
       api.logger.warn?.(`[dkg] Failed to load stored OpenClaw integration state: ${err.message}`);
-      return null;
+      return undefined;
     }
   }
 

@@ -778,7 +778,7 @@ describe('DkgChannelPlugin', () => {
     await plugin.stop();
   });
 
-  it('stop should prevent a late persistence failure from scheduling retries after shutdown', async () => {
+  it('stop should allow a late non-stream persistence failure to retry within the bounded shutdown window', async () => {
     vi.useFakeTimers();
     try {
       let rejectPersist!: (err: Error) => void;
@@ -806,11 +806,13 @@ describe('DkgChannelPlugin', () => {
       const api = makeApi() as any;
       api.runtime = mockRuntime;
       api.cfg = mockCfg;
-      const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementationOnce(() =>
-        new Promise<void>((_resolve, reject) => {
-          rejectPersist = reject;
-        }),
-      );
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockImplementationOnce(() =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPersist = reject;
+          }),
+        )
+        .mockResolvedValueOnce(undefined);
       plugin.register(api);
 
       await plugin.processInbound('Hello', 'corr-stop-retry', 'owner');
@@ -819,13 +821,77 @@ describe('DkgChannelPlugin', () => {
       const stopPromise = plugin.stop();
       rejectPersist(new Error('late persistence failure'));
       await Promise.resolve();
-      await stopPromise;
-      await vi.advanceTimersByTimeAsync(2_000);
-
+      await vi.advanceTimersByTimeAsync(249);
       expect(storeSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(storeSpy).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('processInbound should still persist a completed non-stream reply when shutdown has already begun', async () => {
+    let resumeDispatch!: () => void;
+    let markDispatchReady!: () => void;
+    const dispatchReady = new Promise<void>((resolve) => { markDispatchReady = resolve; });
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            markDispatchReady();
+            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    let resolveStore!: () => void;
+    const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+    plugin.register(api);
+
+    const replyPromise = plugin.processInbound('Hello', 'corr-stop-nonstream', 'owner');
+    await dispatchReady;
+    const stopPromise = plugin.stop();
+    resumeDispatch();
+
+    await expect(replyPromise).resolves.toEqual({
+      text: 'Reply before shutdown',
+      correlationId: 'corr-stop-nonstream',
+    });
+
+    let stopSettled = false;
+    void stopPromise.then(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(storeSpy).toHaveBeenCalledTimes(1);
+    expect(stopSettled).toBe(false);
+
+    resolveStore();
+    await stopPromise;
+    expect(stopSettled).toBe(true);
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply before shutdown',
+      { turnId: 'corr-stop-nonstream' },
+    );
   });
 
   it('stop should only wait a bounded time for a final turn persistence attempt that hangs during shutdown', async () => {

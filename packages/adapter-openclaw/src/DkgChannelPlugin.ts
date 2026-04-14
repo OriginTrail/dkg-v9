@@ -420,7 +420,7 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.queueTurnPersistence(text, reply.text, correlationId, identity);
+        this.queueTurnPersistence(text, reply.text, correlationId, identity, undefined, true);
         return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
@@ -439,7 +439,7 @@ export class DkgChannelPlugin {
         text,
         correlationId,
       });
-      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner');
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', undefined, true);
       return reply;
     }
 

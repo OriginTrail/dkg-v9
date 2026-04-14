@@ -22,7 +22,7 @@ import { promisify } from "node:util";
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { join, dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ethers } from "ethers";
 import { enrichEvmError } from "@origintrail-official/dkg-chain";
@@ -1652,6 +1652,7 @@ function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationC
   const capabilities: LocalAgentIntegrationCapabilities = {};
   const keys: (keyof LocalAgentIntegrationCapabilities)[] = [
     'localChat',
+    'chatAttachments',
     'connectFromUi',
     'installNode',
     'dkgPrimaryMemory',
@@ -1691,6 +1692,31 @@ function normalizeLocalAgentRuntime(input: unknown): LocalAgentIntegrationRuntim
   if (input.lastError === null || typeof input.lastError === 'string') runtime.lastError = input.lastError;
   if (typeof input.updatedAt === 'string' && input.updatedAt.trim()) runtime.updatedAt = input.updatedAt.trim();
   return Object.keys(runtime).length > 0 ? runtime : undefined;
+}
+
+function isLocalAgentExplicitlyUserDisabled(
+  integration: Pick<LocalAgentIntegrationConfig, 'metadata'> | null | undefined,
+): boolean {
+  return integration?.metadata?.userDisabled === true;
+}
+
+function isExplicitLocalAgentDisconnectPatch(patch: Pick<LocalAgentIntegrationConfig, 'enabled' | 'runtime'>): boolean {
+  return patch.runtime?.status === 'disconnected';
+}
+
+export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, unknown>): Record<string, unknown> {
+  const runtime = isPlainRecord(body.runtime) ? body.runtime : undefined;
+  if (body.enabled !== false && runtime?.status !== 'disconnected') return body;
+  return {
+    ...body,
+    enabled: false,
+    runtime: {
+      ...(runtime ?? {}),
+      status: 'disconnected',
+      ready: false,
+      lastError: runtime?.lastError ?? null,
+    },
+  };
 }
 
 function mergeLocalAgentIntegrationConfig(
@@ -1827,6 +1853,9 @@ export function connectLocalAgentIntegration(
     runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
   };
   const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  if (next.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
   if (id === 'openclaw') pruneLegacyOpenClawConfig(config);
@@ -1844,6 +1873,13 @@ export function updateLocalAgentIntegration(
   const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
   const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  if (isExplicitLocalAgentDisconnectPatch(patch)) {
+    next.enabled = false;
+    next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: true };
+  } else if (patch.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.id = normalizedId;
   next.updatedAt = now.toISOString();
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
@@ -1859,10 +1895,10 @@ export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): bool
     && integration.capabilities.localChat === true;
 }
 
-function hasLocalAgentTransportConfig(
-  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime' | 'enabled'> | null | undefined,
+function hasStoredLocalAgentTransportConfig(
+  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime'> | null | undefined,
 ): boolean {
-  if (!integration || integration.enabled !== true) return false;
+  if (!integration) return false;
   return Boolean(
     integration.transport?.bridgeUrl
     || integration.transport?.gatewayUrl
@@ -2063,27 +2099,96 @@ type OpenClawUiSetupCommand = {
   source: 'workspace' | 'npx';
 };
 
+type WorkspacePackageLookupDeps = {
+  fileExists?: (path: string) => boolean;
+  readFileText?: (path: string) => string;
+  readDirNames?: (path: string) => string[];
+};
+
+function resolveWorkspacePackageBinCommand(
+  packageName: string,
+  runtimeModuleUrl = import.meta.url,
+  deps: WorkspacePackageLookupDeps = {},
+): OpenClawUiSetupCommand | null {
+  const fileExists = deps.fileExists ?? existsSync;
+  const readFileText = deps.readFileText ?? ((path: string) => readFileSync(path, 'utf8'));
+  const readDirNames = deps.readDirNames ?? ((path: string) => readdirSync(path, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name));
+
+  const repoRoot = fileURLToPath(new URL('../../../', runtimeModuleUrl));
+  const packagesDir = join(repoRoot, 'packages');
+  let packageDirs: string[];
+  try {
+    packageDirs = readDirNames(packagesDir);
+  } catch {
+    return null;
+  }
+
+  for (const dirName of packageDirs) {
+    const packageDir = join(packagesDir, dirName);
+    const packageJsonPath = join(packageDir, 'package.json');
+    if (!fileExists(packageJsonPath)) continue;
+
+    try {
+      const packageJson = JSON.parse(readFileText(packageJsonPath)) as {
+        name?: unknown;
+        bin?: unknown;
+      };
+      if (packageJson.name !== packageName) continue;
+
+      const binField = packageJson.bin;
+      const binPath = typeof binField === 'string'
+        ? binField
+        : isPlainRecord(binField)
+          ? Object.values(binField).find((value): value is string => typeof value === 'string')
+          : undefined;
+      if (!binPath) continue;
+
+      const commandPath = join(packageDir, binPath);
+      if (!fileExists(commandPath)) continue;
+
+      return {
+        command: process.execPath,
+        args: [commandPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
+        source: 'workspace',
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 export function getOpenClawUiSetupCommand(
   packageName: string,
   runtimeModuleUrl = import.meta.url,
   fileExists: (path: string) => boolean = existsSync,
+  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
 ): OpenClawUiSetupCommand {
-  const setupArgs = ['setup', '--no-fund', '--no-start', '--no-verify'];
-
   if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
     const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
     if (fileExists(localSetupCliPath)) {
       return {
         command: process.execPath,
-        args: [localSetupCliPath, ...setupArgs],
+        args: [localSetupCliPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
         source: 'workspace',
       };
     }
   }
 
+  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, {
+    ...deps,
+    fileExists,
+  });
+  if (workspaceCommand) {
+    return workspaceCommand;
+  }
+
   return {
     command: 'npx',
-    args: ['--yes', packageName, ...setupArgs],
+    args: ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'],
     source: 'npx',
   };
 }
@@ -2215,7 +2320,7 @@ export async function connectLocalAgentIntegrationFromUi(
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
-  const hadAttachedBridgeBeforeConnect = hasLocalAgentTransportConfig(existingBeforeConnect);
+  const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
   const requested = connectLocalAgentIntegration(config, {
     ...body,
     runtime: {
@@ -2239,7 +2344,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
-  if (health.ok) {
+  if (health.ok && hadStoredTransportBeforeConnect) {
     const integration = updateLocalAgentIntegration(config, requested.id, {
       transport: transportPatchFromOpenClawTarget(config, health.target),
       runtime: {
@@ -2319,8 +2424,8 @@ export async function connectLocalAgentIntegrationFromUi(
         return;
       }
       await persistIntegrationState({
-        enabled: hadAttachedBridgeBeforeConnect ? true : false,
-        ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport
+        enabled: hadStoredTransportBeforeConnect ? true : false,
+        ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
           ? { transport: existingBeforeConnect.transport }
           : {}),
         runtime: {
@@ -2492,19 +2597,258 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   sessionId?: unknown;
   userMessage?: unknown;
   assistantReply?: unknown;
+  persistenceState?: unknown;
+  failureReason?: unknown;
+  attachmentRefs?: unknown;
 }): payload is {
   sessionId: string;
   userMessage: string;
   assistantReply: string;
   turnId?: unknown;
   toolCalls?: unknown;
+  persistenceState?: unknown;
+  failureReason?: unknown;
+  attachmentRefs?: unknown;
 } {
   return (
     typeof payload.sessionId === "string" &&
     payload.sessionId.trim().length > 0 &&
     typeof payload.userMessage === "string" &&
-    typeof payload.assistantReply === "string"
+    typeof payload.assistantReply === "string" &&
+    (
+      payload.failureReason === undefined ||
+      payload.failureReason === null ||
+      typeof payload.failureReason === 'string'
+    ) &&
+    (
+      payload.attachmentRefs === undefined ||
+      normalizeOpenClawAttachmentRefs(payload.attachmentRefs) !== undefined
+    ) &&
+    (
+      payload.persistenceState === undefined ||
+      payload.persistenceState === 'stored' ||
+      payload.persistenceState === 'failed' ||
+      payload.persistenceState === 'pending'
+    )
   );
+}
+
+export interface OpenClawAttachmentRef {
+  assertionUri: string;
+  fileHash: string;
+  contextGraphId: string;
+  fileName: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
+function normalizeOpenClawAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
+  if (!isPlainRecord(raw)) return null;
+  const assertionUri = typeof raw.assertionUri === 'string' ? raw.assertionUri.trim() : '';
+  const fileHash = typeof raw.fileHash === 'string' ? raw.fileHash.trim() : '';
+  const contextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
+  const fileName = typeof raw.fileName === 'string' ? raw.fileName.trim() : '';
+  if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
+
+  const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof raw.detectedContentType === 'string' && raw.detectedContentType.trim()) {
+    normalized.detectedContentType = raw.detectedContentType.trim();
+  }
+  if (raw.extractionStatus === 'completed') {
+    normalized.extractionStatus = raw.extractionStatus;
+  } else if (raw.extractionStatus !== undefined) {
+    return null;
+  }
+  if (typeof raw.tripleCount === 'number' && Number.isFinite(raw.tripleCount) && raw.tripleCount >= 0) {
+    normalized.tripleCount = raw.tripleCount;
+  }
+  if (typeof raw.rootEntity === 'string' && raw.rootEntity.trim()) {
+    normalized.rootEntity = raw.rootEntity.trim();
+  }
+  return normalized;
+}
+
+export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const refs: OpenClawAttachmentRef[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeOpenClawAttachmentRef(entry);
+    if (!normalized) return undefined;
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+export function hasOpenClawChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function unescapeOpenClawAttachmentLiteralBody(raw: string): string {
+  let decoded = '';
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch !== '\\') {
+      decoded += ch;
+      continue;
+    }
+
+    const next = raw[i + 1];
+    if (!next) {
+      decoded += '\\';
+      break;
+    }
+
+    if (next === 'u' || next === 'U') {
+      const hexLength = next === 'u' ? 4 : 8;
+      const hex = raw.slice(i + 2, i + 2 + hexLength);
+      if (/^[0-9A-Fa-f]+$/.test(hex) && hex.length === hexLength) {
+        const codePoint = Number.parseInt(hex, 16);
+        if (codePoint <= 0x10FFFF) {
+          decoded += String.fromCodePoint(codePoint);
+          i += 1 + hexLength;
+          continue;
+        }
+      }
+      decoded += `\\${next}`;
+      i += 1;
+      continue;
+    }
+
+    const escaped = ({
+      t: '\t',
+      b: '\b',
+      n: '\n',
+      r: '\r',
+      f: '\f',
+      '"': '"',
+      "'": "'",
+      '\\': '\\',
+    } as Record<string, string>)[next];
+
+    if (escaped !== undefined) {
+      decoded += escaped;
+    } else {
+      decoded += `\\${next}`;
+    }
+    i += 1;
+  }
+
+  return decoded;
+}
+
+function stripOpenClawAttachmentLiteral(raw: string | undefined): string {
+  if (!raw) return '';
+  const match = raw.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
+  return match ? unescapeOpenClawAttachmentLiteralBody(match[1]) : raw;
+}
+
+function parseOpenClawAttachmentTripleCount(raw: string | undefined): number | undefined {
+  const value = stripOpenClawAttachmentLiteral(raw).trim();
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isOpenClawAttachmentAssertionUriForContextGraph(assertionUri: string, contextGraphId: string): boolean {
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  if (!assertionUri.startsWith(prefix)) return false;
+  const remainder = assertionUri.slice(prefix.length);
+  if (remainder.startsWith('assertion/')) {
+    return remainder.length > 'assertion/'.length;
+  }
+  const assertionMarker = remainder.indexOf('/assertion/');
+  if (assertionMarker <= 0) return false;
+  const subGraphName = remainder.slice(0, assertionMarker);
+  const validation = validateSubGraphName(subGraphName);
+  return validation.valid;
+}
+
+function extractionRecordMatchesOpenClawAttachmentRef(
+  ref: OpenClawAttachmentRef,
+  record: ExtractionStatusRecord,
+): boolean {
+  if (record.status !== 'completed') return false;
+  if (record.fileHash !== ref.fileHash) return false;
+  if (record.fileName && record.fileName !== ref.fileName) return false;
+  if (
+    ref.detectedContentType &&
+    normalizeDetectedContentType(ref.detectedContentType) !== normalizeDetectedContentType(record.detectedContentType)
+  ) {
+    return false;
+  }
+  if (ref.extractionStatus && ref.extractionStatus !== 'completed') return false;
+  if (ref.tripleCount != null && ref.tripleCount !== record.tripleCount) return false;
+  if (ref.rootEntity && ref.rootEntity !== record.rootEntity) return false;
+  return true;
+}
+
+export async function verifyOpenClawAttachmentRefsProvenance(
+  agent: Pick<DKGAgent, 'store'>,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): Promise<OpenClawAttachmentRef[] | undefined> {
+  if (!attachmentRefs) return attachmentRefs;
+
+  for (const ref of attachmentRefs) {
+    if (!isSafeIri(ref.assertionUri)) return undefined;
+    if (ref.rootEntity && !isSafeIri(ref.rootEntity)) return undefined;
+    if (!isOpenClawAttachmentAssertionUriForContextGraph(ref.assertionUri, ref.contextGraphId)) return undefined;
+
+    const extractionRecord = getExtractionStatusRecord(extractionStatus, ref.assertionUri);
+    if (extractionRecord) {
+      if (!extractionRecordMatchesOpenClawAttachmentRef(ref, extractionRecord)) return undefined;
+      if (extractionRecord.fileName === ref.fileName) continue;
+    }
+
+    const metaGraph = contextGraphMetaUri(ref.contextGraphId);
+    const metaResult = await agent.store.query(`
+      SELECT ?fileHash ?contentType ?rootEntity ?tripleCount ?sourceFileName WHERE {
+        GRAPH <${metaGraph}> {
+          <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash .
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceContentType> ?contentType }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/rootEntity> ?rootEntity }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/structuralTripleCount> ?tripleCount }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileName> ?sourceFileName }
+        }
+      }
+      LIMIT 1
+    `) as { bindings?: Array<Record<string, string>> };
+    const binding = metaResult?.bindings?.[0];
+    if (!binding) return undefined;
+
+    if (stripOpenClawAttachmentLiteral(binding.fileHash ?? '') !== ref.fileHash) return undefined;
+    const storedContentType = stripOpenClawAttachmentLiteral(binding.contentType ?? '').trim();
+    if (
+      ref.detectedContentType &&
+      storedContentType &&
+      normalizeDetectedContentType(ref.detectedContentType) !== normalizeDetectedContentType(storedContentType)
+    ) {
+      return undefined;
+    }
+    if (ref.extractionStatus && ref.extractionStatus !== 'completed') return undefined;
+
+    const storedTripleCount = parseOpenClawAttachmentTripleCount(binding.tripleCount ?? '');
+    if (ref.tripleCount != null && storedTripleCount != null && ref.tripleCount !== storedTripleCount) {
+      return undefined;
+    }
+    const storedFileName = stripOpenClawAttachmentLiteral(binding.sourceFileName ?? '').trim();
+    if (storedFileName && storedFileName !== ref.fileName) return undefined;
+
+    const storedRootEntity = typeof binding.rootEntity === 'string'
+      ? binding.rootEntity.replace(/[<>]/g, '').trim()
+      : '';
+    if (ref.rootEntity && storedRootEntity && ref.rootEntity !== storedRootEntity) return undefined;
+  }
+
+  return attachmentRefs;
 }
 
 let _standaloneCache: boolean | null = null;
@@ -2952,22 +3296,32 @@ async function handleRequest(
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity? }
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
   // returns the agent's reply.
   if (req.method === "POST" && path === "/api/openclaw-channel/send") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try {
       payload = JSON.parse(body);
     } catch {
       return jsonResponse(res, 400, { error: "Invalid JSON" });
     }
 
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
+    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
     const corrId = correlationId ?? crypto.randomUUID();
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: {
@@ -2994,7 +3348,12 @@ async function handleRequest(
             bridgeAuthToken,
             { 'Content-Type': 'application/json' },
           ),
-          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          body: JSON.stringify({
+            text,
+            correlationId: corrId,
+            identity: identity ?? 'owner',
+            ...(attachmentRefs ? { attachmentRefs } : {}),
+          }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
@@ -3042,20 +3401,30 @@ async function handleRequest(
     });
   }
 
-  // POST /api/openclaw-channel/stream  { text, correlationId, identity? }
+  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, attachmentRefs? }
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === "POST" && path === "/api/openclaw-channel/stream") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
     try {
       payload = JSON.parse(body);
     } catch {
       return jsonResponse(res, 400, { error: "Invalid JSON" });
     }
 
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
+    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const { text, correlationId, identity } = payload;
-    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
+      return jsonResponse(res, 400, { error: 'Missing "text"' });
+    }
     const corrId = correlationId ?? crypto.randomUUID();
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: {
@@ -3085,7 +3454,12 @@ async function handleRequest(
               'Accept': 'text/event-stream',
             },
           ),
-          body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+          body: JSON.stringify({
+            text,
+            correlationId: corrId,
+            identity: identity ?? 'owner',
+            ...(attachmentRefs ? { attachmentRefs } : {}),
+          }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
@@ -3174,7 +3548,7 @@ async function handleRequest(
     });
   }
 
-  // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
+  // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, attachmentRefs?, ... }
   // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
   // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
@@ -3192,7 +3566,7 @@ async function handleRequest(
           "Missing required fields: sessionId, userMessage, assistantReply",
       });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls } =
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason } =
       payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? (toolCalls as Array<{
@@ -3201,15 +3575,34 @@ async function handleRequest(
           result: unknown;
         }>)
       : undefined;
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(attachmentRefs);
+    if (attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
+    const verifiedAttachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    if (attachmentRefs != null && verifiedAttachmentRefs === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
     const normalizedTurnId =
       typeof turnId === "string" ? turnId : crypto.randomUUID();
+    const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
+      ? persistenceState
+      : 'stored';
+    const normalizedFailureReason = typeof failureReason === 'string'
+      ? failureReason.trim() || undefined
+      : undefined;
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
         normalizedToolCalls,
-        { turnId: normalizedTurnId, persistenceState: "stored" },
+        {
+          turnId: normalizedTurnId,
+          attachmentRefs: verifiedAttachmentRefs,
+          persistenceState: normalizedPersistenceState,
+          failureReason: normalizedFailureReason,
+        },
       );
       return jsonResponse(res, 200, { ok: true });
     } catch (err: any) {

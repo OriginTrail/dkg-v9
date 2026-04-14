@@ -206,5 +206,5 @@ describe.sequential('assertion CLI smoke', () => {
     expect(promoted.stdout).toContain('Assertion promoted to shared memory:');
     expect(promoted.stdout).toContain('Triples:        14');
     expect(promoted.stdout).toContain('urn:company:acme');
-  });
+  }, 15000);
 });

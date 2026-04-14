@@ -7,9 +7,10 @@ The adapter is a thin bridge into the DKG node. It does not run its own DKG node
 ## What It Does
 
 - bridges the DKG node UI to a local OpenClaw agent
-- keeps connected-agent chat persisted in DKG memory
+- keeps connected-agent chat persisted in DKG Working Memory via the `chat-turns` assertion of the `agent-context` context graph
+- registers the DKG memory provider as OpenClaw's memory-slot capability, so slot-backed recall reads flow through real V10 primitives (assertion-scoped SPARQL queries with `view: 'working-memory'`) rather than the legacy filesystem-watcher path
+- exposes `dkg_memory_import` as an agent-callable write tool for recording memories into a project's Working Memory assertion
 - exposes DKG agent-network tools to the OpenClaw runtime
-- preserves compatibility memory ingestion through the node import and extraction pipeline
 
 ## What It Does Not Do Anymore
 
@@ -65,11 +66,11 @@ These keys live under `"dkg-node"` in `WORKSPACE_DIR/config.json`.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon HTTP URL |
-| `memory.enabled` | `false` (`true` after setup) | enable DKG memory tools and compatibility file-watcher sync |
-| `memory.memoryDir` | `WORKSPACE_DIR/memory` | override the watched memory directory |
-| `memory.watchDebounceMs` | `1500` | file watcher debounce interval in milliseconds |
+| `memory.enabled` | `false` (`true` after setup) | register the DKG memory-slot capability on attach and enable the `dkg_memory_import` write tool |
 | `channel.enabled` | `false` (`true` after setup) | enable the DKG UI to OpenClaw bridge |
 | `channel.port` | `9201` | standalone bridge port when gateway route registration is unavailable |
+
+The legacy `memory.memoryDir` and `memory.watchDebounceMs` config keys, and the filesystem-watcher + `/api/memory/import` ingestion flow they configured, were retired in the openclaw-dkg-primary-memory work. Memory now flows exclusively through `api.registerMemoryCapability` for slot-backed recall reads (handled by `DkgMemorySearchManager` which runs dual-graph SPARQL against `agent-context` / `chat-turns` plus the resolved project CG / `memory`) and through the `dkg_memory_import` tool for explicit per-project writes (which land in a project CG's `memory` Working Memory assertion via `POST /api/assertion/:name/write`). See `agent-docs/openclaw-dkg-primary-memory-plan.md` and ADR-018 in `agent-docs/notes/decisions.md` for the full architecture.
 
 ## Notes
 

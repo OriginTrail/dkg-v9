@@ -3935,6 +3935,13 @@ async function handleRequest(
         assertionName,
         subGraphName ? { subGraphName } : undefined,
       );
+      const assertionUri = contextGraphAssertionUri(
+        contextGraphId,
+        agent.peerId,
+        assertionName,
+        subGraphName,
+      );
+      extractionStatus.delete(assertionUri);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (

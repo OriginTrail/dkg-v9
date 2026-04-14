@@ -37,7 +37,9 @@ export interface StorageACKHandlerConfig {
  * 1. Verify this node is a core node
  * 2. Verify the data exists in SWM
  * 3. Recompute the merkle root from SWM triples
- * 4. Sign ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ * 4. Sign ACK = EIP-191(computePublishACKDigest(chainId, kav10Address, cgId,
+ *    merkleRoot, kaCount, byteSize, epochs, tokenAmount)) — the H5-prefixed
+ *    8-field digest. Matches KnowledgeAssetsV10.sol:362-373 byte-for-byte.
  * 5. Return StorageACK via the P2P stream response
  */
 export class StorageACKHandler {

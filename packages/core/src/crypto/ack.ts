@@ -14,19 +14,6 @@ function uint256ToBytes(value: bigint): Uint8Array {
 }
 
 /**
- * Encode a uint256 as a big-endian 32-byte Uint8Array.
- */
-function uint256ToBytesValue(value: bigint): Uint8Array {
-  const buf = new Uint8Array(32);
-  let v = value;
-  for (let i = 31; i >= 0; i--) {
-    buf[i] = Number(v & 0xffn);
-    v >>= 8n;
-  }
-  return buf;
-}
-
-/**
  * Compute the ACK digest that core nodes sign to attest data integrity.
  *
  * V10 6-field: keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
@@ -58,10 +45,10 @@ export function computeACKDigest(
     const packed = new Uint8Array(192);
     packed.set(uint256ToBytes(contextGraphId), 0);
     packed.set(merkleRoot, 32);
-    packed.set(uint256ToBytesValue(BigInt(kaCount)), 64);
-    packed.set(uint256ToBytesValue(byteSize ?? 0n), 96);
-    packed.set(uint256ToBytesValue(BigInt(epochs ?? 1)), 128);
-    packed.set(uint256ToBytesValue(tokenAmount ?? 0n), 160);
+    packed.set(uint256ToBytes(BigInt(kaCount)), 64);
+    packed.set(uint256ToBytes(byteSize ?? 0n), 96);
+    packed.set(uint256ToBytes(BigInt(epochs ?? 1)), 128);
+    packed.set(uint256ToBytes(tokenAmount ?? 0n), 160);
     return keccak256(packed);
   }
   const packed = new Uint8Array(64);

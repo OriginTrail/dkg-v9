@@ -198,7 +198,9 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
         gossipPublish: vi.fn().mockResolvedValue(undefined),
         sendP2P: async () => {
           const wallet = coreWallets[callIdx % coreWallets.length];
-          const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
+          // Match collector.collect inputs below so the H5 digest the signer
+          // produces equals the one the collector recovers from.
+          const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot, 1, 500n);
           return encodeStorageACK({
             merkleRoot,
             coreNodeSignatureR: r,
@@ -229,32 +231,19 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
     });
   });
 
-  describe('Phase 3: chain submission with ACK signatures', () => {
-    it('all ACK signatures are on the same merkle root', async () => {
-      const merkleRoot = computeFlatKCRoot(multiEntityQuads, []);
-      const sigs = await Promise.all(
-        coreWallets.slice(0, 3).map(w => signACK(w, cgIdBigInt, merkleRoot)),
-      );
-
-      const digest = computeACKDigest(cgIdBigInt, merkleRoot);
-      const prefixedHash = ethers.hashMessage(digest);
-
-      for (const { r, vs } of sigs) {
-        const addr = ethers.recoverAddress(prefixedHash, {
-          r: ethers.hexlify(r),
-          yParityAndS: ethers.hexlify(vs),
-        });
-        expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
-      }
-    });
-
-    // The pre-rewire `non-numeric contextGraphId maps to 0n for ACK digest`
-    // test was deleted as part of Bug F. V10 publishDirect requires a
-    // numeric on-chain context graph id; the silent `= 0n` fallback is gone
-    // and the fail-loud guard lives in `dkg-agent.createV10ACKProvider`,
-    // `publisher-runner.createV10ACKProviderForPublisher`,
-    // `storage-ack-handler.ts:handler`, and `evm-adapter.createKnowledgeAssetsV10`.
-  });
+  // Phase 3 ("chain submission with ACK signatures") test block was removed:
+  // the remaining assertion ("all ACK signatures are on the same merkle root")
+  // signed with the new H5 helper but verified with the legacy 2-field
+  // `computeACKDigest`, so the recover loop just checked that the output had
+  // hex-format, not that the signer matched. The real chain-submission path
+  // is covered end-to-end by `v10-publish-e2e.test.ts` against the real
+  // handler + collector. The pre-rewire `non-numeric contextGraphId maps to
+  // 0n for ACK digest` test was also deleted as part of Bug F — the silent
+  // `= 0n` fallback is gone and the fail-loud guard lives in
+  // `dkg-agent.createV10ACKProvider`,
+  // `publisher-runner.createV10ACKProviderForPublisher`,
+  // `storage-ack-handler.ts:handler`, and
+  // `evm-adapter.createKnowledgeAssetsV10`.
 
   describe('Phase 4: SWM cleanup after publish', () => {
     it('published triples removed from SWM (mock verification)', async () => {
@@ -392,7 +381,8 @@ describe('V10 ACK Edge Cases', () => {
     const deps: ACKCollectorDeps = {
       gossipPublish: vi.fn().mockResolvedValue(undefined),
       sendP2P: async () => {
-        const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot);
+        // Match collector inputs so the signer + verifier compute the same H5 digest.
+        const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot, 1, 100n);
         return encodeStorageACK({
           merkleRoot: wrongRoot,
           coreNodeSignatureR: r,
@@ -428,7 +418,7 @@ describe('V10 ACK Edge Cases', () => {
       gossipPublish: vi.fn().mockResolvedValue(undefined),
       sendP2P: async () => {
         const wallet = coreWallets[idx++ % coreWallets.length];
-        const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
+        const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot, 1, 100n);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -466,7 +456,7 @@ describe('V10 ACK Edge Cases', () => {
       gossipPublish: vi.fn().mockResolvedValue(undefined),
       sendP2P: async () => {
         const wallet = coreWallets[0];
-        const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
+        const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot, 1, 100n);
         callCount++;
         return encodeStorageACK({
           merkleRoot,
@@ -501,7 +491,7 @@ describe('V10 ACK Edge Cases', () => {
     const deps: ACKCollectorDeps = {
       gossipPublish: vi.fn().mockResolvedValue(undefined),
       sendP2P: async () => {
-        const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot);
+        const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot, 1, 100n);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,

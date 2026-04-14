@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';

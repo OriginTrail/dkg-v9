@@ -8,6 +8,7 @@ import hre from 'hardhat';
 import {
   Chronos,
   ConvictionStakingStorage,
+  DelegatorsInfo,
   DKGStakingConvictionNFT,
   Hub,
   ParametersStorage,
@@ -1742,6 +1743,343 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(posFinal.raw).to.equal(amount);
       expect(posFinal.rewards).to.equal(0n);
       expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    });
+  });
+
+  // =====================================================================
+  // convertToNFT → StakingV10.convertToNFT
+  // =====================================================================
+  //
+  // Atomic V8 → V10 migration. The user starts with an address-keyed V8
+  // delegator position on some node (via `Staking.stake`) and ends with a
+  // bytes32(tokenId)-keyed V10 conviction NFT on the same node at the
+  // chosen lock tier. Net change:
+  //   - V8 delegator stake base → 0
+  //   - V8 delegator removed from `DelegatorsInfo` set
+  //   - V10 position created (raw = V8 amount, rewards = 0, multiplier18
+  //     matches tier, lastClaimedEpoch = currentEpoch - 1)
+  //   - NFT minted to `staker`
+  //   - Node stake, total stake INVARIANT (V8 amount removed, V10 amount
+  //     added — same value, zero net change)
+  //
+  // Precondition: V8 rolling rewards must be 0 AND `lastClaimedEpoch >=
+  // currentEpoch - 1`. User must run `Staking.claimDelegatorRewards` for
+  // every unclaimed V8 epoch before invoking `convertToNFT`. This keeps
+  // StakingV10 out of the V8 reward-distribution path — Phase 5's
+  // V10 implementation does NOT fold V8 rolling rewards into the V10
+  // position's raw bucket.
+
+  describe('convertToNFT (→ StakingV10.convertToNFT)', () => {
+    // V8 delegator key formula is `keccak256(abi.encodePacked(address))`
+    // per `Staking._getDelegatorKey` at Staking.sol:905-907. Mirror here
+    // so the tests can inspect the V8 bucket directly.
+    const v8Key = (addr: string): string =>
+      hre.ethers.keccak256(hre.ethers.solidityPacked(['address'], [addr]));
+
+    // Test shortcut — set up a V8 address-keyed delegator position without
+    // running the full V8 stake path. This mimics the end state of a
+    // `Staking.stake(id, amount)` call plus a `claimDelegatorRewards` that
+    // caught the delegator up to `currentEpoch - 1` with zero rolling
+    // rewards. The Hub owner can call `onlyContracts` setters directly per
+    // `HubDependent._checkHubContract`, so we poke StakingStorage and
+    // DelegatorsInfo without going through the V8 path. This is faster
+    // than a real V8 stake (which would also walk reward-epoch baselines)
+    // and keeps the convertToNFT tests from depending on the correctness
+    // of V8 `stake()` — we already have Staking.test.ts for that.
+    const setupV8Stake = async (
+      staker: SignerWithAddress,
+      identityId: number,
+      amount: bigint,
+    ) => {
+      // Mint TRAC into the StakingStorage vault so any later finalize
+      // draws from a funded pool. Not strictly required for the
+      // convertToNFT path itself (no transfer on migrate), but keeps the
+      // test state consistent with what a real V8 stake would leave.
+      const stakingStorageAddr = await StakingStorage.getAddress();
+      await Token.mint(stakingStorageAddr, amount);
+
+      // V8 delegator key + storage writes. `increaseDelegatorStakeBase`
+      // flips the delegator to active, so the delegatorNodes set entry
+      // is created via `_updateDelegatorActivity`. Match the V8
+      // `_stake` call sequence (set base, set nodeStake, increaseTotalStake).
+      const key = v8Key(staker.address);
+      await StakingStorage.connect(accounts[0]).increaseDelegatorStakeBase(
+        identityId,
+        key,
+        amount,
+      );
+      await StakingStorage.connect(accounts[0]).increaseNodeStake(identityId, amount);
+      await StakingStorage.connect(accounts[0]).increaseTotalStake(amount);
+
+      // V8 DelegatorsInfo bookkeeping — mark the delegator as registered
+      // on the node, record hasEverDelegatedToNode, and baseline
+      // lastClaimedEpoch to currentEpoch - 1 so the precondition check
+      // in convertToNFT passes without forcing the test to crawl the full
+      // V8 reward flow. Rolling rewards start at 0 (default).
+      await DelegatorsInfoContract.connect(accounts[0]).addDelegator(identityId, staker.address);
+      await DelegatorsInfoContract.connect(accounts[0]).setHasEverDelegatedToNode(
+        identityId,
+        staker.address,
+        true,
+      );
+      const currentEpoch = await ChronosContract.getCurrentEpoch();
+      // Floor the baseline at 0 to avoid underflow when currentEpoch == 1
+      // (Chronos floors at 1, so currentEpoch - 1 == 0 is legal).
+      const baseline = currentEpoch > 0n ? currentEpoch - 1n : 0n;
+      await DelegatorsInfoContract.connect(accounts[0]).setLastClaimedEpoch(
+        identityId,
+        staker.address,
+        baseline,
+      );
+    };
+
+    // Pull the hub-registered DelegatorsInfo contract into scope on every
+    // test — the fixture builds a fresh graph each run.
+    let DelegatorsInfoContract: DelegatorsInfo;
+    beforeEach(async () => {
+      DelegatorsInfoContract = await hre.ethers.getContract<DelegatorsInfo>('DelegatorsInfo');
+    });
+
+    // -----------------------------------------------------------------
+    // Revert / gate paths
+    // -----------------------------------------------------------------
+
+    it('reverts if V8 rolling rewards are unclaimed', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      // Inject non-zero rolling rewards — the precondition must reject
+      // before any storage mutation. Hub owner can poke DelegatorsInfo
+      // directly (onlyContracts).
+      await DelegatorsInfoContract.connect(accounts[0]).setDelegatorRollingRewards(
+        identityId,
+        accounts[0].address,
+        1n,
+      );
+
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 12),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'V8StakeNotFullyClaimed');
+
+      // No state leak past the revert: V8 bucket still holds the stake.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(amount);
+    });
+
+    it('reverts if V8 lastClaimedEpoch is older than currentEpoch - 1', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      // Advance the Chronos cursor past the current lastClaimedEpoch
+      // without re-baselining the V8 delegator. Since setupV8Stake set
+      // `lastClaimedEpoch = currentEpoch - 1` at the time of setup, we
+      // need `currentEpoch` to jump by > 1 epoch so that
+      // `lastClaimedEpoch < newCurrentEpoch - 1`.
+      await advanceEpochs(3);
+
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 12),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'V8StakeNotFullyClaimed');
+
+      // V8 bucket unchanged.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(amount);
+    });
+
+    it('reverts if no V8 stake exists for the staker (NoV8StakeToConvert)', async () => {
+      const { identityId } = await createProfile();
+      // No V8 stake setup — the caller has nothing to migrate. We still
+      // need DelegatorsInfo to show `lastClaimedEpoch >= currentEpoch - 1`
+      // so the precondition check doesn't trip first; that's trivially
+      // true here since a never-touched delegator has `lastClaimed == 0`
+      // and currentEpoch == 1 in a fresh fixture.
+      //
+      // Actually, since `lastClaimedEpoch` defaults to 0, we also need
+      // currentEpoch <= 1 for the precondition check to pass. Fresh
+      // fixture starts at epoch 1, so this is fine without any setup.
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 12),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'NoV8StakeToConvert');
+    });
+
+    it('reverts on invalid lock tier (2) at the NFT wrapper layer', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      // Wrapper's `_convictionMultiplier` rejects tier 2 before forwarding
+      // to StakingV10 — no V8 state is touched.
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 2),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+    });
+
+    it('reverts on invalid lock tier (4)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 4),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+    });
+
+    it('reverts on invalid lock tier (13)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      await expect(
+        NFT.connect(accounts[0]).convertToNFT(identityId, 13),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+    });
+
+    it('direct StakingV10.convertToNFT call from non-NFT caller reverts via onlyConvictionNFT gate', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      // The gate pins the caller to the Hub-registered NFT contract.
+      // accounts[0] is the hub owner, not the NFT, so the direct call
+      // reverts with OnlyConvictionNFT regardless of the V8 precondition.
+      await expect(
+        StakingV10Contract.connect(accounts[0]).convertToNFT(
+          accounts[0].address,
+          42,
+          identityId,
+          12,
+        ),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+
+    // -----------------------------------------------------------------
+    // Happy paths
+    // -----------------------------------------------------------------
+
+    it('happy path tier 12: migrates V8 stake into V10 NFT, totals invariant, 6x multiplier', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+
+      // Capture the V8 bucket state before the migration.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(amount);
+      expect(
+        await DelegatorsInfoContract.isNodeDelegator(identityId, accounts[0].address),
+      ).to.equal(true);
+
+      const tx = await NFT.connect(accounts[0]).convertToNFT(identityId, 12);
+
+      // Wrapper-layer event and StakingV10 authoritative event both fire.
+      await expect(tx)
+        .to.emit(NFT, 'ConvertedFromV8')
+        .withArgs(accounts[0].address, 0n, identityId, 12);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'ConvertedFromV8')
+        .withArgs(accounts[0].address, 0n, identityId, amount, 12);
+
+      // V8 bucket drained and removed from DelegatorsInfo set.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(0n);
+      expect(
+        await DelegatorsInfoContract.isNodeDelegator(identityId, accounts[0].address),
+      ).to.equal(false);
+
+      // V10 position created under bytes32(tokenId=0) key.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(amount);
+
+      // ConvictionStakingStorage position.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(identityId);
+      expect(pos.raw).to.equal(amount);
+      expect(pos.rewards).to.equal(0n);
+      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.multiplier18).to.equal(SIX_X);
+
+      // NFT ownership.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
+
+      // TOTAL STAKE INVARIANT — net migration is zero.
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore);
+      // Node stake also unchanged (V8 amount out, V10 amount in).
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(nodeStakeBefore);
+    });
+
+    it('happy path tier 0: migrates V8 stake at the permanent rest tier (1x, no expiry)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await setupV8Stake(accounts[0], identityId, amount);
+
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+
+      await NFT.connect(accounts[0]).convertToNFT(identityId, 0);
+
+      // V10 position at rest tier: multiplier 1x, expiryEpoch == 0 per
+      // ConvictionStakingStorage.createPosition at :153-154.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(amount);
+      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.multiplier18).to.equal(ONE_X);
+      expect(pos.expiryEpoch).to.equal(0);
+
+      // Totals invariant.
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore);
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(nodeStakeBefore);
+
+      // V8 bucket zero.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(0n);
+    });
+
+    it('cross-user isolation: Alice migrates, Bob’s V8 stake on the same node is untouched', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      const amountBob = hre.ethers.parseEther('500');
+
+      // Alice and Bob both have V8 stake on the same node.
+      await setupV8Stake(accounts[0], identityId, amount);
+      await setupV8Stake(accounts[4], identityId, amountBob);
+
+      // Alice migrates; Bob does not.
+      await NFT.connect(accounts[0]).convertToNFT(identityId, 12);
+
+      // Bob's V8 bucket untouched.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[4].address)),
+      ).to.equal(amountBob);
+      expect(
+        await DelegatorsInfoContract.isNodeDelegator(identityId, accounts[4].address),
+      ).to.equal(true);
+
+      // Alice's V8 bucket zero.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
+      ).to.equal(0n);
+      expect(
+        await DelegatorsInfoContract.isNodeDelegator(identityId, accounts[0].address),
+      ).to.equal(false);
+
+      // Node total = Alice's V10 + Bob's V8 = amount + amountBob.
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(amount + amountBob);
+      // Alice's V10 NFT.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(amount);
     });
   });
 });

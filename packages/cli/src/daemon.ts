@@ -4103,14 +4103,10 @@ async function handleRequest(
       }
       throw err;
     }
-    // Backward compatibility: auto-register on-chain when a real chain is
-    // configured, unless the caller explicitly opts out with register: false.
-    // New callers that want local-only creation pass register: false and
-    // later use POST /api/context-graph/register.
-    const chainConf = config.chain ?? network?.chain;
-    const hasRealChain = chainConf && chainConf.chainId && chainConf.chainId !== 'none';
-    const shouldRegister = register === true || (register !== false && hasRealChain);
-    if (shouldRegister) {
+    // Registration is opt-in: callers that want on-chain registration
+    // pass `register: true`. Otherwise CG stays local-only and can be
+    // registered later via POST /api/context-graph/register.
+    if (register === true) {
       try {
         const regResult = await agent.registerContextGraph(id);
         return jsonResponse(res, 200, {
@@ -4141,6 +4137,9 @@ async function handleRequest(
     const { id, revealOnChain, accessPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
+    }
     if (accessPolicy !== undefined && typeof accessPolicy !== 'number') {
       return jsonResponse(res, 400, { error: '"accessPolicy" must be a number (0=open, 1=private)' });
     }

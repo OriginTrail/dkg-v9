@@ -119,6 +119,13 @@ export interface ContextGraphSub {
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
+  /**
+   * Whether the `_meta` graph (allowlist, registration status) has been
+   * fetched via authenticated sync or is known from local creation.
+   * When false, the gossip handler denies writes to prevent unauthorized
+   * access during the window before _meta arrives.
+   */
+  metaSynced?: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
   /** Local participant identities used for private SWM authorization before anchoring. */
@@ -761,6 +768,14 @@ export class DKGAgent {
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+
+      // _meta graphs arrive via authenticated sync, so all previously
+      // unsynced subscriptions can now be considered meta-synced.
+      for (const [id, sub] of this.subscribedContextGraphs) {
+        if (sub.metaSynced === false) {
+          sub.metaSynced = true;
+        }
+      }
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
@@ -1840,9 +1855,14 @@ export class DKGAgent {
       this.trackSyncContextGraph(contextGraphId);
     }
 
-    // Idempotent: skip if gossip handlers already installed for this context graph
+    // Idempotent: skip if gossip handlers already installed for this context graph.
+    // Re-subscribing upgrades metaSynced → true: the caller is explicitly
+    // trusting this CG, so the deny-until-meta-synced gate can open.
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
+      if (existing && existing.metaSynced === false) {
+        existing.metaSynced = true;
+      }
       if (!existing?.subscribed) {
         this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
@@ -2065,6 +2085,7 @@ export class DKGAgent {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
+      metaSynced: true,
     });
 
     if (!opts.private) {
@@ -2499,6 +2520,7 @@ export class DKGAgent {
         name: opts.name,
         subscribed: true,
         synced: true,
+        metaSynced: true,
         onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
       });
       return;
@@ -2539,6 +2561,7 @@ export class DKGAgent {
       name: opts.name,
       subscribed: true,
       synced: true,
+      metaSynced: true,
     });
 
     this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
@@ -3972,6 +3995,7 @@ export class DKGAgent {
         name,
         subscribed: true,
         synced: true,
+        metaSynced: true,
         onChainId: existing?.onChainId,
       });
 
@@ -4033,6 +4057,7 @@ export class DKGAgent {
         name: p.name,
         subscribed: true,
         synced: false,
+        metaSynced: false,
         onChainId: p.contextGraphId,
       });
       this.subscribeToContextGraph(p.name, { trackSyncScope: false });

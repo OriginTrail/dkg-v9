@@ -156,6 +156,7 @@ export class GossipPublishHandler {
               name,
               subscribed: true,
               synced: true,
+              metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             });
             this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
@@ -179,14 +180,15 @@ export class GossipPublishHandler {
           }
         }
 
-        // Open CGs that haven't synced _meta yet: deny until sync completes.
-        // null allowlist + synced=false could mean curated-but-not-yet-fetched.
+        // CGs whose _meta hasn't been fetched yet: deny until _meta sync
+        // completes. A null allowlist with metaSynced=false could mean the CG
+        // is curated but the allowlist hasn't arrived via authenticated sync.
         // System paranets (agents/ontology) are exempt — always open.
         if (allowedPeers === null
           && request.paranetId !== SYSTEM_PARANETS.AGENTS
           && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
           const sub = this.subscribedContextGraphs.get(request.paranetId);
-          if (sub && !sub.synced) {
+          if (sub && sub.metaSynced === false) {
             this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
             return;
           }

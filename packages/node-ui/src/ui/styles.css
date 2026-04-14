@@ -918,6 +918,51 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-secondary);
   line-height: 1.55;
 }
+.v10-local-agent-attachment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.v10-local-agent-attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--panel-elevated);
+  min-width: 0;
+}
+.v10-local-agent-attachment-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.v10-local-agent-attachment-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.v10-local-agent-attachment-badge {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.v10-local-agent-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-local-agent-attachment-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
 .v10-local-agent-actions {
   display: flex;
   flex-wrap: wrap;
@@ -970,11 +1015,16 @@ button:focus:not(:focus-visible) { outline: none; }
 
 /* Agent input */
 .v10-agent-input-area {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   padding: 12px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
   gap: 8px;
   align-items: center;
+  background: var(--bg-panel);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
 }
 .v10-agent-input {
   flex: 1;

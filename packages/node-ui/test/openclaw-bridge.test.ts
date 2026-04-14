@@ -655,6 +655,32 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
+  it('streamLocalAgentChat forwards injected context entries', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      body: null,
+      json: async () => ({ text: 'reply', correlationId: 'corr-2' }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { streamLocalAgentChat } = await import('../src/ui/api.js');
+      await streamLocalAgentChat('openclaw', 'hello', {
+        contextEntries: [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+        ],
+      });
+      const [, opts] = fakeFetch.mock.calls[0];
+      const body = JSON.parse(opts.body);
+      expect(body.contextEntries).toEqual([
+        { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('fetchLocalAgentIntegrations maps OpenClaw readiness and Hermes placeholder state', async () => {
     const fakeFetch = vi.fn()
       .mockResolvedValueOnce({

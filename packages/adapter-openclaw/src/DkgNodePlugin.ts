@@ -1,6 +1,6 @@
 /**
  * DkgNodePlugin — OpenClaw adapter that connects any OpenClaw agent to a
- * running DKG V9 daemon.
+ * running DKG V10 daemon.
  *
  * All tools route through DkgDaemonClient → daemon HTTP API.
  * There is no embedded DKGAgent — the daemon owns the node, triple store,
@@ -8,20 +8,21 @@
  *
  * Integration modules:
  *   - DKG UI channel bridge (DkgChannelPlugin)
- *   - DKG-backed memory search (DkgMemoryPlugin)
- *   - Memory write capture (WriteCapture)
+ *   - DKG-backed memory slot plugin (DkgMemoryPlugin) — registers an
+ *     upstream `MemoryPluginCapability` via `api.registerMemoryCapability`
+ *     and exposes an explicit `dkg_memory_import` write tool.
  */
-import { readFile } from 'node:fs/promises';
-import { existsSync, readdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
   type LocalAgentIntegrationTransport,
 } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
-import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
-import { WriteCapture } from './write-capture.js';
+import {
+  DkgMemoryPlugin,
+  type DkgMemorySession,
+  type DkgMemorySessionResolver,
+} from './DkgMemoryPlugin.js';
 import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
@@ -54,11 +55,22 @@ export class DkgNodePlugin {
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
-  private writeCapture: WriteCapture | null = null;
-  /** Guard: backlog import runs at most once per plugin lifecycle. */
-  private backlogImportDone: Promise<void> | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private nodePeerId: string | undefined;
+  private readonly memorySessionResolver: DkgMemorySessionResolver = {
+    getSession: (_sessionKey: string | undefined): DkgMemorySession | undefined => {
+      // TODO(Slice 9): read the UI-selected project context graph from daemon
+      // state stamped on the turn envelope. For v1 of the slice series the
+      // resolver returns `undefined`, which causes `DkgMemorySearchManager.search`
+      // to run against `agent-context` / `chat-turns` only and the write path
+      // to return a structured `needs_clarification` response unless the agent
+      // supplies `contextGraphId` explicitly on the `dkg_memory_import` call.
+      return undefined;
+    },
+    getDefaultAgentAddress: () => this.nodePeerId,
+    listAvailableContextGraphs: () => [],
+  };
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -141,34 +153,11 @@ export class DkgNodePlugin {
     // --- Memory module ---
     const memoryConfig = this.config.memory;
     if (memoryConfig?.enabled) {
-      // Auto-detect memory directory from shared memory if not configured
-      const memoryDir = memoryConfig.memoryDir
-        ?? (api.workspaceDir ? `${api.workspaceDir}/memory` : undefined)
-        ?? '';
-
-      const effectiveConfig = { ...memoryConfig, memoryDir };
-
-      // Memory search manager (reads)
       if (!this.memoryPlugin) {
-        this.memoryPlugin = new DkgMemoryPlugin(this.client, effectiveConfig);
+        this.memoryPlugin = new DkgMemoryPlugin(this.client, memoryConfig, this.memorySessionResolver);
       }
       this.memoryPlugin.register(api);
-      api.logger.info?.('[dkg] Memory module enabled — DKG-backed search active');
-
-      // Write capture (writes)
-      if (!this.writeCapture) {
-        this.writeCapture = new WriteCapture(this.client, effectiveConfig);
-        this.writeCapture.register(api);
-
-        // Fire-and-forget: backlog import on first-ever install.
-        // Runs at gateway startup (not session_start) so it works regardless
-        // of which channel the user interacts through.
-        if (!this.backlogImportDone) {
-          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
-            .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
-        }
-      }
-      api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
+      api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
     }
   }
 
@@ -406,107 +395,12 @@ export class DkgNodePlugin {
   async stop(): Promise<void> {
     // Stop integration modules
     this.clearLocalAgentIntegrationRetry();
-    this.writeCapture?.stop();
     await this.channelPlugin?.stop();
   }
 
   getClient(): DkgDaemonClient {
     if (!this.client) throw new Error('DkgNodePlugin.getClient() called before register()');
     return this.client;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Backlog import
-  // ---------------------------------------------------------------------------
-
-  /**
-   * On first-ever install, import all existing memory files into the DKG graph.
-   * Checks if any ImportedMemory items exist — if so, this isn't the first run.
-   */
-  private async runBacklogImportIfNeeded(
-    api: OpenClawPluginApi,
-    client: DkgDaemonClient,
-    memoryConfig: NonNullable<DkgOpenClawConfig['memory']>,
-  ): Promise<void> {
-    // Check if any memories already exist in the graph
-    const checkSparql = `SELECT (COUNT(?m) AS ?cnt) WHERE {
-      { ?m a <http://dkg.io/ontology/ImportedMemory> . }
-      UNION
-      { GRAPH ?g { ?m a <http://dkg.io/ontology/ImportedMemory> . } }
-    }`;
-
-    try {
-      const result = await client.query(checkSparql, {
-        contextGraphId: 'agent-memory',
-        includeSharedMemory: true,
-      });
-      const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
-      const countRaw = bindings[0]?.cnt;
-      const count = typeof countRaw === 'object' && countRaw?.value != null
-        ? parseInt(String(countRaw.value), 10)
-        : typeof countRaw === 'string'
-          ? parseInt(countRaw.replace(/^"(\d+)".*$/, '$1'), 10)
-          : 0;
-
-      api.logger.debug?.(`[dkg] Backlog check: count=${count}, raw=${JSON.stringify(countRaw)}`);
-
-      if (count > 0) {
-        api.logger.info?.(`[dkg] Backlog import skipped — ${count} memories already in graph`);
-        return;
-      }
-    } catch (err: any) {
-      api.logger.warn?.(`[dkg] Backlog check failed: ${err.message} — skipping import`);
-      return;
-    }
-
-    // First install — collect and import all memory files
-    const filesToImport: string[] = [];
-    const memoryDir = memoryConfig.memoryDir ?? '';
-
-    // Collect MEMORY.md
-    if (memoryDir) {
-      const workspaceDir = dirname(resolve(memoryDir));
-      const memoryMd = join(workspaceDir, 'MEMORY.md');
-      if (existsSync(memoryMd)) filesToImport.push(memoryMd);
-    }
-
-    // Collect memory/*.md files
-    if (memoryDir) {
-      const absMemDir = resolve(memoryDir);
-      if (existsSync(absMemDir)) {
-        try {
-          const entries = readdirSync(absMemDir, { recursive: true });
-          for (const entry of entries) {
-            const name = String(entry);
-            if (name.endsWith('.md')) {
-              filesToImport.push(join(absMemDir, name));
-            }
-          }
-        } catch { /* scan failed — skip */ }
-      }
-    }
-
-    if (filesToImport.length === 0) {
-      api.logger.info?.('[dkg] Backlog import: no memory files found');
-      return;
-    }
-
-    api.logger.info?.(`[dkg] Backlog import: importing ${filesToImport.length} memory file(s)…`);
-    let imported = 0;
-
-    for (const filePath of filesToImport) {
-      try {
-        const content = await readFile(filePath, 'utf-8');
-        if (!content.trim()) continue;
-        await client.importMemories(content.trim(), 'other', { useLlm: true });
-        imported++;
-        api.logger.info?.(`[dkg] Backlog import: imported ${filePath}`);
-      } catch (err: any) {
-        api.logger.warn?.(`[dkg] Backlog import failed for ${filePath}: ${err.message}`);
-      }
-    }
-
-    api.logger.info?.(`[dkg] Backlog import complete: ${imported}/${filesToImport.length} files imported`);
   }
 
   // ---------------------------------------------------------------------------

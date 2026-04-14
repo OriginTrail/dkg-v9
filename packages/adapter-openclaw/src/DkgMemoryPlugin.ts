@@ -1,328 +1,480 @@
 /**
- * DkgMemoryPlugin — DKG-backed memory search.
+ * DkgMemoryPlugin — DKG-backed memory-slot plugin for OpenClaw.
  *
- * Registers `dkg_memory_search` and `dkg_memory_import` tools that query
- * the DKG daemon's agent-memory context graph via SPARQL.
+ * Reads flow through the memory slot:
+ *   `api.registerMemoryCapability({ runtime: buildDkgMemoryRuntime(...) })`
+ * which gives the upstream memory host a `MemorySearchManager` instance
+ * whose `search()` issues two parallel `POST /api/query` calls — one to
+ * `agent-context` (`assertionName: 'chat-turns'`) and one to the resolved
+ * project context graph (`assertionName: 'memory'`), both with
+ * `view: 'working-memory'`.
  *
- * Memory reads go through this plugin:
- *   search(query) → SPARQL FILTER(CONTAINS) on dkg:ImportedMemory items
- *   readFile(path) → SPARQL text search fallback
- *   status()       → daemon health check
+ * Writes flow through an explicit `api.registerTool("dkg_memory_import")`
+ * registration, because the upstream `MemorySearchManager` contract is
+ * read-only. The write path creates (idempotently) and writes into the
+ * `'memory'` WM assertion of the resolved project CG.
  *
- * Memory writes are captured by `write-capture.ts` (file watcher →
- * daemon's /api/memory/import pipeline with LLM entity extraction).
+ * Both surfaces target real V10 primitives:
+ *   create: POST /api/assertion/create
+ *   write:  POST /api/assertion/:name/write
+ *   read:   POST /api/query   (with view='working-memory' + agentAddress
+ *                              + assertionName)
+ *
+ * No `agent-memory` sidecar. No `dkg:ImportedMemory`. No
+ * `FILTER(CONTAINS)`-over-a-throwaway-graph. No `tools.share` on the
+ * chat-turn or memory paths — that's SWM, wrong layer per
+ * `21_TRI_MODAL_MEMORY.md §5`.
  */
 
 import type { DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
+  MemoryEmbeddingProbeResult,
+  MemoryPluginCapability,
+  MemoryPluginRuntime,
+  MemoryProviderStatus,
+  MemoryReadFileRequest,
+  MemoryReadFileResult,
+  MemoryRuntimeRequest,
+  MemoryRuntimeResult,
+  MemorySearchManager,
+  MemorySearchOptions,
+  MemorySearchResult,
   OpenClawPluginApi,
+  OpenClawToolResult,
 } from './types.js';
 
-// NOTE: This file is scheduled for rewrite in Slice 3 of the
-// openclaw-dkg-primary-memory effort. Types below temporarily bridge the
-// legacy (Phase-0) shape with the vendored upstream types now declared in
-// `./types.js` so the package continues to compile between slices.
-type LegacyMemorySearchOptions = { limit?: number; threshold?: number };
-type LegacyMemorySearchResult = { path: string; content: string; score?: number };
-type LegacyMemorySearchManager = {
-  search(query: string, options?: LegacyMemorySearchOptions): Promise<LegacyMemorySearchResult[]>;
-  readFile(path: string): Promise<string | null>;
-  status(): Promise<{ ready: boolean; indexedFiles?: number; lastSync?: number }>;
-  sync?(): Promise<void>;
-  close?(): Promise<void>;
-};
+// ---------------------------------------------------------------------------
+// Conventions — addresses, assertion names, RDF vocabulary
+// ---------------------------------------------------------------------------
 
-const AGENT_MEMORY_CONTEXT_GRAPH = 'agent-memory';
+export const AGENT_CONTEXT_GRAPH = 'agent-context';
+export const CHAT_TURNS_ASSERTION = 'chat-turns';
+export const PROJECT_MEMORY_ASSERTION = 'memory';
 
-/**
- * SPARQL namespaces used in the agent-memory graph.
- * Must match the schema in ChatMemoryManager.
- */
 const NS = {
   schema: 'http://schema.org/',
   dkg: 'http://dkg.io/ontology/',
 };
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
-export class DkgMemoryPlugin implements LegacyMemorySearchManager {
+// ---------------------------------------------------------------------------
+// Session resolver — how the search manager and write tool find the
+// currently-active project context graph for a given chat turn
+// ---------------------------------------------------------------------------
+
+export interface DkgMemorySession {
+  /**
+   * UI-selected / envelope-stamped project context graph. `undefined` when
+   * the user has not selected a project, in which case reads fall back to
+   * the `agent-context` branch only and writes return a structured
+   * clarification request.
+   */
+  projectContextGraphId?: string;
+  /** Agent address used for scoping WM assertion reads. */
+  agentAddress?: string;
+}
+
+export interface DkgMemorySessionResolver {
+  getSession(sessionKey: string | undefined): DkgMemorySession | undefined;
+  /** Default agent address when no session is available (falls back to node peer ID). */
+  getDefaultAgentAddress(): string | undefined;
+  /** List of subscribed CGs, used when the write path needs to return a clarification. */
+  listAvailableContextGraphs(): string[];
+}
+
+// ---------------------------------------------------------------------------
+// DkgMemorySearchManager — the upstream-contract implementation
+// ---------------------------------------------------------------------------
+
+interface DkgMemorySearchManagerDeps {
+  client: DkgDaemonClient;
+  resolver: DkgMemorySessionResolver;
+  sessionKey?: string;
+  logger?: OpenClawPluginApi['logger'];
+}
+
+export class DkgMemorySearchManager implements MemorySearchManager {
+  private cachedStatus: MemoryProviderStatus;
+
+  constructor(private readonly deps: DkgMemorySearchManagerDeps) {
+    this.cachedStatus = this.buildStatus();
+  }
+
+  async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
+    const limit = Math.max(1, Math.min(100, options?.maxResults ?? 10));
+    const minScore = options?.minScore ?? 0;
+    const sessionKey = options?.sessionKey ?? this.deps.sessionKey;
+
+    const session = this.deps.resolver.getSession(sessionKey);
+    const agentAddress = session?.agentAddress ?? this.deps.resolver.getDefaultAgentAddress();
+    const projectContextGraphId = session?.projectContextGraphId;
+
+    const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);
+    if (keywords.length === 0) {
+      return [];
+    }
+    const filter = keywords
+      .map(k => `CONTAINS(LCASE(STR(?text)), "${escapeSparqlString(k)}")`)
+      .join(' || ');
+
+    const chatTurnsSparql = `SELECT ?uri ?text WHERE {
+        ?uri a <${NS.schema}Message> ;
+             <${NS.schema}text> ?text .
+        FILTER(${filter})
+      }
+      LIMIT ${limit}`;
+
+    const projectMemorySparql = `SELECT ?uri ?text WHERE {
+        ?uri a <${NS.schema}Thing> ;
+             <${NS.schema}description> ?text .
+        FILTER(${filter})
+      }
+      LIMIT ${limit}`;
+
+    const calls: Array<Promise<{ source: 'sessions' | 'memory'; bindings: any[] }>> = [];
+
+    calls.push(
+      this.deps.client
+        .query(chatTurnsSparql, {
+          contextGraphId: AGENT_CONTEXT_GRAPH,
+          view: 'working-memory',
+          agentAddress,
+          assertionName: CHAT_TURNS_ASSERTION,
+        })
+        .then(r => ({ source: 'sessions' as const, bindings: extractBindings(r) }))
+        .catch(err => {
+          this.deps.logger?.warn?.(`[dkg-memory] chat-turns search failed: ${errorMessage(err)}`);
+          return { source: 'sessions' as const, bindings: [] };
+        }),
+    );
+
+    if (projectContextGraphId) {
+      calls.push(
+        this.deps.client
+          .query(projectMemorySparql, {
+            contextGraphId: projectContextGraphId,
+            view: 'working-memory',
+            agentAddress,
+            assertionName: PROJECT_MEMORY_ASSERTION,
+          })
+          .then(r => ({ source: 'memory' as const, bindings: extractBindings(r) }))
+          .catch(err => {
+            this.deps.logger?.warn?.(
+              `[dkg-memory] project memory search failed for ${projectContextGraphId}: ${errorMessage(err)}`,
+            );
+            return { source: 'memory' as const, bindings: [] };
+          }),
+      );
+    }
+
+    const settled = await Promise.all(calls);
+    const results: MemorySearchResult[] = [];
+
+    for (const { source, bindings } of settled) {
+      for (const binding of bindings) {
+        const text = bindingValue(binding.text) ?? '';
+        const uri = bindingValue(binding.uri) ?? '';
+        if (!text) continue;
+        const score = computeKeywordOverlap(text, keywords);
+        if (score < minScore) continue;
+        results.push({
+          path: `dkg://${source === 'sessions' ? AGENT_CONTEXT_GRAPH : projectContextGraphId ?? 'unknown'}/${source === 'sessions' ? CHAT_TURNS_ASSERTION : PROJECT_MEMORY_ASSERTION}/${hashString(uri || text)}`,
+          startLine: 1,
+          endLine: 1,
+          score,
+          snippet: truncate(text, 500),
+          source,
+        });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, limit);
+  }
+
+  async readFile(request: MemoryReadFileRequest): Promise<MemoryReadFileResult> {
+    // V10 memory is graph-native, not file-backed. The DKG provider returns
+    // an empty shell unconditionally so upstream callers that depend on
+    // filesystem recall degrade to a no-op rather than crashing.
+    return { text: '', path: request.relPath };
+  }
+
+  status(): MemoryProviderStatus {
+    return this.cachedStatus;
+  }
+
+  async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
+    return {
+      ok: false,
+      error: 'DKG memory provider uses lexical SPARQL match; no embedding service in v1',
+    };
+  }
+
+  async probeVectorAvailability(): Promise<MemoryEmbeddingProbeResult> {
+    return {
+      ok: false,
+      error: 'DKG memory provider uses lexical SPARQL match; no vector store in v1',
+    };
+  }
+
+  async sync(): Promise<void> {
+    this.cachedStatus = this.buildStatus();
+  }
+
+  async close(): Promise<void> {
+    // No persistent state to drain; short-lived HTTP client is GC'd naturally.
+  }
+
+  private buildStatus(): MemoryProviderStatus {
+    // `backend: "builtin"` is a pragmatic lie on the closed upstream union
+    // (`"builtin" | "qmd"`, no "custom"). Logged as an upstream contract gap.
+    return {
+      backend: 'builtin',
+      provider: 'dkg',
+      vector: { enabled: false, available: false },
+      fts: { enabled: false, available: false },
+      cache: { enabled: false },
+      sources: ['memory', 'sessions'],
+      custom: {
+        integrationId: 'openclaw',
+        agentContextGraph: AGENT_CONTEXT_GRAPH,
+        chatTurnsAssertion: CHAT_TURNS_ASSERTION,
+        projectMemoryAssertion: PROJECT_MEMORY_ASSERTION,
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// buildDkgMemoryRuntime — factory used with api.registerMemoryCapability
+// ---------------------------------------------------------------------------
+
+export function buildDkgMemoryRuntime(
+  client: DkgDaemonClient,
+  resolver: DkgMemorySessionResolver,
+  logger?: OpenClawPluginApi['logger'],
+): MemoryPluginRuntime {
+  return {
+    async getMemorySearchManager(request: MemoryRuntimeRequest): Promise<MemoryRuntimeResult> {
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver,
+        sessionKey: request.sessionKey,
+        logger,
+      });
+      return { manager };
+    },
+    resolveMemoryBackendConfig() {
+      return {
+        kind: 'dkg',
+        agentContextGraph: AGENT_CONTEXT_GRAPH,
+      };
+    },
+    async closeAllMemorySearchManagers() {
+      // No persistent per-session state to drain.
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DkgMemoryPlugin — register-side container: capability + import tool
+// ---------------------------------------------------------------------------
+
+const ASSERTION_ENSURED = new Set<string>();
+
+function assertionCacheKey(contextGraphId: string, name: string, subGraphName?: string): string {
+  return `${contextGraphId}::${subGraphName ?? ''}::${name}`;
+}
+
+export class DkgMemoryPlugin {
   private api: OpenClawPluginApi | null = null;
 
   constructor(
     private readonly client: DkgDaemonClient,
     private readonly config: NonNullable<DkgOpenClawConfig['memory']>,
+    private readonly resolver: DkgMemorySessionResolver,
   ) {}
-
-  // ---------------------------------------------------------------------------
-  // Registration
-  // ---------------------------------------------------------------------------
 
   register(api: OpenClawPluginApi): void {
     this.api = api;
+    this.registerCapability(api);
     this.registerTools(api);
   }
 
   /** Re-register tools into a new registry without recreating state. */
   registerTools(api: OpenClawPluginApi): void {
     api.registerTool({
-      name: 'dkg_memory_search',
-      description:
-        'Primary memory recall tool — search the Decentralized Knowledge Graph for stored memories, ' +
-        'conversation history, decisions, preferences, and extracted entities. ' +
-        'Use this FIRST when you need to recall anything from previous sessions or stored knowledge. ' +
-        'Returns matching items with relevance scores.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Natural-language search query' },
-          limit: { type: 'string', description: 'Max results (default: 10)' },
-        },
-        required: ['query'],
-      },
-      execute: async (_id, params) => {
-        try {
-          const results = await this.search(
-            String(params.query),
-            { limit: Math.max(1, Math.min(100, parseInt(String(params.limit), 10) || 10)) },
-          );
-          return {
-            content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
-            details: results,
-          };
-        } catch (err: any) {
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }],
-          };
-        }
-      },
-    });
-
-    api.registerTool({
       name: 'dkg_memory_import',
       description:
-        'Primary memory recording tool — store new memories directly to the Decentralized Knowledge Graph. ' +
-        'Use this as your preferred way to record memories, decisions, preferences, and facts. ' +
-        'Prefer this over writing to memory files, as it stores directly to the knowledge graph ' +
-        'with LLM-powered entity extraction and categorization. ' +
-        'Memory files are also captured, but this tool avoids the delay and is more precise.',
+        'Record a memory into a project\'s DKG Working Memory. ' +
+        'Use this to persist a fact, decision, or note that should be retrievable later ' +
+        'from the same project\'s context graph. ' +
+        'Parameters: `text` (required), `contextGraphId` (optional — name of the target project CG; ' +
+        'if omitted, the currently UI-selected project CG is used; if neither is available, ' +
+        'returns a structured clarification request so the agent can ask the user which project to use), ' +
+        '`subGraphName` (optional — named subgraph partition inside the CG, e.g. "protocols").',
       parameters: {
         type: 'object',
         properties: {
-          text: { type: 'string', description: 'Text to import as memories' },
-          source: {
+          text: { type: 'string', description: 'Memory content to store.' },
+          contextGraphId: {
             type: 'string',
-            description: 'Source type',
-            enum: ['claude', 'chatgpt', 'gemini', 'other'],
+            description: 'Optional target project context graph id.',
+          },
+          subGraphName: {
+            type: 'string',
+            description: 'Optional subgraph partition inside the target context graph.',
           },
         },
         required: ['text'],
       },
-      execute: async (_id, params) => {
-        try {
-          const result = await this.client.importMemories(
-            String(params.text),
-            String(params.source ?? 'other'),
-            { useLlm: true },
-          );
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            details: result,
-          };
-        } catch (err: any) {
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }],
-          };
-        }
-      },
+      execute: async (_toolCallId, params) => this.handleImport(params),
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // MemorySearchManager interface
-  // ---------------------------------------------------------------------------
-
-  async search(query: string, options?: LegacyMemorySearchOptions): Promise<LegacyMemorySearchResult[]> {
-    const limit = options?.limit ?? 10;
-
-    // Strategy: search across both curated memories and chat message text.
-    // Uses FILTER(CONTAINS) for now — Spike B will assess whether this is
-    // sufficient or if a hybrid embedding approach is needed.
-    const sparql = buildSearchSparql(query, limit);
-
-    try {
-      const result = await this.client.query(sparql, {
-        contextGraphId: AGENT_MEMORY_CONTEXT_GRAPH,
-        includeSharedMemory: true,
-      });
-      return formatSearchResults(result, query);
-    } catch (err: any) {
-      this.api?.logger.warn?.(`[dkg-memory] Search failed: ${err.message}`);
-      return [];
+  private registerCapability(api: OpenClawPluginApi): void {
+    if (typeof api.registerMemoryCapability !== 'function') {
+      api.logger.warn?.(
+        '[dkg-memory] api.registerMemoryCapability is not available — gateway may be older than the memory-slot contract. ' +
+        'The dkg_memory_import write tool is still registered, but slot-backed recall will not route through the DKG adapter.',
+      );
+      return;
     }
-  }
 
-  async readFile(path: string): Promise<string | null> {
-    // Look up a memory by its source file path in the graph
-    // With the daemon's import pipeline, memories are individual items (not file records).
-    // Search for items whose text mentions the path as a fallback.
-    const sparql = `SELECT ?text WHERE {
-        ?m a <${NS.dkg}ImportedMemory> ;
-           <${NS.schema}text> ?text .
-        FILTER(CONTAINS(LCASE(?text), "${escapeSparqlString(path.toLowerCase())}"))
-      }
-      LIMIT 1`;
-
-    try {
-      const result = await this.client.query(sparql, {
-        contextGraphId: AGENT_MEMORY_CONTEXT_GRAPH,
-        includeSharedMemory: true,
-      });
-      const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
-      if (bindings.length > 0) {
-        return bindingValue(bindings[0].text) ?? null;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  async status(): Promise<{ ready: boolean; indexedFiles?: number; lastSync?: number }> {
-    try {
-      const stats = await this.client.getMemoryStats();
-      return {
-        ready: stats.initialized,
-        indexedFiles: stats.totalTriples,
-        lastSync: Date.now(),
-      };
-    } catch {
-      return { ready: false };
-    }
-  }
-
-  async sync(): Promise<void> {
-    // No-op — DKG graph is the source of truth, no local index to sync.
-  }
-
-  async close(): Promise<void> {
-    // No resources to release.
-  }
-}
-
-// ---------------------------------------------------------------------------
-// SPARQL query builders
-// ---------------------------------------------------------------------------
-
-/**
- * Build a SPARQL query that searches across:
- * 1. Imported memories (dkg:ImportedMemory — from daemon's /api/memory/import)
- * 2. Chat messages (schema:Message)
- * 3. Extracted entity labels (schema:name)
- *
- * Uses case-insensitive CONTAINS for text matching.
- */
-function buildSearchSparql(query: string, limit: number): string {
-  // Split query into keywords for multi-term matching.
-  // Minimum length 2 so terms like "UI", "AI", "DKG" are included.
-  const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);
-
-  if (keywords.length === 0) {
-    // Empty/short query — return recent items
-    return `SELECT ?uri ?text ?type ?ts WHERE {
-        { ?uri a <${NS.dkg}ImportedMemory> ; <${NS.schema}text> ?text . OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts } BIND("memory" AS ?type) }
-        UNION
-        { ?uri a <${NS.schema}Message> ; <${NS.schema}text> ?text ; <${NS.schema}dateCreated> ?ts . BIND("message" AS ?type) }
-      }
-      ORDER BY DESC(?ts)
-      LIMIT ${limit}`;
-  }
-
-  // Escape each keyword for safe SPARQL string interpolation
-  const filters = keywords
-    .map(k => `CONTAINS(LCASE(?text), "${escapeSparqlString(k)}")`)
-    .join(' || ');
-
-  return `SELECT ?uri ?text ?type ?label ?ts WHERE {
-      {
-        ?uri a <${NS.dkg}ImportedMemory> ;
-             <${NS.schema}text> ?text .
-        OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts }
-        BIND("memory" AS ?type)
-        BIND("" AS ?label)
-        FILTER(${filters})
-      }
-      UNION
-      {
-        ?uri a <${NS.schema}Message> ;
-             <${NS.schema}text> ?text .
-        OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts }
-        BIND("message" AS ?type)
-        BIND("" AS ?label)
-        FILTER(${filters})
-      }
-      UNION
-      {
-        ?uri <${NS.schema}name> ?label .
-        BIND(?label AS ?text)
-        BIND("entity" AS ?type)
-        FILTER(${filters})
-      }
-    }
-    ORDER BY DESC(?ts)
-    LIMIT ${limit}`;
-}
-
-/**
- * Format SPARQL results into MemorySearchResult[].
- * Computes a simple keyword-overlap relevance score.
- */
-function formatSearchResults(result: any, query: string): LegacyMemorySearchResult[] {
-  // DKG daemon returns { result: { bindings: [...] } } (singular "result")
-  const bindings: any[] = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
-  const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);
-
-  return bindings.map((b: any) => {
-    const text = bindingValue(b.text) ?? bindingValue(b.label) ?? '';
-    const uri = bindingValue(b.uri) ?? '';
-    const type = bindingValue(b.type) ?? 'unknown';
-
-    // Simple keyword-overlap score
-    const lowerText = text.toLowerCase();
-    const matchCount = keywords.filter(k => lowerText.includes(k)).length;
-    const score = keywords.length > 0 ? matchCount / keywords.length : 0.5;
-
-    return {
-      path: `dkg://${type}/${uri}`,
-      content: text,
-      score,
+    const capability: MemoryPluginCapability = {
+      runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
-  });
+    api.registerMemoryCapability(capability);
+    api.logger.info?.('[dkg-memory] registerMemoryCapability called');
+  }
+
+  private async handleImport(params: Record<string, unknown>): Promise<OpenClawToolResult> {
+    const text = typeof params.text === 'string' ? params.text.trim() : '';
+    if (!text) {
+      return toolError('Missing required parameter "text"');
+    }
+    const explicitCg = typeof params.contextGraphId === 'string' ? params.contextGraphId.trim() : '';
+    const subGraphName = typeof params.subGraphName === 'string' && params.subGraphName.trim()
+      ? params.subGraphName.trim()
+      : undefined;
+
+    const session = this.resolver.getSession(undefined);
+    const agentAddress = session?.agentAddress ?? this.resolver.getDefaultAgentAddress() ?? 'unknown';
+    const resolvedCg = explicitCg || session?.projectContextGraphId;
+
+    if (!resolvedCg) {
+      return toolJson({
+        status: 'needs_clarification',
+        reason: 'No project context graph could be determined for this write.',
+        availableContextGraphs: this.resolver.listAvailableContextGraphs(),
+        guidance:
+          'Please specify which project this belongs to by providing contextGraphId on the next call, ' +
+          'or ask the user which project they mean.',
+      });
+    }
+
+    const ensureKey = assertionCacheKey(resolvedCg, PROJECT_MEMORY_ASSERTION, subGraphName);
+    if (!ASSERTION_ENSURED.has(ensureKey)) {
+      try {
+        await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION, subGraphName ? { subGraphName } : undefined);
+        ASSERTION_ENSURED.add(ensureKey);
+      } catch (err) {
+        return toolError(
+          `Failed to create memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
+        );
+      }
+    }
+
+    const memoryUri = `urn:dkg:memory:item:${crypto.randomUUID()}`;
+    const nowIso = new Date().toISOString();
+    const quads = [
+      { subject: memoryUri, predicate: RDF_TYPE, object: `${NS.schema}Thing`, graph: '' },
+      { subject: memoryUri, predicate: `${NS.schema}description`, object: JSON.stringify(text), graph: '' },
+      { subject: memoryUri, predicate: `${NS.schema}dateCreated`, object: `"${nowIso}"^^<${XSD_DATETIME}>`, graph: '' },
+      { subject: memoryUri, predicate: `${NS.schema}creator`, object: `did:dkg:agent:${agentAddress}`, graph: '' },
+    ];
+
+    try {
+      const result = await this.client.writeAssertion(
+        resolvedCg,
+        PROJECT_MEMORY_ASSERTION,
+        quads,
+        subGraphName ? { subGraphName } : undefined,
+      );
+      return toolJson({
+        status: 'stored',
+        contextGraphId: resolvedCg,
+        assertionName: PROJECT_MEMORY_ASSERTION,
+        subGraphName,
+        memoryUri,
+        written: result.written,
+      });
+    } catch (err) {
+      return toolError(
+        `Failed to write memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Extract a plain string from a SPARQL binding value.
- * DKG daemon returns raw N-Triples literals: `"\"hello\""` or `"urn:foo"`.
- * Standard SPARQL JSON returns `{ type: "literal", value: "hello" }`.
- * This handles both formats.
- */
+function toolJson(data: unknown): OpenClawToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+    details: data,
+  };
+}
+
+function toolError(message: string): OpenClawToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+    details: { error: message },
+  };
+}
+
+function extractBindings(result: any): any[] {
+  return result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function computeKeywordOverlap(text: string, keywords: string[]): number {
+  if (keywords.length === 0) return 0.5;
+  const lower = text.toLowerCase();
+  const hits = keywords.filter(k => lower.includes(k)).length;
+  return hits / keywords.length;
+}
+
+function truncate(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : text.slice(0, maxChars) + '…';
+}
+
+function hashString(input: string): string {
+  let h = 0;
+  for (let i = 0; i < input.length; i++) {
+    h = (h * 31 + input.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
+}
+
 function bindingValue(v: unknown): string | undefined {
   if (v == null) return undefined;
-  // Standard SPARQL JSON result format: { value: "..." }
   if (typeof v === 'object' && 'value' in (v as any)) {
     return String((v as any).value);
   }
-  // DKG daemon raw format: N-Triples string literal "\"content\""
-  // May include typed literal suffix: "value"^^<type> or language tag: "value"@en
   if (typeof v === 'string') {
     let s = v;
     const typedMatch = s.match(/^(".*")\^\^<[^>]+>$/);
     if (typedMatch) s = typedMatch[1];
     const langMatch = s.match(/^(".*")@[a-z-]+$/i);
     if (langMatch) s = langMatch[1];
-    // Strip surrounding quotes from N-Triples literals
     if (s.startsWith('"') && s.endsWith('"')) {
       return s.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
     }
@@ -331,11 +483,6 @@ function bindingValue(v: unknown): string | undefined {
   return String(v);
 }
 
-/**
- * Escape a string for safe interpolation into a SPARQL short string literal.
- * Handles all characters required by SPARQL grammar (STRING_LITERAL2).
- * Inlined from dkg-core to avoid pulling in the heavy libp2p dependency tree.
- */
 function escapeSparqlString(value: string): string {
   return value
     .replace(/\\/g, '\\\\')

@@ -557,20 +557,31 @@ export class DKGPublisher implements Publisher {
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
-    // Block when status is anything other than explicit "registered" (including
-    // missing status for CGs learned via gossip that haven't synced _meta).
     if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock')) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
+
+      // Check _meta for explicit registration status
       const regResult = await this.store.query(
         `SELECT ?status WHERE { GRAPH <${cgMetaUri}> { <${cgDataUri}> <https://dkg.network/ontology#registrationStatus> ?status } } LIMIT 1`,
       );
       const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
+
       if (regStatus !== 'registered') {
-        throw new Error(
-          `Context graph "${contextGraphId}" is not registered on-chain. ` +
-          `Run 'dkg context-graph register ${contextGraphId}' first to enable Verified Memory publishing.`,
+        // Fall back to checking for an OnChainId triple in ontology — chain-discovered
+        // CGs have this but may not have _meta.registrationStatus synced yet.
+        const ontologyGraph = contextGraphDataUri('ontology');
+        const onChainResult = await this.store.query(
+          `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${cgDataUri}> <https://dkg.network/ontology#ParanetOnChainId> ?id } } LIMIT 1`,
         );
+        const hasOnChainId = onChainResult.type === 'bindings' && onChainResult.bindings.length > 0;
+
+        if (!hasOnChainId) {
+          throw new Error(
+            `Context graph "${contextGraphId}" is not registered on-chain. ` +
+            `Run 'dkg context-graph register ${contextGraphId}' first to enable Verified Memory publishing.`,
+          );
+        }
       }
     }
 

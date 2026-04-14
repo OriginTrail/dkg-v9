@@ -3,6 +3,7 @@ import {
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName,
   contextGraphSubGraphUri,
+  paranetMetaGraphUri, paranetDataGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -43,7 +44,7 @@ export class GossipPublishHandler {
     this.callbacks = callbacks;
   }
 
-  async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback): Promise<void> {
+  async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
     let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
@@ -96,11 +97,11 @@ export class GossipPublishHandler {
       const dataGraph = subGraphName
         ? contextGraphSubGraphUri(request.paranetId, subGraphName)
         : graphManager.dataGraphUri(request.paranetId);
-      // Preserve _meta graph URIs — they carry access control, registration
-      // status, and curator state that must land in the correct named graph.
-      let normalized = quads.map(q =>
-        q.graph.endsWith('/_meta') ? q : { ...q, graph: dataGraph },
-      );
+      // Drop any _meta quads from gossip — _meta state (allowlists, registration
+      // status, curator) is security-critical and must only propagate via the
+      // authenticated sync protocol, not unauthenticated gossip.
+      const filteredQuads = quads.filter(q => !q.graph.endsWith('/_meta'));
+      let normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
 
       // When receiving ontology-topic broadcasts, skip context graph definition
       // triples for context graphs we already have locally. This prevents duplicate
@@ -132,7 +133,12 @@ export class GossipPublishHandler {
                 .filter(q => duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)
                 .map(q => q.object),
             );
-            normalized = normalized.filter(q => !duplicateUris.has(q.subject) && !activityUris.has(q.subject));
+            // Keep dkg:creator triples for duplicates — the real creator's value
+            // should overwrite any placeholder written by ensureContextGraphLocal().
+            normalized = normalized.filter(q =>
+              (duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.DKG_CREATOR)
+              || (!duplicateUris.has(q.subject) && !activityUris.has(q.subject)),
+            );
           }
 
           for (const newId of newContextGraphIds) {
@@ -146,12 +152,19 @@ export class GossipPublishHandler {
               synced: true,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             });
-            this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: false });
-            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed`);
+            this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
+            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed (sync-enabled)`);
           }
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
+      } else if (fromPeerId) {
+        // For CG-specific topics, enforce peer allowlist (curated CGs).
+        const allowedPeers = await this.getContextGraphAllowedPeers(request.paranetId);
+        if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+          this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.paranetId}"`);
+          return;
+        }
       }
 
       // Structural validation (I-002): reject malformed gossip before inserting.
@@ -463,6 +476,19 @@ export class GossipPublishHandler {
       if (policyRef) relatedPolicyUris.add(policyRef);
     }
     return quads.filter(q => !invalidBindings.has(q.subject) && !relatedPolicyUris.has(q.subject));
+  }
+
+  private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    const cgMeta = paranetMetaGraphUri(contextGraphId);
+    const cgData = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    return result.bindings
+      .map(row => row['peer'])
+      .filter((v): v is string => typeof v === 'string')
+      .map(v => v.replace(/^"|"$/g, ''));
   }
 }
 

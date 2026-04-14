@@ -1838,9 +1838,9 @@ export class DKGAgent {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
-    this.gossip.onMessage(publishTopic, async (_topic, data) => {
+    this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
       const gph = this.getOrCreateGossipPublishHandler();
-      await gph.handlePublishMessage(data, contextGraphId);
+      await gph.handlePublishMessage(data, contextGraphId, undefined, from);
     });
 
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
@@ -2047,10 +2047,11 @@ export class DKGAgent {
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast ontology quads + _meta quads (registration status, curator,
-      // allowlist) so remote nodes can enforce access control and VM guards.
+      // Broadcast only ontology quads via gossip. Security-critical _meta state
+      // (allowlist, registration status, curator) propagates via the authenticated
+      // sync protocol — discovered CGs now enter sync scope automatically.
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph || q.graph === cgMetaGraph);
+      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
       const nquads = broadcastQuads.map(q => {
         const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
         return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
@@ -2165,16 +2166,15 @@ export class DKGAgent {
       sub.onChainId = onChainId;
     }
 
-    // Gossip registration status update so peers update their VM guards
+    // Registration status is in _meta — it propagates to peers via sync, not
+    // gossip, so that only the authenticated sync path can update it.
+    // Broadcast the ontology-graph OnChainId quad so peers see the link.
     try {
-      const regNquads = [
-        `<${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "registered" <${cgMetaGraph}> .`,
-        `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`,
-      ].join('\n');
+      const onChainNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const regMsg = encodePublishRequest({
         ual: `did:dkg:context-graph:${id}`,
-        nquads: new TextEncoder().encode(regNquads),
+        nquads: new TextEncoder().encode(onChainNquad),
         paranetId: SYSTEM_PARANETS.ONTOLOGY,
         kas: [],
         publisherIdentity: this.wallet.keypair.publicKey,
@@ -2224,27 +2224,8 @@ export class DKGAgent {
       graph: cgMetaGraph,
     }]);
 
-    // Gossip the invite so peers update their allowlists
-    try {
-      const inviteNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> "${escapedPeerId}" <${cgMetaGraph}> .`;
-      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const inviteMsg = encodePublishRequest({
-        ual: `did:dkg:context-graph:${contextGraphId}`,
-        nquads: new TextEncoder().encode(inviteNquad),
-        paranetId: SYSTEM_PARANETS.ONTOLOGY,
-        kas: [],
-        publisherIdentity: this.wallet.keypair.publicKey,
-        publisherAddress: '',
-        startKAId: 0,
-        endKAId: 0,
-        chainId: '',
-        publisherSignatureR: new Uint8Array(0),
-        publisherSignatureVs: new Uint8Array(0),
-      });
-      await this.gossip.publish(ontologyTopic, inviteMsg);
-    } catch {
-      // Peers may not be subscribed yet
-    }
+    // Allowlist updates are in _meta and propagate to peers via the
+    // authenticated sync protocol, not unauthenticated gossip.
 
     this.log.info(ctx, `Invited peer ${peerId} to context graph "${contextGraphId}"`);
   }

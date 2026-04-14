@@ -1113,30 +1113,42 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       expect(registeredCapability).not.toBeNull();
 
-      // Before any turn: resolver returns no projectContextGraphId for any sessionKey.
+      // Before any dispatch: resolver returns no projectContextGraphId for
+      // any sessionKey — the ALS store is empty outside of an active
+      // dispatch.
       const runtime = registeredCapability.runtime;
       const resultBefore = await runtime.getMemorySearchManager({ sessionKey: 'session-xyz' });
       expect(resultBefore.manager).toBeDefined();
 
-      // Reach into the channel plugin (private but accessible for tests) and
-      // stash a UI-selected CG on the sessionKey the slot will pass back.
-      // This simulates what DkgChannelPlugin.dispatchViaPluginSdk does just
-      // before dispatch fires.
       const channelPlugin = (plugin as any).channelPlugin as any;
       expect(channelPlugin).toBeDefined();
-      // Use the public setter path by calling the private method via bracket
-      // access — the test is asserting the composition, not the privacy model.
-      channelPlugin.sessionState.set('session-xyz', {
-        projectContextGraphId: 'research-x',
-        expiresAt: Date.now() + 60_000,
+
+      // Simulate a dispatch scope by running the memorySessionResolver
+      // lookup inside `channelPlugin.dispatchContext.run`, the same
+      // AsyncLocalStorage the real dispatch uses. Inside the scope the
+      // resolver sees the stashed CG; outside the scope it returns
+      // undefined. This mirrors what a real slot-backed tool call does
+      // during a live dispatch. Codex Bug B6.
+      const dispatchStore = {
+        uiContextGraphId: 'research-x',
+        sessionKey: 'session-xyz',
+        correlationId: 'corr-test',
+      };
+      const insideScope = channelPlugin.dispatchContext.run(dispatchStore, () => {
+        return (plugin as any).memorySessionResolver.getSession('session-xyz');
       });
+      expect(insideScope?.projectContextGraphId).toBe('research-x');
 
-      expect(channelPlugin.getSessionProjectContextGraphId('session-xyz')).toBe('research-x');
+      // Outside the scope: resolver returns a session with NO project CG.
+      const outsideScope = (plugin as any).memorySessionResolver.getSession('session-xyz');
+      expect(outsideScope?.projectContextGraphId).toBeUndefined();
 
-      // Now the resolver returns the stashed CG, and a manager constructed
-      // for this sessionKey will see it in its search resolver.
-      const session = (plugin as any).memorySessionResolver.getSession('session-xyz');
-      expect(session?.projectContextGraphId).toBe('research-x');
+      // And the channel plugin's own getter is scope-aware too.
+      expect(channelPlugin.getSessionProjectContextGraphId('session-xyz')).toBeUndefined();
+      const insideScopeGetter = channelPlugin.dispatchContext.run(dispatchStore, () => {
+        return channelPlugin.getSessionProjectContextGraphId('session-xyz');
+      });
+      expect(insideScopeGetter).toBe('research-x');
     } finally {
       await plugin.stop();
       globalThis.fetch = originalFetch;

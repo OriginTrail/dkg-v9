@@ -17,6 +17,7 @@
  * full context continuity.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
@@ -226,12 +227,30 @@ interface InboundChatOptions {
 }
 
 /**
- * Time a UI-selected context graph record sticks around in the channel
- * session-state map after the owning turn finishes. Long enough for
- * follow-up tool calls during the same dispatch to read it, short enough
- * that a stale entry does not leak across user sessions. Five minutes.
+ * Per-dispatch context propagated through Node's AsyncLocalStorage so that
+ * `DkgMemorySessionResolver.getSession(sessionKey)` — invoked by the
+ * memory-slot search manager from inside the dispatch call tree — can
+ * observe the UI-selected project context graph for the owning turn.
+ *
+ * Scoping via ALS rather than a shared `Map<sessionKey, state>` is
+ * load-bearing: OpenClaw can dispatch multiple overlapping turns on the
+ * same `sessionKey` (same user, same chat, same agent). A shared map
+ * keyed by `sessionKey` would let a later turn's stash clobber an
+ * earlier still-running turn's state, silently routing that turn's
+ * recall to the wrong project. ALS isolates each dispatch's store to
+ * its own async call tree regardless of sessionKey overlap.
+ *
+ * Codex Bug B6 — the TTL-based cache that preceded this ALS was scoped
+ * wrong.
  */
-const SESSION_STATE_TTL_MS = 5 * 60 * 1_000;
+interface DkgDispatchContext {
+  /** UI-selected project context graph stamped on the turn envelope. */
+  uiContextGraphId?: string;
+  /** The OpenClaw-resolved sessionKey this dispatch is running on. */
+  sessionKey?: string;
+  /** Turn correlation id, for diagnostics. */
+  correlationId?: string;
+}
 
 function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -275,16 +294,15 @@ export class DkgChannelPlugin {
     allowDuringShutdown: boolean;
   }>();
   /**
-   * Per-session state populated when an inbound turn stamps the UI-selected
-   * project context graph onto the dispatch. Keyed by the runtime's
-   * `sessionKey` once resolved, read by `DkgMemorySearchManager.search`
-   * (via the `DkgMemorySessionResolver` the node plugin injects) during
-   * the same dispatch. Entries expire after SESSION_STATE_TTL_MS.
+   * Per-dispatch AsyncLocalStorage holding the UI-selected project
+   * context graph for the currently-running turn. Populated by
+   * `runWithDispatchContext` at the start of each dispatch and read by
+   * `getSessionProjectContextGraphId` from inside the dispatch's async
+   * call tree. Automatically scoped to the dispatch — no explicit
+   * clear needed, concurrent turns on the same `sessionKey` cannot
+   * collide.
    */
-  private readonly sessionState = new Map<string, {
-    projectContextGraphId: string;
-    expiresAt: number;
-  }>();
+  private readonly dispatchContext = new AsyncLocalStorage<DkgDispatchContext>();
   private readonly port: number;
   private useGatewayRoute = false;
   private channelRegistered = false;
@@ -303,59 +321,51 @@ export class DkgChannelPlugin {
   }
 
   /**
-   * Read the UI-selected project context graph that was stamped on the
-   * dispatch for a given `sessionKey`. Used by `DkgMemorySessionResolver`
-   * inside `DkgNodePlugin` to scope slot-backed memory recall to the
-   * user's current project. Returns `undefined` when no state exists,
-   * the state has expired, or the caller passed an empty sessionKey.
+   * Read the UI-selected project context graph for the currently-running
+   * dispatch. Used by `DkgMemorySessionResolver` inside `DkgNodePlugin`
+   * to scope slot-backed memory recall to the user's current project.
+   *
+   * Implementation: reads from AsyncLocalStorage, so the value is only
+   * visible to code running inside the dispatch's async call tree. The
+   * `sessionKey` argument is used as a sanity check — if the dispatch
+   * stamped a different sessionKey than the caller is asking about, we
+   * return `undefined` rather than a mismatched CG. Tool calls made
+   * during the dispatch all share the same sessionKey, so the check
+   * costs nothing in practice.
+   *
+   * Returns `undefined` when:
+   * - the caller is not inside an active dispatch (no ALS store),
+   * - the dispatch carried no `uiContextGraphId` (non-UI turn, or user
+   *   deselected the project),
+   * - the caller's `sessionKey` does not match the dispatch's
+   *   `sessionKey` (defensive: indicates a misuse where the resolver
+   *   is being called from outside the owning dispatch's call tree).
    */
   getSessionProjectContextGraphId(sessionKey: string | undefined): string | undefined {
-    if (!sessionKey) return undefined;
-    const entry = this.sessionState.get(sessionKey);
-    if (!entry) return undefined;
-    if (entry.expiresAt < Date.now()) {
-      this.sessionState.delete(sessionKey);
+    const store = this.dispatchContext.getStore();
+    if (!store) return undefined;
+    if (!store.uiContextGraphId) return undefined;
+    if (sessionKey && store.sessionKey && sessionKey !== store.sessionKey) {
       return undefined;
     }
-    return entry.projectContextGraphId;
+    return store.uiContextGraphId;
   }
 
   /**
-   * Stash the UI-selected project context graph for a `sessionKey`. Called
-   * from `dispatchViaPluginSdk` once `route.sessionKey` is known and
-   * before dispatching the turn so that slot-backed tool calls during the
-   * same dispatch see it.
+   * Run `fn` inside an AsyncLocalStorage-scoped dispatch context so that
+   * any `getSessionProjectContextGraphId` call issued from inside `fn`
+   * (directly or via async descendants) observes the per-turn UI context
+   * graph. Scope is automatically cleared when `fn` resolves, rejects,
+   * or throws — no manual cleanup required.
+   *
+   * Concurrent dispatches on the same `sessionKey` each get their own
+   * isolated store; one cannot clobber another.
    */
-  private setSessionProjectContextGraphId(sessionKey: string, projectContextGraphId: string): void {
-    this.sessionState.set(sessionKey, {
-      projectContextGraphId,
-      expiresAt: Date.now() + SESSION_STATE_TTL_MS,
-    });
-    this.sweepExpiredSessionState();
-  }
-
-  /**
-   * Clear any previously-stashed UI-selected project context graph for a
-   * `sessionKey`. Called at the start of every dispatch when the incoming
-   * turn has no `uiContextGraphId` on the envelope — either because the
-   * user deselected their project in the node UI, or because the turn
-   * arrived from a non-UI channel (Telegram, CLI, etc.) that never
-   * populated the field. Without this call, a previous project selection
-   * would persist for the full 5-minute TTL and recall would silently
-   * scope to a stale project.
-   */
-  private clearSessionProjectContextGraphId(sessionKey: string): void {
-    this.sessionState.delete(sessionKey);
-    this.sweepExpiredSessionState();
-  }
-
-  private sweepExpiredSessionState(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.sessionState) {
-      if (entry.expiresAt < now) {
-        this.sessionState.delete(key);
-      }
-    }
+  private runWithDispatchContext<T>(
+    context: DkgDispatchContext,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return this.dispatchContext.run(context, fn);
   }
 
   // ---------------------------------------------------------------------------
@@ -782,22 +792,6 @@ export class DkgChannelPlugin {
       throw err;
     }
 
-    // Sync the UI-selected project context graph on the resolved sessionKey
-    // BEFORE dispatch fires, so slot-backed tool calls (via
-    // DkgMemorySearchManager.search → DkgMemorySessionResolver.getSession)
-    // during this dispatch can resolve it. If the turn does not carry a
-    // UI-selected CG (user deselected in the node UI, or turn arrived from
-    // a non-UI channel), CLEAR any previously-stashed CG so recall does
-    // not silently scope to a stale project for the full TTL window.
-    // Codex Bug B4.
-    if (route?.sessionKey) {
-      if (uiContextGraphId) {
-        this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
-      } else {
-        this.clearSessionProjectContextGraphId(route.sessionKey);
-      }
-    }
-
     // 2. Resolve store path for session files
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
 
@@ -848,15 +842,34 @@ export class DkgChannelPlugin {
       } : {}),
     };
 
-    // 5. Dispatch and collect reply
+    // 5. Dispatch and collect reply.
+    //
+    // Scope the entire dispatch call tree inside an AsyncLocalStorage
+    // context that carries the UI-selected project context graph for
+    // THIS turn. `DkgMemorySearchManager.search` (fired by the memory
+    // slot's tool calls during this dispatch) reads the CG via
+    // `getSessionProjectContextGraphId`, which reads from the ALS store.
+    // When this promise resolves/rejects the ALS scope is cleared
+    // automatically. Concurrent overlapping dispatches on the same
+    // sessionKey each get their own isolated store; one cannot clobber
+    // another. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     if (sdk?.dispatchInboundReplyWithBase) {
       log.info?.('[dkg-channel] Using plugin-sdk dispatchInboundReplyWithBase');
-      return this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId);
+      return this.runWithDispatchContext(dispatchContext, () =>
+        this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId),
+      );
     }
 
     // 6. Direct runtime dispatch fallback (no sdk)
     log.debug?.('[dkg-channel] Using direct runtime dispatch');
-    return this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId);
+    return this.runWithDispatchContext(dispatchContext, () =>
+      this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId),
+    );
   }
 
   private dispatchWithSdk(
@@ -1013,20 +1026,13 @@ export class DkgChannelPlugin {
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
     }
-    // Sync the UI-selected project context graph on the resolved sessionKey
-    // BEFORE dispatch fires so slot-backed tool calls during this stream
-    // dispatch can resolve it via DkgMemorySessionResolver. If the turn
-    // does not carry a UI-selected CG (user deselected in the node UI,
-    // or turn arrived from a non-UI channel), CLEAR any previously-stashed
-    // CG so recall does not silently scope to a stale project for the full
-    // TTL window. Codex Bug B4 (streaming-branch variant).
-    if (route?.sessionKey) {
-      if (uiContextGraphId) {
-        this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
-      } else {
-        this.clearSessionProjectContextGraphId(route.sessionKey);
-      }
-    }
+    // ALS-scoped dispatch context for this streaming turn — see the
+    // matching comment in dispatchViaPluginSdk. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
@@ -1108,7 +1114,9 @@ export class DkgChannelPlugin {
           ),
         );
 
-    const dispatchCompletion = dispatchFn()
+    // Run the dispatch inside the ALS scope so tool calls fired by the
+    // slot during streaming observe the UI-selected CG for this turn.
+    const dispatchCompletion = this.runWithDispatchContext(dispatchContext, dispatchFn)
       .then(() => {
         dispatchTerminal = 'done';
         push({ type: 'done' });

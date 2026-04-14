@@ -1410,11 +1410,30 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
-  it('processInbound stamps the UI-selected context graph onto the resolved sessionKey so slot-backed recall can resolve it', async () => {
-    const mockRuntime = {
+  // The following tests verify the ALS-scoped dispatch context (Codex Bug
+  // B6) which replaced the earlier TTL-based sessionState map. Each dispatch
+  // runs inside an AsyncLocalStorage scope; `getSessionProjectContextGraphId`
+  // is only observable from code running INSIDE the dispatch's async call
+  // tree. The test mocks grab the in-scope value from the dispatch callback
+  // (simulating what a real memory-slot tool call would do), then assert
+  // that after `processInbound` resolves the ALS has been torn down and the
+  // getter returns undefined from outside.
+
+  /**
+   * Construct a runtime mock that captures the value of
+   * `plugin.getSessionProjectContextGraphId(observedSessionKey)` from
+   * inside the dispatch callback — i.e. while the ALS scope is active.
+   */
+  function makeDispatchObservingRuntime(
+    plugin: DkgChannelPlugin,
+    sessionKey: string,
+    observedSessionKey: string,
+    capture: { inScope?: string | undefined },
+  ) {
+    return {
       channel: {
         routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-ui' }),
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey }),
         },
         session: {
           resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
@@ -1425,74 +1444,114 @@ describe('DkgChannelPlugin', () => {
           resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
           formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
           async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            // At this point the DkgChannelPlugin has already stashed the UI CG
-            // against the resolved sessionKey. The memory slot would fire here
-            // during dispatch and look it up via getSessionProjectContextGraphId.
+            // Simulate a memory-slot tool call happening during dispatch.
+            // Captured value lives in the outer closure so the test can
+            // assert on it after processInbound resolves.
+            capture.inScope = plugin.getSessionProjectContextGraphId(observedSessionKey);
             await params.dispatcherOptions.deliver({ text: 'ok' });
           },
         },
       },
     };
+  }
+
+  it('processInbound stamps the UI-selected context graph onto an ALS-scoped dispatch store that slot-backed recall can observe (Codex B6)', async () => {
+    const capture: { inScope?: string | undefined } = {};
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = makeDispatchObservingRuntime(plugin, 'session-ui', 'session-ui', capture);
     api.cfg = { session: { dmScope: 'main' }, agents: {} };
     vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
-    // Before the turn, the session state is empty.
+    // Before the turn, there is no active dispatch scope.
     expect(plugin.getSessionProjectContextGraphId('session-ui')).toBeUndefined();
 
     await plugin.processInbound('Hello', 'corr-stamp', 'owner', {
       uiContextGraphId: 'research-x',
     });
 
-    // After the turn, the stash is populated and readable by the resolver.
-    expect(plugin.getSessionProjectContextGraphId('session-ui')).toBe('research-x');
+    // While the dispatch was running the in-scope value was observable.
+    expect(capture.inScope).toBe('research-x');
+    // After the dispatch resolves the ALS has been torn down — no leak.
+    expect(plugin.getSessionProjectContextGraphId('session-ui')).toBeUndefined();
   });
 
-  it('processInbound leaves the session-state map untouched when no UI context graph is provided', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-no-ui' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn().mockResolvedValue(undefined),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'ok' });
-          },
-        },
-      },
-    };
+  it('processInbound yields no project CG in the dispatch scope when the turn carries no uiContextGraphId', async () => {
+    const capture: { inScope?: string | undefined } = {};
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = makeDispatchObservingRuntime(plugin, 'session-no-ui', 'session-no-ui', capture);
     api.cfg = { session: { dmScope: 'main' }, agents: {} };
     vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     await plugin.processInbound('Hello', 'corr-none', 'owner');
 
+    // No uiContextGraphId → scope store has no CG → resolver returns undefined.
+    expect(capture.inScope).toBeUndefined();
+    // And nothing leaks post-dispatch.
     expect(plugin.getSessionProjectContextGraphId('session-no-ui')).toBeUndefined();
   });
 
-  it('processInbound CLEARS a previously-stashed UI CG when a later turn arrives without uiContextGraphId (Codex B4)', async () => {
-    // Bug B4 regression guard: if turn 1 stamps a project CG on the
-    // sessionKey and turn 2 arrives with no uiContextGraphId (user
-    // deselected the project in the node UI, or turn arrived from a
-    // non-UI channel), the previous stash MUST be cleared so recall
-    // does not silently scope to the stale project for the full TTL
-    // window. Before the fix, the second turn's stash was a no-op
-    // and the stale CG persisted for 5 minutes.
+  it('dispatch scope auto-clears between turns — second turn on the same sessionKey without uiContextGraphId is NOT polluted by the first turn (Codex B4+B6)', async () => {
+    // Bug B4 regression guard, now enforced through the ALS lifecycle
+    // from Bug B6 rather than an explicit clear. Turn 1 stamps a project
+    // CG inside its dispatch scope; the resolver-reading dispatch callback
+    // observes it. Turn 2 arrives without uiContextGraphId on the SAME
+    // sessionKey; its dispatch callback observes undefined because each
+    // dispatch gets its own fresh ALS store, and turn 1's store was torn
+    // down when turn 1's dispatch promise resolved.
+    const capture1: { inScope?: string | undefined } = {};
+    const capture2: { inScope?: string | undefined } = {};
+    const api = makeApi() as any;
+    api.runtime = makeDispatchObservingRuntime(plugin, 'session-b4', 'session-b4', capture1);
+    api.cfg = { session: { dmScope: 'main' }, agents: {} };
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    // Turn 1: user has research-x selected in the UI.
+    await plugin.processInbound('first turn', 'corr-b4-1', 'owner', {
+      uiContextGraphId: 'research-x',
+    });
+    expect(capture1.inScope).toBe('research-x');
+
+    // Swap the dispatch observer for turn 2. Same sessionKey.
+    api.runtime = makeDispatchObservingRuntime(plugin, 'session-b4', 'session-b4', capture2);
+
+    // Turn 2: user deselected. NO uiContextGraphId on the envelope.
+    await plugin.processInbound('second turn', 'corr-b4-2', 'owner');
+
+    // Turn 2's dispatch callback saw undefined — not 'research-x'.
+    expect(capture2.inScope).toBeUndefined();
+    // And nothing leaks post-dispatch.
+    expect(plugin.getSessionProjectContextGraphId('session-b4')).toBeUndefined();
+  });
+
+  it('concurrent overlapping dispatches on the same sessionKey each see their OWN ALS store (Codex B6)', async () => {
+    // The critical B6 invariant: two dispatches that interleave on the
+    // same `sessionKey` must NOT clobber each other's UI-selected CG.
+    // AsyncLocalStorage gives each dispatch its own isolated store, so
+    // turn A's callback reads turn A's CG and turn B's callback reads
+    // turn B's CG even though they share the sessionKey and overlap in
+    // wall-clock time.
+    //
+    // The mock dispatch callback inspects a per-turn gate keyed by
+    // correlationId — turn A parks on its gate until turn B has
+    // completed, proving the scopes are isolated rather than shared.
+    const captures = new Map<string, string | undefined>();
+    const gates = new Map<string, Promise<void>>();
+    const gateResolvers = new Map<string, () => void>();
+
+    function prepareGate(correlationId: string): void {
+      const promise = new Promise<void>((resolve) => {
+        gateResolvers.set(correlationId, resolve);
+      });
+      gates.set(correlationId, promise);
+    }
+
     const mockRuntime = {
       channel: {
         routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-b4' }),
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-overlap' }),
         },
         session: {
           resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
@@ -1503,7 +1562,21 @@ describe('DkgChannelPlugin', () => {
           resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
           formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
           async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'ok' });
+            // Discriminate turn A vs turn B via the raw body text. The
+            // ctxPayload does not carry a correlationId field but it
+            // does preserve RawBody, which the test sets to `turn-A`
+            // or `turn-B`. Capture the in-scope CG BEFORE parking on
+            // the gate AND AFTER resuming, to prove both that the
+            // scope is present at entry and that it survives the
+            // await boundary with the correct value (not the value
+            // from the OTHER concurrent turn).
+            const ctx = params?.ctx ?? params?.ctxPayload ?? {};
+            const turnLabel: string = String(ctx.RawBody ?? '').trim();
+            captures.set(`${turnLabel}:pre-gate`, plugin.getSessionProjectContextGraphId('session-overlap'));
+            const gate = gates.get(turnLabel);
+            if (gate) await gate;
+            captures.set(`${turnLabel}:post-gate`, plugin.getSessionProjectContextGraphId('session-overlap'));
+            await params.dispatcherOptions.deliver({ text: `ok-${turnLabel}` });
           },
         },
       },
@@ -1514,15 +1587,37 @@ describe('DkgChannelPlugin', () => {
     vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
-    // Turn 1: user has project research-x selected in the UI.
-    await plugin.processInbound('first turn', 'corr-b4-1', 'owner', {
-      uiContextGraphId: 'research-x',
-    });
-    expect(plugin.getSessionProjectContextGraphId('session-b4')).toBe('research-x');
+    // Turn A parks on its gate. Turn B runs to completion without a gate.
+    prepareGate('turn-A');
 
-    // Turn 2: user deselects the project. The next turn arrives with
-    // NO uiContextGraphId on the envelope. The stash must be cleared.
-    await plugin.processInbound('second turn', 'corr-b4-2', 'owner');
-    expect(plugin.getSessionProjectContextGraphId('session-b4')).toBeUndefined();
+    const turnAPromise = plugin.processInbound('turn-A', 'corr-overlap-a', 'owner', {
+      uiContextGraphId: 'project-a',
+    });
+
+    // Yield so turn A enters its dispatch callback and parks on the gate
+    // before turn B starts.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Turn B runs to completion immediately on the same sessionKey.
+    await plugin.processInbound('turn-B', 'corr-overlap-b', 'owner', {
+      uiContextGraphId: 'project-b',
+    });
+
+    // Turn B observed project-b both before and after its (no-op) gate.
+    expect(captures.get('turn-B:pre-gate')).toBe('project-b');
+    expect(captures.get('turn-B:post-gate')).toBe('project-b');
+
+    // Release turn A. Its pre-gate capture happened BEFORE turn B
+    // started; its post-gate capture happens AFTER turn B completed.
+    // The critical B6 assertion: both captures still read 'project-a'
+    // even though turn B ran inside the same sessionKey with a
+    // different uiContextGraphId. If the previous TTL-based cache
+    // were still in use, turn A's post-gate capture would read
+    // 'project-b' because turn B would have overwritten the map entry.
+    // With ALS both captures are isolated by async call tree.
+    gateResolvers.get('turn-A')!();
+    await turnAPromise;
+    expect(captures.get('turn-A:pre-gate')).toBe('project-a');
+    expect(captures.get('turn-A:post-gate')).toBe('project-a');
   });
 });

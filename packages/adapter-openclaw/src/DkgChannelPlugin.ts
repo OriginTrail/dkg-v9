@@ -214,7 +214,7 @@ interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
   attachmentRefs?: OpenClawAttachmentRef[];
-  semanticWake?: SemanticEnrichmentWakeRequest;
+  projectContextGraphId?: string;
 }
 
 interface InboundChatOptions {
@@ -255,6 +255,27 @@ interface DkgDispatchContext {
   sessionKey?: string;
   /** Turn correlation id, for diagnostics. */
   correlationId?: string;
+}
+
+interface SemanticEnrichmentWakeEnvelope {
+  kind: 'semantic_enrichment';
+  eventKind: SemanticEnrichmentWakeRequest['kind'];
+  eventId: string;
+}
+
+function normalizeSemanticEnrichmentWakeEnvelope(raw: unknown): SemanticEnrichmentWakeEnvelope | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const kind = typeof record.kind === 'string' ? record.kind.trim() : '';
+  const eventKind = typeof record.eventKind === 'string' ? record.eventKind.trim() : '';
+  const eventId = typeof record.eventId === 'string' ? record.eventId.trim() : '';
+  if (kind !== 'semantic_enrichment') return null;
+  if ((eventKind !== 'chat_turn' && eventKind !== 'file_import') || !eventId) return null;
+  return {
+    kind: 'semantic_enrichment',
+    eventKind,
+    eventId,
+  };
 }
 
 function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
@@ -334,26 +355,6 @@ export class DkgChannelPlugin {
       this.semanticEnrichmentWorker.bind(this.api, this.client);
     }
     return this.semanticEnrichmentWorker;
-  }
-
-  private buildSemanticWakeRequest(
-    kind: SemanticEnrichmentWakeRequest['kind'],
-    correlationId: string,
-    triggerSource: SemanticEnrichmentWakeRequest['triggerSource'],
-    context: {
-      uiContextGraphId?: string;
-      sessionKey?: string;
-      payload?: Record<string, unknown>;
-    },
-  ): SemanticEnrichmentWakeRequest {
-    return {
-      kind,
-      eventKey: correlationId,
-      triggerSource,
-      uiContextGraphId: context.uiContextGraphId,
-      sessionKey: context.sessionKey,
-      payload: context.payload,
-    };
   }
 
   private noteSemanticWake(request: SemanticEnrichmentWakeRequest): void {
@@ -498,9 +499,21 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      api.registerHttpRoute({
+        method: 'POST',
+        path: '/api/dkg-channel/semantic-enrichment/wake',
+        auth: 'gateway',
+        handler: (req: any, res: any) => {
+          void this.handleGatewaySemanticWakeRoute(req, res).catch((err) => {
+            this.handleUnexpectedGatewayError(res, err);
+          });
+        },
+      });
       this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
-      log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
+      log.info?.(
+        '[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health, POST /api/dkg-channel/semantic-enrichment/wake',
+      );
     }
 
     // Start the bridge server immediately so it's ready to receive
@@ -783,19 +796,10 @@ export class DkgChannelPlugin {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
-        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
-          uiContextGraphId,
-          payload: {
-            userMessage: text,
-            assistantReply: reply.text,
-            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
-          },
-        });
-        this.noteSemanticWake(semanticWake);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
-          semanticWake,
+          projectContextGraphId: uiContextGraphId,
         }, true);
         return reply;
       } catch (err: any) {
@@ -830,18 +834,9 @@ export class DkgChannelPlugin {
           correlationId,
         } as any),
       );
-      const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
-        uiContextGraphId,
-        payload: {
-          userMessage: text,
-          assistantReply: reply.text,
-          attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
-        },
-      });
-      this.noteSemanticWake(semanticWake);
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
-        semanticWake,
+        projectContextGraphId: uiContextGraphId,
       }, true);
       return reply;
     }
@@ -1254,59 +1249,37 @@ export class DkgChannelPlugin {
       }
 
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
-        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
-          uiContextGraphId,
-          sessionKey: route?.sessionKey,
-          payload: {
-            userMessage: text,
-            assistantReply: resolvedFinalText,
-            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
-          },
-        });
-        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
-          semanticWake,
+          projectContextGraphId: uiContextGraphId,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
         const failedReply = this.buildFailedAssistantReply(resolvedFailureReason);
-        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
-          uiContextGraphId,
-          sessionKey: route?.sessionKey,
-          payload: {
-            userMessage: text,
-            assistantReply: failedReply,
-            failureReason: resolvedFailureReason,
-            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
-          },
-        });
-        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(
           text,
           failedReply,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs, semanticWake },
+          {
+            persistenceState: 'failed',
+            failureReason: resolvedFailureReason,
+            attachmentRefs,
+            projectContextGraphId: uiContextGraphId,
+          },
           true,
         );
       } else {
-        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
-          uiContextGraphId,
-          sessionKey: route?.sessionKey,
-          payload: {
-            userMessage: text,
-            assistantReply: CANCELLED_TURN_MESSAGE,
-            failureReason: 'cancelled',
-            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
-          },
-        });
-        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(
           text,
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs, semanticWake },
+          {
+            persistenceState: 'failed',
+            failureReason: 'cancelled',
+            attachmentRefs,
+            projectContextGraphId: uiContextGraphId,
+          },
           true,
         );
       }
@@ -1499,7 +1472,7 @@ export class DkgChannelPlugin {
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
-    const persisted = await this.client.storeChatTurn(
+    await this.client.storeChatTurn(
       sessionId,
       userMessage,
       assistantReply,
@@ -1508,21 +1481,9 @@ export class DkgChannelPlugin {
         ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
         ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
-        ...(opts?.semanticWake?.uiContextGraphId ? { projectContextGraphId: opts.semanticWake.uiContextGraphId } : {}),
+        ...(opts?.projectContextGraphId ? { projectContextGraphId: opts.projectContextGraphId } : {}),
       },
     );
-    if (opts?.semanticWake) {
-      this.noteSemanticWake({
-        ...opts.semanticWake,
-        triggerSource: 'background',
-        payload: {
-          ...(opts.semanticWake.payload ?? {}),
-          userMessage,
-          assistantReply,
-          semanticEnrichmentEventId: persisted?.semanticEnrichment?.eventId,
-        },
-      });
-    }
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
 
@@ -1608,6 +1569,11 @@ export class DkgChannelPlugin {
 
     if (req.method === 'POST' && req.url === '/inbound/stream') {
       await this.handleInboundStreamHttp(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/semantic-enrichment/wake') {
+      await this.handleSemanticEnrichmentWakeHttp(req, res);
       return;
     }
 
@@ -1803,6 +1769,48 @@ export class DkgChannelPlugin {
     }
   }
 
+  private async handleGatewaySemanticWakeRoute(req: any, res: any): Promise<void> {
+    try {
+      const payload = normalizeSemanticEnrichmentWakeEnvelope(
+        typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req)),
+      );
+      if (!payload) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
+        return;
+      }
+      this.handleSemanticEnrichmentWake(payload);
+      res.writeHead?.(200, { 'Content-Type': 'application/json' });
+      res.end?.(JSON.stringify({ ok: true }));
+    } catch {
+      res.writeHead?.(400, { 'Content-Type': 'application/json' });
+      res.end?.(JSON.stringify({ error: 'Invalid JSON body' }));
+    }
+  }
+
+  private async handleSemanticEnrichmentWakeHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.authorizeBridgeRequest(req, res)) return;
+    try {
+      const payload = normalizeSemanticEnrichmentWakeEnvelope(JSON.parse(await readBody(req)));
+      if (!payload) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
+        return;
+      }
+      this.handleSemanticEnrichmentWake(payload);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err: any) {
+      if (err?.message === 'Request body too large') {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Request body too large' }));
+        return;
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+    }
+  }
+
   private authorizeBridgeRequest(req: IncomingMessage, res: ServerResponse): boolean {
     const expectedToken = this.client.getAuthToken();
     if (!expectedToken) {
@@ -1837,6 +1845,14 @@ export class DkgChannelPlugin {
 
   get isUsingGatewayRoute(): boolean {
     return this.useGatewayRoute;
+  }
+
+  private handleSemanticEnrichmentWake(payload: SemanticEnrichmentWakeEnvelope): void {
+    this.noteSemanticWake({
+      kind: payload.eventKind,
+      eventKey: payload.eventId,
+      triggerSource: 'daemon',
+    });
   }
 }
 

@@ -586,6 +586,8 @@ export class DkgNodePlugin {
     const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
 
+    const existingWakeUrl = existing?.wakeUrl?.trim();
+    const existingWakeAuth = existing?.wakeAuth;
     const gatewayBaseUrl = this.resolveGatewayBaseUrl(
       api,
       this.channelPlugin.isUsingGatewayRoute ? undefined : existing?.gatewayUrl,
@@ -595,8 +597,10 @@ export class DkgNodePlugin {
     }
 
     const bridgePort = this.channelPlugin.bridgePort;
+    let liveBridgeUrl: string | undefined;
     if (bridgePort > 0) {
       transport.bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+      liveBridgeUrl = transport.bridgeUrl;
       transport.healthUrl = `${transport.bridgeUrl}/health`;
     } else {
       const existingBridgeUrl = existing?.bridgeUrl?.trim();
@@ -606,6 +610,22 @@ export class DkgNodePlugin {
       }
       if (existingHealthUrl) {
         transport.healthUrl = existingHealthUrl;
+      }
+    }
+
+    if (liveBridgeUrl) {
+      transport.wakeUrl = `${liveBridgeUrl}/semantic-enrichment/wake`;
+      transport.wakeAuth = 'bridge-token';
+    } else if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
+      transport.wakeUrl = `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`;
+      transport.wakeAuth = 'gateway';
+    } else if (transport.bridgeUrl) {
+      transport.wakeUrl = `${transport.bridgeUrl}/semantic-enrichment/wake`;
+      transport.wakeAuth = 'bridge-token';
+    } else if (existingWakeUrl) {
+      transport.wakeUrl = existingWakeUrl;
+      if (existingWakeAuth) {
+        transport.wakeAuth = existingWakeAuth;
       }
     }
 

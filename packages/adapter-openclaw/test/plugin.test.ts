@@ -158,6 +158,8 @@ describe('DkgNodePlugin', () => {
       expect(readyBody.setupEntry).toBe('./setup-entry.mjs');
       expect(readyBody.transport.kind).toBe('openclaw-channel');
       expect(readyBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(readyBody.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
+      expect(readyBody.transport.wakeAuth).toBe('bridge-token');
       expect(readyBody.runtime).toMatchObject({
         status: 'ready',
         ready: true,
@@ -214,6 +216,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:19789',
+          wakeUrl: 'http://127.0.0.1:19789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
         },
         metadata: {
           transportMode: 'gateway+bridge',
@@ -224,6 +228,9 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:19789',
+          bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {
@@ -322,6 +329,8 @@ describe('DkgNodePlugin', () => {
           kind: 'openclaw-channel',
           bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
           healthUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/health$/),
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
       expect(JSON.parse(String(readyCall?.[1]?.body)).transport.gatewayUrl).toBeUndefined();
@@ -391,6 +400,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'https://localhost:18789',
+          wakeUrl: 'https://localhost:18789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
         },
       });
     } finally {
@@ -458,6 +469,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:18789',
+          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
         },
       });
     } finally {
@@ -523,6 +536,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:18789',
+          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
         },
       });
     } finally {
@@ -1151,7 +1166,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(fullRuntimeApi);
 
       expect(registerChannel).toHaveBeenCalledTimes(1);
-      expect(registerHttpRoute).toHaveBeenCalledTimes(2);
+      expect(registerHttpRoute).toHaveBeenCalledTimes(3);
     } finally {
       await plugin.stop();
       globalThis.fetch = originalFetch;

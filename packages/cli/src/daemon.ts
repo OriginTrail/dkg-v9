@@ -1655,6 +1655,17 @@ export interface OpenClawChannelTarget {
   healthUrl?: string;
 }
 
+export interface LocalAgentIntegrationWakeRequest {
+  kind: 'semantic_enrichment';
+  eventKind: 'chat_turn' | 'file_import';
+  eventId: string;
+}
+
+export interface LocalAgentIntegrationWakeResult {
+  status: 'delivered' | 'skipped' | 'failed';
+  reason?: string;
+}
+
 function trimTrailingSlashes(value: string): string {
   let end = value.length;
   while (end > 0 && value.charCodeAt(end - 1) === 47) {
@@ -1696,6 +1707,10 @@ function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrationTran
   if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
   if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
   if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
+  if (typeof input.wakeUrl === 'string' && input.wakeUrl.trim()) transport.wakeUrl = trimTrailingSlashes(input.wakeUrl.trim());
+  if (input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none') {
+    transport.wakeAuth = input.wakeAuth;
+  }
   return Object.keys(transport).length > 0 ? transport : undefined;
 }
 
@@ -2049,6 +2064,8 @@ function transportPatchFromOpenClawTarget(
       kind: 'openclaw-channel',
       bridgeUrl: bridgeBase,
       ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+      wakeUrl: `${bridgeBase}/semantic-enrichment/wake`,
+      wakeAuth: 'bridge-token',
     };
   }
 
@@ -2062,7 +2079,59 @@ function transportPatchFromOpenClawTarget(
     kind: 'openclaw-channel',
     gatewayUrl,
     ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+    wakeUrl: `${gatewayUrl}/api/dkg-channel/semantic-enrichment/wake`,
+    wakeAuth: 'gateway',
   };
+}
+
+export async function notifyLocalAgentIntegrationWake(
+  config: DkgConfig,
+  integrationId: string,
+  wake: LocalAgentIntegrationWakeRequest,
+  bridgeAuthToken?: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<LocalAgentIntegrationWakeResult> {
+  const integration = getLocalAgentIntegration(config, integrationId);
+  if (!integration?.enabled) {
+    return { status: 'skipped', reason: 'integration_disabled' };
+  }
+
+  const wakeUrl = integration.transport?.wakeUrl?.trim();
+  if (!wakeUrl) {
+    return { status: 'skipped', reason: 'wake_unavailable' };
+  }
+
+  const wakeAuth = integration.transport?.wakeAuth ?? 'none';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (wakeAuth === 'bridge-token') {
+    if (!bridgeAuthToken?.trim()) {
+      return { status: 'failed', reason: 'missing_bridge_token' };
+    }
+    headers['x-dkg-bridge-token'] = bridgeAuthToken.trim();
+  }
+
+  try {
+    const response = await fetchImpl(wakeUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(wake),
+      signal: AbortSignal.timeout(1_000),
+    });
+    if (!response.ok) {
+      return {
+        status: 'failed',
+        reason: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`.trim(),
+      };
+    }
+    return { status: 'delivered' };
+  } catch (err: any) {
+    return {
+      status: 'failed',
+      reason: err?.message ?? String(err),
+    };
+  }
 }
 
 export async function probeOpenClawChannelHealth(
@@ -4052,6 +4121,22 @@ async function handleRequest(
           projectContextGraphId: normalizedProjectContextGraphId,
         }),
       );
+      void notifyLocalAgentIntegrationWake(
+        config,
+        'openclaw',
+        {
+          kind: 'semantic_enrichment',
+          eventKind: 'chat_turn',
+          eventId: semanticEnrichment.eventId,
+        },
+        bridgeAuthToken,
+      ).then((result) => {
+        if (result.status === 'failed') {
+          console.warn(
+            `[semantic-enrichment] Failed to wake local agent integration "openclaw" for chat event ${semanticEnrichment.eventId}: ${result.reason ?? 'unknown error'}`,
+          );
+        }
+      });
       return jsonResponse(res, 200, { ok: true, turnId: normalizedTurnId, semanticEnrichment });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
@@ -6005,6 +6090,22 @@ async function handleRequest(
         assertionUri,
         semanticEnrichment,
       );
+      void notifyLocalAgentIntegrationWake(
+        config,
+        'openclaw',
+        {
+          kind: 'semantic_enrichment',
+          eventKind: 'file_import',
+          eventId: semanticEnrichment.eventId,
+        },
+        bridgeAuthToken,
+      ).then((result) => {
+        if (result.status === 'failed') {
+          console.warn(
+            `[semantic-enrichment] Failed to wake local agent integration "openclaw" for file event ${semanticEnrichment.eventId}: ${result.reason ?? 'unknown error'}`,
+          );
+        }
+      });
 
       return respondWithImportFileResponse(200, {
         status: "completed",

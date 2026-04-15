@@ -62,7 +62,7 @@ describe('SemanticEnrichmentWorker', () => {
     expect(probe.subagent).toBeNull();
   });
 
-  it('dedupes direct and background wakes while executing work only through the daemon lease queue', async () => {
+  it('dedupes repeated daemon wakes by event id while executing work only through the daemon lease queue', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
         event: {
@@ -144,21 +144,21 @@ describe('SemanticEnrichmentWorker', () => {
 
     worker.noteWake({
       kind: 'chat_turn',
-      eventKey: 'turn-123',
-      triggerSource: 'direct',
+      eventKey: 'evt-1',
+      triggerSource: 'daemon',
       uiContextGraphId: 'project-42',
       payload: { userMessage: 'hello' },
     });
     worker.noteWake({
       kind: 'chat_turn',
-      eventKey: 'turn-123',
-      triggerSource: 'background',
-      uiContextGraphId: 'project-42',
+      eventKey: 'evt-1',
+      triggerSource: 'daemon',
       payload: { assistantReply: 'hi' },
     });
 
     expect(worker.getPendingSummaries()).toHaveLength(1);
-    expect(worker.getPendingSummaries()[0].triggerSources.sort()).toEqual(['background', 'direct']);
+    expect(worker.getPendingSummaries()[0].eventKey).toBe('evt-1');
+    expect(worker.getPendingSummaries()[0].triggerSources).toEqual(['daemon']);
 
     await worker.flush();
 
@@ -232,8 +232,8 @@ describe('SemanticEnrichmentWorker', () => {
 
     worker.noteWake({
       kind: 'chat_turn',
-      eventKey: 'turn-456',
-      triggerSource: 'direct',
+      eventKey: 'evt-2',
+      triggerSource: 'daemon',
     });
     await worker.flush();
 
@@ -317,7 +317,7 @@ describe('SemanticEnrichmentWorker', () => {
     worker.noteWake({
       kind: 'file_import',
       eventKey: 'evt-file-1',
-      triggerSource: 'background',
+      triggerSource: 'daemon',
     });
     await worker.flush();
 
@@ -336,6 +336,7 @@ describe('SemanticEnrichmentWorker', () => {
         },
       ],
     );
+    expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
   it('uses the explicit ontologyRef as a replace-only override for file import prompts', async () => {
@@ -407,7 +408,7 @@ describe('SemanticEnrichmentWorker', () => {
     worker.noteWake({
       kind: 'file_import',
       eventKey: 'evt-file-2',
-      triggerSource: 'background',
+      triggerSource: 'daemon',
     });
     await worker.flush();
 
@@ -417,5 +418,6 @@ describe('SemanticEnrichmentWorker', () => {
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: override');
     expect(run.mock.calls[0]?.[0]?.message).toContain('Graph: did:dkg:context-graph:project-2/custom-ontology');
+    expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 });

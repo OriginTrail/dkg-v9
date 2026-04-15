@@ -733,6 +733,8 @@ interface LocalAgentIntegrationRecord {
     bridgeUrl?: string;
     gatewayUrl?: string;
     healthUrl?: string;
+    wakeUrl?: string;
+    wakeAuth?: 'bridge-token' | 'gateway' | 'none';
   };
   runtime?: {
     status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
@@ -890,7 +892,8 @@ function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boole
   return Boolean(
     record.transport?.bridgeUrl
     || record.transport?.gatewayUrl
-    || record.transport?.healthUrl,
+    || record.transport?.healthUrl
+    || record.transport?.wakeUrl,
   );
 }
 

@@ -14,6 +14,7 @@ import {
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
+  notifyLocalAgentIntegrationWake,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
@@ -253,6 +254,149 @@ describe('OpenClaw channel routing helpers', () => {
     await proxyPromise;
 
     expect(secondReadCalled).toBe(true);
+  });
+});
+
+describe('local agent semantic wake helper', () => {
+  const wakePayload = {
+    kind: 'semantic_enrichment' as const,
+    eventKind: 'chat_turn' as const,
+    eventId: 'evt-wake-1',
+  };
+
+  it('skips when the target integration is disabled or has no wake url', async () => {
+    await expect(
+      notifyLocalAgentIntegrationWake(makeConfig(), 'openclaw', wakePayload, 'bridge-token', vi.fn() as any),
+    ).resolves.toEqual({ status: 'skipped', reason: 'integration_disabled' });
+
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn() as any,
+      ),
+    ).resolves.toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+  });
+
+  it('applies bridge-token auth when the wake transport requires it', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:9301/semantic-enrichment/wake',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-dkg-bridge-token': 'bridge-token',
+        }),
+      }),
+    );
+  });
+
+  it('uses gateway wake auth mode without sending the bridge token header', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+              wakeAuth: 'gateway',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+      expect.objectContaining({
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  });
+
+  it('returns a failed wake result on fetch errors or non-2xx responses without throwing', async () => {
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+                wakeAuth: 'bridge-token',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn().mockResolvedValue(new Response('nope', { status: 503, statusText: 'Service Unavailable' })) as any,
+      ),
+    ).resolves.toEqual({ status: 'failed', reason: 'HTTP 503 Service Unavailable' });
+
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+                wakeAuth: 'bridge-token',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn().mockRejectedValue(new Error('wake offline')) as any,
+      ),
+    ).resolves.toEqual({ status: 'failed', reason: 'wake offline' });
   });
 });
 
@@ -891,6 +1035,8 @@ describe('local agent integration registry helpers', () => {
           transport: {
             kind: 'openclaw-channel',
             bridgeUrl: 'http://127.0.0.1:9201',
+            wakeUrl: 'http://127.0.0.1:9201/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
           },
         },
       },
@@ -919,6 +1065,8 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(result.integration.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
@@ -966,6 +1114,8 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.metadata?.userDisabled).toBe(false);
+    expect(result.integration.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
@@ -1066,6 +1216,8 @@ describe('local agent integration registry helpers', () => {
           transport: {
             kind: 'openclaw-channel',
             bridgeUrl: 'http://127.0.0.1:9201',
+            wakeUrl: 'http://127.0.0.1:9201/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
           },
         },
       },
@@ -1105,6 +1257,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.enabled).toBe(true);
     expect(integration?.status).toBe('error');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(integration?.transport.wakeAuth).toBe('bridge-token');
     expect(saveConfig).toHaveBeenCalled();
   });
 
@@ -1214,6 +1368,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(integration?.transport.wakeAuth).toBe('bridge-token');
     expect(saveConfig).toHaveBeenCalled();
   });
 
@@ -1443,6 +1599,7 @@ describe('local agent integration registry helpers', () => {
 
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
     expect(integration.transport.gatewayUrl).toBeUndefined();
+    expect(integration.transport.wakeUrl).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
   });

@@ -10,7 +10,7 @@ import type {
 import type { OpenClawPluginApi, OpenClawRuntimeSubagent } from './types.js';
 
 export type SemanticEnrichmentWakeKind = 'chat_turn' | 'file_import';
-export type SemanticEnrichmentWakeTrigger = 'direct' | 'background';
+export type SemanticEnrichmentWakeTrigger = 'daemon';
 
 export interface SemanticEnrichmentWakeRequest {
   kind: SemanticEnrichmentWakeKind;
@@ -258,6 +258,9 @@ export class SemanticEnrichmentWorker {
         this.scheduleDrain();
         return;
       }
+      // Daemon-triggered wakes are the primary low-latency path; the periodic
+      // poll remains as the recovery sweep for missed wakes, restarts, and
+      // reclaimed leases.
       this.scheduleTick(CLAIM_POLL_INTERVAL_MS);
     });
   }
@@ -280,9 +283,7 @@ export class SemanticEnrichmentWorker {
   }
 
   private clearWakeSummary(event: SemanticEnrichmentEventLease): void {
-    if (event.payload.kind === 'chat_turn') {
-      this.pending.delete(event.payload.turnId);
-    }
+    this.pending.delete(event.id);
   }
 
   private async processClaimedEvent(

@@ -17,6 +17,7 @@ import {
   notifyLocalAgentIntegrationWake,
   canQueueLocalAgentSemanticEnrichment,
   queueLocalAgentSemanticEnrichmentBestEffort,
+  fileImportSourceIdentityMatchesCurrentState,
   normalizeOntologyQuadObjectInput,
   parseRequiredSignatures,
   pipeOpenClawStream,
@@ -439,14 +440,32 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
-  it('treats the built-in OpenClaw definition as semantic-capable once the integration is enabled', () => {
+  it('allows semantic queueing for already-ready OpenClaw records before explicit capability re-registration lands', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
         openclaw: {
           enabled: true,
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
         },
       },
     }), 'openclaw')).toBe(true);
+  });
+
+  it('does not queue semantic jobs during first-attach connecting state without explicit capability support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          runtime: {
+            status: 'connecting',
+            ready: false,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
   });
 
   it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {
@@ -573,6 +592,38 @@ describe('best-effort semantic enqueue helper', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('Failed to enqueue chat turn test'),
     );
+  });
+});
+
+describe('file import semantic source identity matching', () => {
+  const payload = {
+    kind: 'file_import' as const,
+    contextGraphId: 'cg1',
+    assertionName: 'roadmap',
+    assertionUri: 'did:dkg:context-graph:cg1/assertion/peer/roadmap',
+    importStartedAt: '2026-04-15T12:00:00.000Z',
+    fileHash: 'sha256:file-1',
+    mdIntermediateHash: 'sha256:md-1',
+    detectedContentType: 'text/markdown',
+  };
+
+  it('accepts the current assertion only when file and markdown hashes still match the queued job', () => {
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-1',
+    })).toBe(true);
+  });
+
+  it('rejects replaced or discarded assertion state when the source identity no longer matches', () => {
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, null)).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-2',
+      mdIntermediateHash: 'sha256:md-1',
+    })).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-2',
+    })).toBe(false);
   });
 });
 

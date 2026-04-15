@@ -1609,7 +1609,6 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
       dkgPrimaryMemory: true,
       wmImportPipeline: true,
       nodeServedSkill: true,
-      semanticEnrichment: true,
     },
     manifest: {
       packageName: '@origintrail-official/dkg-adapter-openclaw',
@@ -2162,9 +2161,17 @@ export function canQueueLocalAgentSemanticEnrichment(
   config: DkgConfig,
   integrationId: string,
 ): boolean {
-  const integration = getLocalAgentIntegration(config, integrationId);
-  return integration?.enabled === true
-    && integration.capabilities?.semanticEnrichment === true;
+  const normalizedId = normalizeIntegrationId(integrationId);
+  const stored = getStoredLocalAgentIntegrations(config)[normalizedId];
+  if (!stored?.enabled) return false;
+  if (stored.capabilities?.semanticEnrichment === false) return false;
+  if (stored.capabilities?.semanticEnrichment === true) return true;
+  if (normalizedId === 'openclaw') {
+    return stored.runtime?.ready === true
+      || stored.runtime?.status === 'ready'
+      || stored.runtime?.status === 'degraded';
+  }
+  return false;
 }
 
 export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
@@ -3454,6 +3461,44 @@ async function readCurrentSemanticTripleCount(
   return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
 }
 
+function normalizeQueriedLiteralValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.replace(/[<>]/g, '').trim();
+  return trimmed || undefined;
+}
+
+async function readCurrentFileImportSourceIdentity(
+  agent: Pick<DKGAgent, 'store'>,
+  contextGraphId: string,
+  assertionUri: string,
+): Promise<{ fileHash?: string; mdIntermediateHash?: string } | null> {
+  const result = await agent.store.query(`
+    SELECT ?fileHash ?mdIntermediateHash WHERE {
+      GRAPH <${contextGraphMetaUri(contextGraphId)}> {
+        OPTIONAL { <${assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash . }
+        OPTIONAL { <${assertionUri}> <http://dkg.io/ontology/mdIntermediateHash> ?mdIntermediateHash . }
+      }
+    }
+    LIMIT 1
+  `) as { bindings?: Array<Record<string, unknown>> };
+  const binding = result?.bindings?.[0];
+  if (!binding) return null;
+  return {
+    fileHash: normalizeQueriedLiteralValue(binding.fileHash),
+    mdIntermediateHash: normalizeQueriedLiteralValue(binding.mdIntermediateHash),
+  };
+}
+
+export function fileImportSourceIdentityMatchesCurrentState(
+  payload: FileImportSemanticEventPayload,
+  current: { fileHash?: string; mdIntermediateHash?: string } | null,
+): boolean {
+  if (!current?.fileHash || current.fileHash !== payload.fileHash) return false;
+  const queuedMdHash = payload.mdIntermediateHash?.trim() || undefined;
+  const currentMdHash = current.mdIntermediateHash?.trim() || undefined;
+  return currentMdHash === queuedMdHash;
+}
+
 async function readSemanticProvenanceTripleCount(
   agent: Pick<DKGAgent, 'store'>,
   graph: string,
@@ -4388,6 +4433,34 @@ async function handleRequest(
       );
       return jsonResponse(res, 200, { event: null });
     }
+    if (eventPayload.kind === 'file_import') {
+      const currentSource = await readCurrentFileImportSourceIdentity(
+        agent,
+        eventPayload.contextGraphId,
+        eventPayload.assertionUri,
+      );
+      if (!fileImportSourceIdentityMatchesCurrentState(eventPayload, currentSource)) {
+        dashDb.failSemanticEnrichmentEvent(
+          claimed.id,
+          leaseOwner,
+          claimed.max_attempts,
+          claimed.max_attempts,
+          now,
+          now,
+          'Queued semantic source no longer matches the current assertion state',
+        );
+        const updated = dashDb.getSemanticEnrichmentEvent(claimed.id);
+        if (updated) {
+          updateExtractionStatusSemanticDescriptor(
+            extractionStatus,
+            dashDb,
+            eventPayload.assertionUri,
+            semanticEnrichmentDescriptorFromRow(updated),
+          );
+        }
+        return jsonResponse(res, 200, { event: null });
+      }
+    }
     return jsonResponse(res, 200, {
       event: {
         id: claimed.id,
@@ -4549,6 +4622,41 @@ async function handleRequest(
     const extractedAt = new Date(now).toISOString();
     const targetGraph = eventPayload.assertionUri;
     const sourceRef = semanticEnrichmentSourceRef(eventPayload);
+    if (eventPayload.kind === 'file_import') {
+      const currentSource = await readCurrentFileImportSourceIdentity(
+        agent,
+        eventPayload.contextGraphId,
+        eventPayload.assertionUri,
+      );
+      if (!fileImportSourceIdentityMatchesCurrentState(eventPayload, currentSource)) {
+        dashDb.failSemanticEnrichmentEvent(
+          eventId,
+          leaseOwner,
+          row.max_attempts,
+          row.max_attempts,
+          now,
+          now,
+          'Queued semantic source no longer matches the current assertion state',
+        );
+        const updated = dashDb.getSemanticEnrichmentEvent(eventId);
+        if (updated) {
+          const descriptor = semanticEnrichmentDescriptorFromRow(updated);
+          updateExtractionStatusSemanticDescriptor(
+            extractionStatus,
+            dashDb,
+            eventPayload.assertionUri,
+            descriptor,
+          );
+          return jsonResponse(res, 409, {
+            error: 'Semantic enrichment source no longer matches the current assertion state',
+            semanticEnrichment: descriptor,
+          });
+        }
+        return jsonResponse(res, 409, {
+          error: 'Semantic enrichment source no longer matches the current assertion state',
+        });
+      }
+    }
     const alreadyApplied = await semanticEnrichmentAlreadyApplied(agent, targetGraph, eventId);
     let semanticTripleCount = eventPayload.kind === 'file_import'
       ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)

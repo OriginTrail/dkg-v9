@@ -3791,9 +3791,15 @@ async function handleRequest(
       const sel: "all" | { rootEntities: string[] } = Array.isArray(selection)
         ? { rootEntities: selection }
         : selection || "all";
-      const resolvedPublishContextGraphId = publishContextGraphId != null
-        ? String(publishContextGraphId)
-        : await agent.getContextGraphOnChainId(paranetId);
+      let resolvedPublishContextGraphId: string | null = null;
+      if (publishContextGraphId != null) {
+        resolvedPublishContextGraphId = String(publishContextGraphId);
+      } else if (!subGraphName) {
+        const onChainId = await agent.getContextGraphOnChainId(paranetId);
+        if (onChainId && /^\d+$/.test(onChainId)) {
+          resolvedPublishContextGraphId = onChainId;
+        }
+      }
       const result = await tracker.trackPhase(ctx, "read-shared-memory", () =>
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,

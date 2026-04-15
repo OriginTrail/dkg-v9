@@ -2042,10 +2042,17 @@ export class DKGAgent {
       });
     }
     if (participantIdentityIds.size > 0 && typeof opts.requiredSignatures === 'number' && opts.requiredSignatures > 0) {
+      const reqSig = Math.floor(opts.requiredSignatures);
+      if (reqSig < 1) {
+        throw new Error(`requiredSignatures must be >= 1, got ${opts.requiredSignatures}`);
+      }
+      if (reqSig > participantIdentityIds.size) {
+        throw new Error(`requiredSignatures (${reqSig}) exceeds participant count (${participantIdentityIds.size})`);
+      }
       quads.push({
         subject: paranetUri,
         predicate: `${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures`,
-        object: `"${opts.requiredSignatures}"`,
+        object: `"${reqSig}"`,
         graph: cgMetaGraph,
       });
     }
@@ -2195,14 +2202,32 @@ export class DKGAgent {
       ? Number(requiredSignaturesResult.bindings[0]?.['required']?.replace(/^"|"$/g, ''))
       : NaN;
 
+    // Check if already registered on-chain (prevents duplicate minting)
+    const existingOnChainId = await this.getContextGraphOnChainId(id);
+    if (existingOnChainId) {
+      this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
+      await this.store.deleteByPattern({
+        graph: cgMetaGraph,
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+      });
+      await this.store.insert([
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+      ]);
+      return { onChainId: existingOnChainId, txHash: undefined };
+    }
+
+    // Use V10 participant-based registration only when explicitly configured
+    // with a RequiredSignatures threshold or multiple participants beyond the
+    // creator. A single creator identity is NOT sufficient — that's the
+    // default for every CG and should use legacy registration.
+    const useV10MultiSig = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0;
+
     let onChainId: string;
-    if (participantIdentityIds.length > 0) {
-      const requiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
-        ? storedRequiredSignatures
-        : 1;
+    if (useV10MultiSig && participantIdentityIds.length > 0) {
       const result = await this.registerContextGraphOnChain({
         participantIdentityIds,
-        requiredSignatures,
+        requiredSignatures: storedRequiredSignatures,
       });
       onChainId = result.contextGraphId.toString();
     } else {

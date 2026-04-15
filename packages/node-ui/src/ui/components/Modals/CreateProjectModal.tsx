@@ -58,7 +58,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     setError(null);
     setProgress('Registering project on the network…');
 
-    const finalSlug = `${slugify(trimmedName)}-${Date.now().toString(36)}`;
+    const finalSlug = slugify(trimmedName);
     const resolvedAddr = agentAddress ?? '0x0000000000000000000000000000000000000000';
     const cgId = `${resolvedAddr}/${finalSlug}`;
 

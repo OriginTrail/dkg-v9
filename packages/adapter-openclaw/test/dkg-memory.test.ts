@@ -261,6 +261,44 @@ describe('DkgMemoryPlugin.register', () => {
     expect(opts.view).toBe('working-memory');
   });
 
+  it('dkg_memory_search compat tool populates a legacy `content` field alongside the new `snippet` (Codex B55)', async () => {
+    // B55: the retired pre-workstream tool returned result items in
+    // the shape `{ path: string, content: string, score?: number }`.
+    // The new `MemorySearchResult` shape is
+    // `{ path, startLine, endLine, score, snippet, source, citation? }`
+    // — `snippet` instead of `content`. Legacy prompts / older
+    // gateways parsing `details[i].content` would see `undefined`
+    // without a compat mapping. The fix adds an additive `content`
+    // alias that mirrors `snippet`, so both shapes work on the
+    // compat tool.
+    vi.spyOn(client, 'query').mockResolvedValue({
+      result: {
+        bindings: [
+          { uri: { value: 'urn:m:1' }, text: { value: 'alpha beta legacy shape test' } },
+        ],
+      },
+    });
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    const result = await searchTool.execute('call-1', { query: 'alpha beta' });
+    expect(Array.isArray(result.details)).toBe(true);
+    expect(result.details.length).toBeGreaterThan(0);
+    const item = (result.details as any[])[0];
+    // Legacy shape: `content` must be present and non-undefined.
+    expect(typeof item.content).toBe('string');
+    expect(item.content).toContain('alpha beta legacy shape test');
+    // New shape: `snippet` must still be present and equal `content`.
+    expect(item.snippet).toBe(item.content);
+    // Legacy callers still get `path` and `score`.
+    expect(typeof item.path).toBe('string');
+    expect(typeof item.score).toBe('number');
+  });
+
   it('dkg_memory_search compat tool preserves the retired tool\'s raw-array details envelope (Codex B36)', async () => {
     // B36: the retired pre-workstream `dkg_memory_search` tool returned
     // `{ content: [{ type: 'text', text: JSON.stringify(results) }],

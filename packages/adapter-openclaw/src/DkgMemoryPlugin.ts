@@ -642,20 +642,25 @@ export class DkgMemoryPlugin {
       const results = await manager.search(query, { maxResults, minScore });
       // B36: The retired pre-workstream `dkg_memory_search` tool returned
       // `{ content: [{ type: 'text', text: JSON.stringify(results) }],
-      // details: results }` — the raw array was the `details` payload,
-      // and callers parsing the legacy envelope expect `details` to be
-      // an array of results. Wrapping success in `{ status, results }`
-      // via `toolJson` broke that contract: `details` became the
-      // envelope object, not the raw array, and any legacy prompt / host
-      // destructuring `details` as a result array silently got the
-      // wrong shape. Return the raw array as `details` directly from
-      // the compat path to match the retired tool's envelope exactly.
-      // New metadata is still additive via the JSON serialization in
-      // `content[0].text` (single array form), but the `details`
-      // field stays pure for programmatic consumers.
+      // details: results }` — the raw array was the `details` payload.
+      //
+      // B55: The retired tool's item shape was also different —
+      // `{ path: string, content: string, score?: number }` — whereas
+      // the new `MemorySearchResult` shape is `{ path, startLine,
+      // endLine, score, snippet, source, citation? }`. Old callers
+      // parsing `details[i].content` would now see `undefined` because
+      // the result text lives in the `snippet` field. Map the compat
+      // results to a shape that satisfies BOTH the legacy and new
+      // contracts: start from the new-shape item (so forward-compat
+      // callers still read `snippet`, `startLine`, `endLine`, `source`,
+      // etc.) and add a `content` alias that mirrors `snippet` so
+      // legacy callers get their expected field back. Additive layering
+      // rather than a field rename avoids breaking new consumers that
+      // are already on the new shape.
+      const compatResults = results.map((r) => ({ ...r, content: r.snippet }));
       return {
-        content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
-        details: results,
+        content: [{ type: 'text', text: JSON.stringify(compatResults, null, 2) }],
+        details: compatResults,
       };
     } catch (err) {
       return toolError(`Memory search failed: ${errorMessage(err)}`);

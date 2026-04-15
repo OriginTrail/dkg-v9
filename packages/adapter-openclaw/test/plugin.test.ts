@@ -1459,16 +1459,25 @@ describe('DkgNodePlugin', () => {
     });
   });
 
-  describe('context-graph cache filter on subscribed + non-system (Codex B51)', () => {
-    it('caches only entries with subscribed=true AND isSystem=false', async () => {
+  describe('context-graph cache filter on synced + non-system (Codex B51 + B54)', () => {
+    it('caches only entries with synced=true AND isSystem=false (includes local private CGs per B54)', async () => {
       // B51: `agent.listContextGraphs()` returns every known CG —
       // including system paranets (ontology, agents registry) and
-      // discovered-but-not-subscribed graphs. The cache is the
+      // discovered-but-not-synced ontology entries. The cache is the
       // needs_clarification availability list AND the B42 / B46 / B48
       // subscribed-project allowlist for `dkg_memory_import`, so
-      // including non-subscribed or system entries would advertise
-      // targets the node has not joined. The refresh now filters on
-      // both flags.
+      // including non-locally-usable or system entries would advertise
+      // targets the node cannot actually write to.
+      //
+      // B54: local private CGs are legitimately recorded as
+      // `subscribed: false, synced: true` by `createContextGraph({
+      // private: true })` (agent/src/dkg-agent.ts:2041-2045). B51's
+      // original strict `subscribed === true` filter dropped these
+      // and broke `dkg_memory_import` writes against legitimate
+      // private targets. The relaxed filter uses `synced === true`
+      // to accept both public-subscribed AND local-private while
+      // still excluding system paranets and discovered-but-not-
+      // synced entries.
       const fetchFn = vi.fn(async (input: any, _init?: any) => {
         const url = typeof input === 'string' ? input : input?.url ?? '';
         if (url.includes('/api/status')) {
@@ -1481,16 +1490,16 @@ describe('DkgNodePlugin', () => {
           return new Response(
             JSON.stringify({
               contextGraphs: [
-                // Valid: subscribed and non-system → cached
-                { id: 'research-subscribed', subscribed: true, isSystem: false },
-                // System paranet → filtered out
-                { id: 'ontology', subscribed: true, isSystem: true },
-                // Discovered but not subscribed → filtered out
-                { id: 'research-unsubscribed', subscribed: false, isSystem: false },
+                // Valid: public subscribed, synced, non-system → cached
+                { id: 'research-public', subscribed: true, synced: true, isSystem: false },
+                // System paranet → filtered out (isSystem)
+                { id: 'ontology', subscribed: true, synced: true, isSystem: true },
+                // Subscribed but not yet synced (gossip subscribe lag) → filtered out
+                { id: 'research-syncing', subscribed: true, synced: false, isSystem: false },
                 // Reserved graph name → filtered out (pre-existing guard)
-                { id: 'agent-context', subscribed: true, isSystem: false },
-                // Another valid entry → cached
-                { id: 'research-second', subscribed: true, isSystem: false },
+                { id: 'agent-context', subscribed: true, synced: true, isSystem: false },
+                // B54 case: local PRIVATE CG, subscribed=false, synced=true → cached
+                { id: 'research-private', subscribed: false, synced: true, isSystem: false },
               ],
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1524,10 +1533,11 @@ describe('DkgNodePlugin', () => {
 
         const resolver = (plugin as any).memorySessionResolver;
         const cached = resolver.listAvailableContextGraphs();
-        // Only the two subscribed + non-system entries, in the order
-        // the daemon returned them (reserved name and the others
-        // filtered).
-        expect(cached).toEqual(['research-subscribed', 'research-second']);
+        // Only the two synced + non-system + non-reserved entries:
+        // public subscribed and local private. Ontology (system),
+        // subscribed-but-unsynced, and agent-context (reserved) are
+        // all filtered.
+        expect(cached).toEqual(['research-public', 'research-private']);
       } finally {
         await plugin.stop();
         globalThis.fetch = originalFetch;
@@ -1564,13 +1574,13 @@ describe('DkgNodePlugin', () => {
         if (url.includes('/api/context-graph/list')) {
           listCallCount++;
           await listGate;
-          // B51: the refresh now filters on `subscribed: true` and
+          // B51 + B54: the refresh now filters on `synced: true` and
           // `!isSystem`, so the mock entry has to carry both flags to
           // end up in the cache.
           return new Response(
             JSON.stringify({
               contextGraphs: [
-                { id: 'research-b49-fresh', subscribed: true, isSystem: false },
+                { id: 'research-b49-fresh', subscribed: true, synced: true, isSystem: false },
               ],
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },

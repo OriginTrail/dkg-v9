@@ -618,21 +618,51 @@ export class DkgNodePlugin {
                 ? entry.contextGraphId
                 : undefined;
             if (!id || id === 'agent-context') continue;
-            // B51: `agent.listContextGraphs()` returns every context graph
-            // the node knows about — including system paranets (ontology,
-            // agents registry) and non-subscribed discovered graphs. This
-            // cache is the `needs_clarification` availability list AND the
-            // B42 / B46 / B48 subscribed-project allowlist for
-            // `dkg_memory_import`, so including non-subscribed or system
-            // entries would let the tool advertise or accept a target the
-            // node has not actually joined. `createAssertion` /
-            // `writeAssertion` against an unsubscribed graph would then
-            // fail at the daemon layer, producing a confusing late error
-            // instead of the structured clarification we return upstream.
-            // Filter on `subscribed === true` AND `!isSystem` — the two
-            // flags the agent's listing already provides per
-            // `packages/agent/src/dkg-agent.ts:3541-3600`.
-            if (entry?.subscribed !== true) continue;
+            // B51 + B54: `agent.listContextGraphs()` returns every context
+            // graph the node knows about — including system paranets
+            // (ontology, agents registry), locally-created private CGs,
+            // public local CGs, subscribed gossip CGs, and discovered-
+            // but-not-subscribed ontology entries. Each entry carries
+            // `subscribed: boolean`, `synced: boolean`, and
+            // `isSystem: boolean` flags (per
+            // `packages/agent/src/dkg-agent.ts:3541-3620`).
+            //
+            // This cache is the `needs_clarification` availability list
+            // AND the B42 / B46 / B48 subscribed-project allowlist for
+            // `dkg_memory_import`, so the filter shape matters:
+            //
+            //   - B51 (initial filter) used `subscribed === true`, which
+            //     correctly excluded system paranets and discovered-not-
+            //     subscribed entries.
+            //   - B54 (this fix) discovered that `createContextGraph({
+            //     private: true })` records local private CGs as
+            //     `subscribed: false` (see dkg-agent.ts:2041-2045, the
+            //     `subscribed: !opts.private` line). My strict B51 filter
+            //     therefore dropped private CGs from the allowlist, and
+            //     `dkg_memory_import` hard-rejected them as "not in the
+            //     subscribed project list" even though they are the most
+            //     obvious legitimate write target for a local agent.
+            //
+            // Relax the filter to `synced === true && !isSystem`. Every
+            // locally usable CG — public subscribed, local public,
+            // local private — has `synced: true` in the listing. System
+            // paranets also have `synced: true` but are filtered by the
+            // `isSystem` check. Discovered-but-not-yet-synced gossip
+            // entries (subscribed via `subscribe()` but not yet
+            // data-synced) have `synced: false` and are excluded until
+            // sync lands.
+            //
+            // Tradeoff: this is more permissive than B51 and could
+            // include discovered-but-not-subscribed ontology entries
+            // that happen to have triples locally. The alternative
+            // (restricting to `subscribed: true`) is strictly worse
+            // because it creates a correctness regression for private
+            // local CGs — a first-class feature, not an edge case.
+            // Discovered-but-not-subscribed writes either succeed at
+            // the daemon layer (local-only assertion) or fail with a
+            // daemon error, neither of which is as bad as a hard-block
+            // on legitimate private writes.
+            if (entry?.synced !== true) continue;
             if (entry?.isSystem === true) continue;
             ids.push(id);
           }

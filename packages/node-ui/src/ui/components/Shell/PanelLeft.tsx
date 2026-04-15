@@ -5,6 +5,7 @@ import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
+import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
 import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
 
 const CHEVRON_ICON = '▸';
@@ -112,6 +113,7 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showJoinModal, setShowJoinModal] = useState(false);
   const [importTarget, setImportTarget] = useState<ContextGraph | null>(null);
 
   const loadCGs = useCallback(() => {
@@ -167,7 +169,10 @@ export function PanelLeft() {
           )}
 
           {contextGraphs.length > 0 && (
-            <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New</button>
+              <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join</button>
+            </div>
           )}
 
           {contextGraphs.length === 0 && stage <= 1 && (
@@ -214,6 +219,7 @@ export function PanelLeft() {
       )}
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
+      <JoinProjectModal open={showJoinModal} onClose={() => setShowJoinModal(false)} />
       {importTarget && (
         <ImportFilesModal
           open

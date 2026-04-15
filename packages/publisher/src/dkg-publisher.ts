@@ -1873,6 +1873,14 @@ export class DKGPublisher implements Publisher {
     });
     await this.store.insert(lifecycleQuads);
 
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: 'http://dkg.io/ontology/memoryLayer',
+      object: '"WM"',
+      graph: metaGraph,
+    }]);
+
     return graphUri;
   }
 
@@ -2100,6 +2108,21 @@ export class DKGPublisher implements Publisher {
       ? quadsToPromote.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
       : quadsToPromote;
     await this.store.delete(effectivePromoteQuads.map((q) => ({ ...q, graph: graphUri })));
+
+    // Update the assertion's memory layer from WM → SWM in _meta
+    const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
+    const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+    await this.store.deleteByPattern({
+      graph: assertionMetaGraph,
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+    });
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+      object: '"SWM"',
+      graph: assertionMetaGraph,
+    }]);
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
     const entities = [...new Set(effectiveQuads.map((q) => q.subject))];

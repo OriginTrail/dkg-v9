@@ -327,7 +327,7 @@ const lastUpdateCheck = {
 };
 let isUpdating = false;
 
-type CatchupJobState = "queued" | "running" | "done" | "failed";
+type CatchupJobState = "queued" | "running" | "done" | "failed" | "denied";
 
 interface CatchupJobResult {
   connectedPeers: number;
@@ -1055,6 +1055,25 @@ async function runDaemonInner(
     }
   });
 
+  agent.eventBus.on(DKGEvent.JOIN_REQUEST_RECEIVED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: "join_request",
+        title: "Join request received",
+        message: `${data.agentName ?? shortId(data.agentAddress)} wants to join project ${shortId(data.contextGraphId)}`,
+        source: "access-control",
+        meta: JSON.stringify({
+          contextGraphId: data.contextGraphId,
+          agentAddress: data.agentAddress,
+          agentName: data.agentName,
+        }),
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
   const agentToolsContext = {
     query: (
       sparql: string,
@@ -1150,6 +1169,11 @@ async function runDaemonInner(
     (validTokens.size > 0
       ? (validTokens.values().next().value as string)
       : undefined);
+  // Register per-agent Bearer tokens so the auth guard accepts them
+  for (const a of agent.listLocalAgents()) {
+    validTokens.add(a.authToken);
+  }
+
   if (authEnabled) {
     log(
       `API authentication enabled (${validTokens.size} token${validTokens.size !== 1 ? "s" : ""} loaded)`,
@@ -1424,6 +1448,7 @@ async function runDaemonInner(
         assertionImportLocks,
         vectorStore,
         embeddingProvider,
+        validTokens,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -2875,9 +2900,16 @@ async function handleRequest(
   assertionImportLocks: Map<string, Promise<void>>,
   vectorStore: VectorStore,
   embeddingProvider: EmbeddingProvider | null,
+  validTokens: Set<string>,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
+
+  // Resolve the requesting agent's address from the Bearer token.
+  // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
+  // fall back to the default owner agent.
+  const requestToken = extractBearerToken(req.headers.authorization);
+  const requestAgentAddress = agent.resolveAgentAddress(requestToken);
 
   // GET /.well-known/skill.md — Agent Skills document (PUBLIC, no auth)
   if (req.method === "GET" && path === "/.well-known/skill.md") {
@@ -3016,6 +3048,48 @@ async function handleRequest(
       direct,
       relayed: connections.length - direct,
       connections,
+    });
+  }
+
+  // POST /api/agent/register — register a new agent on this node
+  if (req.method === "POST" && path === "/api/agent/register") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const { name, publicKey, framework } = parsed;
+    if (!name || typeof name !== "string") {
+      return jsonResponse(res, 400, { error: 'Missing required field "name"' });
+    }
+    try {
+      const record = await agent.registerAgent(name, { publicKey, framework });
+      validTokens.add(record.authToken);
+      const response: Record<string, unknown> = {
+        agentAddress: record.agentAddress,
+        authToken: record.authToken,
+        mode: record.mode,
+      };
+      if (record.mode === "custodial") {
+        response.publicKey = record.publicKey;
+        response.privateKey = record.privateKey;
+      }
+      return jsonResponse(res, 200, response);
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message });
+    }
+  }
+
+  // GET /api/agent/identity — current agent identity for the requesting token
+  if (req.method === "GET" && path === "/api/agent/identity") {
+    const token = extractBearerToken(req.headers.authorization);
+    const agentAddress = agent.resolveAgentAddress(token);
+    const localAgents = agent.listLocalAgents();
+    const current = localAgents.find((a) => a.agentAddress === agentAddress);
+    return jsonResponse(res, 200, {
+      agentAddress,
+      agentDid: `did:dkg:agent:${agentAddress}`,
+      name: current?.name ?? agent.nodeName,
+      framework: current?.framework ?? agent.nodeFramework,
+      peerId: agent.peerId,
+      nodeIdentityId: String(agent.publisher.getIdentityId()),
     });
   }
 
@@ -4085,7 +4159,7 @@ async function handleRequest(
       }
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedPeers, register } = parsed;
+    const { id, name, description, allowedAgents, allowedPeers, publishPolicy, accessPolicy, register } = parsed;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -4095,7 +4169,9 @@ async function handleRequest(
         id,
         name,
         description,
-        ...(allowedPeers ? { allowedPeers } : {}),
+        allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
+        allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
+        accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
         ...(parsed.private === true ? { private: true } : {}),
         ...(Array.isArray(parsed.participantIdentityIds)
           ? { participantIdentityIds: parsed.participantIdentityIds.map((v: string | number) => BigInt(v)) }
@@ -4508,7 +4584,7 @@ async function handleRequest(
       );
       const assertionUri = contextGraphAssertionUri(
         contextGraphId,
-        agent.peerId,
+        requestAgentAddress,
         assertionName,
         subGraphName,
       );
@@ -4698,7 +4774,7 @@ async function handleRequest(
 
     const assertionUri = contextGraphAssertionUri(
       contextGraphId!,
-      agent.peerId,
+      requestAgentAddress,
       assertionName,
       subGraphName,
     );
@@ -4836,7 +4912,7 @@ async function handleRequest(
               filePath: fileStoreEntry.path,
               contentType: detectedContentType,
               ontologyRef,
-              agentDid: `did:dkg:agent:${agent.peerId}`,
+              agentDid: `did:dkg:agent:${requestAgentAddress}`,
             });
             mdIntermediate = md;
             pipelineUsed = detectedContentType;
@@ -5008,7 +5084,7 @@ async function handleRequest(
       // safety checks.
       const assertionGraph = contextGraphAssertionUri(
         contextGraphId!,
-        agent.peerId,
+        requestAgentAddress,
         assertionName,
         subGraphName,
       );
@@ -5519,7 +5595,7 @@ async function handleRequest(
 
     const assertionUri = contextGraphAssertionUri(
       contextGraphId!,
-      agent.peerId,
+      requestAgentAddress,
       assertionName,
       subGraphName,
     );
@@ -5753,6 +5829,147 @@ async function handleRequest(
     }
   }
 
+  // POST /api/context-graph/{id}/add-participant
+  const addParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/add-participant$/);
+  if (req.method === "POST" && addParticipantMatch) {
+    const contextGraphId = decodeURIComponent(addParticipantMatch[1]);
+    const body = await readBody(req);
+    const { agentAddress } = JSON.parse(body);
+    if (!agentAddress || typeof agentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress is required' });
+    }
+    try {
+      await agent.inviteAgentToContextGraph(contextGraphId, agentAddress);
+      return jsonResponse(res, 200, { ok: true, contextGraphId, agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/remove-participant
+  const removeParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/remove-participant$/);
+  if (req.method === "POST" && removeParticipantMatch) {
+    const contextGraphId = decodeURIComponent(removeParticipantMatch[1]);
+    const body = await readBody(req);
+    const { agentAddress } = JSON.parse(body);
+    if (!agentAddress || typeof agentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress is required' });
+    }
+    try {
+      await agent.removeAgentFromContextGraph(contextGraphId, agentAddress);
+      return jsonResponse(res, 200, { ok: true, contextGraphId, agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/participants
+  const listParticipantsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/participants$/);
+  if (req.method === "GET" && listParticipantsMatch) {
+    const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
+    try {
+      const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
+      return jsonResponse(res, 200, { contextGraphId, allowedAgents: agents });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/request-join — signed join request from an invitee
+  // If local node is the curator (owns the CG), store locally.
+  // Otherwise, forward via P2P to all connected peers so the curator receives it.
+  const requestJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/request-join$/);
+  if (req.method === "POST" && requestJoinMatch) {
+    const contextGraphId = decodeURIComponent(requestJoinMatch[1]);
+    const body = await readBody(req);
+    try {
+      const { agentAddress, signature, timestamp, agentName } = JSON.parse(body);
+      if (!agentAddress || !signature || !timestamp) {
+        return jsonResponse(res, 400, { error: 'Missing agentAddress, signature, or timestamp' });
+      }
+      agent.verifyJoinRequest(contextGraphId, agentAddress, timestamp, signature);
+
+      const isCurator = await agent.contextGraphExists(contextGraphId);
+      if (isCurator) {
+        await agent.storePendingJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
+        return jsonResponse(res, 200, { ok: true, status: 'pending', delivered: 'local' });
+      }
+
+      const result = await agent.forwardJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
+      if (result.delivered === 0) {
+        return jsonResponse(res, 502, { error: 'Could not deliver join request to curator. No reachable curator found.' });
+      }
+      return jsonResponse(res, 200, { ok: true, status: 'pending', delivered: result.delivered });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/join-requests — list pending join requests (curator view)
+  const joinRequestsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/join-requests$/);
+  if (req.method === "GET" && joinRequestsMatch) {
+    const contextGraphId = decodeURIComponent(joinRequestsMatch[1]);
+    try {
+      const requests = await agent.listPendingJoinRequests(contextGraphId);
+      return jsonResponse(res, 200, { contextGraphId, requests });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/approve-join — approve a pending request
+  const approveJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/approve-join$/);
+  if (req.method === "POST" && approveJoinMatch) {
+    const contextGraphId = decodeURIComponent(approveJoinMatch[1]);
+    const body = await readBody(req);
+    try {
+      const { agentAddress } = JSON.parse(body);
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      await agent.approveJoinRequest(contextGraphId, agentAddress);
+      return jsonResponse(res, 200, { ok: true, status: 'approved', agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/reject-join — reject a pending request
+  const rejectJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/reject-join$/);
+  if (req.method === "POST" && rejectJoinMatch) {
+    const contextGraphId = decodeURIComponent(rejectJoinMatch[1]);
+    const body = await readBody(req);
+    try {
+      const { agentAddress } = JSON.parse(body);
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      await agent.rejectJoinRequest(contextGraphId, agentAddress);
+      return jsonResponse(res, 200, { ok: true, status: 'rejected', agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/sign-join — sign a join request as this node's agent
+  const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
+  if (req.method === "POST" && signJoinMatch) {
+    const contextGraphId = decodeURIComponent(signJoinMatch[1]);
+    try {
+      const requestAgentAddress = agent.resolveAgentAddress(
+        extractBearerToken(req.headers.authorization),
+      );
+      const signed = await agent.signJoinRequest(contextGraphId, requestAgentAddress);
+      return jsonResponse(res, 200, signed);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
   // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
   if (
     req.method === "POST" &&
@@ -5766,6 +5983,21 @@ async function handleRequest(
       return jsonResponse(res, 400, {
         error: 'Missing "contextGraphId" (or legacy "paranetId")',
       });
+
+    // For curated CGs, verify this node's agent is on the allowlist.
+    // The allowlist may not be available locally yet (it lives on the
+    // curator's node), so this is a best-effort early rejection —
+    // the sync protocol enforces access on the remote side regardless.
+    const localAllowed = await agent.getContextGraphAllowedAgents(paranetId).catch(() => [] as string[]);
+    if (localAllowed.length > 0) {
+      const myAddr = agent.getDefaultAgentAddress();
+      if (myAddr && !localAllowed.some((a: string) => a.toLowerCase() === myAddr.toLowerCase())) {
+        return jsonResponse(res, 403, {
+          error: `Your agent (${myAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
+        });
+      }
+    }
+
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
     agent.subscribeToContextGraph(paranetId);
@@ -5813,6 +6045,18 @@ async function handleRequest(
         );
         job.result = result;
         job.status = "done";
+
+        // If catchup synced zero data from all peers, the remote nodes
+        // likely denied access (curated CG, not on allowlist). Remove the
+        // subscription so the project doesn't appear in the UI as a ghost.
+        if (result.dataSynced === 0 && result.syncCapablePeers > 0) {
+          const exists = await agent.contextGraphExists(paranetId);
+          if (!exists) {
+            (agent as any).subscribedContextGraphs?.delete(paranetId);
+            job.status = "denied";
+            job.error = "Sync denied by all peers — you may not be on the allowlist for this curated project.";
+          }
+        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
@@ -5864,10 +6108,16 @@ async function handleRequest(
   // V10 route /api/context-graph/create is handled above (combined with on-chain context graph create).
   if (req.method === "POST" && path === "/api/paranet/create") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { id, name, description } = JSON.parse(body);
+    const { id, name, description, allowedAgents, accessPolicy } = JSON.parse(body);
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createContextGraph({ id, name, description });
+    await agent.createContextGraph({
+      id,
+      name,
+      description,
+      ...(Array.isArray(allowedAgents) ? { allowedAgents } : {}),
+      ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
+    });
     return jsonResponse(res, 200, {
       created: id,
       uri: `did:dkg:context-graph:${id}`,
@@ -6519,7 +6769,7 @@ async function handleRequest(
     // 4. Build quads for the target graph
     const targetGraph = targetLayer === 'swm'
       ? contextGraphSharedMemoryUri(contextGraphId, subGraphName)
-      : contextGraphAssertionUri(contextGraphId, agent.peerId, `turn-${now}`, subGraphName);
+      : contextGraphAssertionUri(contextGraphId, requestAgentAddress, `turn-${now}`, subGraphName);
 
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { type Notification } from '../../api.js';
+import { type Notification, fetchCurrentAgent, type AgentIdentity } from '../../api.js';
 import { api } from '../../api-wrapper.js';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
@@ -56,6 +56,7 @@ export function Header() {
   const [unread, setUnread] = useState(0);
   const [showNotifs, setShowNotifs] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
+  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -79,6 +80,10 @@ export function Header() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  useEffect(() => {
+    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
+  }, []);
+
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
   const statusLoaded = nodeStatus != null;
   const synced = statusLoaded && nodeStatus?.synced !== false;
@@ -100,9 +105,16 @@ export function Header() {
 
       <div className="v10-header-sep" />
 
-      <div className="v10-header-agent-switcher">
+      <div className="v10-header-agent-switcher" title={currentAgent ? `${currentAgent.agentDid}\n${currentAgent.agentAddress}` : undefined}>
         <span className="v10-header-agent-dot" />
-        <span className="v10-header-agent-name">{nodeStatus?.name || 'Node Agent'}</span>
+        <span className="v10-header-agent-name">
+          {currentAgent?.name || nodeStatus?.name || 'Agent'}
+        </span>
+        {currentAgent?.agentAddress && (
+          <span className="v10-header-agent-addr">
+            {currentAgent.agentAddress.slice(0, 6)}…{currentAgent.agentAddress.slice(-4)}
+          </span>
+        )}
       </div>
 
       <div className="v10-header-spacer" />
@@ -131,8 +143,9 @@ export function Header() {
               <div className="v10-header-notif-title">Notifications</div>
               {notifications.length === 0 ? (
                 <div className="v10-header-notif-empty">No notifications</div>
-              ) : notifications.slice(0, 8).map((n, i) => (
-                <div key={i} className="v10-header-notif-item">
+              ) : notifications.slice(0, 12).map((n, i) => (
+                <div key={i} className={`v10-header-notif-item ${n.type === 'join_request' ? 'v10-notif-join' : ''}`}>
+                  {n.type === 'join_request' && <span className="v10-notif-join-icon">🔑</span>}
                   <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
                   {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
                 </div>

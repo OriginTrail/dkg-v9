@@ -1100,16 +1100,30 @@ contextGraphCmd
   .description('Create a new context graph (publishes definition to the system ontology)')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
   .option('-d, --description <desc>', 'Description of the context graph')
+  .option('--private', 'Create a private local-only context graph')
+  .option(
+    '--participant-identity-id <id>',
+    'Participant identity ID to include for private access control (repeatable)',
+    (value, previous: string[] = []) => [...previous, value],
+    [],
+  )
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createContextGraph(id, opts.name ?? id, opts.description);
+      const participantIdentityIds = (opts.participantIdentityId as string[] | undefined) ?? [];
+      const result = await client.createContextGraph(id, opts.name ?? id, opts.description, {
+        private: !!opts.private,
+        participantIdentityIds,
+      });
       console.log(`Context graph created:`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
-      console.log(`  Auto-subscribed to GossipSub topic.`);
+      console.log(`  ${opts.private ? 'Private local-only graph created.' : 'Auto-subscribed to GossipSub topic.'}`);
+      if (opts.private && participantIdentityIds.length > 0) {
+        console.log(`  Participants: ${participantIdentityIds.join(', ')}`);
+      }
 
       if (opts.save) {
         const config = await loadConfig();

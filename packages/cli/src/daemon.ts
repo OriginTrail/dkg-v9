@@ -10,7 +10,7 @@ import { join, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
-import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -428,6 +428,20 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     log('No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
   }
 
+  const mockIdentityId = chainBase?.type === 'mock' && chainBase.mockIdentityId != null
+    ? BigInt(chainBase.mockIdentityId)
+    : undefined;
+  const mockChainAdapter = chainBase?.type === 'mock'
+    ? (() => {
+        const signerAddress = opWallets.wallets[0]?.address;
+        const adapter = new MockChainAdapter(chainBase.chainId ?? 'mock:31337', signerAddress);
+        if (signerAddress && mockIdentityId != null) {
+          adapter.seedIdentity(signerAddress, mockIdentityId);
+        }
+        return adapter;
+      })()
+    : undefined;
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: 'DKG',
@@ -442,6 +456,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       backend: config.store.backend,
       options: config.store.options,
     } : undefined,
+    chainAdapter: mockChainAdapter,
     chainConfig: chainBase ? {
       rpcUrl: chainBase.rpcUrl,
       hubAddress: chainBase.hubAddress,

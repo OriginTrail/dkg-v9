@@ -45,6 +45,9 @@ const MATRIX_PUBLIC_SWM_ENTITY = 'urn:e2e:matrix:public:swm:1';
 const MATRIX_PUBLIC_DATA_ENTITY = 'urn:e2e:matrix:public:data:1';
 const MATRIX_PRIVATE_SWM_ENTITY = 'urn:e2e:matrix:private:swm:1';
 const MATRIX_PRIVATE_DATA_ENTITY = 'urn:e2e:matrix:private:data:1';
+const GUARDIAN_PARANET = 'GuardianTest';
+const GUARDIAN_SWM_ENTITY = 'urn:e2e:guardian:swm:1';
+const GUARDIAN_DATA_ENTITY = 'urn:e2e:guardian:data:1';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -618,4 +621,132 @@ describe('Participant IDs stored in meta graph (not ontology)', () => {
     expect(participants).toContain(idA);
     expect(participants).toContain(42n);
   }, 30000);
+});
+
+describe('Private context graph late join sync (3 nodes)', () => {
+  let curator: DKGAgent;
+  let syncerA: DKGAgent;
+  let syncerB: DKGAgent;
+  let walletA: ethers.Wallet;
+  let walletB: ethers.Wallet;
+  let walletC: ethers.Wallet;
+
+  afterAll(async () => {
+    try { await curator?.stop(); } catch { /* */ }
+    try { await syncerA?.stop(); } catch { /* */ }
+    try { await syncerB?.stop(); } catch { /* */ }
+  });
+
+  it('syncs invited private graph data for an early and a late participant via real DKG sync/query flows', async () => {
+    walletA = ethers.Wallet.createRandom();
+    walletB = ethers.Wallet.createRandom();
+    walletC = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainB.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletB.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainC.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletC.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    curator = await DKGAgent.create({ name: 'GuardianCurator', listenPort: 0, chainAdapter: chainA });
+    syncerA = await DKGAgent.create({ name: 'GuardianSyncerA', listenPort: 0, chainAdapter: chainB });
+    syncerB = await DKGAgent.create({ name: 'GuardianSyncerB', listenPort: 0, chainAdapter: chainC });
+
+    await curator.start();
+    await syncerA.start();
+    await syncerB.start();
+    await sleep(800);
+
+    const addrCurator = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await syncerA.connectTo(addrCurator);
+    await sleep(500);
+
+    const idA = 11n;
+    const idB = 12n;
+    const idC = 13n;
+    (chainA as any).identities.set(walletA.address, idA);
+    (chainA as any).identities.set(walletB.address, idB);
+    (chainA as any).identities.set(walletC.address, idC);
+    (chainB as any).identities.set(walletB.address, idB);
+    (chainC as any).identities.set(walletC.address, idC);
+
+    await curator.createContextGraph({
+      id: GUARDIAN_PARANET,
+      name: 'GuardianTest',
+      description: 'Curator plus invited participants',
+      private: true,
+      participantIdentityIds: [idA, idB, idC],
+    });
+
+    await syncerA.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    await curator.share(GUARDIAN_PARANET, [
+      { subject: GUARDIAN_SWM_ENTITY, predicate: 'http://schema.org/text', object: '"Guardian shared memory"', graph: '' },
+      { subject: GUARDIAN_SWM_ENTITY, predicate: 'http://schema.org/author', object: '"curator"', graph: '' },
+    ], { localOnly: true });
+
+    await insertWithMeta((curator as any).store, GUARDIAN_PARANET, [
+      {
+        subject: GUARDIAN_DATA_ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"Guardian durable data"',
+        graph: contextGraphDataUri(GUARDIAN_PARANET),
+      },
+    ]);
+
+    const earlyDataSync = await syncerA.syncContextGraphFromConnectedPeers(GUARDIAN_PARANET, {
+      includeSharedMemory: true,
+    });
+    expect(earlyDataSync.dataSynced).toBeGreaterThan(0);
+    expect(earlyDataSync.sharedMemorySynced).toBeGreaterThan(0);
+
+    const earlyDurable = await syncerA.query(
+      `SELECT ?name WHERE { <${GUARDIAN_DATA_ENTITY}> <http://schema.org/name> ?name }`,
+      { contextGraphId: GUARDIAN_PARANET },
+    );
+    expect(earlyDurable.bindings.length).toBe(1);
+    expect(earlyDurable.bindings[0]?.['name']).toBe('"Guardian durable data"');
+
+    const earlySwm = await syncerA.query(
+      `SELECT ?text WHERE { <${GUARDIAN_SWM_ENTITY}> <http://schema.org/text> ?text }`,
+      { contextGraphId: GUARDIAN_PARANET, graphSuffix: '_shared_memory' },
+    );
+    expect(earlySwm.bindings.length).toBe(1);
+    expect(earlySwm.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+
+    await syncerB.connectTo(addrCurator);
+    await sleep(500);
+    await syncerB.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    const lateSync = await syncerB.syncContextGraphFromConnectedPeers(GUARDIAN_PARANET, {
+      includeSharedMemory: true,
+    });
+    expect(lateSync.dataSynced).toBeGreaterThan(0);
+    expect(lateSync.sharedMemorySynced).toBeGreaterThan(0);
+
+    const lateDurable = await syncerB.query(
+      `SELECT ?name WHERE { <${GUARDIAN_DATA_ENTITY}> <http://schema.org/name> ?name }`,
+      { contextGraphId: GUARDIAN_PARANET },
+    );
+    expect(lateDurable.bindings.length).toBe(1);
+    expect(lateDurable.bindings[0]?.['name']).toBe('"Guardian durable data"');
+
+    const lateSwm = await syncerB.query(
+      `SELECT ?text WHERE { <${GUARDIAN_SWM_ENTITY}> <http://schema.org/text> ?text }`,
+      { contextGraphId: GUARDIAN_PARANET, graphSuffix: '_shared_memory' },
+    );
+    expect(lateSwm.bindings.length).toBe(1);
+    expect(lateSwm.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+  }, 45000);
 });

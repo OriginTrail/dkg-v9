@@ -297,19 +297,37 @@ export class ApiClient {
     return this.post('/api/connect', { multiaddr });
   }
 
-  async createContextGraph(id: string, name: string, description?: string): Promise<{
+  async createContextGraph(
+    id: string,
+    name: string,
+    description?: string,
+    options?: { private?: boolean; participantIdentityIds?: Array<string | number | bigint> },
+  ): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.post('/api/context-graph/create', { id, name, description });
+    return this.post('/api/context-graph/create', {
+      id,
+      name,
+      description,
+      ...(options?.private ? { private: true } : {}),
+      ...(options?.participantIdentityIds?.length
+        ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
+        : {}),
+    });
   }
 
   /** @deprecated Use createContextGraph */
-  async createParanet(id: string, name: string, description?: string): Promise<{
+  async createParanet(
+    id: string,
+    name: string,
+    description?: string,
+    options?: { private?: boolean; participantIdentityIds?: Array<string | number | bigint> },
+  ): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.createContextGraph(id, name, description);
+    return this.createContextGraph(id, name, description, options);
   }
 
   async listContextGraphs(): Promise<{

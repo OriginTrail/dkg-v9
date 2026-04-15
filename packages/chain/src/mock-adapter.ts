@@ -83,6 +83,17 @@ export class MockChainAdapter implements ChainAdapter {
     return id;
   }
 
+  /**
+   * Test helper: seed a deterministic identity for an address in this in-memory adapter.
+   * Used by black-box daemon tests that need stable participant IDs across processes.
+   */
+  seedIdentity(address: string, identityId: bigint): void {
+    this.identities.set(address, identityId);
+    if (identityId >= this.nextIdentityId) {
+      this.nextIdentityId = identityId + 1n;
+    }
+  }
+
   // --- V9 UAL-based methods ---
 
   async reserveUALRange(count: number): Promise<ReservedRange> {

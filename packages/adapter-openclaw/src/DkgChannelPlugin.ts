@@ -31,7 +31,6 @@ import type {
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import {
   SemanticEnrichmentWorker,
-  type SemanticEnrichmentWakeRequest,
 } from './SemanticEnrichmentWorker.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
@@ -355,14 +354,6 @@ export class DkgChannelPlugin {
       this.semanticEnrichmentWorker.bind(this.api, this.client);
     }
     return this.semanticEnrichmentWorker;
-  }
-
-  private noteSemanticWake(request: SemanticEnrichmentWakeRequest): void {
-    const worker = this.ensureSemanticEnrichmentWorker();
-    if (!worker) return;
-    const probe = worker.getRuntimeProbe();
-    if (!probe.supported) return;
-    worker.noteWake(request);
   }
 
   /**
@@ -1779,7 +1770,11 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
         return;
       }
-      this.handleSemanticEnrichmentWake(payload);
+      if (!this.handleSemanticEnrichmentWake(payload)) {
+        res.writeHead?.(503, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+        return;
+      }
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify({ ok: true }));
     } catch {
@@ -1797,7 +1792,11 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
         return;
       }
-      this.handleSemanticEnrichmentWake(payload);
+      if (!this.handleSemanticEnrichmentWake(payload)) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     } catch (err: any) {
@@ -1847,12 +1846,17 @@ export class DkgChannelPlugin {
     return this.useGatewayRoute;
   }
 
-  private handleSemanticEnrichmentWake(payload: SemanticEnrichmentWakeEnvelope): void {
-    this.noteSemanticWake({
+  private handleSemanticEnrichmentWake(payload: SemanticEnrichmentWakeEnvelope): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    if (!worker) return false;
+    const probe = worker.getRuntimeProbe();
+    if (!probe.supported) return false;
+    worker.noteWake({
       kind: payload.eventKind,
       eventKey: payload.eventId,
       triggerSource: 'daemon',
     });
+    return true;
   }
 }
 

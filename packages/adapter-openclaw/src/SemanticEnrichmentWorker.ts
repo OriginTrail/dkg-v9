@@ -412,18 +412,24 @@ export class SemanticEnrichmentWorker {
     }
 
     this.drainRequested = false;
-    this.drainInFlight = this.drainOnce().finally(() => {
-      this.drainInFlight = null;
-      if (this.stopped) return;
-      if (this.drainRequested) {
-        this.scheduleDrain();
-        return;
-      }
-      // Daemon-triggered wakes are the primary low-latency path; the periodic
-      // poll remains as the recovery sweep for missed wakes, restarts, and
-      // reclaimed leases.
-      this.scheduleTick(CLAIM_POLL_INTERVAL_MS);
-    });
+    this.drainInFlight = this.drainOnce()
+      .catch((err: any) => {
+        this.api.logger.warn?.(
+          `[semantic-enrichment] drain failed: ${err?.message ?? String(err)}`,
+        );
+      })
+      .finally(() => {
+        this.drainInFlight = null;
+        if (this.stopped) return;
+        if (this.drainRequested) {
+          this.scheduleDrain();
+          return;
+        }
+        // Daemon-triggered wakes are the primary low-latency path; the periodic
+        // poll remains as the recovery sweep for missed wakes, restarts, and
+        // reclaimed leases.
+        this.scheduleTick(CLAIM_POLL_INTERVAL_MS);
+      });
   }
 
   private async drainOnce(): Promise<void> {

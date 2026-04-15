@@ -162,7 +162,7 @@ describe('DkgChannelPlugin', () => {
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
-  it('gateway semantic wake endpoint no-ops when runtime.subagent helpers are unavailable', async () => {
+  it('gateway semantic wake endpoint returns 503 when runtime.subagent helpers are unavailable', async () => {
     const registerHttpRoute = vi.fn();
     const api = makeApi({ registerHttpRoute }) as any;
     api.runtime = {
@@ -193,8 +193,40 @@ describe('DkgChannelPlugin', () => {
     const worker = (plugin as any).ensureSemanticEnrichmentWorker();
     expect(worker.getRuntimeProbe().supported).toBe(false);
     expect(worker.getPendingSummaries()).toHaveLength(0);
-    expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
-    expect(res.end).toHaveBeenCalledWith(JSON.stringify({ ok: true }));
+    expect(res.writeHead).toHaveBeenCalledWith(503, { 'Content-Type': 'application/json' });
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+  });
+
+  it('bridge semantic wake endpoint returns 503 when runtime.subagent helpers are unavailable', async () => {
+    const api = makeApi({
+      runtime: {
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+        },
+      } as any,
+    });
+    plugin.register(api);
+
+    const port = await waitForBridgePort(plugin);
+    const wakeUrl = `http://127.0.0.1:${port}/semantic-enrichment/wake`;
+    const response = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dkg-bridge-token': 'test-token',
+      },
+      body: JSON.stringify({
+        kind: 'semantic_enrichment',
+        eventKind: 'chat_turn',
+        eventId: 'evt-bridge-unsupported',
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Semantic enrichment worker unavailable',
+    });
   });
 
   it('bridge semantic wake endpoint requires the bridge token and dedupes repeated event wakes', async () => {

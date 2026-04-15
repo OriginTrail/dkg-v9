@@ -471,6 +471,33 @@ describe('SemanticEnrichmentWorker', () => {
     vi.useRealTimers();
   });
 
+  it('logs claim-loop failures instead of letting drain rejections escape', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const worker = new SemanticEnrichmentWorker(
+      {
+        ...makeApi({
+          subagent: {
+            run: vi.fn(),
+            waitForRun: vi.fn(),
+            getSessionMessages: vi.fn(),
+            deleteSession: vi.fn(),
+          } as any,
+        }),
+        logger,
+      },
+      makeClient({
+        claimSemanticEnrichmentEvent: vi.fn().mockRejectedValue(new Error('daemon offline')),
+      }),
+    );
+
+    worker.poke();
+    await worker.flush();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[semantic-enrichment] drain failed: daemon offline',
+    );
+  });
+
   it('loads markdown-backed file imports and falls back to schema.org guidance when no project ontology is usable', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({

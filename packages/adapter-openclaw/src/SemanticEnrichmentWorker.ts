@@ -809,9 +809,7 @@ export class SemanticEnrichmentWorker {
       ORDER BY ?s ?p ?o
       LIMIT ${MAX_ONTOLOGY_QUERY_TRIPLES}
     `;
-    const result = await this.client.query(sparql, {
-      contextGraphId,
-    });
+    const result = await this.client.query(sparql);
     const bindings = Array.isArray(result?.result?.bindings)
       ? result.result.bindings as Array<Record<string, unknown>>
       : Array.isArray(result?.bindings)
@@ -1025,20 +1023,15 @@ export class SemanticEnrichmentWorker {
   private async loadChatTurnMessageAnchors(
     payload: ChatTurnSemanticEventPayload,
   ): Promise<{ userMsgUri: string; assistantMsgUri: string } | null> {
-    const result = await this.client.query(
-      `
-        SELECT ?user ?assistant WHERE {
-          GRAPH <${payload.assertionUri}> {
-            <${payload.turnUri}> <${DKG_HAS_USER_MESSAGE}> ?user .
-            <${payload.turnUri}> <${DKG_HAS_ASSISTANT_MESSAGE}> ?assistant .
-          }
+    const result = await this.client.query(`
+      SELECT ?user ?assistant WHERE {
+        GRAPH <${payload.assertionUri}> {
+          <${payload.turnUri}> <${DKG_HAS_USER_MESSAGE}> ?user .
+          <${payload.turnUri}> <${DKG_HAS_ASSISTANT_MESSAGE}> ?assistant .
         }
-        LIMIT 1
-      `,
-      {
-        contextGraphId: payload.contextGraphId,
-      },
-    );
+      }
+      LIMIT 1
+    `);
     const bindings = Array.isArray(result?.result?.bindings)
       ? result.result.bindings as Array<Record<string, unknown>>
       : Array.isArray(result?.bindings)

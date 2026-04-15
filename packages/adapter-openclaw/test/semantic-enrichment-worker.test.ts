@@ -238,7 +238,7 @@ describe('SemanticEnrichmentWorker', () => {
     expect(prompt).toContain('<https://example.com/project#Task>');
     expect(prompt).toContain('<https://example.com/project#assignedTo>');
     expect(prompt).not.toContain('<https://example.com/project#Galaxy>');
-    expect(query.mock.calls.every(([, opts]) => !opts?.view)).toBe(true);
+    expect(query.mock.calls.every(([, opts]) => !opts?.view && !opts?.contextGraphId)).toBe(true);
     expect(append).toHaveBeenCalledWith(
       'evt-1',
       worker.getWorkerInstanceId(),
@@ -1001,7 +1001,6 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('GRAPH <did:dkg:context-graph:project-3/_ontology>'),
-      expect.objectContaining({ contextGraphId: 'project-3' }),
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: project_ontology');
     expect(run.mock.calls[0]?.[0]?.message).not.toContain('Ontology ref override:');

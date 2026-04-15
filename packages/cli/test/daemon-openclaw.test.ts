@@ -541,6 +541,56 @@ describe('best-effort semantic enqueue helper', () => {
     });
   });
 
+  it('reuses the stored semantic triple count when an idempotent semantic event already exists', () => {
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue({
+        id: 'evt-existing',
+        status: 'completed',
+        semantic_triple_count: 7,
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'file_import',
+      payload: {
+        kind: 'file_import',
+        contextGraphId: 'project-1',
+        assertionName: 'roadmap',
+        assertionUri: 'did:dkg:context-graph:project-1/assertion/peer/roadmap',
+        importStartedAt: '2026-04-15T12:00:00.000Z',
+        fileHash: 'sha256:file-1',
+        mdIntermediateHash: 'sha256:md-1',
+        detectedContentType: 'text/markdown',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'existing semantic event',
+      semanticTripleCount: 0,
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-existing',
+      status: 'completed',
+      semanticTripleCount: 7,
+    });
+  });
+
   it('swallows enqueue failures so the primary route can still succeed', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const dashDb = {

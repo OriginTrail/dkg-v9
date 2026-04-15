@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_SEMANTIC_ENRICHMENT_LEASE_MS = 5 * 60_000;
 const DEFAULT_SEMANTIC_ENRICHMENT_RETRY_BASE_MS = 1_000;
@@ -227,6 +227,7 @@ export class DashboardDB {
           idempotency_key TEXT NOT NULL UNIQUE,
           payload_json TEXT NOT NULL,
           status TEXT NOT NULL,
+          semantic_triple_count INTEGER NOT NULL DEFAULT 0,
           attempts INTEGER NOT NULL DEFAULT 0,
           max_attempts INTEGER NOT NULL DEFAULT 3,
           next_attempt_at INTEGER NOT NULL,
@@ -255,6 +256,18 @@ export class DashboardDB {
         CREATE INDEX IF NOT EXISTS idx_extraction_status_snapshots_updated_at
           ON extraction_status_snapshots(updated_at);
       `);
+    }
+
+    if (version < 9) {
+      const semanticEventColumns = this.db
+        .prepare(`PRAGMA table_info(semantic_enrichment_events)`)
+        .all() as Array<{ name?: string }>;
+      if (!semanticEventColumns.some((column) => column.name === 'semantic_triple_count')) {
+        this.db.exec(`
+          ALTER TABLE semantic_enrichment_events
+          ADD COLUMN semantic_triple_count INTEGER NOT NULL DEFAULT 0
+        `);
+      }
     }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -968,6 +981,7 @@ export class DashboardDB {
     idempotency_key: string;
     payload_json: string;
     status: SemanticEnrichmentStatus;
+    semantic_triple_count?: number;
     attempts: number;
     max_attempts: number;
     next_attempt_at: number;
@@ -979,14 +993,15 @@ export class DashboardDB {
   }): void {
     this.stmt('insertSemanticEnrichmentEvent', `
       INSERT INTO semantic_enrichment_events (
-        id, kind, idempotency_key, payload_json, status, attempts, max_attempts,
+        id, kind, idempotency_key, payload_json, status, semantic_triple_count, attempts, max_attempts,
         next_attempt_at, lease_owner, lease_expires_at, last_error, created_at, updated_at
       ) VALUES (
-        @id, @kind, @idempotency_key, @payload_json, @status, @attempts, @max_attempts,
+        @id, @kind, @idempotency_key, @payload_json, @status, @semantic_triple_count, @attempts, @max_attempts,
         @next_attempt_at, @lease_owner, @lease_expires_at, @last_error, @created_at, @updated_at
       )
     `).run({
       ...event,
+      semantic_triple_count: event.semantic_triple_count ?? 0,
       lease_owner: event.lease_owner ?? null,
       lease_expires_at: event.lease_expires_at ?? null,
       last_error: event.last_error ?? null,
@@ -1111,16 +1126,22 @@ export class DashboardDB {
     return result.changes > 0;
   }
 
-  completeSemanticEnrichmentEvent(id: string, leaseOwner: string, updatedAt: number): boolean {
+  completeSemanticEnrichmentEvent(
+    id: string,
+    leaseOwner: string,
+    updatedAt: number,
+    semanticTripleCount?: number,
+  ): boolean {
     const result = this.stmt('completeSemanticEnrichmentEvent', `
       UPDATE semantic_enrichment_events
       SET status = 'completed',
+          semantic_triple_count = COALESCE(?, semantic_triple_count),
           lease_owner = NULL,
           lease_expires_at = NULL,
           updated_at = ?,
           last_error = NULL
       WHERE id = ? AND status = 'leased' AND lease_owner = ?
-    `).run(updatedAt, id, leaseOwner);
+    `).run(semanticTripleCount ?? null, updatedAt, id, leaseOwner);
     return result.changes > 0;
   }
 
@@ -1609,6 +1630,7 @@ export interface SemanticEnrichmentEventRow {
   idempotency_key: string;
   payload_json: string;
   status: SemanticEnrichmentStatus;
+  semantic_triple_count: number;
   attempts: number;
   max_attempts: number;
   next_attempt_at: number;

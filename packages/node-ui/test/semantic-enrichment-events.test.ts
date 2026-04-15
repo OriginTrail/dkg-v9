@@ -188,6 +188,21 @@ describe('DashboardDB — semantic enrichment events', () => {
     });
   });
 
+  it('persists semantic triple counts on completed events for idempotent descriptor reuse', () => {
+    insertEvent();
+
+    const claimed = db.claimNextRunnableSemanticEnrichmentEvent(1_000, 'worker-a');
+    expect(claimed).toBeDefined();
+
+    const completed = db.completeSemanticEnrichmentEvent(claimed!.id, 'worker-a', 1_500, 9);
+    expect(completed).toBe(true);
+
+    const row = db.getSemanticEnrichmentEvent(claimed!.id);
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('completed');
+    expect(row!.semantic_triple_count).toBe(9);
+  });
+
   it('can dead-letter all active semantic events when the worker becomes unavailable', () => {
     insertEvent({
       id: 'semantic-event-pending',

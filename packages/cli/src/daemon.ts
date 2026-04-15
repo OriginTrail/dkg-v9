@@ -3109,10 +3109,11 @@ function semanticEnrichmentDescriptorFromRow(
   row: {
     id: string;
     status: SemanticEnrichmentStatus;
+    semantic_triple_count?: number;
     updated_at: number;
     last_error: string | null;
   },
-  semanticTripleCount = 0,
+  semanticTripleCount = row.semantic_triple_count ?? 0,
 ): SemanticEnrichmentDescriptor {
   return {
     eventId: row.id,
@@ -3370,7 +3371,7 @@ function ensureSemanticEnrichmentEvent(
           throw new Error(`Semantic enrichment payload kind mismatch: expected ${kind}, received ${payload.kind}`);
         })();
   const existing = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
-  if (existing) return semanticEnrichmentDescriptorFromRow(existing, semanticTripleCount);
+  if (existing) return semanticEnrichmentDescriptorFromRow(existing);
 
   const eventId = randomUUID();
   try {
@@ -3380,6 +3381,7 @@ function ensureSemanticEnrichmentEvent(
       idempotency_key: idempotencyKey,
       payload_json: JSON.stringify(payload),
       status: 'pending',
+      semantic_triple_count: semanticTripleCount,
       attempts: 0,
       max_attempts: SEMANTIC_ENRICHMENT_MAX_ATTEMPTS,
       next_attempt_at: now,
@@ -3388,16 +3390,17 @@ function ensureSemanticEnrichmentEvent(
     });
   } catch (err) {
     const racedExisting = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
-    if (racedExisting) return semanticEnrichmentDescriptorFromRow(racedExisting, semanticTripleCount);
+    if (racedExisting) return semanticEnrichmentDescriptorFromRow(racedExisting);
     throw err;
   }
   const row = dashDb.getSemanticEnrichmentEvent(eventId);
   return semanticEnrichmentDescriptorFromRow(row ?? {
     id: eventId,
     status: 'pending',
+    semantic_triple_count: semanticTripleCount,
     updated_at: now,
     last_error: null,
-  }, semanticTripleCount);
+  });
 }
 
 function semanticCountLiteral(value: number): string {
@@ -4507,11 +4510,6 @@ async function handleRequest(
     if (!eventId || !leaseOwner) {
       return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
     }
-    const now = Date.now();
-    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now);
-    if (!completed) {
-      return jsonResponse(res, 409, { completed: false });
-    }
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) {
       return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
@@ -4522,14 +4520,21 @@ async function handleRequest(
       : eventPayload
         ? await readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId)
         : 0;
+    const now = Date.now();
+    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now, semanticTripleCount);
+    if (!completed) {
+      return jsonResponse(res, 409, { completed: false });
+    }
+    const updatedRow = dashDb.getSemanticEnrichmentEvent(eventId);
+    const descriptorRow = updatedRow ?? row;
     if (eventPayload?.kind === 'file_import') {
-      const descriptor = semanticEnrichmentDescriptorFromRow(row, semanticTripleCount);
+      const descriptor = semanticEnrichmentDescriptorFromRow(descriptorRow, semanticTripleCount);
       updateExtractionStatusSemanticDescriptor(extractionStatus, dashDb, eventPayload.assertionUri, descriptor);
       return jsonResponse(res, 200, { completed: true, semanticEnrichment: descriptor });
     }
     return jsonResponse(res, 200, {
       completed: true,
-      semanticEnrichment: semanticEnrichmentDescriptorFromRow(row, semanticTripleCount),
+      semanticEnrichment: semanticEnrichmentDescriptorFromRow(descriptorRow, semanticTripleCount),
     });
   }
 
@@ -4712,7 +4717,7 @@ async function handleRequest(
       }
     }
 
-    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now);
+    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now, semanticTripleCount);
     const updated = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!updated) {
       return jsonResponse(res, 404, { error: `Semantic enrichment event not found after append: ${eventId}` });

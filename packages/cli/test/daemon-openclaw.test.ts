@@ -435,6 +435,60 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
+  it('still persists the semantic event when OpenClaw is enabled but wake transport metadata is temporarily unavailable', () => {
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-chat-queued',
+        status: 'pending',
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-outage-window',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-outage-window',
+        userMessage: 'remember this',
+        assistantReply: 'noted',
+        persistenceState: 'stored',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'chat outage window',
+    });
+
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+        },
+      },
+    }), 'openclaw')).toBe(true);
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-chat-queued',
+      status: 'pending',
+    });
+  });
+
   it('swallows enqueue failures so the primary route can still succeed', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const dashDb = {

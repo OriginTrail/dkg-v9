@@ -2161,7 +2161,7 @@ export function canQueueLocalAgentSemanticEnrichment(
   integrationId: string,
 ): boolean {
   const integration = getLocalAgentIntegration(config, integrationId);
-  return !!integration?.enabled && hasStoredLocalAgentTransportConfig(integration);
+  return integration?.enabled === true;
 }
 
 export function queueLocalAgentSemanticEnrichmentBestEffort(args: {

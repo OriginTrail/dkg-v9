@@ -1965,12 +1965,14 @@ export class DKGAgent {
     allowedPeers?: string[];
     /** Identity IDs for private CG access control (chain-based). */
     participantIdentityIds?: bigint[];
+    /** Required signatures threshold for participant-based CGs. */
+    requiredSignatures?: number;
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
-    const paranetUri = paranetDataGraphUri(opts.id);
+    const paranetUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
 
@@ -2036,6 +2038,14 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
         object: `"${participantIdentityId.toString()}"`,
+        graph: cgMetaGraph,
+      });
+    }
+    if (participantIdentityIds.size > 0 && typeof opts.requiredSignatures === 'number' && opts.requiredSignatures > 0) {
+      quads.push({
+        subject: paranetUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures`,
+        object: `"${opts.requiredSignatures}"`,
         graph: cgMetaGraph,
       });
     }
@@ -2140,7 +2150,7 @@ export class DKGAgent {
 
     // Check if already registered
     const cgMetaGraph = paranetMetaGraphUri(id);
-    const paranetUri = paranetDataGraphUri(id);
+    const paranetUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
@@ -2166,23 +2176,53 @@ export class DKGAgent {
       resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
     }
 
+    const participantsResult = await this.store.query(
+      `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
+    );
+    const participantIdentityIds = participantsResult.type === 'bindings'
+      ? participantsResult.bindings
+          .map((binding) => binding['identityId']?.replace(/^"|"$/g, ''))
+          .filter((value): value is string => !!value)
+          .map((value) => BigInt(value))
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+          .filter((value, index, arr) => index === 0 || value !== arr[index - 1])
+      : [];
+
+    const requiredSignaturesResult = await this.store.query(
+      `SELECT ?required WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures> ?required } } LIMIT 1`,
+    );
+    const storedRequiredSignatures = requiredSignaturesResult.type === 'bindings'
+      ? Number(requiredSignaturesResult.bindings[0]?.['required']?.replace(/^"|"$/g, ''))
+      : NaN;
+
     let onChainId: string;
-    try {
-      const result = await this.chain.createContextGraph({
-        name: id,
-        description,
-        accessPolicy: resolvedAccessPolicy,
-        revealOnChain: opts?.revealOnChain,
+    if (participantIdentityIds.length > 0) {
+      const requiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
+        ? storedRequiredSignatures
+        : 1;
+      const result = await this.registerContextGraphOnChain({
+        participantIdentityIds,
+        requiredSignatures,
       });
-      onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
-    } catch (err) {
-      const errorName = enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
-        onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
-        this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
-      } else {
-        throw err;
+      onChainId = result.contextGraphId.toString();
+    } else {
+      try {
+        const result = await this.chain.createContextGraph({
+          name: id,
+          description,
+          accessPolicy: resolvedAccessPolicy,
+          revealOnChain: opts?.revealOnChain,
+        });
+        onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
+      } catch (err) {
+        const errorName = enrichEvmError(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
+          onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
+          this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -2274,7 +2314,7 @@ export class DKGAgent {
     }
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
     // If this is the first allowlist entry (CG was open), also add our own
@@ -2312,11 +2352,25 @@ export class DKGAgent {
    */
   async isContextGraphRegistered(contextGraphId: string): Promise<boolean> {
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
+  }
+
+  async getContextGraphOnChainId(contextGraphId: string): Promise<string | null> {
+    const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    if (subscribed) return subscribed;
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const result = await this.store.query(
+      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> ?id } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    const value = result.bindings[0]?.['id'];
+    return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
   }
 
   /**
@@ -3287,9 +3341,9 @@ export class DKGAgent {
    * in-memory state that may not have been persisted yet.
    */
   async contextGraphExists(contextGraphId: string): Promise<boolean> {
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?p WHERE {
+      `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
       } LIMIT 1`,
     );
@@ -3496,7 +3550,7 @@ export class DKGAgent {
     }
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?policy WHERE {
         GRAPH <${ontologyGraph}> {
@@ -3514,7 +3568,7 @@ export class DKGAgent {
       return localParticipants;
     }
 
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
 
     // Look in the CG's meta graph first (where createContextGraph now writes them)

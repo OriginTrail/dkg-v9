@@ -355,11 +355,11 @@ export class DkgNodePlugin {
       '[dkg] Legacy memory config keys detected in dkg-node.memory — the ' +
       'openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
       'backlog-import ingestion flow that memoryDir and watchDebounceMs ' +
-      'configured. These keys are now ignored. Memories must be recorded ' +
-      'via the `dkg_memory_import` tool (writes to a project CG working ' +
-      'memory assertion) or through chat-turn persistence. Any `MEMORY.md` ' +
-      'or `memory/*.md` files on disk will NOT be ingested after upgrade. ' +
-      'Remove these keys from your workspace config to silence this warning.',
+      'configured. These keys are now ignored. Memories are recorded ' +
+      'through the memory slot (saveMemory via registerMemoryCapability) ' +
+      'or through chat-turn persistence. Any `MEMORY.md` or `memory/*.md` ' +
+      'files on disk will NOT be ingested after upgrade. Remove these ' +
+      'keys from your workspace config to silence this warning.',
     );
   }
 

@@ -1,24 +1,27 @@
 /**
  * DkgMemoryPlugin — DKG-backed memory-slot plugin for OpenClaw.
  *
- * Reads flow through the memory slot:
+ * Reads AND writes flow through the memory slot contract:
  *   `api.registerMemoryCapability({ runtime: buildDkgMemoryRuntime(...) })`
- * which gives the upstream memory host a `MemorySearchManager` instance
- * whose `search()` issues two parallel `POST /api/query` calls — one to
- * `agent-context` (`assertionName: 'chat-turns'`) and one to the resolved
- * project context graph (`assertionName: 'memory'`), both with
- * `view: 'working-memory'`.
+ * which hands the upstream memory host a `MemorySearchManager` instance.
+ * `DkgMemorySearchManager.search()` fans out across four layers when a
+ * project context graph is resolved — one `POST /api/query` to
+ * `agent-context` (`assertionName: 'chat-turns'`, `view: 'working-memory'`)
+ * plus three against the resolved project CG's `'memory'` assertion with
+ * `view: 'working-memory' | 'shared-working-memory' | 'verified-memory'`.
+ * See `DkgMemorySearchManager.search` for trust-weighted ranking and
+ * cross-layer dedup.
  *
- * Writes flow through an explicit `api.registerTool("dkg_memory_import")`
- * registration, because the upstream `MemorySearchManager` contract is
- * read-only. The write path creates (idempotently) and writes into the
- * `'memory'` WM assertion of the resolved project CG.
+ * Writes happen through the upstream memory-host write contract on the
+ * same slot registration (upstream recall orchestrates `saveMemory` /
+ * `recallMemory` against the capability runtime). This adapter no longer
+ * registers explicit `dkg_memory_import` / `dkg_memory_search` tools —
+ * the slot is the single entry point for both directions. Programmatic
+ * callers can still construct a `DkgMemorySearchManager` directly for
+ * read-side access (see the barrel export in `src/index.ts`).
  *
- * Both surfaces target real V10 primitives:
- *   create: POST /api/assertion/create
- *   write:  POST /api/assertion/:name/write
- *   read:   POST /api/query   (with view='working-memory' + agentAddress
- *                              + assertionName)
+ * Reads target real V10 primitives:
+ *   read:   POST /api/query   (with view + agentAddress + assertionName)
  *
  * No `agent-memory` sidecar. No `dkg:ImportedMemory`. No
  * `FILTER(CONTAINS)`-over-a-throwaway-graph. No `tools.share` on the
@@ -43,7 +46,6 @@ import type {
   MemorySearchResult,
   MemorySource,
   OpenClawPluginApi,
-  OpenClawToolResult,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -56,10 +58,7 @@ export const PROJECT_MEMORY_ASSERTION = 'memory';
 
 const NS = {
   schema: 'http://schema.org/',
-  dkg: 'http://dkg.io/ontology/',
 };
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 // ---------------------------------------------------------------------------
 // Session resolver — how the search manager and write tool find the
@@ -456,15 +455,16 @@ export function buildDkgMemoryRuntime(
 /**
  * **BREAKING API CHANGE (openclaw-dkg-primary-memory workstream)** — the
  * exported `DkgMemoryPlugin` class no longer implements the legacy
- * `OpenClawMemorySearchManager` surface. Previous revisions of this class
- * exposed `search`, `readFile`, `status`, `sync`, and `close` methods
- * directly so external consumers could instantiate a plugin and query it
- * as a search manager. Those methods have moved to the new
- * `DkgMemorySearchManager` class (exported from this same module), which
- * is instantiated internally by `buildDkgMemoryRuntime` when the gateway
- * calls `api.registerMemoryCapability`. See the module-level comment at
- * the top of this file for the new reads-through-slot /
- * writes-through-explicit-tool architecture.
+ * `OpenClawMemorySearchManager` surface, and no longer registers
+ * explicit `dkg_memory_import` / `dkg_memory_search` tools. Previous
+ * revisions of this class exposed `search`, `readFile`, `status`,
+ * `sync`, and `close` methods directly so external consumers could
+ * instantiate a plugin and query it as a search manager. Those methods
+ * have moved to the new `DkgMemorySearchManager` class (exported from
+ * this same module), which is instantiated internally by
+ * `buildDkgMemoryRuntime` when the gateway calls
+ * `api.registerMemoryCapability`. See the module-level comment at the
+ * top of this file for the slot-backed reads-and-writes architecture.
  *
  * The constructor signature has also changed from `(client, config)` to
  * `(client, config, resolver)` so the change is an unavoidable compile
@@ -480,8 +480,6 @@ export function buildDkgMemoryRuntime(
  * The only in-tree consumer of this class is `DkgNodePlugin`.
  */
 export class DkgMemoryPlugin {
-  private api: OpenClawPluginApi | null = null;
-
   constructor(
     private readonly client: DkgDaemonClient,
     private readonly config: NonNullable<DkgOpenClawConfig['memory']>,
@@ -489,178 +487,23 @@ export class DkgMemoryPlugin {
   ) {}
 
   register(api: OpenClawPluginApi): void {
-    this.api = api;
-    const slotRegistered = this.registerCapability(api);
-    // B25: "slot registered" is a local signal (did we call
-    // `api.registerMemoryCapability`?) — it does NOT prove that this
-    // adapter actually owns the memory slot in the gateway's config.
-    // Slot election is a separate setup-time step that writes
-    // `plugins.slots.memory = "adapter-openclaw"` to the workspace
-    // config. On upgrade, an install can end up with a modern gateway
-    // (registerMemoryCapability available) but a stale slot config
-    // (slot unset or pointing at another plugin) — in that window, the
-    // slot-backed recall path doesn't route through us, so suppressing
-    // the compat `dkg_memory_search` tool would leave agents with no
-    // recall surface at all. Gate the suppression on ACTUAL slot
-    // ownership: only drop the compat tool when both the capability was
-    // registered AND the workspace config names this adapter as the
-    // memory-slot owner. Otherwise keep the compat tool around as a
-    // safety net, log a warning so operators notice the misconfiguration
-    // and rerun setup to finish migration.
-    const slotOwnedByThisAdapter = this.isMemorySlotOwnedByThisAdapter(api);
-    if (slotRegistered && !slotOwnedByThisAdapter) {
-      api.logger.warn?.(
-        '[dkg-memory] Modern gateway supports registerMemoryCapability but ' +
-        '`plugins.slots.memory` is not set to "adapter-openclaw" in the workspace ' +
-        'config — slot-backed recall will not route through this adapter. ' +
-        'Rerunning `dkg setup` (or re-electing the adapter into the memory slot) ' +
-        'will fix this. Keeping the compatibility `dkg_memory_search` tool ' +
-        'registered as a safety net so agents still have a recall path.',
-      );
-    }
-    const includeLegacySearchTool = !slotRegistered || !slotOwnedByThisAdapter;
-    this.registerTools(api, { includeLegacySearchTool });
+    this.registerCapability(api);
   }
 
   /**
-   * Read the workspace-config memory-slot owner and return `true` only
-   * when the slot is explicitly pointing at this adapter's plugin id
-   * (`"adapter-openclaw"`, matching the manifest and the value setup.ts
-   * writes during slot election). Any other result — unset slot, slot
-   * pointing at another plugin, or malformed config — returns `false`
-   * and is treated as "not our slot" by the fallback-tool gate.
-   *
-   * B29: some OpenClaw gateway versions expose the merged config on
-   * `api.cfg` instead of `api.config` — `DkgChannelPlugin.register`
-   * already handles this divergence at
-   * `this.cfg = (api as any).cfg ?? (api as any).config ?? runtime.cfg ?? runtime.config`.
-   * Reading only `api.config` here would leave `slotOwnedByThisAdapter`
-   * false on those runtimes even after setup completes, and the compat
-   * `dkg_memory_search` tool would stay registered on fully-migrated
-   * installs — the exact duplicate-recall-surface state this PR is
-   * trying to remove. Mirror the same fallback order so the slot check
-   * resolves on every gateway shape we see in the wild.
+   * Registers the memory-slot capability. On gateways that do not
+   * implement `api.registerMemoryCapability`, logs a diagnostic warning
+   * and returns — legacy-gateway compatibility via `dkg_memory_search`
+   * was retired along with `dkg_memory_import` when the memory slot
+   * became the single recall/write surface.
    */
-  private isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
-    const anyApi = api as any;
-    const runtime = anyApi?.runtime;
-    const mergedConfig =
-      (anyApi?.cfg as Record<string, unknown> | undefined) ??
-      (anyApi?.config as Record<string, unknown> | undefined) ??
-      (runtime?.cfg as Record<string, unknown> | undefined) ??
-      (runtime?.config as Record<string, unknown> | undefined);
-    const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
-    const slots = plugins?.slots as Record<string, unknown> | undefined;
-    return slots?.memory === 'adapter-openclaw';
-  }
-
-  /** Re-register tools into a new registry without recreating state. */
-  registerTools(
-    api: OpenClawPluginApi,
-    options?: { includeLegacySearchTool?: boolean },
-  ): void {
-    api.registerTool({
-      name: 'dkg_memory_import',
-      description:
-        'Record a memory into a project\'s DKG Working Memory. ' +
-        'Use this to persist a fact, decision, or note that should be retrievable later ' +
-        'from the same project\'s context graph. ' +
-        'Parameters: `text` (required), `contextGraphId` (optional — name of the target project CG; ' +
-        'if omitted, the tool falls back to the UI-selected project CG stamped on the current turn ' +
-        'via the dispatch-scoped resolver, then to a structured `needs_clarification` response listing ' +
-        'the available context graphs when no project can be resolved). ' +
-        'Subgraph-scoped writes are intentionally not supported in v1: the query engine at ' +
-        'dkg-query-engine.ts:120-124 throws when `subGraphName` is combined with view-based routing, ' +
-        'which would make subgraph-scoped writes silently unreadable through `view: working-memory`. ' +
-        'Tracked as a V10.x follow-up.',
-      parameters: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'Memory content to store.' },
-          contextGraphId: {
-            type: 'string',
-            description:
-              'Optional target project context graph id. When omitted, the tool uses the ' +
-              'UI-selected project CG for the current turn; if no project is active, it returns ' +
-              'a `needs_clarification` response listing the available context graphs.',
-          },
-        },
-        required: ['text'],
-      },
-      execute: async (_toolCallId, params) => this.handleImport(params),
-    });
-
-    // Legacy-gateway compatibility: when the host does not implement
-    // `api.registerMemoryCapability`, upstream can't route reads through
-    // the memory slot. Register a plain `dkg_memory_search` tool so the
-    // agent still has a recall path. On modern gateways the slot handles
-    // reads and this tool is intentionally omitted to avoid competing
-    // with the slot router.
-    if (options?.includeLegacySearchTool) {
-      api.registerTool({
-        name: 'dkg_memory_search',
-        description:
-          'Search DKG Working Memory for relevant prior context. ' +
-          'Queries both the agent-context chat-turns assertion and (when resolvable) ' +
-          'the selected project memory assertion, returning ranked snippets. ' +
-          'Registered only on legacy gateways that do not implement the memory-slot contract.',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Search terms.' },
-            // B35: schema-aware hosts validate tool-call arguments against
-            // this schema before the handler runs. Declaring `maxResults` /
-            // `limit` / `minScore` as strict `type: 'number'` causes those
-            // hosts to reject `{ "limit": "5" }` from legacy callers /
-            // serializers (the B18 stringified-numeric scenario) before
-            // `handleLegacySearch` can coerce the value. That makes the
-            // B18 + B32 compat shims unreachable on the exact hosts they
-            // were meant to protect. Declare these as `["number", "string"]`
-            // so legacy stringified inputs pass schema validation, then
-            // `coerceFiniteNumber` in the handler converts them.
-            maxResults: {
-              type: ['number', 'string'],
-              description: 'Maximum number of results to return (default 10). Alias: `limit`. Accepts numeric or stringified-numeric values for legacy tool-call compatibility.',
-            },
-            // B32: The retired pre-workstream `dkg_memory_search` tool used
-            // `limit` as the parameter name. Old callers / prompts still
-            // pass `limit` on the compat path, and dropping it silently
-            // falls back to the default cap of 10 — a silent regression
-            // from the contract the compat tool is supposed to preserve.
-            // Accept `limit` here as a documented alias; the handler
-            // prefers `maxResults` when both are present.
-            limit: {
-              type: ['number', 'string'],
-              description:
-                'Deprecated alias for `maxResults`, preserved for legacy tool-call compatibility ' +
-                'on older gateways. `maxResults` takes precedence when both are supplied. ' +
-                'Accepts numeric or stringified-numeric values.',
-            },
-            minScore: {
-              type: ['number', 'string'],
-              description: 'Minimum keyword-overlap score for returned results. Accepts numeric or stringified-numeric values for legacy tool-call compatibility.',
-            },
-          },
-          required: ['query'],
-        },
-        execute: async (_toolCallId, params) => this.handleLegacySearch(params),
-      });
-    }
-  }
-
-  /**
-   * Registers the memory-slot capability when the gateway supports it.
-   * Returns `true` when `api.registerMemoryCapability` was called,
-   * `false` when the gateway is legacy (caller falls back to the compat
-   * `dkg_memory_search` tool registration in `registerTools`).
-   */
-  private registerCapability(api: OpenClawPluginApi): boolean {
+  private registerCapability(api: OpenClawPluginApi): void {
     if (typeof api.registerMemoryCapability !== 'function') {
       api.logger.warn?.(
-        '[dkg-memory] api.registerMemoryCapability is not available — gateway may be older than the memory-slot contract. ' +
-        'Registering the compatibility dkg_memory_search tool so recall still works on this gateway.',
+        '[dkg-memory] api.registerMemoryCapability is not available — gateway is older than the memory-slot contract. ' +
+        'The adapter no longer ships a compatibility `dkg_memory_search` tool; upgrade the gateway to restore recall.',
       );
-      return false;
+      return;
     }
 
     const capability: MemoryPluginCapability = {
@@ -668,285 +511,13 @@ export class DkgMemoryPlugin {
     };
     api.registerMemoryCapability(capability);
     api.logger.info?.('[dkg-memory] registerMemoryCapability called');
-    return true;
-  }
-
-  private async handleLegacySearch(params: Record<string, unknown>): Promise<OpenClawToolResult> {
-    const query = typeof params.query === 'string' ? params.query.trim() : '';
-    if (!query) {
-      return toolError('Missing required parameter "query"');
-    }
-    // B18: Legacy tool-call serializers on older gateways often stringify
-    // numeric arguments — the retired `dkg_memory_search` tool tolerated
-    // that via `parseInt(String(params.limit), 10)`. Mirror that tolerance
-    // here so `{ maxResults: '5' }` is accepted the same way as
-    // `{ maxResults: 5 }`. Reject NaN / non-finite values by falling back
-    // to the default (undefined → search manager defaults).
-    //
-    // B32: The retired tool used `limit` as the parameter name; legacy
-    // callers still pass it on the compat path. Accept both names with
-    // `maxResults` taking precedence when both are supplied, so new
-    // callers are not penalized but old prompts keep working.
-    const maxResults =
-      coerceFiniteNumber(params.maxResults) ?? coerceFiniteNumber(params.limit);
-    const minScore = coerceFiniteNumber(params.minScore);
-
-    // B15: Preflight the agent address the same way `getMemorySearchManager`
-    // does in the slot-routed factory. Without this guard, the legacy
-    // `dkg_memory_search` compat tool would construct a manager against an
-    // unresolved peer ID, the WM query would fail in the query engine
-    // (`agentAddress is required for the working-memory view`), and the
-    // in-search `.catch` would swallow the throw and return `status: 'ok',
-    // results: []` — indistinguishable from "no memories found". Surface
-    // the transient state as a retryable error instead so legacy gateways
-    // see the same "backend not ready" contract that modern slot-routed
-    // gateways see via the null-manager factory path.
-    const sessionAgentAddress = this.resolver.getSession(undefined)?.agentAddress;
-    const defaultAgentAddress = this.resolver.getDefaultAgentAddress();
-    const resolvedAgentAddress = sessionAgentAddress ?? defaultAgentAddress;
-    if (!resolvedAgentAddress) {
-      return toolJson({
-        status: 'needs_clarification',
-        reason: 'Agent address is not yet available (node identity probe pending).',
-        retryable: true,
-        guidance:
-          'The adapter has not yet resolved the node peer identity from the daemon. ' +
-          'Retry the search on the next turn; the probe typically completes within a few seconds of attach.',
-      });
-    }
-
-    const manager = new DkgMemorySearchManager({
-      client: this.client,
-      resolver: this.resolver,
-      logger: this.api?.logger,
-    });
-    try {
-      const results = await manager.search(query, { maxResults, minScore });
-      // B36: The retired pre-workstream `dkg_memory_search` tool returned
-      // `{ content: [{ type: 'text', text: JSON.stringify(results) }],
-      // details: results }` — the raw array was the `details` payload.
-      //
-      // B55: The retired tool's item shape was also different —
-      // `{ path: string, content: string, score?: number }` — whereas
-      // the new `MemorySearchResult` shape is `{ path, startLine,
-      // endLine, score, snippet, source, citation? }`. Old callers
-      // parsing `details[i].content` would now see `undefined` because
-      // the result text lives in the `snippet` field. Map the compat
-      // results to a shape that satisfies BOTH the legacy and new
-      // contracts: start from the new-shape item (so forward-compat
-      // callers still read `snippet`, `startLine`, `endLine`, `source`,
-      // etc.) and add a `content` alias that mirrors `snippet` so
-      // legacy callers get their expected field back. Additive layering
-      // rather than a field rename avoids breaking new consumers that
-      // are already on the new shape.
-      const compatResults = results.map((r) => ({ ...r, content: r.snippet }));
-      return {
-        content: [{ type: 'text', text: JSON.stringify(compatResults, null, 2) }],
-        details: compatResults,
-      };
-    } catch (err) {
-      return toolError(`Memory search failed: ${errorMessage(err)}`);
-    }
-  }
-
-  private async handleImport(params: Record<string, unknown>): Promise<OpenClawToolResult> {
-    const text = typeof params.text === 'string' ? params.text.trim() : '';
-    if (!text) {
-      return toolError('Missing required parameter "text"');
-    }
-    const explicitCg = typeof params.contextGraphId === 'string' ? params.contextGraphId.trim() : '';
-
-    // B16: Prefer explicit `contextGraphId` when provided, but also honor the
-    // dispatch-scoped project CG stamped on the current turn's ALS store.
-    // The original B1 fix (commit 13ac99a9) removed the resolver call because
-    // at that time the channel state was keyed by a sessionKey that tool
-    // `execute(toolCallId, params)` had no way to forward. The B6 ALS
-    // refactor (commit 2be963a3) replaced the sessionKey map with
-    // `AsyncLocalStorage`, and `getSessionProjectContextGraphId(undefined)`
-    // now wildcard-reads the active dispatch store — so any tool call
-    // running inside a dispatch's async call tree can observe the UI-
-    // selected CG without needing an explicit sessionKey. Restore the
-    // implicit resolution path; fall back to `needs_clarification` only
-    // when neither source is available.
-    const dispatchScopedCg = this.resolver.getSession(undefined)?.projectContextGraphId;
-    const resolvedCg = explicitCg || dispatchScopedCg || '';
-
-    if (!resolvedCg) {
-      return toolJson({
-        status: 'needs_clarification',
-        reason: 'No project context graph was provided for this write, and no UI-selected project is active on the current turn.',
-        availableContextGraphs: this.resolver.listAvailableContextGraphs(),
-        guidance:
-          'Please specify which project this belongs to by providing contextGraphId on the next call, ' +
-          'or ask the user which project they mean.',
-      });
-    }
-
-    // B42: Validate the resolved context graph against known boundaries
-    // BEFORE triggering `createAssertion`/`writeAssertion`. The underlying
-    // client only validates the string shape, so without this check a
-    // typo or stale project id would silently create an orphaned
-    // assertion graph, and reserved system graphs like `agent-context`
-    // (which backs the chat-turns WM assertion) could be targeted even
-    // though this tool is supposed to be project-scoped.
-    //
-    // Two checks:
-    //   (1) Reject reserved system graph names explicitly. `agent-context`
-    //       is the only one in v1, but any future reserved name added to
-    //       the block-list will be rejected here before it can be
-    //       corrupted by a user-memory write.
-    //   (2) When the subscribed-CG cache is populated, reject any
-    //       `contextGraphId` that is not in the list. We only enforce
-    //       this when the cache is non-empty so that a clean install
-    //       whose probe has not yet populated the cache does not have
-    //       every write falsely rejected. The cache lazy-refreshes on
-    //       read (B17 + B23), so once the probe lands subsequent writes
-    //       see the current subscription set.
-    if (resolvedCg === AGENT_CONTEXT_GRAPH) {
-      return toolError(
-        `Cannot write memories to the reserved '${AGENT_CONTEXT_GRAPH}' context graph. ` +
-        'That graph is owned by the adapter for chat-turn persistence. ' +
-        'Pass an explicit project `contextGraphId` for the target project.',
-      );
-    }
-    let availableCgs = this.resolver.listAvailableContextGraphs();
-
-    // B42 + B46 + B48: Force a synchronous refresh of the subscribed-CG
-    // cache before validating the resolved id. Three failure modes this
-    // covers with a single refresh call:
-    //
-    //   B42 — cached list has items but not this id (typo protection).
-    //   B46 — cached list has items, id is missing because the user
-    //         just created/subscribed a new CG within the lazy-refresh
-    //         TTL window (stale cache).
-    //   B48 — cached list is empty on cold start / after a failed
-    //         probe, so the previous `length > 0` guard skipped
-    //         validation entirely and typos passed through to create
-    //         orphaned assertion graphs.
-    //
-    // A single refresh call on cache-miss (either empty or
-    // missing-this-id) resolves all three. If the refresh method is
-    // not supported by this resolver (test fixtures, legacy wirings),
-    // skip the retry and validate against whatever cached list we
-    // have. If the refresh itself throws (transient daemon blip),
-    // fall through to the cached list — hard-rejecting on a refresh
-    // failure would turn a network hiccup into a write outage.
-    const cacheMiss = availableCgs.length === 0 || !availableCgs.includes(resolvedCg);
-    if (cacheMiss && typeof this.resolver.refreshAvailableContextGraphs === 'function') {
-      try {
-        availableCgs = await this.resolver.refreshAvailableContextGraphs();
-      } catch (err) {
-        this.api?.logger.debug?.(
-          `[dkg-memory] refreshAvailableContextGraphs failed during B42/B46/B48 validation: ${errorMessage(err)}. Falling through to cached list.`,
-        );
-      }
-    }
-
-    // Validate: if the (possibly refreshed) list is non-empty and
-    // missing the id, it is a typo or stale id — reject with
-    // clarification. If the list is still empty after the refresh
-    // attempt (genuinely no subscriptions, or refresh failed / is
-    // unsupported), fall through to the daemon's own validation on
-    // the assertion create/write calls.
-    if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
-      return toolJson({
-        status: 'needs_clarification',
-        reason:
-          `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
-          'This is usually a typo or a stale project id from a deleted subscription.',
-        availableContextGraphs: availableCgs,
-        guidance:
-          'Pass one of the available contextGraphIds listed above, or ask the user to ' +
-          `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
-      });
-    }
-
-    // Resolve the agent address for provenance. If the node peer ID probe
-    // has not yet completed (daemon down, /api/status failed, early
-    // dispatch), fail the write with a retryable clarification rather
-    // than writing a durable `did:dkg:agent:unknown` triple.
-    const agentAddress = this.resolver.getDefaultAgentAddress();
-    if (!agentAddress) {
-      return toolJson({
-        status: 'needs_clarification',
-        reason: 'Agent address is not yet available (node identity probe pending).',
-        retryable: true,
-        guidance:
-          'The adapter has not yet resolved the node peer identity from the daemon. ' +
-          'Retry the write on the next turn; the probe typically completes within a few seconds of attach.',
-      });
-    }
-
-    // B14: Always call createAssertion. The previous implementation used a
-    // process-global `ASSERTION_ENSURED` Set keyed by `${cg}::${name}`, but
-    // WM assertions are scoped per agent/node — a cached hit from one
-    // (cg, name) pair does not prove the assertion exists on a different
-    // daemon/peer, nor does it prove the assertion survived a daemon state
-    // reset. Relying on the daemon's idempotent `createAssertion` semantics
-    // each time is correct regardless of which daemon/agent is behind the
-    // client, at the cost of one extra create call per write (the daemon
-    // short-circuits on already-created assertions).
-    try {
-      await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION);
-    } catch (err) {
-      return toolError(
-        `Failed to create memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
-      );
-    }
-
-    const memoryUri = `urn:dkg:memory:item:${crypto.randomUUID()}`;
-    const nowIso = new Date().toISOString();
-    // B43: Always build the `schema:creator` value via `toAgentDid`
-    // so consumers that pass either a raw peer ID or a pre-DID-formed
-    // address get a well-formed canonical DID. Without this, a DID-
-    // form input would be double-prefixed into
-    // `did:dkg:agent:did:dkg:agent:<peerId>`, which would match no
-    // real agent and produce unusable provenance.
-    const quads = [
-      { subject: memoryUri, predicate: RDF_TYPE, object: `${NS.schema}Thing`, graph: '' },
-      { subject: memoryUri, predicate: `${NS.schema}description`, object: JSON.stringify(text), graph: '' },
-      { subject: memoryUri, predicate: `${NS.schema}dateCreated`, object: `"${nowIso}"^^<${XSD_DATETIME}>`, graph: '' },
-      { subject: memoryUri, predicate: `${NS.schema}creator`, object: toAgentDid(agentAddress), graph: '' },
-    ];
-
-    try {
-      const result = await this.client.writeAssertion(
-        resolvedCg,
-        PROJECT_MEMORY_ASSERTION,
-        quads,
-      );
-      return toolJson({
-        status: 'stored',
-        contextGraphId: resolvedCg,
-        assertionName: PROJECT_MEMORY_ASSERTION,
-        memoryUri,
-        written: result.written,
-      });
-    } catch (err) {
-      return toolError(
-        `Failed to write memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
-      );
-    }
   }
 }
+
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function toolJson(data: unknown): OpenClawToolResult {
-  return {
-    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-    details: data,
-  };
-}
-
-function toolError(message: string): OpenClawToolResult {
-  return {
-    content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
-    details: { error: message },
-  };
-}
 
 function extractBindings(result: any): any[] {
   return result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
@@ -977,31 +548,6 @@ function toAgentPeerId(agentAddress: string): string {
   return agentAddress.startsWith(AGENT_DID_PREFIX)
     ? agentAddress.slice(AGENT_DID_PREFIX.length)
     : agentAddress;
-}
-
-/** Return the canonical `did:dkg:agent:<peerId>` DID form used in provenance triples. */
-function toAgentDid(agentAddress: string): string {
-  return agentAddress.startsWith(AGENT_DID_PREFIX)
-    ? agentAddress
-    : `${AGENT_DID_PREFIX}${agentAddress}`;
-}
-
-/**
- * Coerce a tool-call parameter that may arrive as a `number` or as a
- * stringified number (common on older gateways / tool-call serializers)
- * into a finite number. Returns `undefined` for any input that cannot
- * be coerced to a finite value, letting the caller fall back to the
- * downstream default. Codex Bug B18.
- */
-function coerceFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
 }
 
 function computeKeywordOverlap(text: string, keywords: string[]): number {

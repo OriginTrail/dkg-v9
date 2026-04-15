@@ -1026,7 +1026,7 @@ describe('DkgNodePlugin', () => {
     expect(memoryWarnings).toHaveLength(1);
     expect(memoryWarnings[0]).toContain('memoryDir');
     expect(memoryWarnings[0]).toContain('watchDebounceMs');
-    expect(memoryWarnings[0]).toContain('dkg_memory_import');
+    expect(memoryWarnings[0]).toContain('memory slot');
   });
 
   it('does NOT warn about retired memory config keys when the keys are absent', () => {
@@ -1055,7 +1055,7 @@ describe('DkgNodePlugin', () => {
     expect(memoryWarnings).toHaveLength(0);
   });
 
-  it('upgrades from setup-runtime to full runtime without losing the memory tool surface', () => {
+  it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       memory: { enabled: true },
@@ -1076,12 +1076,8 @@ describe('DkgNodePlugin', () => {
     expect(setupRuntimeTools).toHaveLength(0);
 
     const fullRuntimeTools: OpenClawTool[] = [];
+    const registerMemoryCapability = vi.fn();
     const fullRuntimeApi: OpenClawPluginApi = {
-      // Fully-migrated modern gateway: registerMemoryCapability exists
-      // AND `plugins.slots.memory` elects this adapter. Both conditions
-      // are required for Codex Bug B25's slot-ownership check to pass
-      // and suppress the compat `dkg_memory_search` tool — otherwise
-      // the compat tool is retained as a safety net.
       config: {
         plugins: {
           slots: {
@@ -1092,19 +1088,20 @@ describe('DkgNodePlugin', () => {
       registrationMode: 'full',
       registerTool: (tool) => fullRuntimeTools.push(tool),
       registerHook: () => {},
-      // Modern gateway: memory slot contract is available.
-      registerMemoryCapability: () => {},
+      registerMemoryCapability,
       on: () => {},
       logger: {},
       workspaceDir: 'C:/tmp/openclaw-upgrade-test',
     };
     plugin.register(fullRuntimeApi);
 
+    // The adapter no longer registers dkg_memory_import or
+    // dkg_memory_search as conventional tools — both reads and writes
+    // flow through the memory slot via registerMemoryCapability.
     const fullToolNames = fullRuntimeTools.map((tool) => tool.name);
-    // Reads go through the memory slot (registerMemoryCapability), not a
-    // DKG-branded tool. Writes still use an explicit dkg_memory_import tool.
     expect(fullToolNames).not.toContain('dkg_memory_search');
-    expect(fullToolNames).toContain('dkg_memory_import');
+    expect(fullToolNames).not.toContain('dkg_memory_import');
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('does not re-register the OpenClaw channel routes when the same plugin instance upgrades to full runtime', async () => {

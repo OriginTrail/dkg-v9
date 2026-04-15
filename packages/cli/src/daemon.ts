@@ -18,17 +18,13 @@ import {
 } from "node:fs/promises";
 import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { join, dirname, resolve } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { ethers } from 'ethers';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { join, dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { ethers } from 'ethers';
-import { join, dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { ethers } from 'ethers';
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';

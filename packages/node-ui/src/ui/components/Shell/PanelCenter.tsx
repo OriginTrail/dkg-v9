@@ -93,6 +93,7 @@ const KEEP_ALIVE_TABS = ['sync-status'] as const;
 
 function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
+  const tabs = useTabsStore((s) => s.tabs);
   const [visited, setVisited] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -100,6 +101,18 @@ function ViewContainer() {
       setVisited((prev) => new Set(prev).add(activeTabId));
     }
   }, [activeTabId, visited]);
+
+  // Evict keep-alive views when their tab is closed
+  useEffect(() => {
+    const openIds = new Set(tabs.map((t) => t.id));
+    setVisited((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (openIds.has(id)) next.add(id);
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tabs]);
 
   const renderEphemeral = () => {
     if ((KEEP_ALIVE_TABS as readonly string[]).includes(activeTabId)) return null;

@@ -718,7 +718,7 @@ export class DKGAgent {
       }
     };
 
-    const syncDelay = this.config.syncMode ? 500 : 3000;
+    const syncDelay = 3000;
 
     this.node.libp2p.addEventListener('peer:connect', (evt) => {
       const remotePeer = evt.detail.toString();
@@ -771,15 +771,44 @@ export class DKGAgent {
             scheduleNext();
             return;
           }
-          const pick = peers[Math.floor(Math.random() * peers.length)].toString();
-          const short = pick.slice(-8);
-          this.pushSyncEvent('info', `Periodic sync: checking peer ${short} (${peers.length} connected)...`);
-          try {
-            await this.trySyncFromPeer(pick);
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.pushSyncEvent('warn', `Periodic sync failed: ${msg}`);
+          const roundStart = Date.now();
+          const prevTotals = new Map<string, number>();
+          for (const [k, v] of this.syncProgress) prevTotals.set(k, v.totalTriples);
+
+          this.pushSyncEvent('info', `Periodic sync: checking ${peers.length} peers...`);
+          const MAX_PARALLEL_SYNCS = 4;
+          for (let i = 0; i < peers.length; i += MAX_PARALLEL_SYNCS) {
+            if (!this.started) break;
+            const batch = peers.slice(i, i + MAX_PARALLEL_SYNCS);
+            await Promise.allSettled(batch.map(async (peer) => {
+              if (!this.started) return;
+              const remotePeer = peer.toString();
+              try {
+                await this.trySyncFromPeer(remotePeer);
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.pushSyncEvent('warn', `Periodic sync peer ${remotePeer.slice(-8)} failed: ${msg}`);
+              }
+            }));
           }
+          // Persist progress after each round so crash recovery is recent
+          await this.saveSyncProgress().catch(() => {});
+
+          const elapsed = ((Date.now() - roundStart) / 1000).toFixed(1);
+          let totalTriples = 0;
+          let roundDelta = 0;
+          const changed: string[] = [];
+          for (const [k, v] of this.syncProgress) {
+            totalTriples += v.totalTriples;
+            const prev = prevTotals.get(k) ?? 0;
+            const d = v.totalTriples - prev;
+            if (d > 0) changed.push(`${k} +${d}`);
+            roundDelta += d;
+          }
+          const delta = roundDelta > 0 ? `, +${roundDelta} new (${changed.join(', ')})` : '';
+          const msg = `Sync round: ${totalTriples.toLocaleString()} triples across ${this.syncProgress.size} CGs from ${peers.length} peers in ${elapsed}s${delta}`;
+          this.log.info(createOperationContext('sync'), msg);
+          this.pushSyncEvent(roundDelta > 0 ? 'ok' : 'info', msg);
           scheduleNext();
         }, intervalMs);
         this.periodicSyncTimer?.unref?.();
@@ -832,7 +861,9 @@ export class DKGAgent {
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
 
-      const wsContextGraphIds = this.config.syncContextGraphs ?? [];
+      const wsContextGraphIds = this.config.syncMode
+        ? [...new Set([...(this.config.syncContextGraphs ?? []), ...this.subscribedContextGraphs.keys()])]
+        : (this.config.syncContextGraphs ?? []);
       if (wsContextGraphIds.length > 0) {
         const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
         this.log.info(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
@@ -856,23 +887,23 @@ export class DKGAgent {
     onPhase?: PhaseCallback,
   ): Promise<number> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
 
     try {
       for (const pid of contextGraphIds) {
+        // Per-CG deadline so large graphs don't starve smaller ones
+        const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
-
-        this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
         onPhase?.('fetch', 'start');
 
         const metaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
-        this.log.info(ctx, `  meta: ${metaQuads.length} triples fetched`);
-
         const dataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
-        this.log.info(ctx, `  data: ${dataQuads.length} triples fetched`);
+
+        if (metaQuads.length > 0 || dataQuads.length > 0) {
+          this.log.info(ctx, `Synced "${pid}" from ${remotePeerId.slice(-8)}: ${dataQuads.length} data + ${metaQuads.length} meta triples`);
+        }
 
         onPhase?.('fetch', 'end');
 
@@ -921,11 +952,23 @@ export class DKGAgent {
           const prev = this.syncProgress.get(pid);
           const sources = prev?.peerSources ?? new Set<string>();
           sources.add(remotePeerId);
-          // Full-state sync: cgTriples is the peer's total for this CG, not a
-          // delta. Use max() so gossip-added triples aren't lost if the peer
-          // hasn't received them yet.
+          let storeTotal = cgTriples;
+          try {
+            const countResult = await this.store.query(
+              `SELECT (SUM(?cnt) as ?total) WHERE {
+                { SELECT (COUNT(*) as ?cnt) WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } }
+                UNION
+                { SELECT (COUNT(*) as ?cnt) WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } }
+              }`,
+            );
+            if (countResult.type === 'bindings' && countResult.bindings.length > 0) {
+              const raw = countResult.bindings[0]['total'];
+              const parsed = parseInt(raw?.replace(/^"(\d+)".*/, '$1') ?? '0', 10);
+              if (parsed > 0) storeTotal = parsed;
+            }
+          } catch { /* fall back to cgTriples */ }
           const prevTotal = prev?.totalTriples ?? 0;
-          const newTotal = Math.max(prevTotal, cgTriples);
+          const newTotal = Math.max(prevTotal, storeTotal);
           const actualDelta = newTotal - prevTotal;
           this.syncProgress.set(pid, {
             contextGraphId: pid,
@@ -989,8 +1032,6 @@ export class DKGAgent {
         Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
       );
 
-      // Build a fresh request (with unique requestId + signature) per attempt
-      // so that authenticated private-sync retries aren't rejected as replays.
       const curOffset = offset;
       const responseBytes = await withRetry(
         async () => {
@@ -1032,21 +1073,20 @@ export class DKGAgent {
     contextGraphIds: string[] = [...(this.config.syncContextGraphs ?? [])],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
 
     try {
       for (const pid of contextGraphIds) {
+        // Per-CG deadline so large graphs don't starve smaller ones
+        const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
 
-        this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
-
         const wsMetaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
         const wsDataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
-        this.log.info(ctx, `  shared memory: ${wsDataQuads.length} data + ${wsMetaQuads.length} meta triples fetched`);
-
         if (wsDataQuads.length === 0 && wsMetaQuads.length === 0) continue;
+
+        this.log.info(ctx, `SWM "${pid}" from ${remotePeerId.slice(-8)}: ${wsDataQuads.length} data + ${wsMetaQuads.length} meta`);
 
         const wsQuads = wsDataQuads;
 
@@ -1130,6 +1170,31 @@ export class DKGAgent {
         }
 
         this.log.info(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
+
+        if (this.config.syncMode) {
+          const prev = this.syncProgress.get(pid);
+          const sources = prev?.peerSources ?? new Set<string>();
+          sources.add(remotePeerId);
+          const prevTotal = prev?.totalTriples ?? 0;
+          const newTotal = Math.max(prevTotal, validWsQuads.length);
+          const delta = newTotal - prevTotal;
+          this.syncProgress.set(pid, {
+            contextGraphId: pid,
+            totalTriples: newTotal,
+            lastSyncedAt: delta > 0 ? Date.now() : (prev?.lastSyncedAt ?? 0),
+            lastCheckedAt: Date.now(),
+            lastDelta: delta,
+            lastPeerSource: remotePeerId,
+            lastDurationMs: prev?.lastDurationMs ?? 0,
+            syncCount: (prev?.syncCount ?? 0) + 1,
+            peerSources: sources,
+            lastGossipAt: prev?.lastGossipAt ?? 0,
+            lastGossipTriples: prev?.lastGossipTriples ?? 0,
+          });
+          if (delta > 0) {
+            this.pushSyncEvent('ok', `SWM catch-up: +${delta} triples for "${pid}" from ${remotePeerId.slice(-8)}`);
+          }
+        }
       }
       if (totalSynced > 0) {
         this.log.info(ctx, `SWM sync complete: ${totalSynced} triples from ${remotePeerId}`);
@@ -1981,6 +2046,25 @@ export class DKGAgent {
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
       const wh = this.getOrCreateSharedMemoryHandler();
       await wh.handle(data, from);
+      if (this.config.syncMode) {
+        const prev = this.syncProgress.get(contextGraphId);
+        const sources = prev?.peerSources ?? new Set<string>();
+        if (from) sources.add(from);
+        this.syncProgress.set(contextGraphId, {
+          contextGraphId,
+          totalTriples: prev?.totalTriples ?? 0,
+          lastSyncedAt: prev?.lastSyncedAt ?? 0,
+          lastCheckedAt: prev?.lastCheckedAt ?? 0,
+          lastDelta: prev?.lastDelta ?? 0,
+          lastPeerSource: from ?? prev?.lastPeerSource ?? '',
+          lastDurationMs: prev?.lastDurationMs ?? 0,
+          syncCount: prev?.syncCount ?? 0,
+          peerSources: sources,
+          lastGossipAt: Date.now(),
+          lastGossipTriples: prev?.lastGossipTriples ?? 0,
+        });
+        this.pushSyncEvent('info', `SWM gossip for "${contextGraphId}" from ${from?.slice(-8) ?? '?'}`);
+      }
     });
 
     const updateTopic = paranetUpdateTopic(contextGraphId);

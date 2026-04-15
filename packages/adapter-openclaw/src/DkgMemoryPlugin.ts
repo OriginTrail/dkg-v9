@@ -344,12 +344,10 @@ export class DkgMemoryPlugin {
         'Record a memory into a project\'s DKG Working Memory. ' +
         'Use this to persist a fact, decision, or note that should be retrievable later ' +
         'from the same project\'s context graph. ' +
-        'Parameters: `text` (required), `contextGraphId` (required in practice — name of the target ' +
-        'project CG; if omitted, this tool returns a structured `needs_clarification` response listing ' +
-        'the available context graphs so the agent can ask the user which project to use). ' +
-        'Note: implicit UI-selected project CG resolution is not available in v1 because the upstream ' +
-        'tool execute contract (`execute(toolCallId, params)`) provides no per-call session context; ' +
-        'tracked as a follow-up for when upstream exposes a session-scoped dispatch hook. ' +
+        'Parameters: `text` (required), `contextGraphId` (optional — name of the target project CG; ' +
+        'if omitted, the tool falls back to the UI-selected project CG stamped on the current turn ' +
+        'via the dispatch-scoped resolver, then to a structured `needs_clarification` response listing ' +
+        'the available context graphs when no project can be resolved). ' +
         'Subgraph-scoped writes are intentionally not supported in v1: the query engine at ' +
         'dkg-query-engine.ts:120-124 throws when `subGraphName` is combined with view-based routing, ' +
         'which would make subgraph-scoped writes silently unreadable through `view: working-memory`. ' +
@@ -361,8 +359,9 @@ export class DkgMemoryPlugin {
           contextGraphId: {
             type: 'string',
             description:
-              'Target project context graph id. Required in practice — if omitted, the tool returns ' +
-              'a `needs_clarification` response listing available context graphs.',
+              'Optional target project context graph id. When omitted, the tool uses the ' +
+              'UI-selected project CG for the current turn; if no project is active, it returns ' +
+              'a `needs_clarification` response listing the available context graphs.',
           },
         },
         required: ['text'],
@@ -432,8 +431,14 @@ export class DkgMemoryPlugin {
     if (!query) {
       return toolError('Missing required parameter "query"');
     }
-    const maxResults = typeof params.maxResults === 'number' ? params.maxResults : undefined;
-    const minScore = typeof params.minScore === 'number' ? params.minScore : undefined;
+    // B18: Legacy tool-call serializers on older gateways often stringify
+    // numeric arguments — the retired `dkg_memory_search` tool tolerated
+    // that via `parseInt(String(params.limit), 10)`. Mirror that tolerance
+    // here so `{ maxResults: '5' }` is accepted the same way as
+    // `{ maxResults: 5 }`. Reject NaN / non-finite values by falling back
+    // to the default (undefined → search manager defaults).
+    const maxResults = coerceFiniteNumber(params.maxResults);
+    const minScore = coerceFiniteNumber(params.minScore);
 
     // B15: Preflight the agent address the same way `getMemorySearchManager`
     // does in the slot-routed factory. Without this guard, the legacy
@@ -479,17 +484,25 @@ export class DkgMemoryPlugin {
     }
     const explicitCg = typeof params.contextGraphId === 'string' ? params.contextGraphId.trim() : '';
 
-    // `dkg_memory_import` has no upstream-provided per-call session context
-    // today (see openclaw-runtime B1a investigation). We therefore require
-    // the agent to provide `contextGraphId` explicitly. The resolver path
-    // remains for slot-backed recall via `DkgMemorySearchManager.search`,
-    // which DOES receive a sessionKey from the memory slot dispatcher.
-    const resolvedCg = explicitCg;
+    // B16: Prefer explicit `contextGraphId` when provided, but also honor the
+    // dispatch-scoped project CG stamped on the current turn's ALS store.
+    // The original B1 fix (commit 13ac99a9) removed the resolver call because
+    // at that time the channel state was keyed by a sessionKey that tool
+    // `execute(toolCallId, params)` had no way to forward. The B6 ALS
+    // refactor (commit 2be963a3) replaced the sessionKey map with
+    // `AsyncLocalStorage`, and `getSessionProjectContextGraphId(undefined)`
+    // now wildcard-reads the active dispatch store — so any tool call
+    // running inside a dispatch's async call tree can observe the UI-
+    // selected CG without needing an explicit sessionKey. Restore the
+    // implicit resolution path; fall back to `needs_clarification` only
+    // when neither source is available.
+    const dispatchScopedCg = this.resolver.getSession(undefined)?.projectContextGraphId;
+    const resolvedCg = explicitCg || dispatchScopedCg || '';
 
     if (!resolvedCg) {
       return toolJson({
         status: 'needs_clarification',
-        reason: 'No project context graph was provided for this write.',
+        reason: 'No project context graph was provided for this write, and no UI-selected project is active on the current turn.',
         availableContextGraphs: this.resolver.listAvailableContextGraphs(),
         guidance:
           'Please specify which project this belongs to by providing contextGraphId on the next call, ' +
@@ -584,6 +597,24 @@ function extractBindings(result: any): any[] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Coerce a tool-call parameter that may arrive as a `number` or as a
+ * stringified number (common on older gateways / tool-call serializers)
+ * into a finite number. Returns `undefined` for any input that cannot
+ * be coerced to a finite value, letting the caller fall back to the
+ * downstream default. Codex Bug B18.
+ */
+function coerceFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 function computeKeywordOverlap(text: string, keywords: string[]): number {

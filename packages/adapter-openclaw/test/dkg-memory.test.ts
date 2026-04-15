@@ -160,12 +160,15 @@ describe('DkgMemoryPlugin.register', () => {
     expect(payload.error).toMatch(/query/);
   });
 
-  it('dkg_memory_import returns needs_clarification when no contextGraphId is supplied', async () => {
-    // Bug B1: `execute(toolCallId, params)` has no session-context parameter
-    // from upstream, so the tool cannot resolve a UI-selected project CG
-    // implicitly. The tool therefore requires the agent to pass
-    // `contextGraphId` explicitly and falls back to a structured
-    // clarification response when absent.
+  it('dkg_memory_import returns needs_clarification when no contextGraphId is supplied AND resolver has no dispatch-scoped CG', async () => {
+    // After Bug B16: handleImport can resolve an implicit project CG from
+    // the ALS-scoped resolver (post-B6 refactor). When BOTH sources are
+    // unavailable — no explicit contextGraphId AND no dispatch-scoped
+    // projectContextGraphId on the resolver — the tool falls back to a
+    // structured clarification response so the agent can ask the user.
+    // The default `makeResolver()` fixture returns a session with
+    // `projectContextGraphId: undefined` (no override), so this test
+    // exercises the both-unavailable fallback path.
     const api = makeApi();
     plugin.register(api);
     const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
@@ -173,7 +176,75 @@ describe('DkgMemoryPlugin.register', () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe('needs_clarification');
     expect(payload).toHaveProperty('availableContextGraphs');
-    expect(payload.reason).toMatch(/contextGraphId|project context graph/i);
+    expect(payload.reason).toMatch(/context graph|UI-selected project/i);
+  });
+
+  it('dkg_memory_import uses the dispatch-scoped project CG from the resolver when contextGraphId is omitted (Codex B16)', async () => {
+    // B16 regression guard. Post-B6 ALS, the channel dispatches run under
+    // `runWithDispatchContext` and `DkgNodePlugin.memorySessionResolver`
+    // reads `projectContextGraphId` from the ALS store via
+    // `channelPlugin.getSessionProjectContextGraphId`. `handleImport`
+    // must honor that dispatch-scoped CG when the agent omits an
+    // explicit `contextGraphId` — otherwise users with a project
+    // selected in the UI hit `needs_clarification` on every turn.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+
+    const api = makeApi();
+    const pluginWithDispatchCg = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ projectContextGraphId: 'ui-selected-b16' }),
+    );
+    pluginWithDispatchCg.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    // No `contextGraphId` in params — the resolver's dispatch-scoped CG
+    // MUST be used instead of falling through to needs_clarification.
+    const result = await importTool.execute('call-1', { text: 'user likes dark mode' });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.status).toBe('stored');
+    expect(payload.contextGraphId).toBe('ui-selected-b16');
+    expect(createSpy).toHaveBeenCalledWith('ui-selected-b16', PROJECT_MEMORY_ASSERTION);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toBe('ui-selected-b16');
+  });
+
+  it('dkg_memory_import prefers explicit contextGraphId over the resolver dispatch-scoped CG (Codex B16)', async () => {
+    // When the agent passes an explicit `contextGraphId`, it must win
+    // over the resolver's dispatch-scoped project CG. This keeps the
+    // agent-addressable escape hatch for cross-project writes — e.g.,
+    // recording a memory into project X while the UI has project Y
+    // selected.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+
+    const api = makeApi();
+    const pluginWithDispatchCg = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ projectContextGraphId: 'ui-selected-b16' }),
+    );
+    pluginWithDispatchCg.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'cross-project memory',
+      contextGraphId: 'explicit-override',
+    });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.status).toBe('stored');
+    expect(payload.contextGraphId).toBe('explicit-override');
+    expect(createSpy).toHaveBeenCalledWith('explicit-override', PROJECT_MEMORY_ASSERTION);
+    expect(writeSpy.mock.calls[0][0]).toBe('explicit-override');
   });
 
   it('dkg_memory_import writes into the memory assertion when an explicit CG is provided', async () => {
@@ -310,6 +381,57 @@ describe('DkgMemoryPlugin.register', () => {
     // Both calls target the same CG + assertion name.
     expect(createSpy.mock.calls[0]).toEqual(['research-b14', PROJECT_MEMORY_ASSERTION]);
     expect(createSpy.mock.calls[1]).toEqual(['research-b14', PROJECT_MEMORY_ASSERTION]);
+  });
+
+  it('dkg_memory_search compat tool coerces stringified maxResults/minScore to numbers (Codex B18)', async () => {
+    // B18: legacy tool-call serializers on older gateways often stringify
+    // numeric arguments. The retired `dkg_memory_search` tool tolerated
+    // that via parseInt; the new compat tool must do the same, otherwise
+    // callers passing `{ maxResults: "5" }` silently fall back to the
+    // search manager's default limit, which is a silent correctness
+    // regression from the legacy behavior.
+    const searchSpy = vi.spyOn(DkgMemorySearchManager.prototype, 'search').mockResolvedValue([]);
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    await searchTool.execute('call-1', {
+      query: 'alpha beta',
+      maxResults: '7',
+      minScore: '0.25',
+    });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    const opts = searchSpy.mock.calls[0][1];
+    expect(opts).toEqual({ maxResults: 7, minScore: 0.25 });
+  });
+
+  it('dkg_memory_search compat tool falls back to default when stringified params are non-numeric (Codex B18)', async () => {
+    // Non-numeric strings like `{ maxResults: "none" }` must not crash
+    // or produce NaN. They should fall through to `undefined` so the
+    // search manager uses its built-in default.
+    const searchSpy = vi.spyOn(DkgMemorySearchManager.prototype, 'search').mockResolvedValue([]);
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    await searchTool.execute('call-1', {
+      query: 'alpha beta',
+      maxResults: 'not-a-number',
+      minScore: '',
+    });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    const opts = searchSpy.mock.calls[0][1];
+    expect(opts).toEqual({ maxResults: undefined, minScore: undefined });
   });
 
   it('dkg_memory_search compat tool returns retryable needs_clarification when peer-id probe is pending (Codex B15)', async () => {

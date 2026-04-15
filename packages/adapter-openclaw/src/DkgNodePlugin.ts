@@ -117,7 +117,21 @@ export class DkgNodePlugin {
       }
       return this.nodePeerId;
     },
-    listAvailableContextGraphs: () => this.availableContextGraphCache,
+    // B17: The cache is populated fire-and-forget from
+    // `refreshMemoryResolverState` at register time. If `dkg_memory_import`
+    // fires before the register-time probe lands, or after the agent
+    // creates/subscribes a new context graph later in the session, the
+    // cache is stale and the `needs_clarification` payload advertises an
+    // empty or outdated project list to the agent. When the cache is
+    // empty we fire a best-effort lazy refresh; the current call still
+    // returns synchronously with whatever we have, and the next call
+    // sees the refreshed result once the probe completes.
+    listAvailableContextGraphs: () => {
+      if (this.availableContextGraphCache.length === 0 && this.memoryResolverApi) {
+        void this.refreshMemoryResolverState(this.memoryResolverApi);
+      }
+      return this.availableContextGraphCache;
+    },
   };
   private availableContextGraphCache: string[] = [];
   private availableContextGraphsRefreshing = false;

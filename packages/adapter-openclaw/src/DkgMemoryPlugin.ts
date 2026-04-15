@@ -103,7 +103,14 @@ export class DkgMemorySearchManager implements MemorySearchManager {
   }
 
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
-    const limit = Math.max(1, Math.min(100, options?.maxResults ?? 10));
+    // B37: The clamped value is interpolated directly into the SPARQL
+    // `LIMIT` clause below, so it must be an integer. A fractional
+    // input like `2.5` would produce `LIMIT 2.5`, which is invalid
+    // SPARQL and gets swallowed by the per-query `.catch` blocks as
+    // an empty result set. `Math.floor` after the clamp keeps any
+    // fractional caller intent ("give me roughly 2-3 results") mapped
+    // to the nearest valid integer without breaking the query.
+    const limit = Math.floor(Math.max(1, Math.min(100, options?.maxResults ?? 10)));
     const minScore = options?.minScore ?? 0;
     const sessionKey = options?.sessionKey ?? this.deps.sessionKey;
 
@@ -498,9 +505,19 @@ export class DkgMemoryPlugin {
           type: 'object',
           properties: {
             query: { type: 'string', description: 'Search terms.' },
+            // B35: schema-aware hosts validate tool-call arguments against
+            // this schema before the handler runs. Declaring `maxResults` /
+            // `limit` / `minScore` as strict `type: 'number'` causes those
+            // hosts to reject `{ "limit": "5" }` from legacy callers /
+            // serializers (the B18 stringified-numeric scenario) before
+            // `handleLegacySearch` can coerce the value. That makes the
+            // B18 + B32 compat shims unreachable on the exact hosts they
+            // were meant to protect. Declare these as `["number", "string"]`
+            // so legacy stringified inputs pass schema validation, then
+            // `coerceFiniteNumber` in the handler converts them.
             maxResults: {
-              type: 'number',
-              description: 'Maximum number of results to return (default 10). Alias: `limit`.',
+              type: ['number', 'string'],
+              description: 'Maximum number of results to return (default 10). Alias: `limit`. Accepts numeric or stringified-numeric values for legacy tool-call compatibility.',
             },
             // B32: The retired pre-workstream `dkg_memory_search` tool used
             // `limit` as the parameter name. Old callers / prompts still
@@ -510,14 +527,15 @@ export class DkgMemoryPlugin {
             // Accept `limit` here as a documented alias; the handler
             // prefers `maxResults` when both are present.
             limit: {
-              type: 'number',
+              type: ['number', 'string'],
               description:
                 'Deprecated alias for `maxResults`, preserved for legacy tool-call compatibility ' +
-                'on older gateways. `maxResults` takes precedence when both are supplied.',
+                'on older gateways. `maxResults` takes precedence when both are supplied. ' +
+                'Accepts numeric or stringified-numeric values.',
             },
             minScore: {
-              type: 'number',
-              description: 'Minimum keyword-overlap score for returned results.',
+              type: ['number', 'string'],
+              description: 'Minimum keyword-overlap score for returned results. Accepts numeric or stringified-numeric values for legacy tool-call compatibility.',
             },
           },
           required: ['query'],
@@ -601,7 +619,23 @@ export class DkgMemoryPlugin {
     });
     try {
       const results = await manager.search(query, { maxResults, minScore });
-      return toolJson({ status: 'ok', results });
+      // B36: The retired pre-workstream `dkg_memory_search` tool returned
+      // `{ content: [{ type: 'text', text: JSON.stringify(results) }],
+      // details: results }` — the raw array was the `details` payload,
+      // and callers parsing the legacy envelope expect `details` to be
+      // an array of results. Wrapping success in `{ status, results }`
+      // via `toolJson` broke that contract: `details` became the
+      // envelope object, not the raw array, and any legacy prompt / host
+      // destructuring `details` as a result array silently got the
+      // wrong shape. Return the raw array as `details` directly from
+      // the compat path to match the retired tool's envelope exactly.
+      // New metadata is still additive via the JSON serialization in
+      // `content[0].text` (single array form), but the `details`
+      // field stays pure for programmatic consumers.
+      return {
+        content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
+        details: results,
+      };
     } catch (err) {
       return toolError(`Memory search failed: ${errorMessage(err)}`);
     }

@@ -62,7 +62,19 @@ export interface OpenClawTool {
 
 export interface JSONSchemaObject {
   type: 'object';
-  properties: Record<string, { type: string; description?: string; items?: any; enum?: string[] }>;
+  /**
+   * Property `type` matches the JSON Schema Draft 7 shape: either a
+   * single primitive type name or an array of alternative type names
+   * (e.g. `['number', 'string']` for a field that accepts both a
+   * numeric literal and a stringified-numeric value). Codex Bug B35
+   * required the array form on the compat `dkg_memory_search` tool
+   * so legacy callers passing stringified numerics can pass
+   * schema-validation on hosts that actually enforce the schema.
+   */
+  properties: Record<
+    string,
+    { type: string | string[]; description?: string; items?: any; enum?: string[] }
+  >;
   required?: string[];
 }
 

@@ -195,6 +195,28 @@ describe('DkgMemoryPlugin.register', () => {
     expect(toolNames).toContain('dkg_memory_search');
   });
 
+  it('dkg_memory_search compat tool schema accepts both number and string for maxResults/limit/minScore (Codex B35)', () => {
+    // B35: schema-aware hosts validate tool-call arguments against this
+    // schema before the handler runs. Declaring the numeric params as
+    // strict `type: 'number'` would cause those hosts to reject
+    // `{ limit: '5' }` from legacy callers before `handleLegacySearch`
+    // could coerce the value — making the B18 / B32 compat shims
+    // unreachable on the exact hosts they were meant to protect. The
+    // schema must declare these as the JSON Schema union
+    // `['number', 'string']` so stringified inputs pass validation.
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchToolDef = legacyApi.registerTool.mock.calls
+      .map((c: any) => c[0])
+      .find((t: any) => t.name === 'dkg_memory_search');
+    expect(searchToolDef).toBeDefined();
+    const props = searchToolDef.parameters.properties;
+    expect(props.maxResults.type).toEqual(['number', 'string']);
+    expect(props.limit.type).toEqual(['number', 'string']);
+    expect(props.minScore.type).toEqual(['number', 'string']);
+  });
+
   it('dkg_memory_search compat tool delegates to DkgMemorySearchManager.search', async () => {
     // The compat tool must hit the same search path the slot uses, so
     // results are consistent across gateway generations. Verify the
@@ -215,14 +237,93 @@ describe('DkgMemoryPlugin.register', () => {
     )[0];
 
     const result = await searchTool.execute('call-1', { query: 'alpha beta', maxResults: 5 });
+    // B36: the compat path returns the retired tool's envelope shape
+    // directly — `content[0].text` is the JSON-serialized raw result
+    // array, and `details` is the raw result array itself (not a
+    // wrapper object). Legacy prompts parsing the old envelope get
+    // back exactly what the pre-workstream tool produced.
     const payload = JSON.parse(result.content[0].text);
-    expect(payload.status).toBe('ok');
-    expect(Array.isArray(payload.results)).toBe(true);
+    expect(Array.isArray(payload)).toBe(true);
+    expect(Array.isArray(result.details)).toBe(true);
     expect(querySpy).toHaveBeenCalled();
     const opts = querySpy.mock.calls[0][1]!;
     expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
     expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
     expect(opts.view).toBe('working-memory');
+  });
+
+  it('dkg_memory_search compat tool preserves the retired tool\'s raw-array details envelope (Codex B36)', async () => {
+    // B36: the retired pre-workstream `dkg_memory_search` tool returned
+    // `{ content: [{ type: 'text', text: JSON.stringify(results) }],
+    // details: results }` — the raw result array WAS the `details`
+    // payload. Legacy prompts / hosts parsing that envelope expect
+    // `details` to be an array they can iterate, not a `{status,
+    // results}` wrapper. The compat path must mirror the retired
+    // envelope exactly.
+    vi.spyOn(client, 'query').mockResolvedValue({
+      result: {
+        bindings: [
+          { uri: { value: 'urn:m:1' }, text: { value: 'alpha beta memory hit' } },
+        ],
+      },
+    });
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    const result = await searchTool.execute('call-1', { query: 'alpha beta' });
+    // `details` is the raw result array, not an envelope object.
+    expect(Array.isArray(result.details)).toBe(true);
+    // `content[0].text` is the JSON-serialized raw array, not a wrapper.
+    const parsed = JSON.parse(result.content[0].text);
+    expect(Array.isArray(parsed)).toBe(true);
+    // No wrapper object / envelope fields on the success shape.
+    expect(result.details).not.toHaveProperty('status');
+    expect(result.details).not.toHaveProperty('results');
+  });
+
+  it('DkgMemorySearchManager.search floors fractional maxResults into a valid SPARQL LIMIT (Codex B37)', async () => {
+    // B37: the clamped value is interpolated directly into the SPARQL
+    // `LIMIT` clause. A fractional input like `2.5` would produce
+    // `LIMIT 2.5`, which is invalid SPARQL and gets swallowed by the
+    // per-query `.catch` blocks as an empty result set. The fix floors
+    // the clamped value so fractional caller intent maps to the
+    // nearest valid integer.
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValue({
+      result: { bindings: [] },
+    });
+    const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+
+    await manager.search('alpha beta', { maxResults: 2.5 });
+
+    expect(querySpy).toHaveBeenCalled();
+    const sparql = querySpy.mock.calls[0][0] as string;
+    // The interpolated LIMIT must be an integer (no dot).
+    expect(sparql).toMatch(/LIMIT \d+(\s|$)/);
+    // Specifically 2 for input 2.5 (Math.floor after clamp).
+    expect(sparql).toContain('LIMIT 2');
+    expect(sparql).not.toContain('LIMIT 2.5');
+  });
+
+  it('DkgMemorySearchManager.search clamps-then-floors extreme fractional inputs (Codex B37)', async () => {
+    // Belt-and-suspenders for the B37 clamp-then-floor interaction.
+    // Input 150.9 → clamped to 100 → floored to 100. Input 0.4 →
+    // clamped to 1 (via Math.max(1, ...)) → floored to 1.
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValue({
+      result: { bindings: [] },
+    });
+    const managerHi = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+    await managerHi.search('alpha', { maxResults: 150.9 });
+    const managerLo = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+    await managerLo.search('alpha', { maxResults: 0.4 });
+
+    const sparqlHi = querySpy.mock.calls[0][0] as string;
+    const sparqlLo = querySpy.mock.calls[1][0] as string;
+    expect(sparqlHi).toContain('LIMIT 100');
+    expect(sparqlLo).toContain('LIMIT 1');
   });
 
   it('dkg_memory_search compat tool rejects an empty query with a tool-level error', async () => {

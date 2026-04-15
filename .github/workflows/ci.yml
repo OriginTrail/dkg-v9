@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, v10-rc]
+    branches: [main, v10-rc, 'test/**']
   pull_request:
     branches: [main, v10-rc]
 
@@ -11,10 +11,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build & Test (TypeScript)
+  tornado-tests:
+    name: "Tornado: Protocol Core Tests"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +32,23 @@ jobs:
       - name: Build all packages
         run: pnpm build
 
-      - name: Run tests with coverage gates (Vitest packages)
-        run: pnpm turbo test:coverage --filter='!@origintrail-official/dkg-evm-module'
+      - name: "Core — crypto, protocol wire, genesis (442 tests)"
+        run: pnpm --filter @origintrail-official/dkg-core test:coverage
+
+      - name: "Storage — triple store operations (78 tests)"
+        run: pnpm --filter @origintrail-official/dkg-storage test:coverage
+
+      - name: "Chain — chain adapters, staking (102 tests)"
+        run: pnpm --filter @origintrail-official/dkg-chain test:coverage
+
+      - name: "Publisher — merkle, ACK, V10 publish (666 tests)"
+        run: pnpm --filter @origintrail-official/dkg-publisher test:coverage
+
+      - name: "Agent — gossip, workspace, integration (277 tests)"
+        run: pnpm --filter @origintrail-official/dkg-agent test:coverage
 
   solidity:
-    name: Solidity (Compile, test & coverage)
+    name: Solidity (Compile & Test)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

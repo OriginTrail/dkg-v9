@@ -359,8 +359,9 @@ export class DkgChannelPlugin {
   private noteSemanticWake(request: SemanticEnrichmentWakeRequest): void {
     const worker = this.ensureSemanticEnrichmentWorker();
     if (!worker) return;
+    const probe = worker.getRuntimeProbe();
+    if (!probe.supported) return;
     worker.noteWake(request);
-    worker.poke();
   }
 
   /**

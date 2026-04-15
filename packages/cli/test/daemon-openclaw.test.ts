@@ -438,6 +438,12 @@ describe('OpenClaw persist-turn validation', () => {
         detectedContentType: 'application/pdf',
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
+        semanticEnrichment: {
+          eventId: 'evt-semantic-1',
+          status: 'completed',
+          semanticTripleCount: 9,
+          updatedAt: completedAt,
+        },
         rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
         startedAt,
         completedAt,

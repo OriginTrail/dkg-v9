@@ -61,6 +61,7 @@ const MAX_SOURCE_TEXT_CHARS = 12_000;
 const MAX_ONTOLOGY_TRIPLES = 80;
 const DKG_HAS_USER_MESSAGE = 'http://dkg.io/ontology/hasUserMessage';
 const DKG_HAS_ASSISTANT_MESSAGE = 'http://dkg.io/ontology/hasAssistantMessage';
+const SUCCESSFUL_SUBAGENT_RUN_STATUSES = new Set(['completed', 'ok', 'success']);
 
 function contextGraphOntologyUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_ontology`;
@@ -170,12 +171,13 @@ export class SemanticEnrichmentWorker {
   async start(): Promise<void> {
     this.stopped = false;
     if (this.started) return;
+    if (!this.getRuntimeProbe().supported) return;
     this.started = true;
     this.scheduleTick(0);
   }
 
   noteWake(request: SemanticEnrichmentWakeRequest): void {
-    if (this.stopped) return;
+    if (this.stopped || !this.getRuntimeProbe().supported) return;
     const existing = this.pending.get(request.eventKey);
     if (existing) {
       existing.request = {
@@ -200,7 +202,7 @@ export class SemanticEnrichmentWorker {
   }
 
   poke(): void {
-    if (this.stopped) return;
+    if (this.stopped || !this.getRuntimeProbe().supported) return;
     this.scheduleDrain();
   }
 
@@ -305,10 +307,14 @@ export class SemanticEnrichmentWorker {
         throw new Error('OpenClaw subagent run did not return a runId');
       }
 
-      await subagent.waitForRun({
+      const waitResult = await subagent.waitForRun({
         runId,
         timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
       });
+      const waitStatus = typeof waitResult?.status === 'string' ? waitResult.status.trim().toLowerCase() : '';
+      if (waitStatus && !SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
+        throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult?.status}"`);
+      }
       const messages = await subagent.getSessionMessages({
         sessionKey,
         limit: DEFAULT_SUBAGENT_MESSAGE_LIMIT,

@@ -180,4 +180,242 @@ describe('SemanticEnrichmentWorker', () => {
     );
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });
+
+  it('treats non-successful wait statuses as failures and never appends triples from an incomplete run', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-2',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-456',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-456',
+            userMessage: 'hello again',
+            assistantReply: 'pending',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn();
+    const fail = vi.fn().mockResolvedValue({ status: 'pending' });
+    const getSessionMessages = vi.fn();
+    const deleteSession = vi.fn().mockResolvedValue(undefined);
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-2' }),
+          waitForRun: vi.fn().mockResolvedValue({ status: 'failed' }),
+          getSessionMessages,
+          deleteSession,
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'turn-456',
+      triggerSource: 'direct',
+    });
+    await worker.flush();
+
+    expect(getSessionMessages).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(
+      'evt-2',
+      worker.getWorkerInstanceId(),
+      expect.stringContaining('ended with status "failed"'),
+    );
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads markdown-backed file imports and falls back to schema.org guidance when no project ontology is usable', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-1',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-1',
+            assertionName: 'product-brief',
+            assertionUri: 'did:dkg:context-graph:project-1/assertion/peer/product-brief',
+            importStartedAt: '2026-04-15T10:00:00.000Z',
+            fileHash: 'keccak256:file-1',
+            mdIntermediateHash: 'keccak256:md-1',
+            detectedContentType: 'application/pdf',
+            sourceFileName: 'brief.pdf',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const fetchFileText = vi.fn().mockResolvedValue('# Brief\n\nAcme builds sensors.');
+    const query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-file-1',
+        status: 'completed',
+        semanticTripleCount: 1,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-file-1' });
+    const waitForRun = vi.fn().mockResolvedValue({ status: 'ok' });
+    const getSessionMessages = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          role: 'assistant',
+          text: '{"triples":[{"subject":"urn:dkg:file:keccak256:file-1#product","predicate":"https://schema.org/about","object":"https://schema.org/Product"}]}',
+        },
+      ],
+    });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun,
+          getSessionMessages,
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText,
+        query,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-1',
+      triggerSource: 'background',
+    });
+    await worker.flush();
+
+    expect(fetchFileText).toHaveBeenCalledWith('keccak256:md-1', 'text/markdown');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Source: schema_org');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Triples: none loaded; use schema.org terms where appropriate.');
+    expect(append).toHaveBeenCalledWith(
+      'evt-file-1',
+      worker.getWorkerInstanceId(),
+      [
+        {
+          subject: 'urn:dkg:file:keccak256:file-1#product',
+          predicate: 'https://schema.org/about',
+          object: 'https://schema.org/Product',
+        },
+      ],
+    );
+  });
+
+  it('uses the explicit ontologyRef as a replace-only override for file import prompts', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-2',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-2',
+            assertionName: 'roadmap',
+            assertionUri: 'did:dkg:context-graph:project-2/assertion/peer/roadmap',
+            importStartedAt: '2026-04-15T11:00:00.000Z',
+            fileHash: 'keccak256:file-2',
+            detectedContentType: 'text/markdown',
+            ontologyRef: 'did:dkg:context-graph:project-2/custom-ontology',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const query = vi.fn().mockResolvedValue({
+      result: {
+        bindings: [
+          {
+            s: { value: 'https://example.com/Project' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2000/01/rdf-schema#Class' },
+          },
+        ],
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-file-2' });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-file-2',
+        status: 'completed',
+        semanticTripleCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText: vi.fn().mockResolvedValue('# Roadmap'),
+        query,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-2',
+      triggerSource: 'background',
+    });
+    await worker.flush();
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('GRAPH <did:dkg:context-graph:project-2/custom-ontology>'),
+      expect.objectContaining({ contextGraphId: 'project-2', view: 'working-memory' }),
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Source: override');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Graph: did:dkg:context-graph:project-2/custom-ontology');
+  });
 });

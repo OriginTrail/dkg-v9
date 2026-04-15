@@ -33,6 +33,7 @@ export interface FileImportSemanticEventPayload {
   contextGraphId: string;
   assertionName: string;
   assertionUri: string;
+  importStartedAt: string;
   rootEntity?: string;
   fileHash: string;
   mdIntermediateHash?: string;
@@ -58,16 +59,20 @@ export function buildChatSemanticIdempotencyKey(turnId: string): string {
 
 export function buildFileSemanticIdempotencyKey(args: {
   assertionUri: string;
+  importStartedAt: string;
   fileHash: string;
   mdIntermediateHash?: string;
+  ontologyRef?: string;
   extractorVersion?: string;
 }): string {
   const version = args.extractorVersion ?? SEMANTIC_ENRICHMENT_EXTRACTOR_VERSION;
   return [
     'file',
     args.assertionUri,
+    args.importStartedAt,
     args.fileHash,
     args.mdIntermediateHash ?? 'none',
+    args.ontologyRef?.trim() || 'none',
     version,
   ].join('|');
 }

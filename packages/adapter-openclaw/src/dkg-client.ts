@@ -113,6 +113,7 @@ export interface FileImportSemanticEventPayload {
   contextGraphId: string;
   assertionName: string;
   assertionUri: string;
+  importStartedAt: string;
   rootEntity?: string;
   fileHash: string;
   mdIntermediateHash?: string;

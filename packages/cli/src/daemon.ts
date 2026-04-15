@@ -3057,6 +3057,7 @@ function buildFileSemanticEventPayload(args: {
   contextGraphId: string;
   assertionName: string;
   assertionUri: string;
+  importStartedAt: string;
   rootEntity?: string;
   fileHash: string;
   mdIntermediateHash?: string;
@@ -3069,6 +3070,7 @@ function buildFileSemanticEventPayload(args: {
     contextGraphId: args.contextGraphId,
     assertionName: args.assertionName,
     assertionUri: args.assertionUri,
+    importStartedAt: args.importStartedAt,
     ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
     fileHash: args.fileHash,
     ...(args.mdIntermediateHash ? { mdIntermediateHash: args.mdIntermediateHash } : {}),
@@ -3090,8 +3092,10 @@ function ensureSemanticEnrichmentEvent(
     : kind === 'file_import' && payload.kind === 'file_import'
       ? buildFileSemanticIdempotencyKey({
           assertionUri: payload.assertionUri,
+          importStartedAt: payload.importStartedAt,
           fileHash: payload.fileHash,
           mdIntermediateHash: payload.mdIntermediateHash,
+          ontologyRef: payload.ontologyRef,
         })
       : (() => {
           throw new Error(`Semantic enrichment payload kind mismatch: expected ${kind}, received ${payload.kind}`);
@@ -3100,18 +3104,24 @@ function ensureSemanticEnrichmentEvent(
   if (existing) return semanticEnrichmentDescriptorFromRow(existing, semanticTripleCount);
 
   const eventId = randomUUID();
-  dashDb.insertSemanticEnrichmentEvent({
-    id: eventId,
-    kind,
-    idempotency_key: idempotencyKey,
-    payload_json: JSON.stringify(payload),
-    status: 'pending',
-    attempts: 0,
-    max_attempts: SEMANTIC_ENRICHMENT_MAX_ATTEMPTS,
-    next_attempt_at: now,
-    created_at: now,
-    updated_at: now,
-  });
+  try {
+    dashDb.insertSemanticEnrichmentEvent({
+      id: eventId,
+      kind,
+      idempotency_key: idempotencyKey,
+      payload_json: JSON.stringify(payload),
+      status: 'pending',
+      attempts: 0,
+      max_attempts: SEMANTIC_ENRICHMENT_MAX_ATTEMPTS,
+      next_attempt_at: now,
+      created_at: now,
+      updated_at: now,
+    });
+  } catch (err) {
+    const racedExisting = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
+    if (racedExisting) return semanticEnrichmentDescriptorFromRow(racedExisting, semanticTripleCount);
+    throw err;
+  }
   const row = dashDb.getSemanticEnrichmentEvent(eventId);
   return semanticEnrichmentDescriptorFromRow(row ?? {
     id: eventId,
@@ -5981,6 +5991,7 @@ async function handleRequest(
           contextGraphId: contextGraphId!,
           assertionName,
           assertionUri,
+          importStartedAt: startedAt,
           rootEntity: importRootEntity,
           fileHash: fileStoreEntry.keccak256,
           mdIntermediateHash,

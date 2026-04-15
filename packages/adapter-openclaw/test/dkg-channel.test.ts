@@ -112,6 +112,55 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isUsingGatewayRoute).toBe(false);
   });
 
+  it('does not queue semantic wakes when runtime.subagent helpers are unavailable', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+          },
+        },
+      },
+      subagent: {
+        run: vi.fn(),
+        waitForRun: vi.fn(),
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue({
+      ok: true,
+      turnId: 'corr-unsupported-runtime',
+      semanticEnrichment: {
+        eventId: 'evt-unsupported',
+        status: 'pending',
+        semanticTripleCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-unsupported-runtime', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const worker = (plugin as any).ensureSemanticEnrichmentWorker();
+    expect(worker.getRuntimeProbe().supported).toBe(false);
+    expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {
     let dispatched: any;
     const recordInboundSession = vi.fn().mockResolvedValue(undefined);

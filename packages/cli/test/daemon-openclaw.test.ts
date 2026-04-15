@@ -15,6 +15,8 @@ import {
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
   notifyLocalAgentIntegrationWake,
+  canQueueLocalAgentSemanticEnrichment,
+  queueLocalAgentSemanticEnrichmentBestEffort,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
@@ -397,6 +399,90 @@ describe('local agent semantic wake helper', () => {
         vi.fn().mockRejectedValue(new Error('wake offline')) as any,
       ),
     ).resolves.toEqual({ status: 'failed', reason: 'wake offline' });
+  });
+});
+
+describe('best-effort semantic enqueue helper', () => {
+  it('skips semantic event creation when the integration is unavailable and skipWhenUnavailable is enabled', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw')).toBe(false);
+
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn(),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig(),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'file_import',
+      payload: {
+        kind: 'file_import',
+        contextGraphId: 'cg1',
+        assertionName: 'roadmap',
+        assertionUri: 'did:dkg:context-graph:cg1/assertion/peer/roadmap',
+        importStartedAt: '2026-04-15T12:00:00.000Z',
+        fileHash: 'sha256:file-1',
+        mdIntermediateHash: 'sha256:md-1',
+        detectedContentType: 'text/markdown',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'file import test',
+    });
+
+    expect(descriptor).toBeUndefined();
+    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
+  });
+
+  it('swallows enqueue failures so the primary route can still succeed', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(() => {
+        throw new Error('sqlite busy');
+      }),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-1',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-1',
+        userMessage: 'hi',
+        assistantReply: 'hello',
+        persistenceState: 'stored',
+      },
+      bridgeAuthToken: 'bridge-token',
+      skipWhenUnavailable: true,
+      logLabel: 'chat turn test',
+    });
+
+    expect(descriptor).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to enqueue chat turn test'),
+    );
   });
 });
 

@@ -104,6 +104,7 @@ const CLAIM_POLL_INTERVAL_MS = 30_000;
 const LEASE_RENEW_INTERVAL_MS = 60_000;
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 90_000;
 const DEFAULT_SUBAGENT_MESSAGE_LIMIT = 25;
+const STOP_DRAIN_TIMEOUT_MS = 5_000;
 const MAX_SOURCE_TEXT_CHARS = 12_000;
 const MAX_ONTOLOGY_QUERY_TRIPLES = 320;
 const MAX_ONTOLOGY_VOCABULARIES = 6;
@@ -375,7 +376,23 @@ export class SemanticEnrichmentWorker {
       this.tickTimer = null;
     }
     this.pending.clear();
-    await this.drainInFlight?.catch(() => {});
+    if (this.drainInFlight) {
+      let timedOut = false;
+      await Promise.race([
+        this.drainInFlight.catch(() => {}),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, STOP_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+      if (timedOut) {
+        this.api.logger.warn?.(
+          `[semantic-enrichment] stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for an in-flight drain; continuing shutdown`,
+        );
+      }
+    }
   }
 
   private scheduleTick(delayMs: number): void {
@@ -1076,22 +1093,30 @@ export class SemanticEnrichmentWorker {
 
   private parseTriplesFromAssistantText(rawText: string): SemanticTripleInput[] {
     if (!rawText.trim()) return [];
+    let structuredError: string | null = null;
     for (const candidate of extractJsonCandidates(rawText)) {
       try {
         const parsed = JSON.parse(candidate) as { triples?: unknown } | unknown[];
         if (Array.isArray(parsed)) {
           const triples = normalizeTriples(parsed);
           if (triples.length > 0 || parsed.length === 0) return triples;
+          structuredError = 'OpenClaw subagent returned a JSON triple array with no valid triples';
+          continue;
         }
         if (isRecord(parsed) && 'triples' in parsed) {
+          if (!Array.isArray(parsed.triples)) {
+            structuredError = 'OpenClaw subagent returned JSON without an array-valued "triples" field';
+            continue;
+          }
           const triples = normalizeTriples(parsed.triples);
-          if (triples.length > 0 || Array.isArray(parsed.triples)) return triples;
+          if (triples.length > 0 || parsed.triples.length === 0) return triples;
+          structuredError = 'OpenClaw subagent returned JSON triples, but none were valid RDF terms';
+          continue;
         }
       } catch {
         // Try the next candidate.
       }
     }
-    this.api.logger.warn?.('[semantic-enrichment] subagent returned non-JSON output; treating as zero triples');
-    return [];
+    throw new Error(structuredError ?? 'OpenClaw subagent returned non-JSON output');
   }
 }

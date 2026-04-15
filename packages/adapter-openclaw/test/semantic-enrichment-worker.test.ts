@@ -42,6 +42,7 @@ function makeClient(overrides: Partial<DkgDaemonClient> = {}): DkgDaemonClient {
 
 describe('SemanticEnrichmentWorker', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -313,6 +314,70 @@ describe('SemanticEnrichmentWorker', () => {
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
+  it('fails the event when the subagent returns malformed non-JSON output instead of silently treating it as zero triples', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-malformed-output',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-malformed-output',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-malformed-output',
+            userMessage: 'Please capture the milestone owner.',
+            assistantReply: 'Working on it.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn();
+    const fail = vi.fn().mockResolvedValue({ status: 'pending' });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-malformed-output' }),
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({
+            messages: [{ role: 'assistant', text: 'Here are the triples: subject=alice' }],
+          }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-malformed-output',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(
+      'evt-malformed-output',
+      worker.getWorkerInstanceId(),
+      expect.stringContaining('non-JSON output'),
+    );
+  });
+
   it('treats already-applied semantic append responses as successful no-ops', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
@@ -382,6 +447,28 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(append).toHaveBeenCalledTimes(1);
     expect(fail).not.toHaveBeenCalled();
+  });
+
+  it('bounds shutdown waiting time when a drain is still in flight', async () => {
+    vi.useFakeTimers();
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const worker = new SemanticEnrichmentWorker(
+      {
+        ...makeApi(),
+        logger,
+      },
+      makeClient(),
+    );
+
+    (worker as any).drainInFlight = new Promise<void>(() => {});
+    const stopPromise = worker.stop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await stopPromise;
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('stop timed out after 5000ms'),
+    );
+    vi.useRealTimers();
   });
 
   it('loads markdown-backed file imports and falls back to schema.org guidance when no project ontology is usable', async () => {

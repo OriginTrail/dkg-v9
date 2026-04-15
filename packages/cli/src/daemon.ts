@@ -2156,6 +2156,60 @@ export async function notifyLocalAgentIntegrationWake(
   }
 }
 
+export function canQueueLocalAgentSemanticEnrichment(
+  config: DkgConfig,
+  integrationId: string,
+): boolean {
+  const integration = getLocalAgentIntegration(config, integrationId);
+  return !!integration?.enabled && hasStoredLocalAgentTransportConfig(integration);
+}
+
+export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
+  config: DkgConfig;
+  dashDb: DashboardDB;
+  integrationId: string;
+  kind: 'chat_turn' | 'file_import';
+  payload: SemanticEnrichmentEventPayload;
+  bridgeAuthToken?: string;
+  skipWhenUnavailable?: boolean;
+  logLabel: string;
+  semanticTripleCount?: number;
+}): SemanticEnrichmentDescriptor | undefined {
+  if (args.skipWhenUnavailable && !canQueueLocalAgentSemanticEnrichment(args.config, args.integrationId)) {
+    return undefined;
+  }
+  try {
+    const descriptor = ensureSemanticEnrichmentEvent(
+      args.dashDb,
+      args.kind,
+      args.payload,
+      args.semanticTripleCount,
+    );
+    void notifyLocalAgentIntegrationWake(
+      args.config,
+      args.integrationId,
+      {
+        kind: 'semantic_enrichment',
+        eventKind: args.kind,
+        eventId: descriptor.eventId,
+      },
+      args.bridgeAuthToken,
+    ).then((result) => {
+      if (result.status === 'failed') {
+        console.warn(
+          `[semantic-enrichment] Failed to wake local agent integration "${args.integrationId}" for ${args.logLabel} ${descriptor.eventId}: ${result.reason ?? 'unknown error'}`,
+        );
+      }
+    });
+    return descriptor;
+  } catch (err: any) {
+    console.warn(
+      `[semantic-enrichment] Failed to enqueue ${args.logLabel}: ${err?.message ?? String(err)}`,
+    );
+    return undefined;
+  }
+}
+
 export async function probeOpenClawChannelHealth(
   config: DkgConfig,
   bridgeAuthToken: string | undefined,
@@ -3239,6 +3293,10 @@ function ensureSemanticEnrichmentEvent(
   }, semanticTripleCount);
 }
 
+function semanticCountLiteral(value: number): string {
+  return `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+}
+
 function semanticEnrichmentSourceRef(payload: SemanticEnrichmentEventPayload): string {
   if (payload.kind === 'file_import') return `urn:dkg:file:${payload.fileHash}`;
   return payload.turnUri;
@@ -4170,10 +4228,12 @@ async function handleRequest(
           failureReason: normalizedFailureReason,
         },
       );
-      const semanticEnrichment = ensureSemanticEnrichmentEvent(
+      const semanticEnrichment = queueLocalAgentSemanticEnrichmentBestEffort({
+        config,
         dashDb,
-        'chat_turn',
-        buildChatSemanticEventPayload({
+        integrationId: 'openclaw',
+        kind: 'chat_turn',
+        payload: buildChatSemanticEventPayload({
           agentPeerId: agent.peerId,
           sessionId,
           turnId: normalizedTurnId,
@@ -4184,24 +4244,15 @@ async function handleRequest(
           failureReason: normalizedFailureReason,
           projectContextGraphId: normalizedProjectContextGraphId,
         }),
-      );
-      void notifyLocalAgentIntegrationWake(
-        config,
-        'openclaw',
-        {
-          kind: 'semantic_enrichment',
-          eventKind: 'chat_turn',
-          eventId: semanticEnrichment.eventId,
-        },
         bridgeAuthToken,
-      ).then((result) => {
-        if (result.status === 'failed') {
-          console.warn(
-            `[semantic-enrichment] Failed to wake local agent integration "openclaw" for chat event ${semanticEnrichment.eventId}: ${result.reason ?? 'unknown error'}`,
-          );
-        }
+        skipWhenUnavailable: true,
+        logLabel: `chat event for turn ${normalizedTurnId}`,
       });
-      return jsonResponse(res, 200, { ok: true, turnId: normalizedTurnId, semanticEnrichment });
+      return jsonResponse(res, 200, {
+        ok: true,
+        turnId: normalizedTurnId,
+        ...(semanticEnrichment ? { semanticEnrichment } : {}),
+      });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
     }
@@ -4413,6 +4464,7 @@ async function handleRequest(
         extractedAt,
       });
       if (eventPayload.kind === 'file_import') {
+        const previousSemanticTripleCount = semanticTripleCount;
         semanticTripleCount += triples.length;
         const metaGraph = contextGraphMetaUri(eventPayload.contextGraphId);
         await agent.store.deleteByPattern({
@@ -4423,13 +4475,32 @@ async function handleRequest(
         semanticQuads.push({
           subject: eventPayload.assertionUri,
           predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
-          object: `"${semanticTripleCount}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          object: semanticCountLiteral(semanticTripleCount),
           graph: metaGraph,
         });
+        try {
+          await agent.store.insert(semanticQuads);
+        } catch (err: any) {
+          if (previousSemanticTripleCount > 0) {
+            try {
+              await agent.store.insert([{
+                subject: eventPayload.assertionUri,
+                predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
+                object: semanticCountLiteral(previousSemanticTripleCount),
+                graph: metaGraph,
+              }]);
+            } catch (restoreErr: any) {
+              throw new Error(
+                `${err?.message ?? String(err)}; semantic count rollback failed: ${restoreErr?.message ?? String(restoreErr)}`,
+              );
+            }
+          }
+          throw err;
+        }
       } else {
         semanticTripleCount = triples.length;
+        await agent.store.insert(semanticQuads);
       }
-      await agent.store.insert(semanticQuads);
     }
 
     const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now);
@@ -6137,10 +6208,12 @@ async function handleRequest(
         completedRecord,
       );
 
-      const semanticEnrichment = ensureSemanticEnrichmentEvent(
+      const semanticEnrichment = queueLocalAgentSemanticEnrichmentBestEffort({
+        config,
         dashDb,
-        'file_import',
-        buildFileSemanticEventPayload({
+        integrationId: 'openclaw',
+        kind: 'file_import',
+        payload: buildFileSemanticEventPayload({
           contextGraphId: contextGraphId!,
           assertionName,
           assertionUri,
@@ -6152,35 +6225,24 @@ async function handleRequest(
           sourceFileName: uploadedFilename || undefined,
           ontologyRef,
         }),
-      );
-      updateExtractionStatusSemanticDescriptor(
-        extractionStatus,
-        assertionUri,
-        semanticEnrichment,
-      );
-      void notifyLocalAgentIntegrationWake(
-        config,
-        'openclaw',
-        {
-          kind: 'semantic_enrichment',
-          eventKind: 'file_import',
-          eventId: semanticEnrichment.eventId,
-        },
         bridgeAuthToken,
-      ).then((result) => {
-        if (result.status === 'failed') {
-          console.warn(
-            `[semantic-enrichment] Failed to wake local agent integration "openclaw" for file event ${semanticEnrichment.eventId}: ${result.reason ?? 'unknown error'}`,
-          );
-        }
+        skipWhenUnavailable: true,
+        logLabel: `file import semantic event for ${assertionUri}`,
       });
+      if (semanticEnrichment) {
+        updateExtractionStatusSemanticDescriptor(
+          extractionStatus,
+          assertionUri,
+          semanticEnrichment,
+        );
+      }
 
       return respondWithImportFileResponse(200, {
         status: "completed",
         tripleCount: triples.length,
         pipelineUsed,
         ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
-        semanticEnrichment,
+        ...(semanticEnrichment ? { semanticEnrichment } : {}),
       });
     } finally {
       // Round 14 Bug 42 outer finally: release the per-assertion

@@ -859,6 +859,126 @@ describe('DkgMemoryPlugin.register', () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
+  it('dkg_memory_import rejects a typo on cold start by forcing a sync refresh against an empty cache (Codex B48)', async () => {
+    // B48: On cold start / after a failed probe, the cached list is
+    // empty. The previous B42 validation skipped the check entirely
+    // when the cache was empty, so a typo on the first write passed
+    // through and `createAssertion` created an orphaned assertion.
+    // The fix forces a sync refresh when the cache is empty (or
+    // cache-missed), then validates against the freshly-probed list.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+    const api = makeApi();
+
+    // Simulate cold-start: initial list is empty, refresh populates
+    // the list with a single real subscription.
+    let availableList: string[] = [];
+    const refreshSpy = vi.fn(async () => {
+      availableList = ['research-x'];
+      return availableList;
+    });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'peer-test' }),
+      getDefaultAgentAddress: () => 'peer-test',
+      listAvailableContextGraphs: () => availableList,
+      refreshAvailableContextGraphs: refreshSpy,
+    };
+    const pluginWithColdStart = new DkgMemoryPlugin(client, { enabled: true }, resolver);
+    pluginWithColdStart.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'typo attempt on cold start',
+      contextGraphId: 'research-typoo',
+    });
+
+    // Refresh was called exactly once — the cold-start force-refresh.
+    // The refresh populated the cache with the real list, and the
+    // post-refresh validation rejected the typo.
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload.availableContextGraphs).toEqual(['research-x']);
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('dkg_memory_import accepts a valid contextGraphId on cold start after the sync refresh populates the cache (Codex B48)', async () => {
+    // Positive B48 complement: on cold start with an empty cache, a
+    // valid id must be accepted after the forced refresh populates
+    // the list. Without the sync refresh, the id would either pass
+    // through without validation (pre-B42) or be incorrectly treated
+    // as unknown because the cache was empty.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+
+    let availableList: string[] = [];
+    const refreshSpy = vi.fn(async () => {
+      availableList = ['research-x'];
+      return availableList;
+    });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'peer-test' }),
+      getDefaultAgentAddress: () => 'peer-test',
+      listAvailableContextGraphs: () => availableList,
+      refreshAvailableContextGraphs: refreshSpy,
+    };
+    const pluginWithColdStart = new DkgMemoryPlugin(client, { enabled: true }, resolver);
+    pluginWithColdStart.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'first write after cold start',
+      contextGraphId: 'research-x',
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('stored');
+    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION);
+    expect(writeSpy.mock.calls[0][0]).toBe('research-x');
+  });
+
+  it('dkg_memory_import falls through when cold-start refresh returns empty AND refresh method exists (Codex B48)', async () => {
+    // Edge case of B48: if the refresh succeeds but returns an empty
+    // list (genuinely no subscribed CGs), the guard has nothing to
+    // validate against and falls through to the daemon. This is the
+    // existing fall-through behavior from B42 — we don't block the
+    // write on "no subscriptions yet" because that would break the
+    // clean-install first-write scenario.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+
+    const refreshSpy = vi.fn(async () => [] as string[]);
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'peer-test' }),
+      getDefaultAgentAddress: () => 'peer-test',
+      listAvailableContextGraphs: () => [],
+      refreshAvailableContextGraphs: refreshSpy,
+    };
+    const pluginWithEmpty = new DkgMemoryPlugin(client, { enabled: true }, resolver);
+    pluginWithEmpty.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'first-ever write',
+      contextGraphId: 'research-y',
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('stored');
+    expect(createSpy).toHaveBeenCalledWith('research-y', PROJECT_MEMORY_ASSERTION);
+  });
+
   it('dkg_memory_import falls through to cached-list reject when refreshAvailableContextGraphs is absent (Codex B46)', async () => {
     // Backwards compat: resolvers that do NOT implement the optional
     // `refreshAvailableContextGraphs` method skip the retry and fall

@@ -181,7 +181,17 @@ export class DkgNodePlugin {
    * fire a lazy refresh. Codex Bug B23.
    */
   private availableContextGraphCacheAt = 0;
-  private availableContextGraphsRefreshing = false;
+  /**
+   * In-flight handle for a `refreshMemoryResolverState` call. Concurrent
+   * callers share this promise and await it instead of getting a stale
+   * cache back. Codex Bug B49: the previous boolean guard returned
+   * immediately on concurrent calls, so `refreshAvailableContextGraphs`
+   * callers who expected a synchronous refresh could observe the
+   * in-flight background refresh as "nothing to do" and see the stale
+   * cache. Tracking the promise lets multiple callers share one refresh
+   * while all observing the populated result.
+   */
+  private refreshStateInFlight: Promise<void> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -577,42 +587,66 @@ export class DkgNodePlugin {
    * call still recovers. The primary recovery path is the on-demand
    * `ensureNodePeerId` fired by the resolver. Codex Bug B9.
    */
-  private async refreshMemoryResolverState(api: OpenClawPluginApi): Promise<void> {
-    if (this.availableContextGraphsRefreshing) return;
-    this.availableContextGraphsRefreshing = true;
-    try {
-      // Route through `ensureNodePeerId` so the in-flight promise guard
-      // is populated while this register-time probe runs. Any resolver
-      // call that fires concurrently (e.g., a memory slot search during
-      // the same tick) will await the same promise instead of firing a
-      // duplicate /api/status call. Codex Bug B9.
-      await this.ensureNodePeerId();
-      try {
-        const result = await this.client.listContextGraphs();
-        const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
-        const ids: string[] = [];
-        for (const entry of graphs) {
-          const id = typeof entry?.id === 'string'
-            ? entry.id
-            : typeof entry?.contextGraphId === 'string'
-              ? entry.contextGraphId
-              : undefined;
-          if (id && id !== 'agent-context') ids.push(id);
-        }
-        this.availableContextGraphCache = ids;
-        // B23: record the successful-populate wall-clock time so the
-        // resolver's lazy-refresh path can TTL-check staleness.
-        this.availableContextGraphCacheAt = Date.now();
-      } catch (err: any) {
-        api.logger.debug?.(`[dkg-memory] Could not refresh context-graph cache: ${err?.message ?? err}`);
-      }
-    } finally {
-      this.availableContextGraphsRefreshing = false;
+  private refreshMemoryResolverState(api: OpenClawPluginApi): Promise<void> {
+    // B49: Concurrent callers share one in-flight refresh. The previous
+    // boolean guard (`availableContextGraphsRefreshing`) returned
+    // immediately when a background refresh was already running, so
+    // `refreshAvailableContextGraphs()` awaiters could observe
+    // "nothing to do" and return against the still-stale cache. Track
+    // the promise instead so all awaiters block on the same refresh
+    // and see the populated cache when it settles.
+    if (this.refreshStateInFlight) {
+      return this.refreshStateInFlight;
     }
 
-    if (this.nodePeerId === undefined) {
-      this.schedulePeerIdDeferredRetry(api);
-    }
+    const run = async (): Promise<void> => {
+      try {
+        // Route through `ensureNodePeerId` so the in-flight promise
+        // guard is populated while this probe runs. Any resolver call
+        // that fires concurrently (e.g., a memory slot search during
+        // the same tick) will await the same peer-ID promise instead
+        // of firing a duplicate /api/status call. Codex Bug B9.
+        await this.ensureNodePeerId();
+        try {
+          const result = await this.client.listContextGraphs();
+          const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
+          const ids: string[] = [];
+          for (const entry of graphs) {
+            const id = typeof entry?.id === 'string'
+              ? entry.id
+              : typeof entry?.contextGraphId === 'string'
+                ? entry.contextGraphId
+                : undefined;
+            if (id && id !== 'agent-context') ids.push(id);
+          }
+          this.availableContextGraphCache = ids;
+          // B23: record the successful-populate wall-clock time so the
+          // resolver's lazy-refresh path can TTL-check staleness.
+          this.availableContextGraphCacheAt = Date.now();
+        } catch (err: any) {
+          api.logger.debug?.(`[dkg-memory] Could not refresh context-graph cache: ${err?.message ?? err}`);
+        }
+      } finally {
+        // Schedule the deferred retry inside the promise body so every
+        // caller (including the one that triggered the refresh and any
+        // concurrent awaiters) observes the retry scheduling through
+        // the shared finally chain.
+        if (this.nodePeerId === undefined) {
+          this.schedulePeerIdDeferredRetry(api);
+        }
+      }
+    };
+
+    const tracked = run().finally(() => {
+      // Clear the slot only if we're still the tracked promise — a
+      // concurrent caller that started after us would have taken
+      // over, though the guard above prevents that in practice.
+      if (this.refreshStateInFlight === tracked) {
+        this.refreshStateInFlight = null;
+      }
+    });
+    this.refreshStateInFlight = tracked;
+    return tracked;
   }
 
   /**

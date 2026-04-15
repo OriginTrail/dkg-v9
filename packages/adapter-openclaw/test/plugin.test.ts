@@ -1458,4 +1458,94 @@ describe('DkgNodePlugin', () => {
       }
     });
   });
+
+  describe('context-graph cache refresh in-flight promise sharing (Codex B49)', () => {
+    // B49: `refreshMemoryResolverState` used to gate concurrent calls
+    // with a boolean that returned immediately while a background
+    // refresh was in flight. That broke
+    // `refreshAvailableContextGraphs` awaiters — they would resolve
+    // against the still-stale cache instead of awaiting the in-flight
+    // refresh. The fix tracks the refresh promise and returns it to
+    // concurrent callers so all awaiters observe the populated cache.
+
+    it('concurrent refreshAvailableContextGraphs calls share a single daemon fetch and all observe the populated cache', async () => {
+      // Gate the context-graph listing so we can start a second
+      // concurrent refresh while the first is in flight.
+      let releaseListGate!: () => void;
+      const listGate = new Promise<void>((resolve) => {
+        releaseListGate = resolve;
+      });
+      let listCallCount = 0;
+
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: 'peer-b49' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          listCallCount++;
+          await listGate;
+          return new Response(
+            JSON.stringify({ contextGraphs: [{ id: 'research-b49-fresh' }] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+
+      try {
+        plugin.register({
+          config: {},
+          registrationMode: 'full' as const,
+          registerTool: () => {},
+          registerHook: () => {},
+          registerMemoryCapability: () => {},
+          on: () => {},
+          logger: { info: () => {}, warn: () => {}, debug: () => {} },
+        } as unknown as OpenClawPluginApi);
+
+        // Register-time fire-and-forget refresh is in flight and blocked
+        // on the gate. Drain enough microtasks to let the
+        // /api/context-graph/list call reach the gate.
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+        expect(listCallCount).toBe(1);
+
+        const resolver = (plugin as any).memorySessionResolver;
+        // Cache is still empty because the in-flight refresh is parked.
+        expect(resolver.listAvailableContextGraphs()).toEqual([]);
+
+        // Start a second concurrent refresh via the resolver. This is
+        // the B49 regression path: previously this call would return
+        // immediately with the stale (empty) cache because the boolean
+        // guard short-circuited the duplicate call.
+        const secondRefreshPromise = resolver.refreshAvailableContextGraphs();
+
+        // Release the gate so the in-flight daemon fetch completes.
+        releaseListGate();
+
+        // Await the second refresh — it MUST observe the populated
+        // cache, not the stale one. And the daemon fetch must have
+        // only fired once (both callers share the promise).
+        const secondResult = await secondRefreshPromise;
+        expect(secondResult).toEqual(['research-b49-fresh']);
+        expect(listCallCount).toBe(1);
+        expect(resolver.listAvailableContextGraphs()).toEqual(['research-b49-fresh']);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
 });

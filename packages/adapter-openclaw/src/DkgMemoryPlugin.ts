@@ -723,43 +723,55 @@ export class DkgMemoryPlugin {
       );
     }
     let availableCgs = this.resolver.listAvailableContextGraphs();
+
+    // B42 + B46 + B48: Force a synchronous refresh of the subscribed-CG
+    // cache before validating the resolved id. Three failure modes this
+    // covers with a single refresh call:
+    //
+    //   B42 — cached list has items but not this id (typo protection).
+    //   B46 — cached list has items, id is missing because the user
+    //         just created/subscribed a new CG within the lazy-refresh
+    //         TTL window (stale cache).
+    //   B48 — cached list is empty on cold start / after a failed
+    //         probe, so the previous `length > 0` guard skipped
+    //         validation entirely and typos passed through to create
+    //         orphaned assertion graphs.
+    //
+    // A single refresh call on cache-miss (either empty or
+    // missing-this-id) resolves all three. If the refresh method is
+    // not supported by this resolver (test fixtures, legacy wirings),
+    // skip the retry and validate against whatever cached list we
+    // have. If the refresh itself throws (transient daemon blip),
+    // fall through to the cached list — hard-rejecting on a refresh
+    // failure would turn a network hiccup into a write outage.
+    const cacheMiss = availableCgs.length === 0 || !availableCgs.includes(resolvedCg);
+    if (cacheMiss && typeof this.resolver.refreshAvailableContextGraphs === 'function') {
+      try {
+        availableCgs = await this.resolver.refreshAvailableContextGraphs();
+      } catch (err) {
+        this.api?.logger.debug?.(
+          `[dkg-memory] refreshAvailableContextGraphs failed during B42/B46/B48 validation: ${errorMessage(err)}. Falling through to cached list.`,
+        );
+      }
+    }
+
+    // Validate: if the (possibly refreshed) list is non-empty and
+    // missing the id, it is a typo or stale id — reject with
+    // clarification. If the list is still empty after the refresh
+    // attempt (genuinely no subscriptions, or refresh failed / is
+    // unsupported), fall through to the daemon's own validation on
+    // the assertion create/write calls.
     if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
-      // B46: the cached list may be stale because the user just
-      // created / subscribed to a new CG within the current TTL window
-      // (B23's `AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS` is 30s). Before
-      // hard-rejecting an explicit id as a typo, force a synchronous
-      // refresh and re-check against the fresh list. This preserves
-      // typo protection (if the id is still missing after a
-      // just-landed refresh, it is genuinely not in the subscription
-      // set) while allowing legitimate brand-new CGs through. The
-      // refresh method is optional on the resolver interface —
-      // resolvers that cannot refresh on demand (test fixtures with
-      // a fixed list, legacy wirings) skip the retry and fall
-      // through to the cached-list reject.
-      if (typeof this.resolver.refreshAvailableContextGraphs === 'function') {
-        try {
-          availableCgs = await this.resolver.refreshAvailableContextGraphs();
-        } catch (err) {
-          // If the refresh itself fails (daemon transient error), fall
-          // through to the cached list — hard-rejecting on a refresh
-          // failure would turn a network blip into a write outage.
-          this.api?.logger.debug?.(
-            `[dkg-memory] refreshAvailableContextGraphs failed during B42 validation: ${errorMessage(err)}. Falling through to cached list.`,
-          );
-        }
-      }
-      if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
-        return toolJson({
-          status: 'needs_clarification',
-          reason:
-            `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
-            'This is usually a typo or a stale project id from a deleted subscription.',
-          availableContextGraphs: availableCgs,
-          guidance:
-            'Pass one of the available contextGraphIds listed above, or ask the user to ' +
-            `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
-        });
-      }
+      return toolJson({
+        status: 'needs_clarification',
+        reason:
+          `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
+          'This is usually a typo or a stale project id from a deleted subscription.',
+        availableContextGraphs: availableCgs,
+        guidance:
+          'Pass one of the available contextGraphIds listed above, or ask the user to ' +
+          `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
+      });
     }
 
     // Resolve the agent address for provenance. If the node peer ID probe

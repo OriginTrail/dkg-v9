@@ -453,10 +453,17 @@ export class SemanticEnrichmentWorker {
 
     while (!this.stopped) {
       const claimed = await this.client.claimSemanticEnrichmentEvent(this.workerInstanceId);
-      if (!claimed.event) return;
+      if (!claimed.event) {
+        this.clearPendingWakeSummariesOnIdle();
+        return;
+      }
       await this.processClaimedEvent(claimed.event, probe.subagent);
       this.clearWakeSummary(claimed.event);
     }
+  }
+
+  private clearPendingWakeSummariesOnIdle(): void {
+    this.pending.clear();
   }
 
   private clearWakeSummary(event: SemanticEnrichmentEventLease): void {
@@ -804,7 +811,6 @@ export class SemanticEnrichmentWorker {
     `;
     const result = await this.client.query(sparql, {
       contextGraphId,
-      view: 'working-memory',
     });
     const bindings = Array.isArray(result?.result?.bindings)
       ? result.result.bindings as Array<Record<string, unknown>>
@@ -1031,7 +1037,6 @@ export class SemanticEnrichmentWorker {
       `,
       {
         contextGraphId: payload.contextGraphId,
-        view: 'working-memory',
       },
     );
     const bindings = Array.isArray(result?.result?.bindings)

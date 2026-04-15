@@ -238,6 +238,7 @@ describe('SemanticEnrichmentWorker', () => {
     expect(prompt).toContain('<https://example.com/project#Task>');
     expect(prompt).toContain('<https://example.com/project#assignedTo>');
     expect(prompt).not.toContain('<https://example.com/project#Galaxy>');
+    expect(query.mock.calls.every(([, opts]) => !opts?.view)).toBe(true);
     expect(append).toHaveBeenCalledWith(
       'evt-1',
       worker.getWorkerInstanceId(),
@@ -249,6 +250,34 @@ describe('SemanticEnrichmentWorker', () => {
         },
       ],
     );
+    expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
+  it('clears late duplicate wake summaries when the daemon no longer has a claimable event', async () => {
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: vi.fn().mockResolvedValue({ event: null }),
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-late-wake',
+      triggerSource: 'daemon',
+    });
+
+    expect(worker.getPendingSummaries()).toHaveLength(1);
+
+    await worker.flush();
+
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
@@ -972,7 +1001,7 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('GRAPH <did:dkg:context-graph:project-3/_ontology>'),
-      expect.objectContaining({ contextGraphId: 'project-3', view: 'working-memory' }),
+      expect.objectContaining({ contextGraphId: 'project-3' }),
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: project_ontology');
     expect(run.mock.calls[0]?.[0]?.message).not.toContain('Ontology ref override:');

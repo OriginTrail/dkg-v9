@@ -231,9 +231,7 @@ describe('SemanticEnrichmentWorker', () => {
     const prompt = run.mock.calls[0]?.[0]?.message ?? '';
     expect(prompt).toContain('<https://example.com/project#Task>');
     expect(prompt).toContain('<https://example.com/project#assignedTo>');
-    expect(prompt.indexOf('<https://example.com/project#Task>')).toBeLessThan(
-      prompt.indexOf('<https://example.com/project#Galaxy>'),
-    );
+    expect(prompt).not.toContain('<https://example.com/project#Galaxy>');
     expect(append).toHaveBeenCalledWith(
       'evt-1',
       worker.getWorkerInstanceId(),
@@ -1045,6 +1043,89 @@ describe('SemanticEnrichmentWorker', () => {
     expect(prompt).toContain('<https://example.com/project#Term8>');
     expect(prompt).toContain('<https://example.com/project#Term9>');
     expect(prompt).not.toContain('<https://example.com/project#Term7>');
-    expect(prompt.match(/- Kind:/g)?.length ?? 0).toBe(8);
+    expect(prompt.match(/- Kind:/g)?.length ?? 0).toBe(2);
+  });
+
+  it('falls back to schema.org when project ontology terms have no lexical relevance to the source text', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-irrelevant-ontology',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-irrelevant-ontology',
+            assertionName: 'status-update',
+            assertionUri: 'did:dkg:context-graph:project-irrelevant-ontology/assertion/peer/status-update',
+            importStartedAt: '2026-04-15T15:00:00.000Z',
+            fileHash: 'keccak256:file-irrelevant-ontology',
+            detectedContentType: 'text/markdown',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const query = vi.fn().mockResolvedValue({
+      result: {
+        bindings: [
+          {
+            s: { value: 'https://example.com/project#GalaxyCluster' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2002/07/owl#Class' },
+          },
+          {
+            s: { value: 'https://example.com/project#GalaxyCluster' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'GalaxyCluster' },
+          },
+          {
+            s: { value: 'https://example.com/project#orbitsNebula' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2002/07/owl#ObjectProperty' },
+          },
+          {
+            s: { value: 'https://example.com/project#orbitsNebula' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'orbitsNebula' },
+          },
+        ],
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-file-irrelevant-ontology' });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText: vi.fn().mockResolvedValue('# Status Update\n\nRoadmap milestone ownership changed this week.'),
+        query,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-irrelevant-ontology',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    const prompt = run.mock.calls[0]?.[0]?.message ?? '';
+    expect(prompt).toContain('Source: schema_org');
+    expect(prompt).toContain('No project ontology guidance available; use schema.org terms where appropriate.');
+    expect(prompt).not.toContain('<https://example.com/project#GalaxyCluster>');
+    expect(prompt).not.toContain('<https://example.com/project#orbitsNebula>');
   });
 });

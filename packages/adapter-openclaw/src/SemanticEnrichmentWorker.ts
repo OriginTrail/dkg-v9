@@ -95,6 +95,7 @@ type OntologyContext =
 
 interface ScoredOntologyTermCard extends OntologyTermCard {
   score: number;
+  relevanceSignal: number;
 }
 
 const SUBAGENT_SESSION_PREFIX = 'agent';
@@ -872,9 +873,18 @@ export class SemanticEnrichmentWorker {
         if (left.kind !== right.kind) return left.kind.localeCompare(right.kind);
         return left.label.localeCompare(right.label);
       });
+    const relevantTermIris = new Set(
+      scoredTerms
+        .filter((term) => term.relevanceSignal > 0)
+        .map((term) => term.iri),
+    );
+    if (relevantTermIris.size === 0) return null;
     const preferredTerms = scoredTerms
+      .filter((term) =>
+        term.relevanceSignal > 0 || this.isOntologyTermConnectedToRelevantTerm(term, relevantTermIris),
+      )
       .slice(0, MAX_PREFERRED_ONTOLOGY_TERMS)
-      .map(({ score: _score, ...term }) => term);
+      .map(({ score: _score, relevanceSignal: _relevanceSignal, ...term }) => term);
     if (preferredTerms.length === 0) return null;
 
     const vocabularyCounts = new Map<string, number>();
@@ -930,7 +940,7 @@ export class SemanticEnrichmentWorker {
     const domain = uniqueNonEmpty(term.domains)[0];
     const range = uniqueNonEmpty(term.ranges)[0];
     const normalizedSource = ` ${normalizeSearchText(sourceText)} `;
-    const score = this.computeOntologyTermScore(term, label, description, normalizedSource);
+    const { score, relevanceSignal } = this.computeOntologyTermScore(term, label, description, normalizedSource);
     return {
       iri: term.iri,
       kind: term.kind,
@@ -941,6 +951,7 @@ export class SemanticEnrichmentWorker {
       ...(domain ? { domain } : {}),
       ...(range ? { range } : {}),
       score,
+      relevanceSignal,
     };
   }
 
@@ -949,8 +960,9 @@ export class SemanticEnrichmentWorker {
     label: string,
     description: string | undefined,
     normalizedSource: string,
-  ): number {
+  ): { score: number; relevanceSignal: number } {
     let score = 0;
+    let relevanceSignal = 0;
     if (term.kind === 'class') score += 2;
     if (term.kind === 'property') score += 1;
     if (!this.isStandardOntologyNamespace(term.vocabulary)) score += 3;
@@ -962,6 +974,7 @@ export class SemanticEnrichmentWorker {
       const normalizedPhrase = normalizeSearchText(phrase);
       if (normalizedPhrase && normalizedSource.includes(` ${normalizedPhrase} `)) {
         score += 8;
+        relevanceSignal += 1;
       }
     }
 
@@ -975,7 +988,18 @@ export class SemanticEnrichmentWorker {
       if (normalizedSource.includes(` ${token} `)) tokenMatches += 1;
     }
     score += Math.min(tokenMatches * 2, 8);
-    return score;
+    relevanceSignal += tokenMatches;
+    return { score, relevanceSignal };
+  }
+
+  private isOntologyTermConnectedToRelevantTerm(
+    term: Pick<ScoredOntologyTermCard, 'iri' | 'parent' | 'domain' | 'range'>,
+    relevantTermIris: Set<string>,
+  ): boolean {
+    if (relevantTermIris.has(term.iri)) return true;
+    return [term.parent, term.domain, term.range]
+      .filter((value): value is string => !!value)
+      .some((value) => relevantTermIris.has(value));
   }
 
   private isStandardOntologyNamespace(vocabulary?: string): boolean {

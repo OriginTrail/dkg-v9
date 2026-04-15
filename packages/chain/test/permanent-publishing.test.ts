@@ -22,7 +22,7 @@ describe('Permanent Publishing (MockChainAdapter)', () => {
     expect(result.batchId).toBe(1n);
     expect(result.startKAId).toBe(1n);
     expect(result.endKAId).toBe(3n);
-    expect(result.publisherAddress).toBeDefined();
+    expect(result.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
   });
 
   it('creates events with isPermanent flag', async () => {

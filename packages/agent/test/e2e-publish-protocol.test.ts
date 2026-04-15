@@ -176,16 +176,17 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
   }, 30_000);
 
   it('on-chain V10 publish emits KCCreated event with publisher address', async () => {
-    const events = [];
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
     for await (const event of sharedChain.listenForEvents({
       eventTypes: ['KCCreated'],
     })) {
       events.push(event);
+      break;
     }
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     const publishEvent = events[events.length - 1];
-    expect(publishEvent.data.publisherAddress).toBeDefined();
+    expect(publishEvent.data.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 10_000);
 });
 

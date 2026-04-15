@@ -101,18 +101,6 @@ describe('getGenesisRaw', () => {
     expect(raw).toContain('@prefix dkg:');
     expect(raw).toContain('dkg:Network');
     expect(raw).toContain('did:dkg:network:v9-testnet');
-    expect(raw).toContain('did:dkg:paranet:agents');
-    expect(raw).toContain('did:dkg:paranet:ontology');
-  });
-});
-
-describe('getGenesisRaw', () => {
-  it('returns a TriG string with required content', () => {
-    const raw = getGenesisRaw();
-    expect(raw.length).toBeGreaterThan(0);
-    expect(raw).toContain('@prefix dkg:');
-    expect(raw).toContain('dkg:Network');
-    expect(raw).toContain('did:dkg:network:v9-testnet');
     expect(raw).toContain('did:dkg:context-graph:agents');
     expect(raw).toContain('did:dkg:context-graph:ontology');
   });

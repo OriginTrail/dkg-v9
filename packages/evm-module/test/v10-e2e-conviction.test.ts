@@ -231,6 +231,7 @@ describe('V10 E2E Conviction System', function () {
           await Staking.connect(staker).claimDelegatorRewards(identityId, epoch - 1n, staker.address);
         } catch (err: any) {
           expect(err.message).to.include('No rewards');
+          continue;
         }
       }
 

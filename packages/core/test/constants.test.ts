@@ -54,19 +54,10 @@ describe('context graph topic helpers (V10)', () => {
     expect(result).toBe('dkg/context-graph/a/b/finalization');
   });
 
-  it('handles empty string paranet ID', () => {
-    expect(paranetPublishTopic('')).toBe('dkg/paranet//publish');
-    expect(paranetDataGraphUri('')).toBe('did:dkg:paranet:');
-  });
-
-  it('preserves paranet IDs with special characters', () => {
-    expect(paranetPublishTopic('my-paranet')).toBe('dkg/paranet/my-paranet/publish');
-    expect(paranetPublishTopic('paranet_v2')).toBe('dkg/paranet/paranet_v2/publish');
-  });
-
-  it('does not sanitize slashes in paranet IDs (caller responsibility)', () => {
-    const result = paranetPublishTopic('a/b');
-    expect(result).toBe('dkg/paranet/a/b/publish');
+  it('deprecated paranetPublishTopic delegates to contextGraphFinalizationTopic', () => {
+    expect(paranetPublishTopic('my-paranet')).toBe(contextGraphFinalizationTopic('my-paranet'));
+    expect(paranetPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
+    expect(paranetPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
   });
 });
 

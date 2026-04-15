@@ -219,7 +219,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     );
 
     expect(accessResult.granted).toBe(true);
-    expect(accessResult.quads.length).toBeGreaterThanOrEqual(2);
+    expect(accessResult.quads.length).toBe(2);
 
     const apiKeyTriple = accessResult.quads.find(
       (q) => q.predicate === 'http://ex.org/apiKey',

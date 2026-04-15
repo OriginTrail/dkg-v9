@@ -97,6 +97,7 @@ describe('PublishHandler.restorePendingPublishes', () => {
     };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     expect(await h.restorePendingPublishes()).toBe(0);
+    expect(h.hasPendingPublishes).toBe(false);
     await vi.waitFor(() => expect(journal.save).toHaveBeenCalled());
   });
 });

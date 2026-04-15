@@ -249,7 +249,8 @@ describe('Network E2E (3 nodes + relay)', () => {
       `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
     expect(ualResult.type).toBe('bindings');
-    if (ualResult.type === 'bindings' && ualResult.bindings.length > 0) {
+    if (ualResult.type === 'bindings') {
+      expect(ualResult.bindings.length).toBeGreaterThan(0);
       const ual = String(ualResult.bindings[0]['ual'] ?? '');
       expect(ual.startsWith(`did:dkg:${CUSTOM_CHAIN_ID}/`)).toBe(true);
     }

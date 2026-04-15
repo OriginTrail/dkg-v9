@@ -69,8 +69,9 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
   it('handlePublishMessage does not throw on undecodable payload', async () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
-      paranetExists: async () => false,
-      subscribeToParanet: () => {},
+      contextGraphExists: async () => false,
+      getContextGraphOwner: async () => null,
+      subscribeToContextGraph: () => {},
     });
     const insertSpy = vi.spyOn(store, 'insert');
 
@@ -84,8 +85,9 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
   it('ignores publish when message paranetId does not match gossip topic', async () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
-      paranetExists: async () => true,
-      subscribeToParanet: () => {},
+      contextGraphExists: async () => true,
+      getContextGraphOwner: async () => null,
+      subscribeToContextGraph: () => {},
     });
     const insertSpy = vi.spyOn(store, 'insert');
 
@@ -116,8 +118,9 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const gm = new GraphManager(store);
     await gm.ensureParanet(PARANET);
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
-      paranetExists: async () => true,
-      subscribeToParanet: () => {},
+      contextGraphExists: async () => true,
+      getContextGraphOwner: async () => null,
+      subscribeToContextGraph: () => {},
     });
     const insertSpy = vi.spyOn(store, 'insert');
 

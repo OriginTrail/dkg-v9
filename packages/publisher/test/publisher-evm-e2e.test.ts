@@ -27,7 +27,7 @@ function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${CONTEXT
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-let ctx: HardhatContext | null = null;
+let ctx: HardhatContext;
 let publisher: DKGPublisher;
 let publisherWallet: Wallet;
 let publisherIdentityId: bigint;
@@ -35,7 +35,6 @@ let publisherIdentityId: bigint;
 describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   beforeAll(async () => {
     ctx = await spawnHardhatEnv(HARDHAT_PORT);
-    if (!ctx) return;
 
     publisherWallet = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
     publisherIdentityId = BigInt(ctx.coreProfileId);
@@ -76,8 +75,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
 
   let firstPublishResult: Awaited<ReturnType<typeof publisher.publish>>;
 
-  it('V10 CREATE: publishes knowledge to chain with self-signed ACK', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 CREATE: publishes knowledge to chain with self-signed ACK', async () => {
 
     firstPublishResult = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
@@ -98,8 +96,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     expect(firstPublishResult.ual).toContain('did:dkg:evm:31337/');
   }, 60_000);
 
-  it('V10 CREATE: on-chain KC can be verified via events', async (test) => {
-    if (!ctx || !firstPublishResult?.onChainResult) { test.skip(); return; }
+  it('V10 CREATE: on-chain KC can be verified via events', async () => {
+    expect(firstPublishResult?.onChainResult).toBeDefined();
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
@@ -125,8 +123,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // V10 UPDATE — through DKGPublisher.update() (full pipeline)
   // -------------------------------------------------------------------------
 
-  it('V10 UPDATE: publisher.update() modifies KC on-chain', async (test) => {
-    if (!ctx || !firstPublishResult?.onChainResult) { test.skip(); return; }
+  it('V10 UPDATE: publisher.update() modifies KC on-chain', async () => {
+    expect(firstPublishResult?.onChainResult).toBeDefined();
 
     const kcId = firstPublishResult.onChainResult!.batchId;
 
@@ -149,8 +147,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // V10 UPDATE — adapter-level with explicit mintAmount / burnTokenIds
   // -------------------------------------------------------------------------
 
-  it('V10 UPDATE: adapter.updateKnowledgeCollectionV10 with mint+burn params', async (test) => {
-    if (!ctx || !firstPublishResult?.onChainResult) { test.skip(); return; }
+  it('V10 UPDATE: adapter.updateKnowledgeCollectionV10 with mint+burn params', async () => {
+    expect(firstPublishResult?.onChainResult).toBeDefined();
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
@@ -175,8 +173,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Multiple publishes (verifies UAL increments correctly)
   // -------------------------------------------------------------------------
 
-  it('V10 CREATE: second publish yields distinct KC and UAL', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 CREATE: second publish yields distinct KC and UAL', async () => {
 
     const result = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
@@ -198,8 +195,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Multi-KA publish (auto-partition creates multiple KAs)
   // -------------------------------------------------------------------------
 
-  it('V10 CREATE: multi-entity publish creates multiple KA manifest entries', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 CREATE: multi-entity publish creates multiple KA manifest entries', async () => {
 
     const entities = Array.from({ length: 5 }, (_, i) => `urn:evm-e2e:entity-${i}`);
     const quads: Quad[] = [];
@@ -225,8 +221,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Adapter-level context graph creation
   // -------------------------------------------------------------------------
 
-  it('creates on-chain context graph with participants', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('creates on-chain context graph with participants', async () => {
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
@@ -249,8 +244,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // V10 Publish + Update round-trip: verify merkle root changes on-chain
   // -------------------------------------------------------------------------
 
-  it('V10: publish then update then verify chain state changed', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10: publish then update then verify chain state changed', async () => {
 
     const result1 = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
@@ -274,8 +268,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Publish lifecycle: phase callbacks fire in correct order
   // -------------------------------------------------------------------------
 
-  it('V10 CREATE: phase callbacks fire in correct order during publish', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 CREATE: phase callbacks fire in correct order during publish', async () => {
 
     const phases: Array<{ phase: string; event: string }> = [];
 
@@ -311,8 +304,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Concurrent publishes don't interfere
   // -------------------------------------------------------------------------
 
-  it('V10 CREATE: sequential publishes yield distinct batch IDs and UALs', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 CREATE: sequential publishes yield distinct batch IDs and UALs', async () => {
 
     const r1 = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
@@ -334,8 +326,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Error path: invalid kcId for update returns meaningful error
   // -------------------------------------------------------------------------
 
-  it('V10 UPDATE: updating non-existent KC throws descriptive error', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10 UPDATE: updating non-existent KC throws descriptive error', async () => {
 
     const bogusKcId = 999999n;
     await expect(
@@ -350,8 +341,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // V9 direct adapter operations (exercised through EVMChainAdapter)
   // -------------------------------------------------------------------------
 
-  it('V9: reserveUALRange + publishKnowledgeAssets works end-to-end', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V9: reserveUALRange + publishKnowledgeAssets works end-to-end', async () => {
 
     const pubAdapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER, [HARDHAT_KEYS.PUBLISHER2]),
@@ -374,8 +364,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Publishing conviction account
   // -------------------------------------------------------------------------
 
-  it('creates conviction account and queries info', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('creates conviction account and queries info', async () => {
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
@@ -389,19 +378,10 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
       lockAmount,
     );
 
-    let accountId: bigint;
-    try {
-      const result = await adapter.createConvictionAccount(lockAmount, 5);
-      accountId = result.accountId;
-      expect(result.success).toBe(true);
-      expect(accountId).toBeGreaterThan(0n);
-    } catch (err: any) {
-      if (err.message?.includes('not deployed')) {
-        test.skip();
-        return;
-      }
-      throw err;
-    }
+    const result = await adapter.createConvictionAccount(lockAmount, 5);
+    const accountId = result.accountId;
+    expect(result.success).toBe(true);
+    expect(accountId).toBeGreaterThan(0n);
 
     const info = await adapter.getConvictionAccountInfo(accountId);
     expect(info).not.toBeNull();
@@ -413,8 +393,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Staking conviction
   // -------------------------------------------------------------------------
 
-  it('stakeWithLock and query conviction multiplier', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('stakeWithLock and query conviction multiplier', async () => {
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
@@ -428,21 +407,13 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
       stakeAmount,
     );
 
-    try {
-      const result = await adapter.stakeWithLock(publisherIdentityId, stakeAmount, 10);
-      expect(result.success).toBe(true);
-    } catch (err: any) {
-      if (err.message?.includes('not deployed') || err.message?.includes('not available')) {
-        test.skip();
-        return;
-      }
-      throw err;
-    }
+    const result = await adapter.stakeWithLock(publisherIdentityId, stakeAmount, 10);
+    expect(result.success).toBe(true);
 
     const { multiplier } = await adapter.getDelegatorConvictionMultiplier(
       publisherIdentityId,
       publisherWallet.address,
     );
-    expect(typeof multiplier).toBe('number');
+    expect(multiplier).toBeGreaterThanOrEqual(0);
   }, 30_000);
 });

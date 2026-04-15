@@ -229,21 +229,12 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   });
 
   describe('Phase 4: SWM cleanup after publish', () => {
-    it('published triples removed from SWM (mock verification)', async () => {
-      const mockStore = {
-        query: vi.fn().mockResolvedValue({ type: 'quads' as const, quads: [] }),
-        insert: vi.fn(),
-        delete: vi.fn(),
-        dropGraph: vi.fn(),
-      };
-
-      await mockStore.dropGraph('did:dkg:context-graph:test/_shared_memory');
-      expect(mockStore.dropGraph).toHaveBeenCalledWith(
-        'did:dkg:context-graph:test/_shared_memory',
-      );
-
-      const result = await mockStore.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <swm> { ?s ?p ?o } }');
-      expect(result.quads).toHaveLength(0);
+    it('SWM graph URI follows expected naming convention', () => {
+      const contextGraphId = 'test';
+      const swmUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+      expect(swmUri).toBe('did:dkg:context-graph:test/_shared_memory');
+      expect(swmUri).toContain('/_shared_memory');
+      expect(swmUri).not.toContain('/_working_memory');
     });
   });
 });
@@ -266,8 +257,8 @@ describe('V10 SHARE Protocol (spec §7.0)', () => {
 
       for (const q of promoted) {
         expect(q.graph).toBe(swmUri);
-        expect(q.subject).toBeTruthy();
-        expect(q.predicate).toBeTruthy();
+        expect(q.subject).toMatch(/^urn:/);
+        expect(q.predicate).toMatch(/^http/);
       }
     });
 
@@ -318,7 +309,8 @@ describe('V10 GET Protocol (spec §12)', () => {
 
   it('view=verified-memory resolves to VM graph prefix', () => {
     const vmGraph = `did:dkg:context-graph:${contextGraphId}/_verified_memory/`;
-    expect(vmGraph).toContain('_verified_memory');
+    expect(vmGraph).toBe('did:dkg:context-graph:research-net/_verified_memory/');
+    expect(vmGraph).not.toContain('_shared_memory');
   });
 });
 
@@ -998,12 +990,11 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
     expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
-  it('contextGraphId consistency: publisher and handler both use 0n for non-numeric string', () => {
-    const publisherDerived = 0n;
-    const handlerDerived = 0n;
-    expect(publisherDerived).toBe(handlerDerived);
-    expect(publisherDerived).toBe(cgIdBigInt);
-    expect(publisherDerived).toBe(0n);
+  it('contextGraphId consistency: non-numeric string maps to 0n for both publisher and handler', () => {
+    const nonNumericStr = 'edge-case-cg';
+    const derived = BigInt(Number(nonNumericStr) || 0);
+    expect(derived).toBe(0n);
+    expect(derived).toBe(cgIdBigInt);
   });
 
   it('KA root combines public and private roots correctly', () => {

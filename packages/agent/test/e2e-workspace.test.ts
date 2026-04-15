@@ -81,14 +81,13 @@ describe('Workspace E2E (2 nodes)', () => {
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
 
-    // Node B may receive via GossipSub (depends on mesh formation timing)
+    // Node B should receive via GossipSub
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
       { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
-    if (onB.bindings.length > 0) {
-      expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
-    }
+    expect(onB.bindings.length).toBeGreaterThan(0);
+    expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
   }, 25000);
 
   it('query with includeSharedMemory returns workspace data', async () => {

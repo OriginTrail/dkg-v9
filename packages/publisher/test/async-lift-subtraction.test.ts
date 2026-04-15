@@ -74,15 +74,6 @@ describe('subtractFinalizedExactQuads', () => {
       resolved: validated.resolved,
     });
 
-    const removedPublic = validated.resolved.quads.filter(
-      (quad) => !result.resolved.quads.some((remaining) => JSON.stringify(remaining) === JSON.stringify(quad)),
-    );
-
-    console.log('Input public quads:', validated.resolved.quads);
-    console.log('Already finalized public quads:', authoritativePublic);
-    console.log('Removed public quads:', removedPublic);
-    console.log('Remaining public quads:', result.resolved.quads);
-
     expect(result.alreadyPublishedPublicCount).toBe(1);
     expect(result.alreadyPublishedPrivateCount).toBe(0);
     expect(result.resolved.quads).toEqual([genreQuad]);
@@ -107,15 +98,6 @@ describe('subtractFinalizedExactQuads', () => {
       validation: validated.validation,
       resolved: validated.resolved,
     });
-
-    console.log('Input public quads:', validated.resolved.quads);
-    console.log('Input private quads:', validated.resolved.privateQuads);
-    console.log('Already finalized public quads:', authoritativePublic);
-    console.log('Already finalized private quads:', authoritativePrivate);
-    console.log('Removed public quads:', validated.resolved.quads);
-    console.log('Removed private quads:', validated.resolved.privateQuads);
-    console.log('Remaining public quads:', result.resolved.quads);
-    console.log('Remaining private quads:', result.resolved.privateQuads);
 
     expect(result.alreadyPublishedPublicCount).toBe(validated.resolved.quads.length);
     expect(result.alreadyPublishedPrivateCount).toBe(validated.resolved.privateQuads?.length ?? 0);

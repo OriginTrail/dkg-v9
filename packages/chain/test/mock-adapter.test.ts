@@ -125,8 +125,7 @@ describe('MockChainAdapter V9', () => {
     expect(result.batchId).toBe(1n);
     expect(result.startKAId).toBe(1n);
     expect(result.endKAId).toBe(7n);
-    expect(result.txHash).toBeDefined();
-    expect(result.txHash.startsWith('0x')).toBe(true);
+    expect(result.txHash).toMatch(/^0x[0-9a-f]+$/);
     expect(result.blockNumber).toBeGreaterThan(0);
     expect(result.blockTimestamp).toBeGreaterThan(0);
     expect(result.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);
@@ -144,7 +143,7 @@ describe('MockChainAdapter V9', () => {
     const result = await adapter.transferNamespace(newOwner);
 
     expect(result.success).toBe(true);
-    expect(result.hash).toBeDefined();
+    expect(result.hash).toMatch(/^0x/);
 
     expect(adapter.getNamespaceOwner(MOCK_DEFAULT_SIGNER)).toBe(newOwner);
 
@@ -331,7 +330,7 @@ describe('MockChainAdapter V9', () => {
     });
 
     expect(result.batchId).toBe(1n);
-    expect(result.txHash).toBeDefined();
+    expect(result.txHash).toMatch(/^0x[0-9a-f]+$/);
     expect(result.blockNumber).toBeGreaterThan(0);
     expect(result.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);
     expect(result.tokenAmount).toBe(100n);
@@ -396,8 +395,8 @@ describe('MockChainAdapter V9', () => {
     expect(events[0].data.contextGraphId).toBe('99');
     expect(events[0].data.convictionAccountId).toBe('7');
     expect(events[0].data.isImmutable).toBe(false);
-    expect(events[0].data.txHash).toBeDefined();
-    expect(events[0].data.publisherAddress).toBeDefined();
+    expect(events[0].data.txHash).toMatch(/^0x[0-9a-f]+$/);
+    expect(events[0].data.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);
   });
 
   // =====================================================================

@@ -130,9 +130,12 @@ export async function createNodeProfile(
   const tx = await profile.createProfile(admin.address, [], name, nodeId, 0);
   const receipt = await tx.wait();
 
-  const identityId = Number(receipt.logs[0].topics[1]);
-  if (!identityId) throw new Error(`No IdentityCreated event for ${name}`);
-  return identityId;
+  const iface = new ethers.Interface(['event IdentityCreated(uint72 indexed identityId, address indexed operational)']);
+  const parsed = receipt.logs
+    .map((log: any) => { try { return iface.parseLog({ topics: log.topics, data: log.data }); } catch { return null; } })
+    .find((e: any) => e?.name === 'IdentityCreated');
+  if (!parsed) throw new Error(`No IdentityCreated event for ${name}`);
+  return Number(parsed.args.identityId);
 }
 
 export async function mintTokens(
@@ -275,9 +278,10 @@ export async function setMinimumRequiredSignatures(
  * @param port   Hardhat JSON-RPC port (use different ports per concurrent test file)
  * @returns      Context with process handle, provider, hub address, and identity IDs
  */
-export async function spawnHardhatEnv(port: number): Promise<HardhatContext | null> {
+export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   const rpcUrl = `http://127.0.0.1:${port}`;
 
+  let stderrOutput = '';
   const hardhatProcess = spawn(
     'npx',
     ['hardhat', 'node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
@@ -287,11 +291,12 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext | nu
       env: { ...process.env },
     },
   );
+  hardhatProcess.stderr?.on('data', (d) => { stderrOutput += d.toString(); });
 
   const ready = await waitForNode(rpcUrl, 15_000);
   if (!ready) {
     hardhatProcess.kill('SIGTERM');
-    return null;
+    throw new Error(`Hardhat node failed to start on port ${port} within 15s.\nstderr: ${stderrOutput}`);
   }
 
   const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });

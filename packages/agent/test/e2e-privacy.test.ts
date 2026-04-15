@@ -172,10 +172,8 @@ describe('Private data isolation (2 nodes)', () => {
       `SELECT ?name WHERE { <${PUBLIC_ENTITY}> <http://schema.org/name> ?name }`,
       { contextGraphId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
     );
-    // GossipSub mesh may not form in time, so we check but don't hard-fail
-    if (onB.bindings.length > 0) {
-      expect(onB.bindings[0]['name']).toBe('"Visible Data"');
-    }
+    expect(onB.bindings.length).toBeGreaterThan(0);
+    expect(onB.bindings[0]['name']).toBe('"Visible Data"');
   }, 25000);
 
   it('node B cannot query private data even with explicit paranet ID', async () => {

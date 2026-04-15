@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext } from '@origintrail-official/dkg-core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
@@ -35,24 +35,26 @@ describe('FinalizationHandler', () => {
   it('deduplicates messages with same UAL and txHash', async () => {
     const msg = makeFinalizationMsg();
     const data = encodeFinalizationMessage(msg);
+    const insertSpy = vi.spyOn(store, 'insert');
 
-    // Process same message twice — should not throw, second should be skipped
     await handler.handleFinalizationMessage(data, PARANET);
+    const callsAfterFirst = insertSpy.mock.calls.length;
     await handler.handleFinalizationMessage(data, PARANET);
-    // No assertion needed — the test passes if no errors are thrown
-    // and no double-processing occurs (verified by log "already processed")
+    expect(insertSpy.mock.calls.length).toBe(callsAfterFirst);
   });
 
   it('processes messages with different UALs separately', async () => {
     const msg1 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/1' });
     const msg2 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/2', txHash: '0x' + 'cd'.repeat(32) });
+    const insertSpy = vi.spyOn(store, 'insert');
 
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg1), PARANET);
+    const callsAfterMsg1 = insertSpy.mock.calls.length;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg2), PARANET);
+    expect(insertSpy.mock.calls.length).toBeGreaterThan(callsAfterMsg1);
   });
 
   it('silently skips non-finalization protobuf messages (wrong wire type)', async () => {
-    // Encode a publish request message instead of a finalization message
     const wrongTypeData = encodePublishRequest({
       ual: 'did:dkg:test/1',
       nquads: new TextEncoder().encode('<urn:s> <urn:p> <urn:o> .'),
@@ -61,26 +63,36 @@ describe('FinalizationHandler', () => {
       txHash: '',
       blockNumber: 0,
     });
+    const insertSpy = vi.spyOn(store, 'insert');
 
-    // Should not throw — just silently skip
     await handler.handleFinalizationMessage(wrongTypeData, PARANET);
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 
   it('silently skips random binary data', async () => {
     const garbage = new Uint8Array([0xFF, 0xFE, 0x01, 0x02, 0x03]);
+    const insertSpy = vi.spyOn(store, 'insert');
+
     await handler.handleFinalizationMessage(garbage, PARANET);
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 
   it('ignores messages with mismatched contextGraphId', async () => {
     const msg = makeFinalizationMsg({ contextGraphId: 'wrong-paranet' });
     const data = encodeFinalizationMessage(msg);
+    const insertSpy = vi.spyOn(store, 'insert');
+
     await handler.handleFinalizationMessage(data, PARANET);
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 
   it('rejects messages with incomplete fields', async () => {
     const msg = makeFinalizationMsg({ rootEntities: [] });
     const data = encodeFinalizationMessage(msg);
+    const insertSpy = vi.spyOn(store, 'insert');
+
     await handler.handleFinalizationMessage(data, PARANET);
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 
   it('promotes workspace data to canonical when merkle matches (no chain adapter)', async () => {

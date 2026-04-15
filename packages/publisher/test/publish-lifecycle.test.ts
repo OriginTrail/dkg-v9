@@ -645,7 +645,10 @@ describe('Tentative data and chain event confirmation', () => {
     });
 
     poller.start();
-    await new Promise((r) => setTimeout(r, 500));
+    const deadline = Date.now() + 5000;
+    while (handler.hasPendingPublishes && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     poller.stop();
 
     expect(handler.hasPendingPublishes).toBe(false);
@@ -670,7 +673,10 @@ describe('Tentative data and chain event confirmation', () => {
     });
 
     poller.start();
-    await new Promise((r) => setTimeout(r, 300));
+    const deadline = Date.now() + 5000;
+    while (received.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     poller.stop();
 
     expect(received).toHaveLength(1);
@@ -769,6 +775,7 @@ describe('Update flow', () => {
     const nameResult = await store.query(
       `SELECT ?name WHERE { GRAPH <${GRAPH}> { <${entity}> <http://schema.org/name> ?name } }`,
     );
+    expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings).toHaveLength(1);
       expect(nameResult.bindings[0]['name']).toBe('"PrivUpdateBot v2"');

@@ -15,23 +15,20 @@ import {
   type HardhatContext,
 } from './hardhat-harness.js';
 
-let ctx: HardhatContext | null = null;
+let ctx: HardhatContext;
 let deployerProfileId: number;
 
 describe('EVM E2E: Full on-chain publishing lifecycle', () => {
   beforeAll(async () => {
     ctx = await spawnHardhatEnv(8546);
-    if (ctx) {
-      deployerProfileId = ctx.coreProfileId;
-    }
+    deployerProfileId = ctx.coreProfileId;
   }, 90_000);
 
   afterAll(() => {
     killHardhat(ctx);
   });
 
-  it('deploys V8 + V9 contracts and registers them in Hub', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('deploys V8 + V9 contracts and registers them in Hub', async () => {
     const hub = new Contract(ctx.hubAddress, [
       'function getContractAddress(string) view returns (address)',
       'function getAssetStorageAddress(string) view returns (address)',
@@ -50,16 +47,14 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(await kc.name()).toBe('KnowledgeCollection');
   }, 30_000);
 
-  it('reserves a UAL range (no identity needed)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('reserves a UAL range (no identity needed)', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER));
     const result = await adapter.reserveUALRange(50);
     expect(result.startId).toBe(1n);
     expect(result.endId).toBe(50n);
   }, 30_000);
 
-  it('publishes KAs in a single transaction (publishKnowledgeAssets)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('publishes KAs in a single transaction (publishKnowledgeAssets)', async () => {
     const pubAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER2));
     const publicByteSize = 1000n;
     const epochs = 2;
@@ -95,8 +90,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.publisherAddress.toLowerCase()).toBe(publisher2.address.toLowerCase());
   }, 60_000);
 
-  it('minted ERC1155 NFTs for each KA (publisher owns one per token id in batch)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('minted ERC1155 NFTs for each KA (publisher owns one per token id in batch)', async () => {
     const hub = new Contract(ctx.hubAddress, [
       'function getContractAddress(string) view returns (address)',
       'function getAssetStorageAddress(string) view returns (address)',
@@ -124,8 +118,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     }
   }, 30_000);
 
-  it('updates knowledge assets (new merkle root)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('updates knowledge assets (new merkle root)', async () => {
     const pubAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER2));
 
     const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('e2e-updated-root'));
@@ -138,8 +131,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('extends storage duration (adapter auto-approves TRAC)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('extends storage duration (adapter auto-approves TRAC)', async () => {
     const pubAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER2));
     const extensionCost = await pubAdapter.getRequiredPublishTokenAmount(2048n, 5);
     expect(extensionCost).toBeGreaterThan(0n);
@@ -155,8 +147,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('transfers namespace to a fresh address', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('transfers namespace to a fresh address', async () => {
     const publisherAdapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.PUBLISHER));
     const freshAddress = new Wallet(HARDHAT_KEYS.EXTRA1).address;
 
@@ -164,8 +155,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('retrieves KnowledgeBatchCreated events', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('retrieves KnowledgeBatchCreated events', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
 
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -178,17 +168,18 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(events[0].type).toBe('KnowledgeBatchCreated');
-    expect(events[0].data.batchId).toBeDefined();
-    expect(events[0].data.publisherAddress).toBeDefined();
-    expect(events[0].data.merkleRoot).toBeDefined();
+    expect(events[0].data.batchId).toBe(1n);
+    expect(String(events[0].data.publisherAddress).toLowerCase()).toBe(
+      new Wallet(HARDHAT_KEYS.PUBLISHER2).address.toLowerCase(),
+    );
+    expect(events[0].data.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/);
   }, 30_000);
 
   // -------------------------------------------------------------------------
   // V10 Multi-validator ACK publish (minimumRequiredSignatures > 1)
   // -------------------------------------------------------------------------
 
-  it('V10: publishes with 3 ACK signatures (multi-validator)', async (test) => {
-    if (!ctx) { test.skip(); return; }
+  it('V10: publishes with 3 ACK signatures (multi-validator)', async () => {
 
     // Raise minimumRequiredSignatures to 3
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 3);

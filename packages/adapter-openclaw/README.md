@@ -70,7 +70,7 @@ These keys live under `"dkg-node"` in `WORKSPACE_DIR/config.json`.
 | `channel.enabled` | `false` (`true` after setup) | enable the DKG UI to OpenClaw bridge |
 | `channel.port` | `9201` | standalone bridge port when gateway route registration is unavailable |
 
-The legacy `memory.memoryDir` and `memory.watchDebounceMs` config keys, and the filesystem-watcher + `/api/memory/import` ingestion flow they configured, were retired in the openclaw-dkg-primary-memory work. Memory now flows exclusively through `api.registerMemoryCapability` for slot-backed recall reads (handled by `DkgMemorySearchManager` which runs dual-graph SPARQL against `agent-context` / `chat-turns` plus the resolved project CG / `memory`) and through the `dkg_memory_import` tool for explicit per-project writes (which land in a project CG's `memory` Working Memory assertion via `POST /api/assertion/:name/write`). See `agent-docs/openclaw-dkg-primary-memory-plan.md` and ADR-018 in `agent-docs/notes/decisions.md` for the full architecture.
+The legacy `memory.memoryDir` and `memory.watchDebounceMs` config keys, and the filesystem-watcher + `/api/memory/import` ingestion flow they configured, were retired in the openclaw-dkg-primary-memory work. Memory now flows exclusively through `api.registerMemoryCapability` for slot-backed recall reads (handled by `DkgMemorySearchManager` which runs dual-graph SPARQL against `agent-context` / `chat-turns` plus the resolved project CG / `memory`) and through the `dkg_memory_import` tool for explicit per-project writes (which land in a project CG's `memory` Working Memory assertion via `POST /api/assertion/:name/write`).
 
 ## Notes
 

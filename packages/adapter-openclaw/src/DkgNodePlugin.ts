@@ -12,6 +12,8 @@
  *     upstream `MemoryPluginCapability` via `api.registerMemoryCapability`
  *     and exposes an explicit `dkg_memory_import` write tool.
  */
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join as pathJoin } from 'node:path';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
@@ -345,22 +347,69 @@ export class DkgNodePlugin {
    */
   private warnOnLegacyMemoryFileWatcherConfig(api: OpenClawPluginApi): void {
     if (this.warnedLegacyMemoryFileWatcherConfig) return;
+
+    // Branch 1: explicit config keys. Operators who wrote `memoryDir` or
+    // `watchDebounceMs` in their workspace config had their retirement
+    // flagged before — keep that branch unchanged.
     const memoryConfig = this.config.memory as Record<string, unknown> | undefined;
-    if (!memoryConfig) return;
     const hasLegacyKey =
-      'memoryDir' in memoryConfig || 'watchDebounceMs' in memoryConfig;
-    if (!hasLegacyKey) return;
+      !!memoryConfig &&
+      ('memoryDir' in memoryConfig || 'watchDebounceMs' in memoryConfig);
+
+    // Branch 2 (Codex B62): operators who relied on the pre-retirement
+    // default path (`<workspace>/memory/`) without ever setting
+    // `memoryDir` explicitly. Branch 1 silently misses them because
+    // nothing in their config looks "legacy". Walk the workspace at
+    // register-time and, if a `memory/` directory exists with any
+    // markdown files (the file-watcher's input shape), warn anyway.
+    // This is best-effort: any filesystem error falls through silently
+    // because a missing workspace or EACCES is not a retirement signal.
+    let hasLegacyDefaultDir = false;
+    let legacyDefaultDirPath: string | undefined;
+    const workspaceDir = (api as any).workspaceDir as string | undefined;
+    if (!hasLegacyKey && typeof workspaceDir === 'string' && workspaceDir.length > 0) {
+      try {
+        const candidate = pathJoin(workspaceDir, 'memory');
+        if (existsSync(candidate) && statSync(candidate).isDirectory()) {
+          const entries = readdirSync(candidate);
+          if (entries.some((name) => name.toLowerCase().endsWith('.md'))) {
+            hasLegacyDefaultDir = true;
+            legacyDefaultDirPath = candidate;
+          }
+        }
+      } catch {
+        // Ignore filesystem errors — absence of a signal is not a signal.
+      }
+    }
+
+    if (!hasLegacyKey && !hasLegacyDefaultDir) return;
     this.warnedLegacyMemoryFileWatcherConfig = true;
-    api.logger.warn?.(
-      '[dkg] Legacy memory config keys detected in dkg-node.memory — the ' +
-      'openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
-      'backlog-import ingestion flow that memoryDir and watchDebounceMs ' +
-      'configured. These keys are now ignored. Memories are recorded ' +
-      'through the memory slot (saveMemory via registerMemoryCapability) ' +
-      'or through chat-turn persistence. Any `MEMORY.md` or `memory/*.md` ' +
-      'files on disk will NOT be ingested after upgrade. Remove these ' +
-      'keys from your workspace config to silence this warning.',
-    );
+
+    if (hasLegacyKey) {
+      api.logger.warn?.(
+        '[dkg] Legacy memory config keys detected in dkg-node.memory — the ' +
+        'openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
+        'backlog-import ingestion flow that memoryDir and watchDebounceMs ' +
+        'configured. These keys are now ignored. Memories are recorded ' +
+        'through the memory slot (saveMemory via registerMemoryCapability) ' +
+        'or through chat-turn persistence. Any `MEMORY.md` or `memory/*.md` ' +
+        'files on disk will NOT be ingested after upgrade. Remove these ' +
+        'keys from your workspace config to silence this warning.',
+      );
+    } else {
+      api.logger.warn?.(
+        `[dkg] Legacy memory directory detected at \`${legacyDefaultDirPath}\` — ` +
+        'the openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
+        'backlog-import ingestion flow that previously watched this path for ' +
+        'markdown files. Files in this directory will NOT be ingested after ' +
+        'upgrade. Memories are now recorded through the memory slot ' +
+        '(saveMemory via registerMemoryCapability) or through chat-turn ' +
+        'persistence. To migrate existing content, import each file once via ' +
+        '`POST /api/assertion/:name/import-file` on your target project ' +
+        'context graph, then archive or delete the directory to silence this ' +
+        'warning.',
+      );
+    }
   }
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {

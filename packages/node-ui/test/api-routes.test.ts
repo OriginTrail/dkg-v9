@@ -403,11 +403,20 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     });
     expect(body.reason).toMatch(/V9 relic|LLM API keys|sidecar graph/i);
     expect(Array.isArray(body.replacements)).toBe(true);
+    // Codex B64: the 410 migration pointer must list BOTH the create step
+    // and the write step so callers bootstrapping a fresh project CG
+    // don't hit a failing first write. The retired `dkg_memory_import`
+    // adapter-tool replacement was dropped along with the tool itself
+    // (eccbe19d) — non-OpenClaw callers now go directly through the two
+    // daemon HTTP routes below.
     expect(body.replacements.length).toBeGreaterThanOrEqual(2);
-    // Both replacement surfaces must be named explicitly.
-    const replacementNames = body.replacements.map((r: any) => r.name ?? r.path ?? '');
-    expect(replacementNames.join(' ')).toMatch(/dkg_memory_import/);
-    expect(replacementNames.join(' ')).toMatch(/\/api\/assertion\/:name\/write/);
+    const replacementPaths = body.replacements.map((r: any) => r.path ?? r.name ?? '');
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/create/);
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/:name\/write/);
+    // Negative assertion: the retired adapter tool must NOT be listed
+    // anymore (regression guard against re-introducing it).
+    const allNames = body.replacements.map((r: any) => r.name ?? '').join(' ');
+    expect(allNames).not.toMatch(/dkg_memory_import/);
   });
 });
 

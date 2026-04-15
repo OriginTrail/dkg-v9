@@ -228,7 +228,7 @@ curl -X POST $BASE_URL/api/assertion/climate-report/import-file \
 }
 ```
 
-Both `fileHash` and `mdIntermediateHash` are `keccak256:<hex>` per spec §10.2:603. `mdIntermediateHash` is only present when Phase 1 actually ran (converter-backed imports like PDF/DOCX); pure-markdown imports leave it undefined.
+Both `fileHash` and `mdIntermediateHash` are `keccak256:<hex>`. `mdIntermediateHash` is only present when Phase 1 actually ran (converter-backed imports like PDF/DOCX); pure-markdown imports leave it undefined.
 
 ### Extraction statuses
 
@@ -284,7 +284,7 @@ Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape fr
 
 - Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-working-memory"}`
 - Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory"}`
-- Working memory (planned): `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
+- Working memory: `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
 
 ## Appendix: V9 → V10 Migration
 

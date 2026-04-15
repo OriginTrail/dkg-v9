@@ -66,8 +66,9 @@ describe('@unit ConvictionStakingStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await ConvictionStakingStorage.name()).to.equal('ConvictionStakingStorage');
-    // Phase 5 — rewards bucket + discrete tier ladder bumped to 1.1.0.
-    expect(await ConvictionStakingStorage.version()).to.equal('1.1.0');
+    // Phase 5 — 1.2.0 adds increaseRaw + V10-native pendingWithdrawals
+    // storage on top of the 1.1.0 split-bucket model.
+    expect(await ConvictionStakingStorage.version()).to.equal('1.2.0');
   });
 
   // ------------------------------------------------------------
@@ -895,6 +896,167 @@ describe('@unit ConvictionStakingStorage', () => {
         }
         expect(await ConvictionStakingStorage.getNodeEffectiveStakeAtEpoch(ALICE_ID, 13)).to.equal(950);
         expect(await ConvictionStakingStorage.getNodeEffectiveStakeAtEpoch(ALICE_ID, 100)).to.equal(950);
+      });
+    });
+
+    // ----------------------------------------------------------
+    // Phase 5 — increaseRaw (symmetric counterpart of decreaseRaw)
+    // ----------------------------------------------------------
+    //
+    // `increaseRaw` is the restoration mutator used by
+    // `StakingV10.cancelWithdrawal` to roll back a pending raw share into
+    // the position. The diff propagation must be a sign-flipped mirror of
+    // `decreaseRaw`: every effective-stake test below pairs an
+    // `increaseRaw` against a `decreaseRaw` with the same shape, so a
+    // round-trip create → decrease → increase ends at exactly the same
+    // global / per-node totals as the create alone.
+
+    describe('increaseRaw', () => {
+      it('Round-trip: decreaseRaw then increaseRaw restores raw + effective stake exactly (pre-expiry)', async () => {
+        await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 12, SIX_X);
+        // Pre: 1000*6 = 6000 pre-expiry, 1000 post-expiry
+        const e1Before = await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1);
+        const e12Before = await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(12);
+        const e13Before = await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(13);
+        const e50Before = await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(50);
+
+        await ConvictionStakingStorage.decreaseRaw(1, 400); // raw → 600
+        await ConvictionStakingStorage.increaseRaw(1, 400); // raw → 1000
+
+        const pos = await ConvictionStakingStorage.getPosition(1);
+        expect(pos.raw).to.equal(1000);
+        expect(pos.rewards).to.equal(0);
+
+        // Effective stake totals are byte-identical to pre-roundtrip.
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1)).to.equal(e1Before);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(12)).to.equal(e12Before);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(13)).to.equal(e13Before);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(50)).to.equal(e50Before);
+      });
+
+      it('Pre-expiry: grows raw + effective stake by amount*multiplier and re-installs the expiry delta', async () => {
+        await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 12, SIX_X);
+        // Drain raw down to 600 first so we have headroom to add it back.
+        await ConvictionStakingStorage.decreaseRaw(1, 400);
+        // Mid-state: raw=600 → effective 3600 in [1..12], 600 in [13..]
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1)).to.equal(3600);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(13)).to.equal(600);
+
+        // Add 200 raw back: pre-expiry 200*6 = 1200 lift, post-expiry 200 lift.
+        await ConvictionStakingStorage.increaseRaw(1, 200);
+        expect((await ConvictionStakingStorage.getPosition(1)).raw).to.equal(800);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1)).to.equal(4800);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(12)).to.equal(4800);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(13)).to.equal(800);
+      });
+
+      it('Post-expiry: grows raw + effective stake by flat amount (no expiry delta)', async () => {
+        // lock=3, 2x → expiry=4. Advance to e=4 (post-expiry).
+        await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 3, TWO_X);
+        await advanceEpochs(3);
+        expect(await Chronos.getCurrentEpoch()).to.equal(4);
+
+        // Mid-state: raw=1000, post-expiry → effective 1000.
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(4)).to.equal(1000);
+
+        // Add 250 raw post-expiry: flat +250.
+        await ConvictionStakingStorage.increaseRaw(1, 250);
+        expect((await ConvictionStakingStorage.getPosition(1)).raw).to.equal(1250);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(4)).to.equal(1250);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(100)).to.equal(1250);
+        // Pre-decrement history stays intact: boost was 2000 in [1..3].
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1)).to.equal(2000);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(3)).to.equal(2000);
+      });
+
+      it('Reverts on non-existent position', async () => {
+        await expect(
+          ConvictionStakingStorage.increaseRaw(42, 1),
+        ).to.be.revertedWith('No position');
+      });
+
+      it('Zero-amount call is a no-op (emits with zero amount, no diff write)', async () => {
+        await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 12, SIX_X);
+        const eBefore = await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1);
+        await ConvictionStakingStorage.increaseRaw(1, 0);
+        // raw + effective stake unchanged
+        expect((await ConvictionStakingStorage.getPosition(1)).raw).to.equal(1000);
+        expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(1)).to.equal(eBefore);
+      });
+    });
+
+    // ----------------------------------------------------------
+    // Phase 5 — V10-native pending withdrawals
+    // ----------------------------------------------------------
+    //
+    // The new `pendingWithdrawals` mapping replaces the V8
+    // `StakingStorage.withdrawals` slot for the V10 NFT path. These tests
+    // only exercise the storage CRUD + sentinel rules; the
+    // `StakingV10.createWithdrawal` / `cancelWithdrawal` /
+    // `finalizeWithdrawal` integration is covered in
+    // `DKGStakingConvictionNFT.test.ts`.
+
+    describe('pendingWithdrawals (V10-native)', () => {
+      it('createPendingWithdrawal stores amount/rewardsPortion/releaseAt under tokenId', async () => {
+        await ConvictionStakingStorage.createPendingWithdrawal(1, 1000, 200, 9_999_999n);
+        const pending = await ConvictionStakingStorage.getPendingWithdrawal(1);
+        expect(pending.amount).to.equal(1000);
+        expect(pending.rewardsPortion).to.equal(200);
+        expect(pending.releaseAt).to.equal(9_999_999n);
+      });
+
+      it('createPendingWithdrawal reverts when one already exists for the tokenId', async () => {
+        await ConvictionStakingStorage.createPendingWithdrawal(1, 1000, 0, 100n);
+        await expect(
+          ConvictionStakingStorage.createPendingWithdrawal(1, 500, 0, 200n),
+        ).to.be.revertedWith('Pending exists');
+      });
+
+      it('createPendingWithdrawal reverts on zero amount', async () => {
+        await expect(
+          ConvictionStakingStorage.createPendingWithdrawal(1, 0, 0, 100n),
+        ).to.be.revertedWith('Zero amount');
+      });
+
+      it('createPendingWithdrawal reverts when rewardsPortion > amount', async () => {
+        await expect(
+          ConvictionStakingStorage.createPendingWithdrawal(1, 100, 101, 100n),
+        ).to.be.revertedWith('Bad split');
+      });
+
+      it('deletePendingWithdrawal clears the slot and allows a fresh create', async () => {
+        await ConvictionStakingStorage.createPendingWithdrawal(1, 1000, 200, 100n);
+        await ConvictionStakingStorage.deletePendingWithdrawal(1);
+        const pending = await ConvictionStakingStorage.getPendingWithdrawal(1);
+        expect(pending.amount).to.equal(0);
+        expect(pending.rewardsPortion).to.equal(0);
+        expect(pending.releaseAt).to.equal(0);
+
+        // Slot is free — a new pending can be created.
+        await ConvictionStakingStorage.createPendingWithdrawal(1, 500, 100, 200n);
+        const pending2 = await ConvictionStakingStorage.getPendingWithdrawal(1);
+        expect(pending2.amount).to.equal(500);
+        expect(pending2.rewardsPortion).to.equal(100);
+        expect(pending2.releaseAt).to.equal(200n);
+      });
+
+      it('deletePendingWithdrawal reverts when no pending exists', async () => {
+        await expect(
+          ConvictionStakingStorage.deletePendingWithdrawal(99),
+        ).to.be.revertedWith('No pending');
+      });
+
+      it('Multiple tokenIds have independent pending slots', async () => {
+        await ConvictionStakingStorage.createPendingWithdrawal(1, 1000, 200, 100n);
+        await ConvictionStakingStorage.createPendingWithdrawal(2, 500, 50, 200n);
+
+        expect((await ConvictionStakingStorage.getPendingWithdrawal(1)).amount).to.equal(1000);
+        expect((await ConvictionStakingStorage.getPendingWithdrawal(2)).amount).to.equal(500);
+
+        // Deleting one does not touch the other.
+        await ConvictionStakingStorage.deletePendingWithdrawal(1);
+        expect((await ConvictionStakingStorage.getPendingWithdrawal(1)).amount).to.equal(0);
+        expect((await ConvictionStakingStorage.getPendingWithdrawal(2)).amount).to.equal(500);
       });
     });
   });

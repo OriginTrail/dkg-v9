@@ -9,10 +9,15 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ConvictionStakingStorage";
-    // Phase 5 bumps from 1.0.0: adds `rewards` bucket to `Position`, three
-    // new mutators (increaseRewards / decreaseRewards / decreaseRaw), and
-    // tightens the tier ladder to the discrete set {0,1,3,6,12}.
-    string private constant _VERSION = "1.1.0";
+    // Phase 5 bumps to 1.2.0:
+    //   - 1.1.0: rewards bucket on `Position`, three split-bucket mutators
+    //     (increaseRewards / decreaseRewards / decreaseRaw), and the
+    //     discrete tier ladder {0,1,3,6,12}.
+    //   - 1.2.0: V10-native pending-withdrawal storage for the
+    //     decrement-at-request model (`pendingWithdrawals` mapping +
+    //     create/delete/get) plus the `increaseRaw` symmetric counterpart
+    //     used by `StakingV10.cancelWithdrawal`.
+    string private constant _VERSION = "1.2.0";
 
     // Multiplier scale, matches Staking.convictionMultiplier /
     // DKGStakingConvictionNFT._convictionMultiplier (both return 1e18-scaled
@@ -46,6 +51,31 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint64 lastClaimedEpoch;
     }
 
+    // Phase 5 — V10-native pending withdrawal storage.
+    //
+    // Lives on this contract instead of `StakingStorage.withdrawals` so the
+    // Phase 5 NFT path owns its own withdrawal metadata end-to-end. The V8
+    // `StakingStorage.withdrawals` mapping is unaffected and continues to
+    // serve the legacy address-keyed flow.
+    //
+    // Layout (single slot, ~256 bits):
+    //   - amount:         uint96  (raw + rewards portion; the value debited from
+    //                              the position at request time)
+    //   - rewardsPortion: uint96  (the rewards-side share of `amount`; raw share
+    //                              is implicit as `amount - rewardsPortion`)
+    //   - releaseAt:      uint64  (Unix timestamp at which finalize is allowed)
+    //
+    // Decrement-at-request semantics: `createPendingWithdrawal` is called by
+    // `StakingV10.createWithdrawal` AFTER the position buckets, delegator
+    // base, and node/total stake have already been decremented. `delete` is
+    // called by both `cancelWithdrawal` (which restores everything) and
+    // `finalizeWithdrawal` (which releases the TRAC).
+    struct PendingWithdrawal {
+        uint96 amount;
+        uint96 rewardsPortion;
+        uint64 releaseAt;
+    }
+
     event PositionCreated(
         uint256 indexed tokenId,
         uint72 indexed identityId,
@@ -73,12 +103,30 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     event RewardsIncreased(uint256 indexed tokenId, uint96 amount, uint96 newRewards);
     event RewardsDecreased(uint256 indexed tokenId, uint96 amount, uint96 newRewards);
     event RawDecreased(uint256 indexed tokenId, uint96 amount, uint96 newRaw);
+    // Phase 5 — V10-native decrement-at-request restoration mutator. Symmetric
+    // counterpart of `RawDecreased`. Emitted by `cancelWithdrawal` when a
+    // pending withdrawal is rolled back to the position.
+    event RawIncreased(uint256 indexed tokenId, uint96 amount, uint96 newRaw);
+    // Phase 5 — V10-native pending-withdrawal lifecycle events.
+    event PendingWithdrawalCreated(
+        uint256 indexed tokenId,
+        uint96 amount,
+        uint96 rewardsPortion,
+        uint64 releaseAt
+    );
+    event PendingWithdrawalDeleted(uint256 indexed tokenId);
     event EffectiveStakeFinalized(uint256 startEpoch, uint256 endEpoch);
     event NodeEffectiveStakeFinalized(uint72 indexed identityId, uint256 startEpoch, uint256 endEpoch);
 
     Chronos public chronos;
 
     mapping(uint256 => Position) public positions;
+
+    // Phase 5 — V10-native pending withdrawals, indexed by tokenId. Disjoint
+    // from the V8 `StakingStorage.withdrawals` map (which is address-keyed).
+    // Only one pending per tokenId at a time; create/cancel/finalize all gate
+    // on `amount != 0` as the existence sentinel.
+    mapping(uint256 => PendingWithdrawal) public pendingWithdrawals;
 
     mapping(uint256 => int256) public effectiveStakeDiff;
     mapping(uint256 => uint256) public totalEffectiveStakeAtEpoch;
@@ -482,6 +530,99 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         }
 
         emit RawDecreased(tokenId, amount, pos.raw);
+    }
+
+    // Phase 5 — Symmetric counterpart of `decreaseRaw`. Used by
+    // `StakingV10.cancelWithdrawal` to restore a pending raw share back to
+    // the position when the user cancels a pending withdrawal under the V10
+    // decrement-at-request model.
+    //
+    // This is a sign-flipped mirror of `decreaseRaw`'s diff propagation:
+    //   pre-expiry  : add amount*mult/1e18 at currentEpoch and re-install the
+    //                 corresponding pending expiry delta (-amount*(mult-1)/1e18
+    //                 at expiryEpoch) so the remaining boost drop matches the
+    //                 restored raw.
+    //   post-expiry : add flat `amount` at currentEpoch; no expiry delta.
+    function increaseRaw(uint256 tokenId, uint96 amount) external onlyContracts {
+        Position storage pos = positions[tokenId];
+        require(pos.identityId != 0, "No position");
+        if (amount == 0) {
+            emit RawIncreased(tokenId, 0, pos.raw);
+            return;
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        uint72 identityId = pos.identityId;
+        uint40 expiryEpoch = pos.expiryEpoch;
+        uint64 multiplier18 = pos.multiplier18;
+        bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
+
+        // Mirror of `decreaseRaw`, signs flipped:
+        //   pre-expiry : add amount*mult/1e18 at currentEpoch.
+        //   post-expiry: add flat `amount` at currentEpoch.
+        uint256 effectiveNow = stillBoosted
+            ? (uint256(amount) * uint256(multiplier18)) / SCALE18
+            : uint256(amount);
+
+        int256 signedEffectiveNow = int256(effectiveNow);
+        effectiveStakeDiff[currentEpoch] += signedEffectiveNow;
+        nodeEffectiveStakeDiff[identityId][currentEpoch] += signedEffectiveNow;
+        _markGlobalDirty(currentEpoch);
+        _markNodeDirty(identityId, currentEpoch);
+
+        if (stillBoosted && multiplier18 > SCALE18) {
+            // Symmetric inverse of the `decreaseRaw` cancel: re-install the
+            //   diff[expiryEpoch] -= amount * (mult-1) / SCALE18
+            // edge so the raw still has its boost drop scheduled at expiry.
+            int256 expiryDelta = (int256(uint256(amount)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
+            effectiveStakeDiff[expiryEpoch] -= expiryDelta;
+            nodeEffectiveStakeDiff[identityId][expiryEpoch] -= expiryDelta;
+        }
+
+        pos.raw = pos.raw + amount;
+
+        if (currentEpoch > 1) {
+            _finalizeEffectiveStakeUpTo(currentEpoch - 1);
+            _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
+        }
+
+        emit RawIncreased(tokenId, amount, pos.raw);
+    }
+
+    // ============================================================
+    //         Phase 5 — V10-native pending withdrawal CRUD
+    // ============================================================
+    //
+    // These three mutators back the V10 NFT-side pending withdrawal flow.
+    // They are independent of `StakingStorage.withdrawals` (the legacy V8
+    // address-keyed mapping is left untouched by Phase 5). Only one pending
+    // per tokenId at a time; the sentinel is `amount != 0`.
+
+    function createPendingWithdrawal(
+        uint256 tokenId,
+        uint96 amount,
+        uint96 rewardsPortion,
+        uint64 releaseAt
+    ) external onlyContracts {
+        require(amount > 0, "Zero amount");
+        require(rewardsPortion <= amount, "Bad split");
+        require(pendingWithdrawals[tokenId].amount == 0, "Pending exists");
+        pendingWithdrawals[tokenId] = PendingWithdrawal({
+            amount: amount,
+            rewardsPortion: rewardsPortion,
+            releaseAt: releaseAt
+        });
+        emit PendingWithdrawalCreated(tokenId, amount, rewardsPortion, releaseAt);
+    }
+
+    function deletePendingWithdrawal(uint256 tokenId) external onlyContracts {
+        require(pendingWithdrawals[tokenId].amount != 0, "No pending");
+        delete pendingWithdrawals[tokenId];
+        emit PendingWithdrawalDeleted(tokenId);
+    }
+
+    function getPendingWithdrawal(uint256 tokenId) external view returns (PendingWithdrawal memory) {
+        return pendingWithdrawals[tokenId];
     }
 
     // ============================================================

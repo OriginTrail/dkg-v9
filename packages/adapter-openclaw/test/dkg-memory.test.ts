@@ -1243,7 +1243,14 @@ describe('DkgMemorySearchManager', () => {
       expect(opts.agentAddress).toBe('peer-test');
     });
 
-    it('issues two parallel /api/query calls when a project CG is resolved', async () => {
+    it('issues four parallel /api/query calls when a project CG is resolved (chat-turns WM + project WM/SWM/VM)', async () => {
+      // Workstream A expanded the slot-backed retrieval path to fan out
+      // across all three project-memory views — working-memory,
+      // shared-working-memory, and verified-memory — in addition to the
+      // agent-context chat-turns working-memory query. `chat-turns` is
+      // WM-only by persistence-path design (chat history only ever lands
+      // in the agent-context WM assertion), so the total call count is
+      // 4 (= 1 WM chat-turns + 3 project-memory views), not 6.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({
         client,
@@ -1252,20 +1259,31 @@ describe('DkgMemorySearchManager', () => {
 
       await manager.search('hello world');
 
-      expect(querySpy).toHaveBeenCalledTimes(2);
-      const firstOpts = querySpy.mock.calls[0][1]!;
-      const secondOpts = querySpy.mock.calls[1][1]!;
-      const optsByCg: Record<string, any> = {
-        [firstOpts.contextGraphId!]: firstOpts,
-        [secondOpts.contextGraphId!]: secondOpts,
-      };
-      expect(optsByCg[AGENT_CONTEXT_GRAPH].assertionName).toBe(CHAT_TURNS_ASSERTION);
-      expect(optsByCg[AGENT_CONTEXT_GRAPH].view).toBe('working-memory');
-      expect(optsByCg['research-x'].assertionName).toBe(PROJECT_MEMORY_ASSERTION);
-      expect(optsByCg['research-x'].view).toBe('working-memory');
+      expect(querySpy).toHaveBeenCalledTimes(4);
+      const allOpts = querySpy.mock.calls.map(c => c[1]!);
+
+      const chatTurns = allOpts.filter(o => o.contextGraphId === AGENT_CONTEXT_GRAPH);
+      expect(chatTurns).toHaveLength(1);
+      expect(chatTurns[0].assertionName).toBe(CHAT_TURNS_ASSERTION);
+      expect(chatTurns[0].view).toBe('working-memory');
+      expect(chatTurns[0].agentAddress).toBe('peer-test');
+
+      const projectOpts = allOpts.filter(o => o.contextGraphId === 'research-x');
+      expect(projectOpts).toHaveLength(3);
+      for (const opts of projectOpts) {
+        expect(opts.assertionName).toBe(PROJECT_MEMORY_ASSERTION);
+        expect(opts.agentAddress).toBe('peer-test');
+      }
+      const projectViews = projectOpts.map(o => o.view).sort();
+      expect(projectViews).toEqual(
+        ['shared-working-memory', 'verified-memory', 'working-memory'],
+      );
     });
 
-    it('merges results from both graphs and tags them with the correct source', async () => {
+    it('merges results from all four layers and tags them with the correct source + layer', async () => {
+      // Deterministic ordering lines up with the plan array in
+      // DkgMemorySearchManager.search: chat-turns WM first, then
+      // project WM, project SWM, project VM.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: {
@@ -1277,7 +1295,21 @@ describe('DkgMemorySearchManager', () => {
         .mockResolvedValueOnce({
           result: {
             bindings: [
-              { uri: { value: 'urn:m:2' }, text: { value: 'project hello world memory' } },
+              { uri: { value: 'urn:m:2' }, text: { value: 'project wm hello world draft' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:3' }, text: { value: 'project swm hello world shared' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:4' }, text: { value: 'project vm hello world verified' } },
             ],
           },
         });
@@ -1288,9 +1320,13 @@ describe('DkgMemorySearchManager', () => {
       });
 
       const results = await manager.search('hello world');
-      expect(results).toHaveLength(2);
+      expect(results).toHaveLength(4);
+      const layers = results.map(r => r.layer).sort();
+      expect(layers).toEqual(['chat-turns-wm', 'project-swm', 'project-vm', 'project-wm']);
+      // source stays on the closed upstream union — sessions for
+      // chat-turns-wm, memory for every project layer.
       const sources = results.map(r => r.source).sort();
-      expect(sources).toEqual(['memory', 'sessions']);
+      expect(sources).toEqual(['memory', 'memory', 'memory', 'sessions']);
       for (const r of results) {
         expect(r.startLine).toBe(1);
         expect(r.endLine).toBe(1);
@@ -1301,19 +1337,134 @@ describe('DkgMemorySearchManager', () => {
       }
     });
 
-    it('degrades to the succeeding graph when one query fails', async () => {
+    it('issues only one chat-turns WM query when no project CG is resolved (chat-turns is WM-only by design)', async () => {
+      // Regression guard for the "chat-turns is WM-only" invariant.
+      // Without a project CG the plan contains exactly the chat-turns
+      // entry, so no SWM/VM calls should fire regardless of how the
+      // fan-out expanded for project memory.
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+
+      await manager.search('hello world');
+
+      expect(querySpy).toHaveBeenCalledTimes(1);
+      const opts = querySpy.mock.calls[0][1]!;
+      expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
+      expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
+      expect(opts.view).toBe('working-memory');
+    });
+
+    it('ranks with trust-weighted scores: VM×1.3 > SWM×1.15 > WM×1.0 when raw overlap is comparable', async () => {
+      // All four layers return a single result with identical keyword
+      // overlap (`hello world` matches both keywords → raw score 1.0).
+      // The trust weights then order the results VM > SWM > WM (both
+      // WM layers tie in trust; rely on raw score for the tie-break).
       vi.spyOn(client, 'query')
-        .mockResolvedValueOnce({ result: { bindings: [{ uri: { value: 'urn:m:1' }, text: { value: 'session match hit' } }] } })
-        .mockRejectedValueOnce(new Error('project cg offline'));
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:ct' }, text: { value: 'hello world chat turn' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:wm' }, text: { value: 'hello world project wm' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:swm' }, text: { value: 'hello world project swm' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:vm' }, text: { value: 'hello world project vm' } },
+            ],
+          },
+        });
 
       const manager = new DkgMemorySearchManager({
         client,
         resolver: makeResolver({ projectContextGraphId: 'research-x' }),
       });
 
-      const results = await manager.search('match');
+      const results = await manager.search('hello world');
+      expect(results).toHaveLength(4);
+      // First entry should be the VM hit (highest trust weight).
+      expect(results[0].layer).toBe('project-vm');
+      // Second entry should be SWM (next-highest trust weight).
+      expect(results[1].layer).toBe('project-swm');
+      // The two WM-trust entries round out the tail in some order;
+      // assert only that both WM layers land in the bottom half.
+      const tailLayers = [results[2].layer, results[3].layer].sort();
+      expect(tailLayers).toEqual(['chat-turns-wm', 'project-wm']);
+    });
+
+    it('dedups across layers by (cg, uri), keeping the highest-trust layer', async () => {
+      // The same memory URI surfaces in VM, SWM, and WM for the
+      // project CG — a verified memory that is still present in the
+      // working-memory draft and the shared-working-memory view. The
+      // three layers should collapse to one result tagged with the
+      // VM layer.
+      const sameUri = { value: 'urn:m:shared' };
+      const sameText = { value: 'hello world canonical memory' };
+      vi.spyOn(client, 'query')
+        .mockResolvedValueOnce({ result: { bindings: [] } }) // chat-turns WM
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } })
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } })
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } });
+
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      const results = await manager.search('hello world');
       expect(results).toHaveLength(1);
-      expect(results[0].source).toBe('sessions');
+      expect(results[0].layer).toBe('project-vm');
+      expect(results[0].source).toBe('memory');
+    });
+
+    it('degrades to the succeeding layers when one view query fails, with one warn per failing (cg, view) pair', async () => {
+      // VM query fails; WM and SWM succeed. The failed layer emits
+      // exactly one warn identifying the (cg, view) pair, and the
+      // surviving two project layers contribute results alongside
+      // the chat-turns WM result.
+      vi.spyOn(client, 'query')
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:ct' }, text: { value: 'match match hit' } }] },
+        }) // chat-turns WM
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:wm' }, text: { value: 'match project wm' } }] },
+        }) // project WM
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:swm' }, text: { value: 'match project swm' } }] },
+        }) // project SWM
+        .mockRejectedValueOnce(new Error('verified-memory view offline')); // project VM
+
+      const warnSpy = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { info: vi.fn(), warn: warnSpy, debug: vi.fn() } as any,
+      });
+
+      const results = await manager.search('match');
+      const layers = results.map(r => r.layer).sort();
+      expect(layers).toEqual(['chat-turns-wm', 'project-swm', 'project-wm']);
+
+      const vmWarns = warnSpy.mock.calls.filter(c =>
+        typeof c[0] === 'string' && c[0].includes('project-vm'),
+      );
+      expect(vmWarns).toHaveLength(1);
+      expect(vmWarns[0][0]).toContain('research-x');
+      expect(vmWarns[0][0]).toContain('verified-memory');
     });
 
     it('returns an empty array for queries with no meaningful keywords', async () => {

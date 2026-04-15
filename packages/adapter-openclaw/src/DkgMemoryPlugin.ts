@@ -30,6 +30,7 @@ import type { DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
   MemoryEmbeddingProbeResult,
+  MemoryLayer,
   MemoryPluginCapability,
   MemoryPluginRuntime,
   MemoryProviderStatus,
@@ -40,6 +41,7 @@ import type {
   MemorySearchManager,
   MemorySearchOptions,
   MemorySearchResult,
+  MemorySource,
   OpenClawPluginApi,
   OpenClawToolResult,
 } from './types.js';
@@ -186,65 +188,145 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       }
       LIMIT ${limit}`;
 
-    const calls: Array<Promise<{ source: 'sessions' | 'memory'; bindings: any[] }>> = [];
-
-    calls.push(
-      this.deps.client
-        .query(chatTurnsSparql, {
-          contextGraphId: AGENT_CONTEXT_GRAPH,
-          view: 'working-memory',
-          agentAddress,
-          assertionName: CHAT_TURNS_ASSERTION,
-        })
-        .then(r => ({ source: 'sessions' as const, bindings: extractBindings(r) }))
-        .catch(err => {
-          this.deps.logger?.warn?.(`[dkg-memory] chat-turns search failed: ${errorMessage(err)}`);
-          return { source: 'sessions' as const, bindings: [] };
-        }),
-    );
-
+    // Fan-out layout: 1 agent-context WM query for chat-turns +
+    // (when a project CG is resolved) 3 project-memory queries — one
+    // each for working-memory, shared-working-memory, and
+    // verified-memory. `chat-turns` is WM-only by persistence-path
+    // design (chat history only ever lands in the agent-context WM
+    // assertion), so there is no SWM/VM fan-out on the sessions side.
+    //
+    // Each layer carries a trust weight that multiplies the keyword-
+    // overlap score during ranking: VM×1.3, SWM×1.15, WM×1.0. The
+    // weighting nudges verified memories ahead of working drafts when
+    // raw lexical overlap is comparable, without hard-preempting WM
+    // (a very strong WM match can still outrank a weak VM hit).
+    //
+    // Per-query `.catch → []` preserves partial-success semantics:
+    // one failing (cg, view) pair emits exactly one warn and the
+    // surviving layers continue to contribute results.
+    interface LayerPlan {
+      layer: MemoryLayer;
+      source: MemorySource;
+      trustWeight: number;
+      contextGraphId: string;
+      assertionName: string;
+      view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+      sparql: string;
+    }
+    const plans: LayerPlan[] = [
+      {
+        layer: 'chat-turns-wm',
+        source: 'sessions',
+        trustWeight: 1.0,
+        contextGraphId: AGENT_CONTEXT_GRAPH,
+        assertionName: CHAT_TURNS_ASSERTION,
+        view: 'working-memory',
+        sparql: chatTurnsSparql,
+      },
+    ];
     if (projectContextGraphId) {
-      calls.push(
-        this.deps.client
-          .query(projectMemorySparql, {
-            contextGraphId: projectContextGraphId,
-            view: 'working-memory',
-            agentAddress,
-            assertionName: PROJECT_MEMORY_ASSERTION,
-          })
-          .then(r => ({ source: 'memory' as const, bindings: extractBindings(r) }))
-          .catch(err => {
-            this.deps.logger?.warn?.(
-              `[dkg-memory] project memory search failed for ${projectContextGraphId}: ${errorMessage(err)}`,
-            );
-            return { source: 'memory' as const, bindings: [] };
-          }),
+      plans.push(
+        {
+          layer: 'project-wm',
+          source: 'memory',
+          trustWeight: 1.0,
+          contextGraphId: projectContextGraphId,
+          assertionName: PROJECT_MEMORY_ASSERTION,
+          view: 'working-memory',
+          sparql: projectMemorySparql,
+        },
+        {
+          layer: 'project-swm',
+          source: 'memory',
+          trustWeight: 1.15,
+          contextGraphId: projectContextGraphId,
+          assertionName: PROJECT_MEMORY_ASSERTION,
+          view: 'shared-working-memory',
+          sparql: projectMemorySparql,
+        },
+        {
+          layer: 'project-vm',
+          source: 'memory',
+          trustWeight: 1.3,
+          contextGraphId: projectContextGraphId,
+          assertionName: PROJECT_MEMORY_ASSERTION,
+          view: 'verified-memory',
+          sparql: projectMemorySparql,
+        },
       );
     }
 
-    const settled = await Promise.all(calls);
-    const results: MemorySearchResult[] = [];
+    const settled = await Promise.all(
+      plans.map(plan =>
+        this.deps.client
+          .query(plan.sparql, {
+            contextGraphId: plan.contextGraphId,
+            view: plan.view,
+            agentAddress,
+            assertionName: plan.assertionName,
+          })
+          .then(r => ({ plan, bindings: extractBindings(r) }))
+          .catch(err => {
+            this.deps.logger?.warn?.(
+              `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${errorMessage(err)}`,
+            );
+            return { plan, bindings: [] as any[] };
+          }),
+      ),
+    );
 
-    for (const { source, bindings } of settled) {
+    // Dedup by (contextGraphId, uri), keeping the highest-trust layer
+    // when the same memory URI surfaces through multiple views (a
+    // verified memory that is still in the WM draft buffer is the
+    // canonical example — it would otherwise occupy two result slots
+    // with near-identical snippets). A VM hit collapses an SWM or WM
+    // hit for the same URI; SWM collapses a WM hit. The weighted
+    // `score * trustWeight` from the surviving layer is what ranks.
+    const trustOrder: Record<MemoryLayer, number> = {
+      'project-vm': 3,
+      'project-swm': 2,
+      'project-wm': 1,
+      'chat-turns-wm': 1,
+    };
+    const best = new Map<string, MemorySearchResult & { _rank: number }>();
+    for (const { plan, bindings } of settled) {
       for (const binding of bindings) {
         const text = bindingValue(binding.text) ?? '';
         const uri = bindingValue(binding.uri) ?? '';
         if (!text) continue;
-        const score = computeKeywordOverlap(text, keywords);
-        if (score < minScore) continue;
-        results.push({
-          path: `dkg://${source === 'sessions' ? AGENT_CONTEXT_GRAPH : projectContextGraphId ?? 'unknown'}/${source === 'sessions' ? CHAT_TURNS_ASSERTION : PROJECT_MEMORY_ASSERTION}/${hashString(uri || text)}`,
+        const rawScore = computeKeywordOverlap(text, keywords);
+        if (rawScore < minScore) continue;
+        const weighted = rawScore * plan.trustWeight;
+        const key = `${plan.contextGraphId}::${uri || hashString(text)}`;
+        const candidate: MemorySearchResult & { _rank: number } = {
+          path: `dkg://${plan.contextGraphId}/${plan.assertionName}/${hashString(uri || text)}`,
           startLine: 1,
           endLine: 1,
-          score,
+          score: rawScore,
           snippet: truncate(text, 500),
-          source,
-        });
+          source: plan.source,
+          layer: plan.layer,
+          _rank: weighted,
+        };
+        const existing = best.get(key);
+        if (!existing) {
+          best.set(key, candidate);
+          continue;
+        }
+        // Higher trust layer always wins; ties broken by raw score.
+        const existingTrust = trustOrder[existing.layer ?? 'project-wm'];
+        const candidateTrust = trustOrder[candidate.layer ?? 'project-wm'];
+        if (
+          candidateTrust > existingTrust ||
+          (candidateTrust === existingTrust && candidate.score > existing.score)
+        ) {
+          best.set(key, candidate);
+        }
       }
     }
 
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
+    const ranked = Array.from(best.values()).sort((a, b) => b._rank - a._rank);
+    return ranked.slice(0, limit).map(({ _rank, ...rest }) => rest);
   }
 
   async readFile(request: MemoryReadFileRequest): Promise<MemoryReadFileResult> {

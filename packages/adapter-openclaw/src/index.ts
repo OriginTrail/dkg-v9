@@ -27,6 +27,7 @@ export type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
   JSONSchemaObject,
+  MemoryLayer,
   MemoryPluginCapability,
   MemoryPluginRuntime,
   MemoryProviderStatus,

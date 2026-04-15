@@ -162,13 +162,35 @@ export interface OpenClawChannelAdapter {
 export type MemorySource = 'memory' | 'sessions';
 
 /**
+ * Narrower adapter-local discriminant identifying which of the four
+ * retrieval layers produced a hit:
+ *   - `chat-turns-wm`: agent-context chat history (WM view)
+ *   - `project-wm`: project memory assertion, working-memory view
+ *   - `project-swm`: project memory assertion, shared-working-memory view
+ *   - `project-vm`: project memory assertion, verified-memory view
+ *
+ * Kept as an optional, non-upstream field on `MemorySearchResult` so the
+ * closed upstream `source` union (`memory | sessions`) stays intact while
+ * adapter internals (trust-weighted ranking, dedup across layers, test
+ * assertions) can distinguish VM from SWM from WM without re-parsing `path`.
+ */
+export type MemoryLayer =
+  | 'chat-turns-wm'
+  | 'project-wm'
+  | 'project-swm'
+  | 'project-vm';
+
+/**
  * Upstream search result shape. `path` is an opaque identifier (file path or
  * graph-backed synthetic URI). `startLine`/`endLine` are `1` for graph-backed
  * backends that have no natural line concept. `snippet` is the matched text,
  * typically truncated. `source` distinguishes per-project memory hits from
- * session-history hits. `citation` is a free-form string per upstream
- * `packages/memory-host-sdk/src/host/types.ts:3-10` — do not promote to a
- * structured object without checking upstream first.
+ * session-history hits. `layer` is an adapter-local, non-upstream discriminant
+ * that pins the specific retrieval layer (chat-turns WM / project WM / SWM /
+ * VM) — populated by `DkgMemorySearchManager` for trust-weighted ranking and
+ * dedup without widening the closed upstream `source` union. `citation` is a
+ * free-form string per upstream `packages/memory-host-sdk/src/host/types.ts:3-10`
+ * — do not promote to a structured object without checking upstream first.
  */
 export interface MemorySearchResult {
   path: string;
@@ -177,6 +199,7 @@ export interface MemorySearchResult {
   score: number;
   snippet: string;
   source: MemorySource;
+  layer?: MemoryLayer;
   citation?: string;
 }
 

@@ -19,10 +19,10 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Register the DKG memory-slot capability (slot-backed recall via registerMemoryCapability) and the dkg_memory_import write tool on attach."
+            "description": "Register the DKG memory-slot capability (slot-backed recall via api.registerMemoryCapability). No conventional tools are exposed: reads flow through the slot, and writes flow directly through daemon HTTP routes documented in the agent SKILL.md (POST /api/assertion/create + POST /api/assertion/:name/write)."
           }
         },
-        "description": "DKG memory integration. Memory now flows exclusively through api.registerMemoryCapability for slot-backed recall reads and through the dkg_memory_import tool for explicit per-project writes; the retired memoryDir / watchDebounceMs / file-watcher-sync configuration surface is no longer accepted."
+        "description": "DKG memory integration. Reads flow through api.registerMemoryCapability (slot-backed recall via DkgMemorySearchManager's WM+SWM+VM fan-out). Writes are NOT exposed as an adapter tool in v1 — the agent persists memory through direct daemon routes listed in packages/cli/skills/dkg-node/SKILL.md §5 (POST /api/assertion/create + POST /api/assertion/:name/write). The retired memoryDir / watchDebounceMs / file-watcher-sync configuration surface and the retired dkg_memory_import / dkg_memory_search adapter tools are no longer accepted."
       },
       "channel": {
         "type": "object",

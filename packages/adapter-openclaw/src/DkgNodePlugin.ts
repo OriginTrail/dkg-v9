@@ -9,8 +9,11 @@
  * Integration modules:
  *   - DKG UI channel bridge (DkgChannelPlugin)
  *   - DKG-backed memory slot plugin (DkgMemoryPlugin) — registers an
- *     upstream `MemoryPluginCapability` via `api.registerMemoryCapability`
- *     and exposes an explicit `dkg_memory_import` write tool.
+ *     upstream `MemoryPluginCapability` via `api.registerMemoryCapability`.
+ *     No adapter-side write tool: memory writes flow through daemon HTTP
+ *     routes documented in `packages/cli/skills/dkg-node/SKILL.md`
+ *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
+ *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
@@ -47,6 +50,55 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   setupEntry: './setup-entry.mjs',
 } as const;
 const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
+
+/**
+ * Codex B66: upper bound on the number of directory entries walked by the
+ * legacy memory-dir retirement scan. The retired file-watcher accepted a
+ * recursive `memory/**\/*.md` layout, so the retirement detector has to
+ * walk into subdirectories — but the scan fires on every register() and
+ * must not turn into a stall if an operator has a huge unrelated `memory/`
+ * tree. First `.md` match short-circuits the walk; this cap is the backstop.
+ */
+const MAX_LEGACY_MEMORY_SCAN_ENTRIES = 256;
+
+/**
+ * Codex B66: recursive scan for the first markdown file under a directory.
+ * Returns `true` as soon as it sees any entry whose name ends in `.md`
+ * (case-insensitive), bounding total directory-entry visits at
+ * MAX_LEGACY_MEMORY_SCAN_ENTRIES so pathological layouts cannot stall
+ * startup. Uses `visited` as a shared counter across the recursive
+ * frame so the cap is global, not per-directory.
+ */
+function containsLegacyMemoryMarkdown(
+  dir: string,
+  depth: number,
+  visited: { count: number } = { count: 0 },
+): boolean {
+  if (visited.count >= MAX_LEGACY_MEMORY_SCAN_ENTRIES) return false;
+  if (depth > 10) return false; // defense against symlink loops
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of entries) {
+    visited.count += 1;
+    if (visited.count > MAX_LEGACY_MEMORY_SCAN_ENTRIES) return false;
+    if (name.toLowerCase().endsWith('.md')) return true;
+    const full = pathJoin(dir, name);
+    let isDir = false;
+    try {
+      isDir = statSync(full).isDirectory();
+    } catch {
+      continue;
+    }
+    if (isDir && containsLegacyMemoryMarkdown(full, depth + 1, visited)) {
+      return true;
+    }
+  }
+  return false;
+}
 /**
  * Delay before the deferred "first-failure" re-probe of the node peer ID
  * fires after `refreshMemoryResolverState` reports a missing peerId at
@@ -356,25 +408,49 @@ export class DkgNodePlugin {
       !!memoryConfig &&
       ('memoryDir' in memoryConfig || 'watchDebounceMs' in memoryConfig);
 
-    // Branch 2 (Codex B62): operators who relied on the pre-retirement
-    // default path (`<workspace>/memory/`) without ever setting
-    // `memoryDir` explicitly. Branch 1 silently misses them because
-    // nothing in their config looks "legacy". Walk the workspace at
-    // register-time and, if a `memory/` directory exists with any
-    // markdown files (the file-watcher's input shape), warn anyway.
-    // This is best-effort: any filesystem error falls through silently
-    // because a missing workspace or EACCES is not a retirement signal.
+    // Branch 2 (Codex B62 + B66): operators who relied on the pre-retirement
+    // default watch paths without ever setting `memoryDir` explicitly. The
+    // retired file-watcher had three input shapes that all silently stop
+    // syncing after upgrade, and each has to be detected on its own:
+    //
+    //   1. `<workspace>/MEMORY.md`             — root single-file shape
+    //   2. `<workspace>/memory/*.md`           — flat directory shape
+    //   3. `<workspace>/memory/**/*.md`        — recursive directory shape
+    //
+    // Branch 1 misses all three because nothing in their config looks
+    // "legacy" — the defaults were implicit. Walk the workspace at
+    // register-time and report the first matching signal. Best-effort:
+    // any filesystem error falls through silently because a missing
+    // workspace or EACCES is not a retirement signal. Recursive scan is
+    // bounded by MAX_LEGACY_MEMORY_SCAN_FILES so a huge directory tree
+    // cannot turn the register path into a stall.
     let hasLegacyDefaultDir = false;
     let legacyDefaultDirPath: string | undefined;
     const workspaceDir = (api as any).workspaceDir as string | undefined;
     if (!hasLegacyKey && typeof workspaceDir === 'string' && workspaceDir.length > 0) {
       try {
-        const candidate = pathJoin(workspaceDir, 'memory');
-        if (existsSync(candidate) && statSync(candidate).isDirectory()) {
-          const entries = readdirSync(candidate);
-          if (entries.some((name) => name.toLowerCase().endsWith('.md'))) {
-            hasLegacyDefaultDir = true;
-            legacyDefaultDirPath = candidate;
+        // 1. Root MEMORY.md (case-insensitive so `memory.md` / `Memory.md`
+        //    variants also trip the warning — the file watcher accepted
+        //    whatever the OS filesystem happened to return).
+        const rootEntries = existsSync(workspaceDir) ? readdirSync(workspaceDir) : [];
+        const rootMemoryMatch = rootEntries.find(
+          (name) => name.toLowerCase() === 'memory.md',
+        );
+        if (rootMemoryMatch) {
+          hasLegacyDefaultDir = true;
+          legacyDefaultDirPath = pathJoin(workspaceDir, rootMemoryMatch);
+        }
+
+        // 2 + 3. `<workspace>/memory/` recursive scan. Short-circuit as
+        //        soon as we see the first .md so we don't walk a huge
+        //        tree for nothing.
+        if (!hasLegacyDefaultDir) {
+          const memoryDir = pathJoin(workspaceDir, 'memory');
+          if (existsSync(memoryDir) && statSync(memoryDir).isDirectory()) {
+            if (containsLegacyMemoryMarkdown(memoryDir, 0)) {
+              hasLegacyDefaultDir = true;
+              legacyDefaultDirPath = memoryDir;
+            }
           }
         }
       } catch {

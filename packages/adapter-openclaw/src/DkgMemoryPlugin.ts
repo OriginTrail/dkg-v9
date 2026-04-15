@@ -180,9 +180,18 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       }
       LIMIT ${limit}`;
 
+    // Codex B65: do NOT hard-require `rdf:type schema:Thing`. The markdown
+    // extractor only emits `rdf:type` when frontmatter explicitly provides
+    // one, so project-memory entities written via the import-file pipeline
+    // often carry a `schema:description` without any type triple — and a
+    // mandatory `?uri a <schema:Thing>` join would make those entities
+    // silently unrecallable. The real discriminant is "has a description"
+    // (the write path always emits `schema:description` for memory entries),
+    // so that's the only required pattern. Keep the type as an OPTIONAL
+    // binding so callers can still filter on it if they later want to.
     const projectMemorySparql = `SELECT ?uri ?text WHERE {
-        ?uri a <${NS.schema}Thing> ;
-             <${NS.schema}description> ?text .
+        ?uri <${NS.schema}description> ?text .
+        OPTIONAL { ?uri a ?type }
         FILTER(${filter})
       }
       LIMIT ${limit}`;

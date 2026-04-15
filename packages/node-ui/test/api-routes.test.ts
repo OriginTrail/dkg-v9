@@ -276,15 +276,21 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSession).not.toHaveBeenCalled();
   });
 
-  it('returns publication status for a valid session id', async () => {
+  // Codex Bug B38: the session-publication routes are no-ops in v1
+  // because chat turns now live in Working Memory assertions rather
+  // than in shared memory — the old SWM-based publication flow has
+  // nothing to read. The routes short-circuit to HTTP 501 with a
+  // stable error code and a pointer at the v2 follow-up; chat-memory
+  // manager methods are never invoked. See api.ts for the handler
+  // and chat-memory.ts:1218-1224 for the TODO that tracks the v2
+  // promotion-based reimplementation.
+
+  it('returns 501 Not Implemented for GET /api/memory/sessions/:id/publication (Codex B38)', async () => {
     const memoryManager = {
-      getSessionPublicationStatus: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        workspaceTripleCount: 12,
-        dataTripleCount: 3,
-        scope: 'published',
-        rootEntityCount: 4,
-      }),
+      // These methods still exist on the class but v1 routes never
+      // invoke them — asserting below that they were not called.
+      getSessionPublicationStatus: vi.fn(),
+      publishSession: vi.fn(),
     } as any;
 
     const { req, url } = createMockReq({
@@ -307,29 +313,20 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionPublicationStatus).toHaveBeenCalledWith('session-1');
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      scope: 'published',
+    expect(state.statusCode).toBe(501);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
     });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
+    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
   });
 
-  it('publishes a session with selected roots and clearAfter option', async () => {
+  it('returns 501 Not Implemented for POST /api/memory/sessions/:id/publish (Codex B38)', async () => {
     const memoryManager = {
-      publishSession: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        rootEntityCount: 1,
-        status: 'confirmed',
-        tripleCount: 5,
-        publication: {
-          sessionId: 'session-1',
-          workspaceTripleCount: 5,
-          dataTripleCount: 5,
-          scope: 'published',
-          rootEntityCount: 1,
-        },
-      }),
+      getSessionPublicationStatus: vi.fn(),
+      publishSession: vi.fn(),
     } as any;
 
     const { req, url } = createMockReq({
@@ -357,143 +354,14 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.publishSession).toHaveBeenCalledWith('session-1', {
-      rootEntities: ['urn:dkg:chat:msg:m-1'],
-      clearSharedMemoryAfter: true,
+    expect(state.statusCode).toBe(501);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
     });
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      status: 'confirmed',
-    });
-  });
-
-  it('returns 400 for invalid session id in publication route', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn(),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1%2Fbad/publication',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for invalid session id in publish route', async () => {
-    const memoryManager = {
-      publishSession: vi.fn(),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1%2Fbad/publish',
-      body: JSON.stringify({}),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
     expect(memoryManager.publishSession).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for session-scope publish validation errors', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(
-        new Error('Selected root entities are not part of session session-1'),
-      ),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({ rootEntities: ['urn:dkg:chat:msg:other'] }),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({
-      error: 'Selected root entities are not part of session session-1',
-    });
-  });
-
-  it('returns 500 for unexpected publish failures', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(new Error('storage offline')),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({}),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(500);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'storage offline' });
   });
 });
 

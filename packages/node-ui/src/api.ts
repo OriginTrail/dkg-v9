@@ -448,46 +448,43 @@ export async function handleNodeUIRequest(
     }
   }
 
+  // B38: `/api/memory/sessions/:id/publication` and
+  // `/api/memory/sessions/:id/publish` are both backed by a
+  // shared-memory read path that the openclaw-dkg-primary-memory
+  // workstream broke by design: chat turns now live in Working Memory
+  // assertions (`agent-context/chat-turns`) and never reach SWM
+  // automatically, so `getSessionPublicationStatus` always reports
+  // `empty` and `publishSession` throws
+  // `No shared memory entities found for session ...`. The chat-memory
+  // methods still exist with a TODO pointing at the v2 follow-up
+  // (reimplement via `agent.assertion.promote` against the chat-turns
+  // WM assertion), but exposing them through these routes in v1 just
+  // returns misleading empty statuses or 400s to the UI. Return 501
+  // Not Implemented with a stable error code and a pointer at the
+  // follow-up issue so callers can gracefully degrade instead of
+  // treating the misleading response as a real publication state.
   if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publication') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publication'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    try {
-      const status = await memoryManager.getSessionPublicationStatus(sessionId);
-      return json(res, 200, status);
-    } catch (err: any) {
-      return json(res, 500, { error: err.message ?? 'Failed to fetch session publication status' });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based publication flow ' +
+        'returns misleading empty state. A future release will re-implement session promotion ' +
+        'via agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
   if (req.method === 'POST' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publish') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publish'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    const body = await readBody(req);
-    let payload: { rootEntities?: unknown; clearAfter?: unknown };
-    try {
-      payload = JSON.parse(body || '{}');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON payload' });
-    }
-    const rootEntities = Array.isArray(payload.rootEntities)
-      ? payload.rootEntities.filter((r): r is string => typeof r === 'string')
-      : undefined;
-    const clearSharedMemoryAfter = payload.clearAfter === true;
-    try {
-      const result = await memoryManager.publishSession(sessionId, {
-        rootEntities,
-        clearSharedMemoryAfter,
-      });
-      return json(res, 200, result);
-    } catch (err: any) {
-      const message = err?.message ?? 'Failed to publish session';
-      const status = /No shared memory entities found|Selected root entities/.test(message) ? 400 : 500;
-      return json(res, status, { error: message });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based /publish flow ' +
+        'has nothing to promote. A future release will re-implement session promotion via ' +
+        'agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
   // POST /api/memory/import was retired as part of the

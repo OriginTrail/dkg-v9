@@ -689,7 +689,10 @@ export function installCanonicalNodeSkill(
 // Step 10: Verify
 // ---------------------------------------------------------------------------
 
-export async function verifySetup(apiPort: number): Promise<void> {
+export async function verifySetup(
+  apiPort: number,
+  opts?: { openclawConfigPath?: string },
+): Promise<void> {
   log('Verifying setup...');
 
   try {
@@ -721,7 +724,12 @@ export async function verifySetup(apiPort: number): Promise<void> {
 
   // Memory-authority post-install invariants. See the openclaw-dkg-primary-memory
   // plan §5.8 / §7 B1,B2,B13 gates.
-  verifyMemorySlotInvariants();
+  // B40: pass through the actual openclaw.json path the setup run merged
+  // into, not the default `~/.openclaw/openclaw.json`. When the operator
+  // runs `dkg-openclaw setup --workspace ...`, verification must read
+  // the same file setup wrote, otherwise it reports false slot-election
+  // failures against an untouched default config.
+  verifyMemorySlotInvariants(opts?.openclawConfigPath);
 
   log(`Node UI: http://127.0.0.1:${apiPort}/ui`);
 }
@@ -734,8 +742,15 @@ export async function verifySetup(apiPort: number): Promise<void> {
  * Logged as pass/fail per invariant. Non-throwing (warns on failure) so
  * that a partial install is still surfaced rather than hidden.
  */
-export function verifyMemorySlotInvariants(): void {
-  const openclawConfigPath = join(openclawDir(), 'openclaw.json');
+export function verifyMemorySlotInvariants(configPath?: string): void {
+  // B40: prefer the explicit path the setup run passed in — this is
+  // the actual openclaw.json `mergeOpenClawConfig` wrote to, honoring
+  // `--workspace` overrides. Fall back to the default
+  // `~/.openclaw/openclaw.json` location only when no path was passed
+  // (direct CLI invocation of the verify command, etc.).
+  const openclawConfigPath = configPath && configPath.trim()
+    ? configPath
+    : join(openclawDir(), 'openclaw.json');
   if (!existsSync(openclawConfigPath)) {
     warn(`Memory-slot verification skipped: openclaw.json not found at ${openclawConfigPath}`);
     return;
@@ -911,7 +926,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 10: Verify
   if (shouldVerify && !dryRun) {
-    await verifySetup(effectivePort);
+    await verifySetup(effectivePort, { openclawConfigPath });
   } else if (shouldVerify) {
     log('[dry-run] Would verify setup');
   }

@@ -77,8 +77,8 @@ describe('SemanticEnrichmentWorker', () => {
             assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
             sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
             turnUri: 'urn:dkg:chat:turn:turn-123',
-            userMessage: 'hello',
-            assistantReply: 'hi',
+            userMessage: 'Please track the task assignment for Alice in the project plan.',
+            assistantReply: 'I will capture the task assignment for Alice.',
             persistenceState: 'stored',
             projectContextGraphId: 'project-42',
           },
@@ -96,9 +96,49 @@ describe('SemanticEnrichmentWorker', () => {
       result: {
         bindings: [
           {
-            s: { value: 'https://schema.org/Person' },
+            s: { value: 'https://example.com/project#Task' },
             p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
-            o: { value: 'http://www.w3.org/2000/01/rdf-schema#Class' },
+            o: { value: 'http://www.w3.org/2002/07/owl#Class' },
+          },
+          {
+            s: { value: 'https://example.com/project#Task' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'Task' },
+          },
+          {
+            s: { value: 'https://example.com/project#Task' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#comment' },
+            o: { value: 'A planned unit of work in the project.' },
+          },
+          {
+            s: { value: 'https://example.com/project#assignedTo' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2002/07/owl#ObjectProperty' },
+          },
+          {
+            s: { value: 'https://example.com/project#assignedTo' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'assignedTo' },
+          },
+          {
+            s: { value: 'https://example.com/project#assignedTo' },
+            p: { value: 'https://schema.org/domainIncludes' },
+            o: { value: 'https://example.com/project#Task' },
+          },
+          {
+            s: { value: 'https://example.com/project#assignedTo' },
+            p: { value: 'https://schema.org/rangeIncludes' },
+            o: { value: 'https://schema.org/Person' },
+          },
+          {
+            s: { value: 'https://example.com/project#Galaxy' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2002/07/owl#Class' },
+          },
+          {
+            s: { value: 'https://example.com/project#Galaxy' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'Galaxy' },
           },
         ],
       },
@@ -167,6 +207,29 @@ describe('SemanticEnrichmentWorker', () => {
     expect(waitForRun).toHaveBeenCalledTimes(1);
     expect(getSessionMessages).toHaveBeenCalledTimes(1);
     expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Return JSON only. Do not wrap the answer in markdown fences.');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Goal: produce as many grounded, semantically useful triples as the source directly supports while staying faithful to the provided ontology guidance.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain('- Vocabularies:');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('- Preferred terms:');
+    expect(run.mock.calls[0]?.[0]?.message).not.toContain('- Triples:');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'When the source clearly indicates that repeated mentions refer to the same real-world entity, prefer one entity instead of duplicates. If that identity is ambiguous, keep the mentions separate.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Chat-turn guidance:');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Capture the relationships between those entities, not just the entities themselves, especially requests, answers, plans, task assignments, follow-up intent, constraints, and references to attached or previously imported materials.',
+    );
+    const prompt = run.mock.calls[0]?.[0]?.message ?? '';
+    expect(prompt).toContain('<https://example.com/project#Task>');
+    expect(prompt).toContain('<https://example.com/project#assignedTo>');
+    expect(prompt.indexOf('<https://example.com/project#Task>')).toBeLessThan(
+      prompt.indexOf('<https://example.com/project#Galaxy>'),
+    );
     expect(append).toHaveBeenCalledWith(
       'evt-1',
       worker.getWorkerInstanceId(),
@@ -323,8 +386,21 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(fetchFileText).toHaveBeenCalledWith('keccak256:md-1', 'text/markdown');
     expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Return JSON only. Do not wrap the answer in markdown fences.');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
+    );
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: schema_org');
-    expect(run.mock.calls[0]?.[0]?.message).toContain('Triples: none loaded; use schema.org terms where appropriate.');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'No project ontology guidance available; use schema.org terms where appropriate.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain('File-import guidance:');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Inspect the full markdown-derived document, including headings, lists, tables rendered as text, and repeated references across sections.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Do not turn every sentence into a paraphrase; focus on durable facts and relationships that improve retrieval, linking, and downstream reasoning.',
+    );
     expect(append).toHaveBeenCalledWith(
       'evt-file-1',
       worker.getWorkerInstanceId(),
@@ -339,7 +415,7 @@ describe('SemanticEnrichmentWorker', () => {
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
-  it('uses the explicit ontologyRef as a replace-only override for file import prompts', async () => {
+  it('uses the explicit ontologyRef as an opaque replace-only override name for file import prompts', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
         event: {
@@ -353,7 +429,7 @@ describe('SemanticEnrichmentWorker', () => {
             importStartedAt: '2026-04-15T11:00:00.000Z',
             fileHash: 'keccak256:file-2',
             detectedContentType: 'text/markdown',
-            ontologyRef: 'did:dkg:context-graph:project-2/custom-ontology',
+            ontologyRef: 'schema.org',
           },
           status: 'leased',
           attempts: 1,
@@ -365,17 +441,7 @@ describe('SemanticEnrichmentWorker', () => {
       })
       .mockResolvedValueOnce({ event: null })
       .mockResolvedValue({ event: null });
-    const query = vi.fn().mockResolvedValue({
-      result: {
-        bindings: [
-          {
-            s: { value: 'https://example.com/Project' },
-            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
-            o: { value: 'http://www.w3.org/2000/01/rdf-schema#Class' },
-          },
-        ],
-      },
-    });
+    const query = vi.fn();
     const run = vi.fn().mockResolvedValue({ runId: 'run-file-2' });
     const append = vi.fn().mockResolvedValue({
       applied: true,
@@ -412,12 +478,168 @@ describe('SemanticEnrichmentWorker', () => {
     });
     await worker.flush();
 
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('GRAPH <did:dkg:context-graph:project-2/custom-ontology>'),
-      expect.objectContaining({ contextGraphId: 'project-2', view: 'working-memory' }),
-    );
+    expect(query).not.toHaveBeenCalled();
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: override');
-    expect(run.mock.calls[0]?.[0]?.message).toContain('Graph: did:dkg:context-graph:project-2/custom-ontology');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Ontology ref override: schema.org');
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Use this ontology if you know it. If it is unfamiliar or insufficient, fall back to schema.org-compatible terms.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).not.toContain('Graph:');
     expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
+  it('treats blank ontologyRef values as absent and falls back to project ontology guidance', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-3',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-3',
+            assertionName: 'notes',
+            assertionUri: 'did:dkg:context-graph:project-3/assertion/peer/notes',
+            importStartedAt: '2026-04-15T12:00:00.000Z',
+            fileHash: 'keccak256:file-3',
+            detectedContentType: 'text/markdown',
+            ontologyRef: '   ',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const query = vi.fn().mockResolvedValue({
+      result: {
+        bindings: [
+          {
+            s: { value: 'https://example.com/project#Decision' },
+            p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+            o: { value: 'http://www.w3.org/2002/07/owl#Class' },
+          },
+          {
+            s: { value: 'https://example.com/project#Decision' },
+            p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+            o: { value: 'Decision' },
+          },
+        ],
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-file-3' });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText: vi.fn().mockResolvedValue('# Notes\n\nDecision log.'),
+        query,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-3',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('GRAPH <did:dkg:context-graph:project-3/_ontology>'),
+      expect.objectContaining({ contextGraphId: 'project-3', view: 'working-memory' }),
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain('Source: project_ontology');
+    expect(run.mock.calls[0]?.[0]?.message).not.toContain('Ontology ref override:');
+    expect(run.mock.calls[0]?.[0]?.message).not.toContain('Event ontologyRef override hint');
+  });
+
+  it('keeps project ontology guidance compact and preserves the highest-ranked preferred terms', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-4',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-4',
+            assertionName: 'planning-doc',
+            assertionUri: 'did:dkg:context-graph:project-4/assertion/peer/planning-doc',
+            importStartedAt: '2026-04-15T13:00:00.000Z',
+            fileHash: 'keccak256:file-4',
+            detectedContentType: 'text/markdown',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+
+    const ontologyBindings = Array.from({ length: 10 }, (_, index) => {
+      const term = `https://example.com/project#Term${index}`;
+      return [
+        {
+          s: { value: term },
+          p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' },
+          o: { value: 'http://www.w3.org/2002/07/owl#Class' },
+        },
+        {
+          s: { value: term },
+          p: { value: 'http://www.w3.org/2000/01/rdf-schema#label' },
+          o: { value: `Term${index}` },
+        },
+      ];
+    }).flat();
+
+    const query = vi.fn().mockResolvedValue({
+      result: {
+        bindings: ontologyBindings,
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-file-4' });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText: vi.fn().mockResolvedValue('# Planning Doc\n\nTerm8 is linked to Term9 in the plan.'),
+        query,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-4',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    const prompt = run.mock.calls[0]?.[0]?.message ?? '';
+    expect(prompt).toContain('<https://example.com/project#Term8>');
+    expect(prompt).toContain('<https://example.com/project#Term9>');
+    expect(prompt).not.toContain('<https://example.com/project#Term7>');
+    expect(prompt.match(/- Kind:/g)?.length ?? 0).toBe(8);
   });
 });

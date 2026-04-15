@@ -44,10 +44,57 @@ interface PendingWakeRecord {
   updatedAt: number;
 }
 
-interface OntologyContext {
-  source: 'override' | 'project_ontology' | 'schema_org';
-  graphUri?: string;
-  triples: string[];
+interface PromptSourceContext {
+  section: string;
+  text: string;
+}
+
+interface OntologyTermCard {
+  iri: string;
+  kind: 'class' | 'property' | 'term';
+  vocabulary?: string;
+  label: string;
+  description?: string;
+  parent?: string;
+  domain?: string;
+  range?: string;
+}
+
+interface MutableOntologyTerm {
+  iri: string;
+  kind: 'class' | 'property' | 'term';
+  vocabulary?: string;
+  labels: string[];
+  descriptions: string[];
+  parents: Set<string>;
+  domains: Set<string>;
+  ranges: Set<string>;
+}
+
+interface OntologyTriple {
+  subject: string;
+  predicate: string;
+  object: string;
+  objectIsIri: boolean;
+}
+
+type OntologyContext =
+  | {
+    source: 'override';
+    ontologyRef: string;
+  }
+  | {
+    source: 'project_ontology';
+    graphUri: string;
+    vocabularies: string[];
+    preferredTerms: OntologyTermCard[];
+  }
+  | {
+    source: 'schema_org';
+  };
+
+interface ScoredOntologyTermCard extends OntologyTermCard {
+  score: number;
 }
 
 const SUBAGENT_SESSION_PREFIX = 'agent';
@@ -58,10 +105,50 @@ const LEASE_RENEW_INTERVAL_MS = 60_000;
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 90_000;
 const DEFAULT_SUBAGENT_MESSAGE_LIMIT = 25;
 const MAX_SOURCE_TEXT_CHARS = 12_000;
-const MAX_ONTOLOGY_TRIPLES = 80;
+const MAX_ONTOLOGY_QUERY_TRIPLES = 320;
+const MAX_ONTOLOGY_VOCABULARIES = 6;
+const MAX_PREFERRED_ONTOLOGY_TERMS = 8;
+const MAX_ONTOLOGY_DESCRIPTION_CHARS = 220;
 const DKG_HAS_USER_MESSAGE = 'http://dkg.io/ontology/hasUserMessage';
 const DKG_HAS_ASSISTANT_MESSAGE = 'http://dkg.io/ontology/hasAssistantMessage';
 const SUCCESSFUL_SUBAGENT_RUN_STATUSES = new Set(['completed', 'ok', 'success']);
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const RDF_PROPERTY = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#Property';
+const RDFS_CLASS = 'http://www.w3.org/2000/01/rdf-schema#Class';
+const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
+const RDFS_COMMENT = 'http://www.w3.org/2000/01/rdf-schema#comment';
+const RDFS_SUBCLASS_OF = 'http://www.w3.org/2000/01/rdf-schema#subClassOf';
+const RDFS_SUBPROPERTY_OF = 'http://www.w3.org/2000/01/rdf-schema#subPropertyOf';
+const RDFS_DOMAIN = 'http://www.w3.org/2000/01/rdf-schema#domain';
+const RDFS_RANGE = 'http://www.w3.org/2000/01/rdf-schema#range';
+const OWL_CLASS = 'http://www.w3.org/2002/07/owl#Class';
+const OWL_OBJECT_PROPERTY = 'http://www.w3.org/2002/07/owl#ObjectProperty';
+const OWL_DATATYPE_PROPERTY = 'http://www.w3.org/2002/07/owl#DatatypeProperty';
+const SCHEMA_NAME = 'https://schema.org/name';
+const SCHEMA_DESCRIPTION = 'https://schema.org/description';
+const SCHEMA_DOMAIN_INCLUDES = 'https://schema.org/domainIncludes';
+const SCHEMA_RANGE_INCLUDES = 'https://schema.org/rangeIncludes';
+const SKOS_PREF_LABEL = 'http://www.w3.org/2004/02/skos/core#prefLabel';
+const SKOS_DEFINITION = 'http://www.w3.org/2004/02/skos/core#definition';
+
+const CLASS_TYPE_IRIS = new Set([RDFS_CLASS, OWL_CLASS]);
+const PROPERTY_TYPE_IRIS = new Set([RDF_PROPERTY, OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY]);
+const LABEL_PREDICATES = new Set([RDFS_LABEL, SCHEMA_NAME, SKOS_PREF_LABEL]);
+const DESCRIPTION_PREDICATES = new Set([RDFS_COMMENT, SCHEMA_DESCRIPTION, SKOS_DEFINITION]);
+const DOMAIN_PREDICATES = new Set([RDFS_DOMAIN, SCHEMA_DOMAIN_INCLUDES]);
+const RANGE_PREDICATES = new Set([RDFS_RANGE, SCHEMA_RANGE_INCLUDES]);
+const STANDARD_ONTOLOGY_NAMESPACES = [
+  'https://schema.org/',
+  'http://schema.org/',
+  'http://www.w3.org/',
+  'https://www.w3.org/',
+  'http://xmlns.com/foaf/',
+  'https://xmlns.com/foaf/',
+  'http://purl.org/dc/',
+  'https://purl.org/dc/',
+  'http://purl.org/dc/terms/',
+  'https://purl.org/dc/terms/',
+];
 
 function contextGraphOntologyUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_ontology`;
@@ -79,6 +166,62 @@ function readBindingValue(value: unknown): string {
   if (typeof value === 'string') return value.replace(/[<>]/g, '').trim();
   if (isRecord(value) && typeof value.value === 'string') return value.value.replace(/[<>]/g, '').trim();
   return '';
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitIdentifierTokens(value: string): string[] {
+  return normalizeSearchText(value)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function extractIriNamespace(iri: string): string | undefined {
+  const trimmed = iri.trim();
+  if (!trimmed) return undefined;
+  const hashIndex = trimmed.lastIndexOf('#');
+  if (hashIndex >= 0) return trimmed.slice(0, hashIndex + 1);
+  const slashIndex = trimmed.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex > trimmed.indexOf('://') + 2) return trimmed.slice(0, slashIndex + 1);
+  const colonIndex = trimmed.lastIndexOf(':');
+  if (colonIndex > trimmed.indexOf(':')) return trimmed.slice(0, colonIndex + 1);
+  return undefined;
+}
+
+function extractIriLocalName(iri: string): string {
+  const trimmed = iri.trim();
+  if (!trimmed) return '';
+  const hashIndex = trimmed.lastIndexOf('#');
+  if (hashIndex >= 0) return trimmed.slice(hashIndex + 1);
+  const slashIndex = trimmed.lastIndexOf('/');
+  if (slashIndex >= 0) return trimmed.slice(slashIndex + 1);
+  const colonIndex = trimmed.lastIndexOf(':');
+  if (colonIndex >= 0) return trimmed.slice(colonIndex + 1);
+  return trimmed;
+}
+
+function uniqueNonEmpty(values: Iterable<string>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  return truncate(value.replace(/\s+/g, ' ').trim(), maxLength);
 }
 
 function isIriLike(value: string): boolean {
@@ -390,47 +533,125 @@ export class SemanticEnrichmentWorker {
   }
 
   private async buildSubagentPrompt(event: SemanticEnrichmentEventLease): Promise<string> {
-    const sourceSection = event.payload.kind === 'chat_turn'
+    const sourceContext = event.payload.kind === 'chat_turn'
       ? await this.buildChatTurnSource(event.payload)
       : await this.buildFileImportSource(event.payload);
-    const ontologyContext = await this.loadOntologyContext(event.payload);
+    const ontologyContext = await this.loadOntologyContext(event.payload, sourceContext.text);
+    const taskGuidance = event.payload.kind === 'chat_turn'
+      ? {
+          title: 'Chat-turn guidance:',
+          lines: this.buildChatTurnPromptGuidance(),
+        }
+      : {
+          title: 'File-import guidance:',
+          lines: this.buildFileImportPromptGuidance(),
+        };
 
     const lines = [
-      'You are a semantic extraction subagent for a DKG graph.',
+      'You are an expert semantic extraction subagent for a DKG graph.',
+      'Goal: produce as many grounded, semantically useful triples as the source directly supports while staying faithful to the provided ontology guidance.',
       'Return JSON only. Do not wrap the answer in markdown fences.',
       'Schema: {"triples":[{"subject":"<IRI>","predicate":"<IRI>","object":"<IRI or quoted N-Triples literal>"}]}',
-      'Rules:',
-      '- Use only safe IRIs for subject and predicate.',
-      '- For literal objects, return a quoted N-Triples literal string such as "\\"Acme\\"" or "\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>."',
-      '- Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
-      '- Extend the existing graph in place. Reuse the provided source URIs and attachment/file URIs when relevant.',
-      '- Do not create detached duplicate file/document entities.',
-      '- Prefer the provided ontology guidance. If no ontology is available, fall back to schema.org.',
+      'Core rules:',
+      ...this.buildSharedPromptGuidance().map((line) => `- ${line}`),
+      '',
+      taskGuidance.title,
+      ...taskGuidance.lines.map((line) => `- ${line}`),
       '',
       `Worker instance: ${this.workerInstanceId}`,
       `Event kind: ${event.kind}`,
       `Event id: ${event.id}`,
       '',
       'Ontology guidance:',
-      `- Source: ${ontologyContext.source}`,
-      ...(ontologyContext.graphUri ? [`- Graph: ${ontologyContext.graphUri}`] : []),
-      ...(ontologyContext.triples.length > 0
-        ? ['- Triples:', ...ontologyContext.triples.map((triple) => `  ${triple}`)]
-        : ['- Triples: none loaded; use schema.org terms where appropriate.']),
+      ...this.renderOntologyGuidance(ontologyContext),
       '',
-      sourceSection,
+      sourceContext.section,
       '',
       'Output JSON only.',
     ];
     return lines.join('\n');
   }
 
-  private async buildChatTurnSource(payload: ChatTurnSemanticEventPayload): Promise<string> {
+  private buildSharedPromptGuidance(): string[] {
+    return [
+      'Use only safe IRIs for subject and predicate.',
+      'For literal objects, return a quoted N-Triples literal string such as "\\"Acme\\"" or "\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>."',
+      'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
+      'Extend the existing graph in place and reuse the provided source URIs, message URIs, root entities, and attachment/file URIs whenever relevant.',
+      'Do not create detached duplicate file, document, turn, or message entities.',
+      'Extract as many grounded entities, events, concepts, and relationships as the source directly supports, but never speculate or invent facts.',
+      'Prefer connected subgraphs over isolated nodes, so the output explains how the extracted entities relate to one another.',
+      'When the source clearly indicates that repeated mentions refer to the same real-world entity, prefer one entity instead of duplicates. If that identity is ambiguous, keep the mentions separate.',
+      'Prefer the provided ontology guidance for classes and predicates. If no suitable ontology term is available, fall back to schema.org.',
+      'Only emit triples that add durable semantic value; skip filler, hedging, or restatements that do not improve the graph.',
+    ];
+  }
+
+  private buildChatTurnPromptGuidance(): string[] {
+    return [
+      'Read both the user message and assistant reply carefully and treat the turn as a grounded conversational event anchored to the provided turn and message URIs.',
+      'Extract the important entities and connections discussed in the turn, including people, organizations, projects, files, tools, tasks, goals, blockers, decisions, commitments, preferences, dates, and referenced concepts when explicitly supported.',
+      'Capture the relationships between those entities, not just the entities themselves, especially requests, answers, plans, task assignments, follow-up intent, constraints, and references to attached or previously imported materials.',
+      'Reuse the provided attachment refs and message URIs when the turn is clearly about those artifacts, rather than inventing parallel entities.',
+      'Ignore greetings or conversational filler unless they materially change the state, intent, or meaning of the turn.',
+    ];
+  }
+
+  private buildFileImportPromptGuidance(): string[] {
+    return [
+      'Inspect the full markdown-derived document, including headings, lists, tables rendered as text, and repeated references across sections.',
+      'Extract the important entities and connections described by the document, including people, organizations, products, projects, requirements, milestones, risks, decisions, claims, processes, dependencies, metrics, dates, and locations when explicitly supported.',
+      'Prefer triples that capture the structure and meaning of the document, such as what the document is about, which entities participate in key events or processes, and how requirements, decisions, or claims relate to one another.',
+      'Reuse the provided root entity and document-related URIs whenever they fit, so semantic output expands the imported assertion instead of creating detached parallel document graphs.',
+      'Do not turn every sentence into a paraphrase; focus on durable facts and relationships that improve retrieval, linking, and downstream reasoning.',
+    ];
+  }
+
+  private renderOntologyGuidance(context: OntologyContext): string[] {
+    if (context.source === 'override') {
+      return [
+        '- Source: override',
+        `- Ontology ref override: ${context.ontologyRef}`,
+        '- Use this ontology if you know it. If it is unfamiliar or insufficient, fall back to schema.org-compatible terms.',
+      ];
+    }
+    if (context.source === 'schema_org') {
+      return [
+        '- Source: schema_org',
+        '- No project ontology guidance available; use schema.org terms where appropriate.',
+      ];
+    }
+    return [
+      '- Source: project_ontology',
+      `- Graph: ${context.graphUri}`,
+      ...(context.vocabularies.length > 0
+        ? ['- Vocabularies:', ...context.vocabularies.map((vocabulary) => `  - ${vocabulary}`)]
+        : ['- Vocabularies: none inferred.']),
+      ...(context.preferredTerms.length > 0
+        ? ['- Preferred terms:', ...context.preferredTerms.flatMap((term) => this.renderOntologyTermCard(term))]
+        : ['- Preferred terms: none inferred; use schema.org terms where appropriate.']),
+    ];
+  }
+
+  private renderOntologyTermCard(term: OntologyTermCard): string[] {
+    return [
+      `  - <${term.iri}>`,
+      `    - Kind: ${term.kind}`,
+      ...(term.vocabulary ? [`    - Vocabulary: ${term.vocabulary}`] : []),
+      `    - Label: ${term.label}`,
+      ...(term.description ? [`    - Description: ${term.description}`] : []),
+      ...(term.parent ? [`    - Parent: ${term.parent}`] : []),
+      ...(term.domain ? [`    - Domain: ${term.domain}`] : []),
+      ...(term.range ? [`    - Range: ${term.range}`] : []),
+    ];
+  }
+
+  private async buildChatTurnSource(payload: ChatTurnSemanticEventPayload): Promise<PromptSourceContext> {
     const attachmentLines = payload.attachmentRefs?.length
       ? payload.attachmentRefs.map((ref) => JSON.stringify(ref))
       : ['none'];
     const turnMessageAnchors = await this.loadChatTurnMessageAnchors(payload).catch(() => null);
-    return [
+    const section = [
       'Source material:',
       `- Assertion graph: ${payload.assertionUri}`,
       `- Session URI: ${payload.sessionUri}`,
@@ -451,12 +672,17 @@ export class SemanticEnrichmentWorker {
       '- Assistant reply:',
       truncate(payload.assistantReply, MAX_SOURCE_TEXT_CHARS),
     ].join('\n');
+    return {
+      section,
+      text: `${payload.userMessage}\n${payload.assistantReply}`,
+    };
   }
 
-  private async buildFileImportSource(payload: FileImportSemanticEventPayload): Promise<string> {
+  private async buildFileImportSource(payload: FileImportSemanticEventPayload): Promise<PromptSourceContext> {
     const markdownHash = payload.mdIntermediateHash ?? payload.fileHash;
     const markdown = await this.client.fetchFileText(markdownHash, 'text/markdown');
-    return [
+    const explicitOntologyRef = payload.ontologyRef?.trim();
+    const section = [
       'Source material:',
       `- Context graph: ${payload.contextGraphId}`,
       `- Assertion graph: ${payload.assertionUri}`,
@@ -465,45 +691,82 @@ export class SemanticEnrichmentWorker {
       ...(payload.mdIntermediateHash ? [`- Markdown intermediate hash: ${payload.mdIntermediateHash}`] : []),
       `- Detected content type: ${payload.detectedContentType}`,
       ...(payload.sourceFileName ? [`- Source file name: ${payload.sourceFileName}`] : []),
-      ...(payload.ontologyRef ? [`- Event ontologyRef override (replace-only): ${payload.ontologyRef}`] : []),
+      ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${explicitOntologyRef}`] : []),
       '- Markdown source:',
       truncate(markdown, MAX_SOURCE_TEXT_CHARS),
     ].join('\n');
+    return {
+      section,
+      text: markdown,
+    };
   }
 
   private async loadOntologyContext(
     payload: ChatTurnSemanticEventPayload | FileImportSemanticEventPayload,
+    sourceText: string,
   ): Promise<OntologyContext> {
     const explicitOntologyRef = payload.kind === 'file_import'
       ? payload.ontologyRef?.trim()
       : undefined;
+    if (explicitOntologyRef) {
+      return {
+        source: 'override',
+        ontologyRef: explicitOntologyRef,
+      };
+    }
     const contextGraphId = payload.kind === 'chat_turn'
       ? payload.projectContextGraphId?.trim()
       : payload.contextGraphId.trim();
-    const graphUri = explicitOntologyRef || (contextGraphId ? contextGraphOntologyUri(contextGraphId) : undefined);
+    const graphUri = contextGraphId ? contextGraphOntologyUri(contextGraphId) : undefined;
     if (!graphUri || !contextGraphId) {
-      return { source: 'schema_org', triples: [] };
+      return { source: 'schema_org' };
     }
 
     const triples = await this.queryOntologyTriples(contextGraphId, graphUri).catch(() => []);
-    if (!this.hasUsableOntologyTriples(triples)) {
-      return { source: 'schema_org', triples: [] };
+    const summary = this.buildProjectOntologySummary(triples, sourceText);
+    if (!summary) {
+      return { source: 'schema_org' };
     }
     return {
-      source: explicitOntologyRef ? 'override' : 'project_ontology',
+      source: 'project_ontology',
       graphUri,
-      triples,
+      vocabularies: summary.vocabularies,
+      preferredTerms: summary.preferredTerms,
     };
   }
 
-  private async queryOntologyTriples(contextGraphId: string, graphUri: string): Promise<string[]> {
+  private async queryOntologyTriples(contextGraphId: string, graphUri: string): Promise<OntologyTriple[]> {
     const sparql = `
       SELECT ?s ?p ?o WHERE {
         GRAPH <${graphUri}> {
           ?s ?p ?o .
+          FILTER(
+            (?p = <${RDF_TYPE}> && ?o IN (
+              <${RDFS_CLASS}>,
+              <${OWL_CLASS}>,
+              <${RDF_PROPERTY}>,
+              <${OWL_OBJECT_PROPERTY}>,
+              <${OWL_DATATYPE_PROPERTY}>
+            ))
+            || ?p IN (
+              <${RDFS_LABEL}>,
+              <${RDFS_COMMENT}>,
+              <${RDFS_SUBCLASS_OF}>,
+              <${RDFS_SUBPROPERTY_OF}>,
+              <${RDFS_DOMAIN}>,
+              <${RDFS_RANGE}>,
+              <${SCHEMA_NAME}>,
+              <${SCHEMA_DESCRIPTION}>,
+              <${SCHEMA_DOMAIN_INCLUDES}>,
+              <${SCHEMA_RANGE_INCLUDES}>,
+              <${SKOS_PREF_LABEL}>,
+              <${SKOS_DEFINITION}>
+            )
+          )
         }
       }
-      LIMIT ${MAX_ONTOLOGY_TRIPLES}
+      ORDER BY ?s ?p ?o
+      LIMIT ${MAX_ONTOLOGY_QUERY_TRIPLES}
     `;
     const result = await this.client.query(sparql, {
       contextGraphId,
@@ -519,27 +782,181 @@ export class SemanticEnrichmentWorker {
         const subject = readBindingValue(binding.s);
         const predicate = readBindingValue(binding.p);
         const object = readBindingValue(binding.o);
-        return subject && predicate && object ? `<${subject}> <${predicate}> ${isIriLike(object) ? `<${object}>` : object} .` : '';
+        return subject && predicate && object
+          ? {
+              subject,
+              predicate,
+              object,
+              objectIsIri: isIriLike(object),
+            }
+          : null;
       })
-      .filter(Boolean);
+      .filter((triple): triple is OntologyTriple => !!triple);
   }
 
-  private hasUsableOntologyTriples(triples: string[]): boolean {
-    if (triples.length === 0) return false;
-    const usefulPatterns = [
-      'rdf-syntax-ns#type',
-      'rdf-schema#Class',
-      'rdf-schema#subClassOf',
-      'rdf-schema#subPropertyOf',
-      'owl#Class',
-      'owl#ObjectProperty',
-      'owl#DatatypeProperty',
-      'schema.org/domainIncludes',
-      'schema.org/rangeIncludes',
-      'schema.org/name',
-      'schema.org/description',
-    ];
-    return triples.some((triple) => usefulPatterns.some((pattern) => triple.includes(pattern)));
+  private buildProjectOntologySummary(
+    triples: OntologyTriple[],
+    sourceText: string,
+  ): { vocabularies: string[]; preferredTerms: OntologyTermCard[] } | null {
+    const termMap = new Map<string, MutableOntologyTerm>();
+    for (const triple of triples) {
+      const subject = triple.subject.trim();
+      if (!isIriLike(subject)) continue;
+      if (triple.predicate === RDF_TYPE) {
+        if (CLASS_TYPE_IRIS.has(triple.object)) {
+          this.ensureOntologyTerm(termMap, subject, 'class');
+        } else if (PROPERTY_TYPE_IRIS.has(triple.object)) {
+          this.ensureOntologyTerm(termMap, subject, 'property');
+        }
+        continue;
+      }
+      if (LABEL_PREDICATES.has(triple.predicate)) {
+        this.ensureOntologyTerm(termMap, subject).labels.push(triple.object);
+        continue;
+      }
+      if (DESCRIPTION_PREDICATES.has(triple.predicate)) {
+        this.ensureOntologyTerm(termMap, subject).descriptions.push(triple.object);
+        continue;
+      }
+      if (triple.predicate === RDFS_SUBCLASS_OF) {
+        this.ensureOntologyTerm(termMap, subject, 'class').parents.add(triple.object);
+        if (triple.objectIsIri) this.ensureOntologyTerm(termMap, triple.object, 'class');
+        continue;
+      }
+      if (triple.predicate === RDFS_SUBPROPERTY_OF) {
+        this.ensureOntologyTerm(termMap, subject, 'property').parents.add(triple.object);
+        if (triple.objectIsIri) this.ensureOntologyTerm(termMap, triple.object, 'property');
+        continue;
+      }
+      if (DOMAIN_PREDICATES.has(triple.predicate)) {
+        this.ensureOntologyTerm(termMap, subject, 'property').domains.add(triple.object);
+        if (triple.objectIsIri) this.ensureOntologyTerm(termMap, triple.object, 'class');
+        continue;
+      }
+      if (RANGE_PREDICATES.has(triple.predicate)) {
+        this.ensureOntologyTerm(termMap, subject, 'property').ranges.add(triple.object);
+        if (triple.objectIsIri) this.ensureOntologyTerm(termMap, triple.object, 'class');
+      }
+    }
+
+    if (termMap.size === 0) return null;
+
+    const scoredTerms = Array.from(termMap.values())
+      .map((term) => this.scoreOntologyTerm(term, sourceText))
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        if (left.kind !== right.kind) return left.kind.localeCompare(right.kind);
+        return left.label.localeCompare(right.label);
+      });
+    const preferredTerms = scoredTerms
+      .slice(0, MAX_PREFERRED_ONTOLOGY_TERMS)
+      .map(({ score: _score, ...term }) => term);
+    if (preferredTerms.length === 0) return null;
+
+    const vocabularyCounts = new Map<string, number>();
+    for (const term of termMap.values()) {
+      if (!term.vocabulary) continue;
+      vocabularyCounts.set(term.vocabulary, (vocabularyCounts.get(term.vocabulary) ?? 0) + 1);
+    }
+    const vocabularies = Array.from(vocabularyCounts.entries())
+      .sort((left, right) => {
+        const projectDelta = Number(!this.isStandardOntologyNamespace(right[0]))
+          - Number(!this.isStandardOntologyNamespace(left[0]));
+        if (projectDelta !== 0) return projectDelta;
+        if (right[1] !== left[1]) return right[1] - left[1];
+        return left[0].localeCompare(right[0]);
+      })
+      .slice(0, MAX_ONTOLOGY_VOCABULARIES)
+      .map(([vocabulary]) => vocabulary);
+
+    return {
+      vocabularies,
+      preferredTerms,
+    };
+  }
+
+  private ensureOntologyTerm(
+    termMap: Map<string, MutableOntologyTerm>,
+    iri: string,
+    preferredKind?: 'class' | 'property',
+  ): MutableOntologyTerm {
+    const existing = termMap.get(iri);
+    if (existing) {
+      if (preferredKind && existing.kind === 'term') existing.kind = preferredKind;
+      return existing;
+    }
+    const created: MutableOntologyTerm = {
+      iri,
+      kind: preferredKind ?? 'term',
+      vocabulary: extractIriNamespace(iri),
+      labels: [],
+      descriptions: [],
+      parents: new Set<string>(),
+      domains: new Set<string>(),
+      ranges: new Set<string>(),
+    };
+    termMap.set(iri, created);
+    return created;
+  }
+
+  private scoreOntologyTerm(term: MutableOntologyTerm, sourceText: string): ScoredOntologyTermCard {
+    const label = uniqueNonEmpty([...term.labels, extractIriLocalName(term.iri)])[0] ?? term.iri;
+    const description = uniqueNonEmpty(term.descriptions)[0];
+    const parent = uniqueNonEmpty(term.parents)[0];
+    const domain = uniqueNonEmpty(term.domains)[0];
+    const range = uniqueNonEmpty(term.ranges)[0];
+    const normalizedSource = ` ${normalizeSearchText(sourceText)} `;
+    const score = this.computeOntologyTermScore(term, label, description, normalizedSource);
+    return {
+      iri: term.iri,
+      kind: term.kind,
+      vocabulary: term.vocabulary,
+      label,
+      ...(description ? { description: truncateInline(description, MAX_ONTOLOGY_DESCRIPTION_CHARS) } : {}),
+      ...(parent ? { parent } : {}),
+      ...(domain ? { domain } : {}),
+      ...(range ? { range } : {}),
+      score,
+    };
+  }
+
+  private computeOntologyTermScore(
+    term: MutableOntologyTerm,
+    label: string,
+    description: string | undefined,
+    normalizedSource: string,
+  ): number {
+    let score = 0;
+    if (term.kind === 'class') score += 2;
+    if (term.kind === 'property') score += 1;
+    if (!this.isStandardOntologyNamespace(term.vocabulary)) score += 3;
+    if (description) score += 1;
+    if (term.parents.size > 0 || term.domains.size > 0 || term.ranges.size > 0) score += 1;
+
+    const phrases = uniqueNonEmpty([label, extractIriLocalName(term.iri)]);
+    for (const phrase of phrases) {
+      const normalizedPhrase = normalizeSearchText(phrase);
+      if (normalizedPhrase && normalizedSource.includes(` ${normalizedPhrase} `)) {
+        score += 8;
+      }
+    }
+
+    const tokens = uniqueNonEmpty([
+      ...splitIdentifierTokens(label),
+      ...splitIdentifierTokens(extractIriLocalName(term.iri)),
+      ...splitIdentifierTokens(description ?? '').slice(0, 6),
+    ]).filter((token) => token.length >= 3);
+    let tokenMatches = 0;
+    for (const token of tokens) {
+      if (normalizedSource.includes(` ${token} `)) tokenMatches += 1;
+    }
+    score += Math.min(tokenMatches * 2, 8);
+    return score;
+  }
+
+  private isStandardOntologyNamespace(vocabulary?: string): boolean {
+    if (!vocabulary) return false;
+    return STANDARD_ONTOLOGY_NAMESPACES.some((prefix) => vocabulary.startsWith(prefix));
   }
 
   private async loadChatTurnMessageAnchors(

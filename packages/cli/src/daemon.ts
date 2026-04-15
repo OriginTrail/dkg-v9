@@ -5177,7 +5177,7 @@ async function handleRequest(
   //   file (required):           the uploaded document bytes
   //   contextGraphId (required): target context graph
   //   contentType (optional):    override the file part's Content-Type
-  //   ontologyRef (optional):    CG _ontology URI for guided Phase 2 extraction
+  //   ontologyRef (optional):    ontology override hint string for guided semantic extraction
   //   subGraphName (optional):   target sub-graph inside the CG
   //
   // Orchestration:

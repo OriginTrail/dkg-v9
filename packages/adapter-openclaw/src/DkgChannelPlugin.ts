@@ -1724,6 +1724,7 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
       const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });

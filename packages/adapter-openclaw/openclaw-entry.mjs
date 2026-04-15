@@ -43,14 +43,12 @@ export default function (api) {
   // Deep-clone integration sub-configs
   if (wsConfig.memory) {
     config.memory = { ...wsConfig.memory };
-    // B53: Do NOT auto-populate `config.memory.memoryDir` here. The key
-    // was retired with the openclaw-dkg-primary-memory workstream (see
-    // `DkgNodePlugin.warnOnLegacyMemoryFileWatcherConfig`), and injecting
-    // a default made the B22 "retired key detected" warning fire on
-    // every clean install — a permanent false positive. The warning
-    // should only fire when an operator actually wrote `memoryDir` (or
-    // `watchDebounceMs`) in their workspace config file, which the
-    // clone above preserves without needing a default.
+    // Do NOT auto-populate `config.memory.memoryDir` here. The key was
+    // retired with the openclaw-dkg-primary-memory workstream along
+    // with the retirement warning itself (that warning was removed in
+    // commit 66211977 — first-product-release has no legacy install
+    // base to migrate from). We still clone `wsConfig.memory` to preserve
+    // any other fields operators may have set in their workspace config.
   }
   if (wsConfig.channel) {
     config.channel = { ...wsConfig.channel };

@@ -56,6 +56,11 @@ export interface ChainConfig {
   hubAddress: string;
   /** Chain identifier (e.g., 'base:84532') */
   chainId?: string;
+  /**
+   * Test-only: when using `type: "mock"`, force the daemon's signer address to map
+   * to this identity ID so private participant flows can be exercised from black-box CLI tests.
+   */
+  mockIdentityId?: string;
 }
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
@@ -78,6 +83,7 @@ export type LocalAgentIntegrationStatus =
 
 export interface LocalAgentIntegrationCapabilities {
   localChat?: boolean;
+  chatAttachments?: boolean;
   connectFromUi?: boolean;
   installNode?: boolean;
   dkgPrimaryMemory?: boolean;

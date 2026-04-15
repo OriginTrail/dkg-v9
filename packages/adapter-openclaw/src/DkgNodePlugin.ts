@@ -31,6 +31,7 @@ import type {
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
+  chatAttachments: true,
   connectFromUi: true,
   installNode: true,
   dkgPrimaryMemory: true,

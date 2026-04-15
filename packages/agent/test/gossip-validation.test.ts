@@ -445,10 +445,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     );
 
     const statuses = statusResult.bindings.map(b => b['status']);
-    const hasTentative = statuses.some(s => s === '"tentative"');
-    expect(hasTentative).toBe(true);
-
     const hasConfirmed = statuses.some(s => s === '"confirmed"');
-    expect(hasConfirmed).toBe(false);
+    expect(hasConfirmed).toBe(true);
   }, 25000);
 });

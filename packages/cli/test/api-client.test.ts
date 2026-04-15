@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
 
 const PORT = 8899;
@@ -6,6 +9,28 @@ const PORT = 8899;
 interface FetchCall {
   url: string;
   opts: RequestInit;
+}
+
+function mockFetchOk(body: unknown): typeof globalThis.fetch & { _calls: [string | URL | Request, RequestInit | undefined][] } {
+  const _calls: [string | URL | Request, RequestInit | undefined][] = [];
+  const fn = (async (url: string | URL | Request, init?: RequestInit) => {
+    _calls.push([url, init]);
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve(body),
+      text: () => Promise.resolve(JSON.stringify(body)),
+      headers: new Headers(),
+    } as unknown as Response;
+  }) as typeof globalThis.fetch & { _calls: typeof _calls };
+  fn._calls = _calls;
+  return fn;
+}
+
+function mockFetchError(status: number, body: unknown): typeof globalThis.fetch {
+  const { fetch } = createTrackingFetch({ ok: false, status, body });
+  return fetch;
 }
 
 function createTrackingFetch(response: { ok: boolean; status: number; statusText?: string; body: unknown; jsonThrows?: boolean }): { fetch: typeof globalThis.fetch; calls: FetchCall[] } {
@@ -29,13 +54,16 @@ function createTrackingFetch(response: { ok: boolean; status: number; statusText
 describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
+  let tempDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-test-'));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   describe('GET endpoints', () => {
@@ -132,6 +160,27 @@ describe('ApiClient', () => {
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-paranet');
+    });
+
+    it('createContextGraph() includes private and participant identity options when provided', async () => {
+      globalThis.fetch = mockFetchOk({ created: 'GuardianTest', uri: 'did:dkg:context-graph:GuardianTest' });
+      await client.createContextGraph('GuardianTest', 'Guardian Test', 'private graph', {
+        private: true,
+        participantIdentityIds: [11n, '12', 13],
+        requiredSignatures: 1,
+      });
+
+      const [url, opts] = (globalThis.fetch as any)._calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/create`);
+      const body = JSON.parse(opts.body);
+      expect(body).toEqual({
+        id: 'GuardianTest',
+        name: 'Guardian Test',
+        description: 'private graph',
+        private: true,
+        participantIdentityIds: ['11', '12', '13'],
+        requiredSignatures: 1,
+      });
     });
 
     it('publishCclPolicy() posts policy payload', async () => {
@@ -242,6 +291,36 @@ describe('ApiClient', () => {
       const { fetch } = createTrackingFetch({ ok: false, status: 500, statusText: 'Internal Server Error', body: {}, jsonThrows: true });
       globalThis.fetch = fetch;
       await expect(client.status()).rejects.toThrow('Internal Server Error');
+    });
+
+    it('prefers extraction.error for multipart import failures and preserves the parsed body', async () => {
+      const filePath = join(tempDir, 'sample.pdf');
+      await writeFile(filePath, Buffer.from('%PDF-1.4\n', 'utf-8'));
+      globalThis.fetch = mockFetchError(400, {
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await client.importAssertionFile('paper', { filePath, contextGraphId: 'research' });
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('PDF converter crashed');
+      expect((thrown as Error & { httpStatus: number }).httpStatus).toBe(400);
+      expect((thrown as Error & { responseBody?: unknown }).responseBody).toEqual({
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
     });
   });
 

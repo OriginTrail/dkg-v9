@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { fetchMemorySessionGraphDelta, streamOpenClawLocalChat } from '../src/ui/api.js';
+import { fetchMemorySessionGraphDelta, streamLocalAgentChat, streamOpenClawLocalChat } from '../src/ui/api.js';
 
 let server: Server;
 let baseUrl: string;
@@ -122,5 +122,42 @@ describe('ui local-agent stream api', () => {
     const res = await fetchMemorySessionGraphDelta('s1', 't2', { baseTurnId: 't1' });
     expect(res.mode).toBe('delta');
     expect(requestLog.some(r => r.url.includes('/api/memory/sessions/s1/graph-delta?turnId=t2&baseTurnId=t1'))).toBe(true);
+  });
+
+  it('forwards attachment refs through the generic local-agent chat transport', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return new Response(
+        JSON.stringify({ text: 'Attached response', correlationId: 'c3' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    const attachments = [{
+      id: 'att-1',
+      fileName: 'notes.md',
+      contextGraphId: 'project-1',
+      assertionName: 'assert-1',
+      assertionUri: 'urn:dkg:assertion:1',
+      fileHash: 'abc123',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed' as const,
+      tripleCount: 12,
+    }];
+
+    try {
+      const result = await streamLocalAgentChat('openclaw', 'hello', {
+        attachments,
+      });
+
+      expect(result.text).toBe('Attached response');
+      const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
+      expect(payload.attachmentRefs).toEqual(attachments);
+      expect(payload.text).toBe('hello');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
   });
 });

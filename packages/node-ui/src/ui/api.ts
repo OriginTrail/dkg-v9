@@ -208,7 +208,7 @@ export interface ImportFileResult {
   fileHash: string;
   detectedContentType: string;
   extraction: {
-    status: 'completed' | 'skipped' | 'error';
+    status: 'completed' | 'skipped' | 'failed';
     tripleCount?: number;
     triplesWritten?: number;
     provenance?: any;
@@ -267,8 +267,14 @@ export async function importFile(
 }
 
 // --- Query ---
-export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>
-  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix });
+export const executeQuery = (
+  sparql: string,
+  contextGraphId?: string,
+  includeSharedMemory?: boolean,
+  graphSuffix?: '_shared_memory',
+  view?: 'verified-memory' | 'shared-working-memory',
+) =>
+  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
 
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
@@ -327,11 +333,11 @@ export const fetchExtractionStatus = (assertionName: string, contextGraphId: str
 
 /** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {
+  const normalizedHash = hash.startsWith('sha256:') || hash.startsWith('keccak256:')
+    ? hash
+    : `sha256:${hash}`;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  if (hash.startsWith('keccak256:') || hash.startsWith('sha256:')) {
-    return `${BASE}/api/file/${hash}${params}`;
-  }
-  return `${BASE}/api/file/sha256:${hash}${params}`;
+  return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
 export interface SwmRootEntity {
@@ -398,6 +404,7 @@ export interface MemorySession {
     turnId?: string;
     persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
     failureReason?: string | null;
+    attachmentRefs?: LocalAgentChatAttachmentRef[];
   }>;
 }
 export interface MemorySessionPublicationStatus {
@@ -525,6 +532,33 @@ export interface OpenClawAgent {
 export const fetchOpenClawAgents = () =>
   get<{ agents: OpenClawAgent[] }>('/api/openclaw-agents');
 
+export interface LocalAgentChatAttachmentRef {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
+export interface LocalAgentChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+interface LocalAgentChatRequestOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+  identity?: string;
+  attachments?: LocalAgentChatAttachmentRef[];
+  contextEntries?: LocalAgentChatContextEntry[];
+}
+
 export const sendOpenClawChat = (peerId: string, text: string) =>
   post<{ delivered: boolean; reply: string | null; timedOut: boolean; waitMs: number; error?: string }>(
     '/api/chat-openclaw',
@@ -535,12 +569,14 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
 
 export async function sendOpenClawLocalChat(
   text: string,
-  opts?: { correlationId?: string; signal?: AbortSignal; identity?: string },
+  opts?: LocalAgentChatRequestOptions,
 ): Promise<{ text: string; correlationId: string }> {
   const body = {
     text,
     correlationId: opts?.correlationId ?? crypto.randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
+    ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -566,17 +602,16 @@ export type OpenClawStreamEvent =
  */
 export async function streamOpenClawLocalChat(
   text: string,
-  opts: {
-    correlationId?: string;
-    signal?: AbortSignal;
+  opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
-    identity?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const body = {
     text,
     correlationId: opts.correlationId ?? crypto.randomUUID(),
     ...(opts.identity ? { identity: opts.identity } : {}),
+    ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -677,6 +712,7 @@ interface LocalAgentIntegrationRecord {
   status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
   capabilities?: {
     localChat?: boolean;
+    chatAttachments?: boolean;
     connectFromUi?: boolean;
     installNode?: boolean;
     dkgPrimaryMemory?: boolean;
@@ -716,6 +752,7 @@ export interface LocalAgentIntegration {
   framework: string;
   description: string;
   chatSupported: boolean;
+  chatAttachments: boolean;
   connectSupported: boolean;
   configured: boolean;
   detected: boolean;
@@ -743,6 +780,7 @@ export interface LocalAgentHistoryMessage {
   ts: string;
   turnId?: string;
   failureReason?: string | null;
+  attachmentRefs?: LocalAgentChatAttachmentRef[];
 }
 
 interface LocalAgentSurface {
@@ -819,6 +857,7 @@ async function fetchLocalAgentHistoryBySessionId(
         ts: message.ts,
         turnId: message.turnId,
         failureReason: message.failureReason,
+        attachmentRefs: message.attachmentRefs,
       }));
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {
@@ -850,6 +889,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const id = String(record.id ?? '').toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[id];
   const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
+  const chatAttachments = hasChatBridge && record.capabilities?.chatAttachments === true;
   const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
   const configured = record.enabled === true;
   const runtimeStatus = record.runtime?.status;
@@ -914,6 +954,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     framework: record.name,
     description: record.description,
     chatSupported: hasChatBridge,
+    chatAttachments,
     connectSupported,
     configured,
     detected: configured || chatReady,
@@ -1005,6 +1046,8 @@ export async function streamLocalAgentChat(
     signal?: AbortSignal;
     onEvent?: (event: LocalAgentStreamEvent) => void;
     sessionId?: string;
+    attachments?: LocalAgentChatAttachmentRef[];
+    contextEntries?: LocalAgentChatContextEntry[];
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();

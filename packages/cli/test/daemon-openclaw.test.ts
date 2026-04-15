@@ -9,12 +9,15 @@ import {
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
+  hasOpenClawChatTurnContent,
   isLoopbackClientIp,
+  normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
@@ -328,6 +331,289 @@ describe('OpenClaw persist-turn validation', () => {
     })).toBe(false);
   });
 
+  it('accepts node-owned attachment refs without reclassifying them as assistant tool calls', () => {
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+        fileHash: 'sha256:abc123',
+        contextGraphId: 'cg1',
+        fileName: 'chat-doc.pdf',
+        detectedContentType: 'application/pdf',
+        extractionStatus: 'completed' as const,
+        tripleCount: 42,
+      },
+    ];
+
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'Summarize the attached doc.',
+      assistantReply: '',
+      attachmentRefs,
+    })).toBe(true);
+    expect(normalizeOpenClawAttachmentRefs(attachmentRefs)).toEqual(attachmentRefs);
+  });
+
+  it('allows attachment-only chat turns only when at least one attachment ref is present', () => {
+    const attachmentRefs = [
+      {
+        assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+        fileHash: 'sha256:abc123',
+        contextGraphId: 'cg1',
+        fileName: 'chat-doc.pdf',
+      },
+    ];
+
+    expect(hasOpenClawChatTurnContent('', attachmentRefs)).toBe(true);
+    expect(hasOpenClawChatTurnContent('Summarize this.', undefined)).toBe(true);
+    expect(hasOpenClawChatTurnContent('', [])).toBe(false);
+    expect(hasOpenClawChatTurnContent(undefined, attachmentRefs)).toBe(false);
+  });
+
+  it('rejects non-completed extraction statuses on sendable attachment refs', () => {
+    expect(normalizeOpenClawAttachmentRefs([{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'skipped',
+    }])).toBeUndefined();
+
+    expect(normalizeOpenClawAttachmentRefs([{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'failed',
+    }])).toBeUndefined();
+  });
+
+  it('rejects malformed attachment refs in persist-turn payloads', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      attachmentRefs: [{ assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc' }],
+    })).toBe(false);
+  });
+
+  it('rejects attachment ref arrays when any entry is malformed', () => {
+    const validRef = {
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+    };
+    expect(normalizeOpenClawAttachmentRefs([validRef, { assertionUri: 'did:dkg:context-graph:cg1/assertion/missing' }]))
+      .toBeUndefined();
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      attachmentRefs: [validRef, { assertionUri: 'did:dkg:context-graph:cg1/assertion/missing' }],
+    })).toBe(false);
+  });
+
+  it('accepts completed attachment refs backed by extraction status records', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      detectedContentType: 'application/pdf',
+      extractionStatus: 'completed' as const,
+      tripleCount: 42,
+      rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = { query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; } };
+    const extractionStatus = new Map([
+      ['did:dkg:context-graph:cg1/assertion/chat-doc', {
+        status: 'completed',
+        fileHash: 'sha256:abc123',
+        fileName: 'chat-doc.pdf',
+        detectedContentType: 'application/pdf',
+        pipelineUsed: 'application/pdf',
+        tripleCount: 42,
+        rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+        startedAt: '2099-01-01T12:00:00Z',
+        completedAt: '2099-01-01T12:00:01Z',
+      }],
+    ]);
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, extractionStatus as any, attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+    expect(queryCalls).toHaveLength(0);
+  });
+
+  it('accepts sub-graph attachment refs backed by extraction status records without querying the store', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = { query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; } };
+    const extractionStatus = new Map([
+      ['did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc', {
+        status: 'completed',
+        fileHash: 'sha256:abc123',
+        fileName: 'chat-doc.pdf',
+        detectedContentType: 'application/pdf',
+        pipelineUsed: 'application/pdf',
+        tripleCount: 42,
+        rootEntity: 'did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc',
+        startedAt: '2099-01-01T12:00:00Z',
+        completedAt: '2099-01-01T12:00:01Z',
+      }],
+    ]);
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, extractionStatus as any, attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+    expect(queryCalls).toHaveLength(0);
+  });
+
+  it('accepts sub-graph attachment refs and verifies them against the root meta graph', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = {
+      query: async (...args: unknown[]) => {
+        queryCalls.push(args);
+        return {
+          bindings: [{
+            fileHash: '"sha256:abc123"',
+            contentType: '"application/pdf"',
+            sourceFileName: '"chat-doc.pdf"',
+          }],
+        };
+      },
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+    expect(String(queryCalls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
+    expect(String(queryCalls[0][0])).not.toContain('did:dkg:context-graph:cg1/decisions/_meta');
+    expect(String(queryCalls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc>');
+  });
+
+  it('unescapes RDF string literals before comparing stored source file names', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'report "final".pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: async () => ({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          sourceFileName: '"report \\"final\\".pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+  });
+
+  it('accepts attachment refs when older metadata does not include sourceFileName', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: async () => ({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          contentType: '"application/pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+  });
+
+  it('rejects completed attachment refs after the extraction cache entry is gone and the meta graph no longer has the assertion', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = {
+      query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; },
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toBeUndefined();
+    expect(queryCalls).toHaveLength(1);
+  });
+
+  it('rejects attachment refs when the stored source file name does not match', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'spoofed.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: async () => ({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          sourceFileName: '"chat-doc.pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects forged attachment refs when graph metadata does not match', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:forged',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: async () => ({
+        bindings: [{
+          fileHash: '"sha256:real"',
+          contentType: '"application/pdf"',
+          tripleCount: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toBeUndefined();
+  });
+
   it('accepts explicit failed and pending persistence states', () => {
     expect(isValidOpenClawPersistTurnPayload({
       sessionId: 'openclaw:dkg-ui',
@@ -445,10 +731,12 @@ describe('local agent integration registry helpers', () => {
 
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
+    const openclaw = integrations.find((integration) => integration.id === 'openclaw');
 
     expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw']);
     expect(integrations.every((integration) => integration.enabled === false)).toBe(true);
     expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
+    expect(openclaw?.capabilities.chatAttachments).toBeUndefined();
   });
 
   it('ignores stale legacy OpenClaw config flags when no local-agent registry record exists', () => {
@@ -492,8 +780,23 @@ describe('local agent integration registry helpers', () => {
     expect(integration.enabled).toBe(true);
     expect(integration.status).toBe('ready');
     expect(integration.manifest?.version).toBe('2026.4.12');
+    expect(integration.capabilities.chatAttachments).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+
+  it('preserves adapter-advertised OpenClaw attachment capability when it is explicitly provided', () => {
+    const config = makeConfig();
+
+    const integration = connectLocalAgentIntegration(config, {
+      id: 'openclaw',
+      capabilities: {
+        localChat: true,
+        chatAttachments: true,
+      },
+    });
+
+    expect(integration.capabilities.chatAttachments).toBe(true);
   });
 
   it('marks explicit OpenClaw disconnects as user-disabled and clears that flag on reconnect', () => {

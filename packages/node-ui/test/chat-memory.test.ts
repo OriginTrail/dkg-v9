@@ -102,6 +102,47 @@ describe('ChatMemoryManager', () => {
     expect(failureReasonQuad.object).toBe('"timeout"');
   });
 
+  it('stores attachment refs inline on the user message when provided', async () => {
+    mockQuery.returns.push({ bindings: [] });
+    await manager.storeChatExchange(
+      'session-attachments',
+      'Summarize these',
+      'Done',
+      undefined,
+      {
+        attachmentRefs: [{
+          id: 'att-1',
+          fileName: 'notes.md',
+          contextGraphId: 'project-1',
+          assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+          fileHash: 'keccak256:abc123',
+          detectedContentType: 'text/markdown',
+          extractionStatus: 'completed',
+          tripleCount: 12,
+        }],
+      },
+    );
+
+    const quads = mockShare.calls[0][1];
+    const attachmentQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/attachmentRefs');
+    const usedToolQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/usedTool');
+    expect(attachmentQuad).toBeDefined();
+    expect(usedToolQuad).toBeUndefined();
+    const persistedRefs = JSON.parse(JSON.parse(String(attachmentQuad.object)));
+    expect(persistedRefs).toEqual([
+      expect.objectContaining({
+        id: 'att-1',
+        fileName: 'notes.md',
+        contextGraphId: 'project-1',
+        assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+        fileHash: 'keccak256:abc123',
+        detectedContentType: 'text/markdown',
+        extractionStatus: 'completed',
+        tripleCount: 12,
+      }),
+    ]);
+  });
+
   it('includes session triples only on first write for a session', async () => {
     mockQuery.returns.push({ bindings: [] });
     await manager.storeChatExchange('session-1', 'First message', 'First reply');
@@ -236,6 +277,49 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[1].author).toBe('agent');
   });
 
+  it('getSession returns attachment refs on the user turn when present', async () => {
+    const attachmentRefsLiteral = JSON.stringify(JSON.stringify([{
+      id: 'att-1',
+      fileName: 'notes.md',
+      contextGraphId: 'project-1',
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+      fileHash: 'keccak256:abc123',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed',
+      tripleCount: 12,
+    }]));
+
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user-1',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"Summarize these"',
+            ts: '"2026-01-01T12:00:00Z"',
+            attachmentRefs: attachmentRefsLiteral,
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-attachments');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0].attachmentRefs).toEqual([
+      expect.objectContaining({
+        id: 'att-1',
+        fileName: 'notes.md',
+        contextGraphId: 'project-1',
+        assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+        fileHash: 'keccak256:abc123',
+        detectedContentType: 'text/markdown',
+        extractionStatus: 'completed',
+        tripleCount: 12,
+      }),
+    ]);
+  });
+
   it('getSession can request the latest session window in descending backend order', async () => {
     mockQuery.returns.push(
       { bindings: [] },
@@ -258,7 +342,7 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?failureReason');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 

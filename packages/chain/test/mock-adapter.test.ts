@@ -319,7 +319,6 @@ describe('MockChainAdapter V9', () => {
       tokenAmount: 100n,
       isImmutable: true,
       paymaster: '0x' + '0'.repeat(40),
-      convictionAccountId: 0n,
       publisherNodeIdentityId: 1n,
       publisherSignature: sig,
       ackSignatures: [
@@ -356,7 +355,6 @@ describe('MockChainAdapter V9', () => {
         tokenAmount: 10n,
         isImmutable: false,
         paymaster: '0x' + '0'.repeat(40),
-        convictionAccountId: 0n,
         publisherNodeIdentityId: 1n,
         publisherSignature: sig,
         ackSignatures: [{ identityId: 2n, ...sig }],
@@ -378,7 +376,6 @@ describe('MockChainAdapter V9', () => {
       tokenAmount: 1n,
       isImmutable: false,
       paymaster: '0x' + '0'.repeat(40),
-      convictionAccountId: 7n,
       publisherNodeIdentityId: 1n,
       publisherSignature: sig,
       ackSignatures: [{ identityId: 2n, ...sig }],
@@ -393,7 +390,6 @@ describe('MockChainAdapter V9', () => {
     expect(events[0].type).toBe('KCCreated');
     expect(events[0].data.publishOperationId).toBe('v10-event-test');
     expect(events[0].data.contextGraphId).toBe('99');
-    expect(events[0].data.convictionAccountId).toBe('7');
     expect(events[0].data.isImmutable).toBe(false);
     expect(events[0].data.txHash).toMatch(/^0x[0-9a-f]+$/);
     expect(events[0].data.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);

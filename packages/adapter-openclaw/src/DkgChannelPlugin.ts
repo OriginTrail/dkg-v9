@@ -27,7 +27,7 @@ import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
 } from './types.js';
-import type { DkgDaemonClient } from './dkg-client.js';
+import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -49,6 +49,154 @@ function finalizeAgentReplyText(text: string): string {
   }
   return text;
 }
+
+function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
+
+  const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed') {
+    normalized.extractionStatus = record.extractionStatus;
+  } else if (record.extractionStatus !== undefined) {
+    return null;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) {
+    normalized.rootEntity = record.rootEntity.trim();
+  }
+  return normalized;
+}
+
+function normalizeAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const refs: OpenClawAttachmentRef[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeAttachmentRef(entry);
+    if (!normalized) return undefined;
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+function hasInboundChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function sanitizeAttachmentPromptField(raw: string | undefined, fallback: string): string {
+  const normalize = (value: string | undefined): string => (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return JSON.stringify(normalize(raw) || normalize(fallback));
+}
+
+function sanitizeAttachmentContextValue(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAttachmentRef {
+  const sanitized: OpenClawAttachmentRef = {
+    assertionUri: sanitizeAttachmentContextValue(ref.assertionUri),
+    fileHash: sanitizeAttachmentContextValue(ref.fileHash),
+    contextGraphId: sanitizeAttachmentContextValue(ref.contextGraphId),
+    fileName: sanitizeAttachmentContextValue(ref.fileName),
+  };
+  if (ref.detectedContentType) {
+    sanitized.detectedContentType = sanitizeAttachmentContextValue(ref.detectedContentType);
+  }
+  if (ref.extractionStatus) {
+    sanitized.extractionStatus = ref.extractionStatus;
+  }
+  if (ref.tripleCount != null) {
+    sanitized.tripleCount = ref.tripleCount;
+  }
+  if (ref.rootEntity) {
+    sanitized.rootEntity = sanitizeAttachmentContextValue(ref.rootEntity);
+  }
+  return sanitized;
+}
+
+function sanitizeAttachmentRefsForContext(
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): OpenClawAttachmentRef[] | undefined {
+  return attachmentRefs?.map((ref) => sanitizeAttachmentRefForContext(ref));
+}
+
+function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): string {
+  const lines = attachmentRefs.map((ref) => {
+    const label = sanitizeAttachmentPromptField(ref.fileName, ref.assertionUri || 'attachment');
+    const graph = ref.contextGraphId ? ` in ${sanitizeAttachmentPromptField(ref.contextGraphId, 'unknown context graph')}` : '';
+    const contentType = ref.detectedContentType
+      ? ` [${sanitizeAttachmentPromptField(ref.detectedContentType, 'unknown content type')}]`
+      : '';
+    const status = ref.extractionStatus ? ` (${ref.extractionStatus})` : '';
+    return `- ${label}${graph}${contentType}${status} -> ${sanitizeAttachmentPromptField(ref.assertionUri, 'unknown assertion')}`;
+  });
+  return ['Attached Working Memory items:', ...lines].join('\n');
+}
+
+interface ChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function sanitizeChatContextEntry(entry: ChatContextEntry): ChatContextEntry {
+  return {
+    key: sanitizeAttachmentContextValue(entry.key),
+    label: sanitizeAttachmentContextValue(entry.label),
+    value: sanitizeAttachmentContextValue(entry.value),
+  };
+}
+
+function sanitizeChatContextEntries(entries: ChatContextEntry[] | undefined): ChatContextEntry[] | undefined {
+  return entries?.map((entry) => sanitizeChatContextEntry(entry));
+}
+
+function formatChatContext(entries: ChatContextEntry[]): string {
+  const lines = entries.map((entry) => `- ${sanitizeAttachmentPromptField(entry.label, entry.key)}: ${sanitizeAttachmentPromptField(entry.value, 'unknown')}`);
+  return [
+    'Context for this chat turn:',
+    'If "target_context_graph" is present below, treat it as authoritative for this turn unless the user explicitly overrides it in the same message.',
+    ...lines,
+  ].join('\n');
+}
+
+function buildAgentBody(text: string, opts?: { attachmentRefs?: OpenClawAttachmentRef[]; contextEntries?: ChatContextEntry[] }): string {
+  const sections: string[] = [];
+  const trimmed = text.trim();
+  if (trimmed) {
+    sections.push(text);
+  }
+  if (opts?.contextEntries?.length) {
+    sections.push(formatChatContext(opts.contextEntries));
+  }
+  if (opts?.attachmentRefs?.length) {
+    sections.push(formatAttachmentContext(opts.attachmentRefs));
+  }
+  if (sections.length === 0) {
+    return 'User sent an empty chat turn.';
+  }
+  return sections.join('\n\n');
+}
 const moduleRequire = createRequire(import.meta.url);
 
 interface PendingRequest {
@@ -60,6 +208,35 @@ interface PendingRequest {
 interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
+  attachmentRefs?: OpenClawAttachmentRef[];
+}
+
+interface InboundChatOptions {
+  attachmentRefs?: OpenClawAttachmentRef[];
+  contextEntries?: ChatContextEntry[];
+}
+
+function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === 'string' ? record.key.trim() : '';
+  const label = typeof record.label === 'string' ? record.label.trim() : '';
+  const value = typeof record.value === 'string' ? record.value.trim() : '';
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+function normalizeChatContextEntries(raw: unknown): ChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: ChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
 }
 
 export class DkgChannelPlugin {
@@ -422,20 +599,33 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
 
     const runtime = this.runtime;
     const cfg = this.cfg;
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
 
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.queueTurnPersistence(text, reply.text, correlationId, identity, undefined, true);
+        this.queueTurnPersistence(text, reply.text, correlationId, identity, {
+          attachmentRefs,
+        }, true);
         return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
@@ -451,10 +641,12 @@ export class DkgChannelPlugin {
         channelName: CHANNEL_NAME,
         senderId: identity || 'owner',
         senderIsOwner: true,
-        text,
+        text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
         correlationId,
-      });
-      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', undefined, true);
+      } as any);
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
+        attachmentRefs,
+      }, true);
       return reply;
     }
 
@@ -472,6 +664,8 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    attachmentRefs?: OpenClawAttachmentRef[],
+    contextEntries?: ChatContextEntry[],
   ): Promise<ChannelOutboundReply> {
     const log = this.api!.logger;
     const runtime = this.runtime;
@@ -509,10 +703,12 @@ export class DkgChannelPlugin {
       storePath,
       sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs, contextEntries });
+    const commandBody = contextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
       channel: 'DKG UI',
       from: identity || 'Owner',
-      body: text,
+      body: agentBody,
       timestamp: Date.now(),
       previousTimestamp,
       envelope: envelopeOpts,
@@ -521,10 +717,11 @@ export class DkgChannelPlugin {
     // 4. Build FinalizedMsgContext (the context payload for the agent)
     const ctxPayload = {
       Body: formattedBody,
-      BodyForAgent: text,
-      RawBody: text,
-      CommandBody: text,
-      BodyForCommands: text,
+      BodyForAgent: agentBody,
+      RawBody: commandBody,
+      CommandBody: commandBody,
+      BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,
@@ -537,6 +734,14 @@ export class DkgChannelPlugin {
       SenderName: identity || 'Owner',
       Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(attachmentRefs?.length ? {
+        AttachmentRefs: attachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(attachmentRefs),
+      } : {}),
+      ...(contextEntries?.length ? {
+        ContextEntries: contextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(contextEntries),
+      } : {}),
     };
 
     // 5. Dispatch and collect reply
@@ -663,15 +868,26 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
 
     const log = this.api.logger;
     const runtime = this.runtime;
     const cfg = this.cfg;
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
 
     if (!runtime?.channel || !cfg) {
-      const reply = await this.processInbound(text, correlationId, identity);
+      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
       return;
     }
@@ -695,19 +911,30 @@ export class DkgChannelPlugin {
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
       storePath, sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries });
+    const commandBody = sanitizedContextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
-      channel: 'DKG UI', from: identity || 'Owner', body: text,
+      channel: 'DKG UI', from: identity || 'Owner', body: agentBody,
       timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
     });
     const ctxPayload = {
-      Body: formattedBody, BodyForAgent: text, RawBody: text,
-      CommandBody: text, BodyForCommands: text,
+      Body: formattedBody, BodyForAgent: agentBody, RawBody: commandBody,
+      CommandBody: commandBody, BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
       CommandAuthorized: true, SenderId: identity || 'owner',
       SenderName: identity || 'Owner', Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(contextAttachmentRefs?.length ? {
+        AttachmentRefs: contextAttachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(contextAttachmentRefs),
+      } : {}),
+      ...(sanitizedContextEntries?.length ? {
+        ContextEntries: sanitizedContextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(sanitizedContextEntries),
+      } : {}),
     };
 
     // Push-based async queue: deliver() pushes, generator yields
@@ -799,14 +1026,16 @@ export class DkgChannelPlugin {
       }
 
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
-        this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, undefined, true);
+        this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
+          attachmentRefs,
+        }, true);
       } else if (resolvedTerminalState === 'failed') {
         this.queueTurnPersistence(
           text,
           this.buildFailedAssistantReply(resolvedFailureReason),
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason },
+          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
           true,
         );
       } else {
@@ -815,7 +1044,7 @@ export class DkgChannelPlugin {
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled' },
+          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
           true,
         );
       }
@@ -1012,6 +1241,7 @@ export class DkgChannelPlugin {
       assistantReply,
       {
         turnId: correlationId,
+        ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
         ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
       },
@@ -1126,7 +1356,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1141,15 +1371,26 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       try {
-        const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+        const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+        const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+        if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+          return;
+        }
+        if (parsed.contextEntries != null && contextEntries === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+          return;
+        }
+        const { text, correlationId, identity } = parsed;
+        if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+          return;
+        }
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
@@ -1178,7 +1419,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1193,8 +1434,20 @@ export class DkgChannelPlugin {
         return;
       }
 
+      const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+      if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (parsed.contextEntries != null && contextEntries === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
       const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
@@ -1212,7 +1465,7 @@ export class DkgChannelPlugin {
       res.on('error', () => { clientDisconnected = true; });
 
       try {
-        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner')) {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries })) {
           if (clientDisconnected) break;
           const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
           if (!ok) await new Promise<void>((r) => res.once('drain', r));
@@ -1235,14 +1488,26 @@ export class DkgChannelPlugin {
   private async handleGatewayRoute(req: any, res: any): Promise<void> {
     try {
       const body = typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req));
+      const attachmentRefs = normalizeAttachmentRefs(body.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(body.contextEntries);
+      if (body.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (body.contextEntries != null && contextEntries === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
       const { text, correlationId, identity } = body;
-      if (!text || !correlationId) {
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
 
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {

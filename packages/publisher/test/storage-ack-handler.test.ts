@@ -2,20 +2,27 @@ import { describe, it, expect } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
 import {
-  encodePublishIntent, decodeStorageACK, computeACKDigest,
+  encodePublishIntent, decodeStorageACK, computePublishACKDigest,
 } from '@origintrail-official/dkg-core';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
+// Test H5 prefix inputs — must match whatever `StorageACKHandlerConfig`
+// carries so that the ACK digest the test computes equals the one the
+// handler computes. The handler rejects non-numeric / zero CG ids
+// (production guard), so the test CG id is a plain numeric string.
+const TEST_CHAIN_ID = 31337n;
+const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
+
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
 describe('StorageACKHandler', () => {
-  const contextGraphId = 'test-project';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
 
   const swmQuads: Quad[] = [
     makeQuad('urn:entity:1', 'urn:p', 'urn:o1'),
@@ -44,6 +51,8 @@ describe('StorageACKHandler', () => {
       signerWallet: coreWallet,
       contextGraphSharedMemoryUri: (cgId: string) =>
         `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     };
 
     return new StorageACKHandler(store as any, config, new TypedEventBus() as any);
@@ -72,7 +81,16 @@ describe('StorageACKHandler', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(Buffer.from(decodedRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, 300n, 1, 1000n);
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      merkleRoot,
+      2n,
+      300n,
+      1n,
+      1000n,
+    );
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
@@ -124,6 +142,8 @@ describe('StorageACKHandler', () => {
       nodeIdentityId: 1n,
       signerWallet: coreWallet,
       contextGraphSharedMemoryUri: () => 'urn:test',
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     };
 
     const handler = new StorageACKHandler(store as any, config, new TypedEventBus() as any);

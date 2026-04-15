@@ -64,23 +64,33 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('fetchLocalAgentHistory');
     expect(apiSrc).toContain('streamLocalAgentChat');
   });
+
+  it('keeps the local-agent contract attachment-aware', () => {
+    expect(apiSrc).toContain('LocalAgentChatAttachmentRef');
+    expect(apiSrc).toContain('chatAttachments?: boolean');
+    expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
+    expect(apiSrc).toContain('attachmentRefs');
+    expect(apiSrc).toContain("extractionStatus?: 'completed';");
+    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("extractionStatus: 'completed'");
+  });
 });
 
 describe('OpenClaw daemon endpoints', () => {
   const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
 
   it('registers GET /api/openclaw-agents endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/openclaw-agents'");
-    expect(daemonSrc).toContain("req.method === 'GET'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']GET["']\s*&&\s*path\s*===\s*["']\/api\/openclaw-agents["']/);
   });
 
   it('filters agents by OpenClaw framework', () => {
-    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*'OpenClaw'\s*\}/);
+    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*["']OpenClaw["']\s*\}\s*\)/);
   });
 
   it('registers POST /api/chat-openclaw endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/chat-openclaw'");
-    expect(daemonSrc).toContain("req.method === 'POST'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']POST["']\s*&&\s*path\s*===\s*["']\/api\/chat-openclaw["']/);
   });
 
   it('chat-openclaw endpoint requires peerId and text', () => {
@@ -93,20 +103,34 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/timedOut/);
   });
 
-  it('chat-openclaw persists outbound messages', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
+  it('does not default OpenClaw chatAttachments in daemon-owned registry surfaces', () => {
+    const definitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf("openclaw: {"),
+      daemonSrc.indexOf('hermes: {'),
     );
+    const registerAdapterBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/register-adapter"),
+      daemonSrc.indexOf('// GET /api/settings', daemonSrc.indexOf("// POST /api/register-adapter")),
+    );
+    expect(definitionsBlock).not.toContain('chatAttachments: true');
+    expect(registerAdapterBlock).not.toContain('chatAttachments: true');
+  });
+
+  it('discarding an imported assertion evicts its cached extraction status', () => {
+    const discardBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/assertion/:name/discard"),
+      daemonSrc.indexOf("// POST /api/assertion/:name/import-file"),
+    );
+    expect(discardBlock).toContain('const assertionUri = contextGraphAssertionUri(');
+    expect(discardBlock).toContain('extractionStatus.delete(assertionUri);');
+  });
+
+  it('chat-openclaw persists outbound messages', () => {
     expect(chatOclawBlock).toContain('insertChatMessage');
-    expect(chatOclawBlock).toContain("direction: 'out'");
+    expect(chatOclawBlock).toMatch(/direction:\s*["']out["']/);
   });
 
   it('chat-openclaw resolves peer names', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     expect(chatOclawBlock).toContain('resolveNameToPeerId');
   });
 });
@@ -176,6 +200,63 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('same local-agent contract');
   });
 
+  it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
+    expect(panelRight).toContain('aria-label="Attach files"');
+    expect(panelRight).toContain('Upload file');
+    expect(panelRight).toContain('📎');
+    expect(panelRight).toContain('Target');
+    expect(panelRight).toContain('Choose a project');
+    expect(panelRight).toContain("value={activeProjectId ?? ''}");
+    expect(panelRight).not.toContain('{activeProjectId ? (');
+    expect(panelRight).toContain('Stored only');
+    expect(panelRight).toContain('Queued - imports on send');
+    expect(panelRight).toContain('Queued files keep their stored target');
+    expect(panelRight).not.toContain('To {targetLabel}');
+    expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
+  });
+
+  it('imports local-agent attachments on send instead of on selection', () => {
+    const addAttachmentsBlock = panelRight.slice(
+      panelRight.indexOf('const addAttachmentsForConversation'),
+      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+    );
+    const sendLocalMessageBlock = panelRight.slice(
+      panelRight.indexOf('const sendLocalMessage'),
+      panelRight.indexOf('const connectIntegration'),
+    );
+
+    expect(addAttachmentsBlock).not.toContain('await importFile(');
+    expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain("if (!text && attachments.length === 0) {");
+    expect(panelRight).not.toContain('selectedCompletedAttachments');
+  });
+
+  it('dedupes selected files per target project instead of globally per conversation', () => {
+    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
+    expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
+  });
+
+  it('only enables attachment-only sends when at least one draft is sendable', () => {
+    expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
+    expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
+    expect(panelRight).toContain('Choose a target above before attaching files.');
+  });
+
+  it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
+    expect(panelRight).toContain('content: message.text || buildAttachmentSummary(message.attachmentRefs ?? [])');
+    expect(panelRight).toContain('const messageText = text || buildAttachmentSummary(attachments);');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text, {');
+  });
+
+  it('persists verified attachment refs separately from assistant tool calls', () => {
+    const persistTurnBlock = readCliFile('daemon.ts');
+    expect(persistTurnBlock).toContain('await memoryManager.storeChatExchange(');
+    expect(persistTurnBlock).toContain('normalizedToolCalls,');
+    expect(persistTurnBlock).not.toContain('mergePersistedToolCalls(');
+    expect(persistTurnBlock).not.toContain('buildOpenClawAttachmentToolCalls(');
+    expect(persistTurnBlock).toContain('sourceFileName');
+  });
+
   it('merges reloaded local history with live messages', () => {
     expect(panelRight).toContain('function mergeLocalAgentMessages');
     expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
@@ -234,6 +315,11 @@ function createTrackingFetch(responses: Array<{ ok: boolean; json: () => Promise
 }
 
 describe('OpenClaw bridge behavioral tests', () => {
+  const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
+
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };
     (globalThis as any).localStorage = {
@@ -346,11 +432,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler captures waitStart before sendChat (timing race fix)', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const waitStartIdx = chatOclawBlock.indexOf('const waitStart = Date.now()');
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     expect(waitStartIdx).toBeGreaterThan(-1);
@@ -359,11 +440,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler persists message with delivered flag after sendChat', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     const insertIdx = chatOclawBlock.indexOf('insertChatMessage');
     expect(sendChatIdx).toBeGreaterThan(-1);
@@ -374,24 +450,26 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('daemon handler returns 200 for undelivered messages (not 502)', () => {
     const daemonSrc = readCliFile('daemon.ts');
-    const blockStart = daemonSrc.indexOf("path === '/api/chat-openclaw'");
+    const blockStart = daemonSrc.search(/path\s*===\s*["']\/api\/chat-openclaw["']/);
     const blockEnd = daemonSrc.indexOf("// OpenClaw channel bridge", blockStart);
     const chatOclawBlock = daemonSrc.slice(blockStart, blockEnd !== -1 ? blockEnd : daemonSrc.indexOf("// POST /api/connect"));
     expect(chatOclawBlock).not.toContain('502');
     expect(chatOclawBlock).toContain('delivered: false');
-    expect(chatOclawBlock).toContain("reply: null");
-    expect(chatOclawBlock).toContain("timedOut: false");
+    expect(chatOclawBlock).toMatch(/reply:\s*null/);
+    expect(chatOclawBlock).toMatch(/timedOut:\s*false/);
   });
 
   it('daemon local channel send handler includes gateway-route fallback', () => {
-    const daemonSrc = readCliFile('daemon.ts');
     expect(daemonSrc).toContain('function getOpenClawChannelTargets');
     expect(daemonSrc).toContain('const standaloneBridgeBase = explicitBridgeBase');
-    expect(daemonSrc).toContain("? (bridgeLooksLikeGateway ? undefined : explicitBridgeBase)");
-    expect(daemonSrc).toContain(": (!explicitGatewayBase ? 'http://127.0.0.1:9201' : undefined);");
-    expect(daemonSrc).toContain('const gatewayBase = explicitGatewayBase ?? (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);');
+    expect(daemonSrc).toContain('bridgeLooksLikeGateway');
+    expect(daemonSrc).toContain('http://127.0.0.1:9201');
+    expect(daemonSrc).toContain('const gatewayBase =');
+    expect(daemonSrc).toContain('explicitGatewayBase ??');
     expect(daemonSrc).toContain("healthUrl: `${normalizedGatewayBase}/health`");
-    expect(daemonSrc).toContain("return value.endsWith('/api/dkg-channel') ? value : `${value}/api/dkg-channel`;");
+    expect(daemonSrc).toContain('function buildOpenClawGatewayBase');
+    expect(daemonSrc).toContain('return value.endsWith("/api/dkg-channel")');
+    expect(daemonSrc).toContain(': `${value}/api/dkg-channel`;');
     expect(daemonSrc).toContain('shouldTryNextOpenClawTarget');
   });
 
@@ -567,6 +645,36 @@ describe('OpenClaw bridge behavioral tests', () => {
       const body = JSON.parse(calls[0].opts?.body as string);
       expect(body.identity).toBe('background-worker');
       expect(body.correlationId).toBeTruthy();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('streamLocalAgentChat forwards injected context entries', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        body: null,
+        json: async () => ({ text: 'reply', correlationId: 'corr-2' }),
+      } as unknown as Response;
+    }) as typeof globalThis.fetch;
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { streamLocalAgentChat } = await import('../src/ui/api.js');
+      await streamLocalAgentChat('openclaw', 'hello', {
+        contextEntries: [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+        ],
+      });
+      const [, opts] = fetchCalls[0];
+      const body = JSON.parse(opts!.body as string);
+      expect(body.contextEntries).toEqual([
+        { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+      ]);
     } finally {
       globalThis.fetch = original;
     }

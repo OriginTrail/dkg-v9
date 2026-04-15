@@ -82,6 +82,19 @@ export interface DkgMemorySessionResolver {
   getDefaultAgentAddress(): string | undefined;
   /** List of subscribed CGs, used when the write path needs to return a clarification. */
   listAvailableContextGraphs(): string[];
+  /**
+   * Force a synchronous refresh of the subscribed-CG cache and return
+   * the refreshed list. Optional — resolvers that cannot refresh on
+   * demand (e.g. test fixtures with a fixed list, or legacy wirings
+   * without network access) can omit this method and callers will
+   * fall through to the synchronous `listAvailableContextGraphs()`
+   * result. Codex Bug B46: `dkg_memory_import` uses this to retry
+   * the subscribed-list guard against a freshly-probed cache when
+   * the initial cached list does not contain a just-created CG, so
+   * legitimate brand-new subscriptions are not rejected during the
+   * TTL window of the cache that normally refreshes lazily.
+   */
+  refreshAvailableContextGraphs?(): Promise<string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -709,18 +722,44 @@ export class DkgMemoryPlugin {
         'Pass an explicit project `contextGraphId` for the target project.',
       );
     }
-    const availableCgs = this.resolver.listAvailableContextGraphs();
+    let availableCgs = this.resolver.listAvailableContextGraphs();
     if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
-      return toolJson({
-        status: 'needs_clarification',
-        reason:
-          `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
-          'This is usually a typo or a stale project id from a deleted subscription.',
-        availableContextGraphs: availableCgs,
-        guidance:
-          'Pass one of the available contextGraphIds listed above, or ask the user to ' +
-          `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
-      });
+      // B46: the cached list may be stale because the user just
+      // created / subscribed to a new CG within the current TTL window
+      // (B23's `AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS` is 30s). Before
+      // hard-rejecting an explicit id as a typo, force a synchronous
+      // refresh and re-check against the fresh list. This preserves
+      // typo protection (if the id is still missing after a
+      // just-landed refresh, it is genuinely not in the subscription
+      // set) while allowing legitimate brand-new CGs through. The
+      // refresh method is optional on the resolver interface —
+      // resolvers that cannot refresh on demand (test fixtures with
+      // a fixed list, legacy wirings) skip the retry and fall
+      // through to the cached-list reject.
+      if (typeof this.resolver.refreshAvailableContextGraphs === 'function') {
+        try {
+          availableCgs = await this.resolver.refreshAvailableContextGraphs();
+        } catch (err) {
+          // If the refresh itself fails (daemon transient error), fall
+          // through to the cached list — hard-rejecting on a refresh
+          // failure would turn a network blip into a write outage.
+          this.api?.logger.debug?.(
+            `[dkg-memory] refreshAvailableContextGraphs failed during B42 validation: ${errorMessage(err)}. Falling through to cached list.`,
+          );
+        }
+      }
+      if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
+        return toolJson({
+          status: 'needs_clarification',
+          reason:
+            `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
+            'This is usually a typo or a stale project id from a deleted subscription.',
+          availableContextGraphs: availableCgs,
+          guidance:
+            'Pass one of the available contextGraphIds listed above, or ask the user to ' +
+            `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
+        });
+      }
     }
 
     // Resolve the agent address for provenance. If the node peer ID probe

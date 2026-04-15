@@ -774,6 +774,118 @@ describe('DkgMemoryPlugin.register', () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
+  it('dkg_memory_import accepts a just-subscribed contextGraphId via the sync refresh retry (Codex B46)', async () => {
+    // B46: the cached subscribed-CG list can be stale for up to the
+    // lazy refresh TTL window. If a user creates/subscribes to a new
+    // CG and immediately calls dkg_memory_import with that id, the
+    // first write must NOT be hard-rejected as a typo. B46 adds an
+    // optional `refreshAvailableContextGraphs` method on the resolver
+    // that forces a synchronous refresh; the B42 validation guard
+    // calls it on cache miss and re-checks the refreshed list before
+    // emitting `needs_clarification`.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+
+    // Resolver that starts with a stale cached list (not including
+    // `research-brand-new`) and populates the id only after the
+    // sync refresh fires. Mimics the real lazy-refresh flow where
+    // the daemon's /api/context-graphs listing reveals the newly
+    // subscribed CG on the next probe.
+    let availableList = ['research-old'];
+    const refreshSpy = vi.fn(async () => {
+      availableList = ['research-old', 'research-brand-new'];
+      return availableList;
+    });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'peer-test' }),
+      getDefaultAgentAddress: () => 'peer-test',
+      listAvailableContextGraphs: () => availableList,
+      refreshAvailableContextGraphs: refreshSpy,
+    };
+    const pluginWithRefresh = new DkgMemoryPlugin(client, { enabled: true }, resolver);
+    pluginWithRefresh.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'first write on new subscription',
+      contextGraphId: 'research-brand-new',
+    });
+
+    // The initial cache check missed, the sync refresh fired, and
+    // the re-check against the refreshed list succeeded — so the
+    // write reached createAssertion / writeAssertion on the real CG.
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('stored');
+    expect(payload.contextGraphId).toBe('research-brand-new');
+    expect(createSpy).toHaveBeenCalledWith('research-brand-new', PROJECT_MEMORY_ASSERTION);
+    expect(writeSpy.mock.calls[0][0]).toBe('research-brand-new');
+  });
+
+  it('dkg_memory_import still rejects a typo after the sync refresh confirms it is not subscribed (Codex B42 + B46)', async () => {
+    // B42 typo protection must survive the B46 refresh-and-retry:
+    // if the explicit id is still missing from the list after a
+    // sync refresh lands, we reject it as a genuine typo.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+    const api = makeApi();
+
+    const availableList = ['research-x', 'research-y'];
+    const refreshSpy = vi.fn(async () => availableList); // no change
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'peer-test' }),
+      getDefaultAgentAddress: () => 'peer-test',
+      listAvailableContextGraphs: () => availableList,
+      refreshAvailableContextGraphs: refreshSpy,
+    };
+    const pluginWithRefresh = new DkgMemoryPlugin(client, { enabled: true }, resolver);
+    pluginWithRefresh.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'typo attempt',
+      contextGraphId: 'research-typoo',
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload.reason).toMatch(/not in the subscribed|typo|stale/i);
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('dkg_memory_import falls through to cached-list reject when refreshAvailableContextGraphs is absent (Codex B46)', async () => {
+    // Backwards compat: resolvers that do NOT implement the optional
+    // `refreshAvailableContextGraphs` method skip the retry and fall
+    // through to the cached-list reject. Keeps the test fixtures
+    // without refresh support from accidentally bypassing the guard.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+    const api = makeApi();
+    const pluginWithSubs = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ available: ['research-x', 'research-y'] }),
+    );
+    pluginWithSubs.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'unknown cg',
+      contextGraphId: 'research-unknown',
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
   it('dkg_memory_import accepts contextGraphIds that are in the subscribed list (Codex B42)', async () => {
     // Positive case for B42: a valid project id in the subscribed list
     // passes through the guard and reaches createAssertion / writeAssertion.

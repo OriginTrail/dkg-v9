@@ -157,6 +157,20 @@ export class DkgNodePlugin {
       }
       return this.availableContextGraphCache;
     },
+    // B46: Force a synchronous refresh of the subscribed-CG cache and
+    // return the freshly-probed list. Used by
+    // `DkgMemoryPlugin.handleImport`'s B42 validation guard to retry
+    // against a fresh cache before hard-rejecting an explicit
+    // `contextGraphId` as a typo — avoids rejecting legitimate
+    // just-created CGs during the TTL window of the lazy cache.
+    // No-op when `memoryResolverApi` is null (plugin not yet
+    // registered, or memory module disabled).
+    refreshAvailableContextGraphs: async () => {
+      if (this.memoryResolverApi) {
+        await this.refreshMemoryResolverState(this.memoryResolverApi);
+      }
+      return this.availableContextGraphCache;
+    },
   };
   private availableContextGraphCache: string[] = [];
   /**

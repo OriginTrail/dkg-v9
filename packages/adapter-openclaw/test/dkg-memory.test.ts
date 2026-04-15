@@ -309,33 +309,46 @@ describe('DkgMemorySearchManager', () => {
   });
 
   describe('search', () => {
-    it('issues one /api/query against agent-context / chat-turns when no project CG is resolved', async () => {
+    it('issues three parallel /api/query calls against agent-context (WM + SWM + VM) when no project CG is resolved', async () => {
+      // The fan-out was broadened during live validation: agent-context
+      // is now queried across all three memory views, not just WM. The
+      // assertionName pin was also dropped — with `view: 'working-memory'`
+      // and no assertionName, the query engine scans all assertions in
+      // the agent's WM namespace (including `chat-turns` and any other
+      // assertions the agent may have written into agent-context). SWM
+      // and VM views don't have assertion-level sub-graphing, so dropping
+      // the pin on those is a no-op that still scans the whole shared-
+      // memory / verified-memory graph for the CG.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
 
       await manager.search('hello world');
 
-      expect(querySpy).toHaveBeenCalledTimes(1);
-      const opts = querySpy.mock.calls[0][1]!;
-      expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
-      expect(opts.view).toBe('working-memory');
-      expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
-      // B43: WM view routing uses the raw peer-ID form. The fixture
-      // provides a raw peer id (`peer-test`), which is passed through
-      // to the query engine as-is — consumers that pass DID-form
-      // addresses through the resolver would be normalized by
-      // `toAgentPeerId` at the consumption site.
-      expect(opts.agentAddress).toBe('peer-test');
+      expect(querySpy).toHaveBeenCalledTimes(3);
+      const allOpts = querySpy.mock.calls.map(c => c[1]!);
+      for (const opts of allOpts) {
+        expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
+        // B43: WM view routing uses the raw peer-ID form. The fixture
+        // provides a raw peer id (`peer-test`), which is passed through
+        // to the query engine as-is — consumers that pass DID-form
+        // addresses through the resolver would be normalized by
+        // `toAgentPeerId` at the consumption site.
+        expect(opts.agentAddress).toBe('peer-test');
+        // No assertionName pin — the whole point of the broadened
+        // fan-out is to let all assertions in the CG view participate
+        // in recall, not just a specific "canonical" one.
+        expect(opts.assertionName).toBeUndefined();
+      }
+      const views = allOpts.map(o => o.view).sort();
+      expect(views).toEqual(
+        ['shared-working-memory', 'verified-memory', 'working-memory'],
+      );
     });
 
-    it('issues four parallel /api/query calls when a project CG is resolved (chat-turns WM + project WM/SWM/VM)', async () => {
-      // Workstream A expanded the slot-backed retrieval path to fan out
-      // across all three project-memory views — working-memory,
-      // shared-working-memory, and verified-memory — in addition to the
-      // agent-context chat-turns working-memory query. `chat-turns` is
-      // WM-only by persistence-path design (chat history only ever lands
-      // in the agent-context WM assertion), so the total call count is
-      // 4 (= 1 WM chat-turns + 3 project-memory views), not 6.
+    it('issues six parallel /api/query calls (agent-context WM/SWM/VM + project WM/SWM/VM) when a project CG is resolved', async () => {
+      // With a project CG resolved, the fan-out is three agent-context
+      // views plus three project views, for six queries total. None of
+      // them pin an assertionName — all six scan the whole CG view.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({
         client,
@@ -344,57 +357,105 @@ describe('DkgMemorySearchManager', () => {
 
       await manager.search('hello world');
 
-      expect(querySpy).toHaveBeenCalledTimes(4);
+      expect(querySpy).toHaveBeenCalledTimes(6);
       const allOpts = querySpy.mock.calls.map(c => c[1]!);
 
-      const chatTurns = allOpts.filter(o => o.contextGraphId === AGENT_CONTEXT_GRAPH);
-      expect(chatTurns).toHaveLength(1);
-      expect(chatTurns[0].assertionName).toBe(CHAT_TURNS_ASSERTION);
-      expect(chatTurns[0].view).toBe('working-memory');
-      expect(chatTurns[0].agentAddress).toBe('peer-test');
+      for (const opts of allOpts) {
+        expect(opts.assertionName).toBeUndefined();
+        expect(opts.agentAddress).toBe('peer-test');
+      }
+
+      const agentContextOpts = allOpts.filter(o => o.contextGraphId === AGENT_CONTEXT_GRAPH);
+      expect(agentContextOpts).toHaveLength(3);
+      expect(agentContextOpts.map(o => o.view).sort()).toEqual(
+        ['shared-working-memory', 'verified-memory', 'working-memory'],
+      );
 
       const projectOpts = allOpts.filter(o => o.contextGraphId === 'research-x');
       expect(projectOpts).toHaveLength(3);
-      for (const opts of projectOpts) {
-        expect(opts.assertionName).toBe(PROJECT_MEMORY_ASSERTION);
-        expect(opts.agentAddress).toBe('peer-test');
-      }
-      const projectViews = projectOpts.map(o => o.view).sort();
-      expect(projectViews).toEqual(
+      expect(projectOpts.map(o => o.view).sort()).toEqual(
         ['shared-working-memory', 'verified-memory', 'working-memory'],
       );
     });
 
-    it('merges results from all four layers and tags them with the correct source + layer', async () => {
+    it('uses a permissive SPARQL shape — no rdf:type constraint, no specific predicate, literal-length floor', async () => {
+      // The SPARQL template itself should match any literal object of
+      // 20+ characters regardless of the predicate or subject type.
+      // This is the whole point of the broadened fan-out: agents can
+      // write memories in whatever RDF shape fits their domain
+      // (schema:description, rdfs:comment, custom predicates, typed or
+      // untyped subjects) and slot-backed recall still finds them.
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
+
+      await manager.search('hello world');
+
+      expect(querySpy).toHaveBeenCalled();
+      const sparql = querySpy.mock.calls[0][0] as string;
+      // Any predicate: `?uri ?pred ?text` instead of
+      // `?uri <schema:description> ?text` or `?uri a schema:Message`.
+      expect(sparql).toMatch(/\?uri\s+\?pred\s+\?text/);
+      // Literal filter excludes IRIs and blank nodes.
+      expect(sparql).toContain('isLiteral(?text)');
+      // 20-char floor on literal length to exclude tiny metadata
+      // (flags, IDs, short tags).
+      expect(sparql).toContain('STRLEN(STR(?text)) >= 20');
+      // No hard-pinned predicates anywhere in the template.
+      expect(sparql).not.toContain('schema:description');
+      expect(sparql).not.toContain('http://schema.org/description');
+      expect(sparql).not.toContain('schema:text');
+      expect(sparql).not.toContain('http://schema.org/text');
+      expect(sparql).not.toContain('schema:Message');
+      expect(sparql).not.toContain('http://schema.org/Message');
+      // The keyword substring filter stays — that's still how we match.
+      expect(sparql).toMatch(/CONTAINS\(LCASE\(STR\(\?text\)\),\s*"hello"\)/);
+      expect(sparql).toMatch(/CONTAINS\(LCASE\(STR\(\?text\)\),\s*"world"\)/);
+    });
+
+    it('merges results from all six layers and tags them with the correct source + layer', async () => {
       // Deterministic ordering lines up with the plan array in
-      // DkgMemorySearchManager.search: chat-turns WM first, then
-      // project WM, project SWM, project VM.
+      // DkgMemorySearchManager.search: agent-context WM, SWM, VM first,
+      // then project WM, SWM, VM.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: {
             bindings: [
-              { uri: { value: 'urn:m:1' }, text: { value: 'session hello world note' } },
+              { uri: { value: 'urn:m:1' }, text: { value: 'agent context wm hello world note' } },
             ],
           },
         })
         .mockResolvedValueOnce({
           result: {
             bindings: [
-              { uri: { value: 'urn:m:2' }, text: { value: 'project wm hello world draft' } },
+              { uri: { value: 'urn:m:2' }, text: { value: 'agent context swm hello world note' } },
             ],
           },
         })
         .mockResolvedValueOnce({
           result: {
             bindings: [
-              { uri: { value: 'urn:m:3' }, text: { value: 'project swm hello world shared' } },
+              { uri: { value: 'urn:m:3' }, text: { value: 'agent context vm hello world note' } },
             ],
           },
         })
         .mockResolvedValueOnce({
           result: {
             bindings: [
-              { uri: { value: 'urn:m:4' }, text: { value: 'project vm hello world verified' } },
+              { uri: { value: 'urn:m:4' }, text: { value: 'project wm hello world draft' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:5' }, text: { value: 'project swm hello world shared' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:6' }, text: { value: 'project vm hello world verified' } },
             ],
           },
         });
@@ -405,13 +466,23 @@ describe('DkgMemorySearchManager', () => {
       });
 
       const results = await manager.search('hello world');
-      expect(results).toHaveLength(4);
+      expect(results).toHaveLength(6);
       const layers = results.map(r => r.layer).sort();
-      expect(layers).toEqual(['chat-turns-wm', 'project-swm', 'project-vm', 'project-wm']);
-      // source stays on the closed upstream union — sessions for
-      // chat-turns-wm, memory for every project layer.
+      expect(layers).toEqual([
+        'agent-context-swm',
+        'agent-context-vm',
+        'agent-context-wm',
+        'project-swm',
+        'project-vm',
+        'project-wm',
+      ]);
+      // source stays on the closed upstream union — sessions for every
+      // agent-context layer, memory for every project layer.
       const sources = results.map(r => r.source).sort();
-      expect(sources).toEqual(['memory', 'memory', 'memory', 'sessions']);
+      expect(sources).toEqual([
+        'memory', 'memory', 'memory',
+        'sessions', 'sessions', 'sessions',
+      ]);
       for (const r of results) {
         expect(r.startLine).toBe(1);
         expect(r.endLine).toBe(1);
@@ -422,56 +493,33 @@ describe('DkgMemorySearchManager', () => {
       }
     });
 
-    it('issues only one chat-turns WM query when no project CG is resolved (chat-turns is WM-only by design)', async () => {
-      // Regression guard for the "chat-turns is WM-only" invariant.
-      // Without a project CG the plan contains exactly the chat-turns
-      // entry, so no SWM/VM calls should fire regardless of how the
-      // fan-out expanded for project memory.
-      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
-      const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
-
-      await manager.search('hello world');
-
-      expect(querySpy).toHaveBeenCalledTimes(1);
-      const opts = querySpy.mock.calls[0][1]!;
-      expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
-      expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
-      expect(opts.view).toBe('working-memory');
-    });
-
-    it('ranks with trust-weighted scores: VM×1.3 > SWM×1.15 > WM×1.0 when raw overlap is comparable', async () => {
-      // All four layers return a single result with identical keyword
+    it('ranks with trust-weighted scores: VM×1.3 > SWM×1.15 > WM×1.0 across both context graphs', async () => {
+      // All six layers return a single result with identical keyword
       // overlap (`hello world` matches both keywords → raw score 1.0).
-      // The trust weights then order the results VM > SWM > WM (both
-      // WM layers tie in trust; rely on raw score for the tie-break).
+      // Trust weights order the tiers VM > SWM > WM uniformly across
+      // both CGs. Within a tier, the tie is broken by raw score (all
+      // tied here) and then by deterministic Promise.all resolution
+      // order from the plans array — agent-context entries come
+      // first in that array, so on a full tie they land before their
+      // project-CG counterparts.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
-          result: {
-            bindings: [
-              { uri: { value: 'urn:m:ct' }, text: { value: 'hello world chat turn' } },
-            ],
-          },
+          result: { bindings: [{ uri: { value: 'urn:m:actxwm' }, text: { value: 'hello world agent context wm' } }] },
         })
         .mockResolvedValueOnce({
-          result: {
-            bindings: [
-              { uri: { value: 'urn:m:wm' }, text: { value: 'hello world project wm' } },
-            ],
-          },
+          result: { bindings: [{ uri: { value: 'urn:m:actxswm' }, text: { value: 'hello world agent context swm' } }] },
         })
         .mockResolvedValueOnce({
-          result: {
-            bindings: [
-              { uri: { value: 'urn:m:swm' }, text: { value: 'hello world project swm' } },
-            ],
-          },
+          result: { bindings: [{ uri: { value: 'urn:m:actxvm' }, text: { value: 'hello world agent context vm' } }] },
         })
         .mockResolvedValueOnce({
-          result: {
-            bindings: [
-              { uri: { value: 'urn:m:vm' }, text: { value: 'hello world project vm' } },
-            ],
-          },
+          result: { bindings: [{ uri: { value: 'urn:m:pwm' }, text: { value: 'hello world project wm' } }] },
+        })
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:pswm' }, text: { value: 'hello world project swm' } }] },
+        })
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:pvm' }, text: { value: 'hello world project vm' } }] },
         });
 
       const manager = new DkgMemorySearchManager({
@@ -480,30 +528,36 @@ describe('DkgMemorySearchManager', () => {
       });
 
       const results = await manager.search('hello world');
-      expect(results).toHaveLength(4);
-      // First entry should be the VM hit (highest trust weight).
-      expect(results[0].layer).toBe('project-vm');
-      // Second entry should be SWM (next-highest trust weight).
-      expect(results[1].layer).toBe('project-swm');
-      // The two WM-trust entries round out the tail in some order;
-      // assert only that both WM layers land in the bottom half.
-      const tailLayers = [results[2].layer, results[3].layer].sort();
-      expect(tailLayers).toEqual(['chat-turns-wm', 'project-wm']);
+      expect(results).toHaveLength(6);
+      // Head is VM tier (highest trust weight, VM×1.3). Both VM hits
+      // share the tier; order within the tier is deterministic via the
+      // plan array — agent-context before project in the current
+      // topology.
+      const headLayers = [results[0].layer, results[1].layer].sort();
+      expect(headLayers).toEqual(['agent-context-vm', 'project-vm']);
+      // Middle is SWM tier.
+      const middleLayers = [results[2].layer, results[3].layer].sort();
+      expect(middleLayers).toEqual(['agent-context-swm', 'project-swm']);
+      // Tail is WM tier.
+      const tailLayers = [results[4].layer, results[5].layer].sort();
+      expect(tailLayers).toEqual(['agent-context-wm', 'project-wm']);
     });
 
     it('dedups across layers by (cg, uri), keeping the highest-trust layer', async () => {
-      // The same memory URI surfaces in VM, SWM, and WM for the
-      // project CG — a verified memory that is still present in the
-      // working-memory draft and the shared-working-memory view. The
-      // three layers should collapse to one result tagged with the
-      // VM layer.
+      // The same memory URI surfaces in all three project-CG layers
+      // (a verified memory that is still in the WM draft buffer and
+      // the SWM view). All three should collapse to one result tagged
+      // with the VM layer. agent-context bindings are unrelated and
+      // stay as their own entries (different contextGraphId key).
       const sameUri = { value: 'urn:m:shared' };
       const sameText = { value: 'hello world canonical memory' };
       vi.spyOn(client, 'query')
-        .mockResolvedValueOnce({ result: { bindings: [] } }) // chat-turns WM
-        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } })
-        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } })
-        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } });
+        .mockResolvedValueOnce({ result: { bindings: [] } }) // agent-context WM
+        .mockResolvedValueOnce({ result: { bindings: [] } }) // agent-context SWM
+        .mockResolvedValueOnce({ result: { bindings: [] } }) // agent-context VM
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } }) // project WM
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } }) // project SWM
+        .mockResolvedValueOnce({ result: { bindings: [{ uri: sameUri, text: sameText }] } }); // project VM
 
       const manager = new DkgMemorySearchManager({
         client,
@@ -517,19 +571,24 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('degrades to the succeeding layers when one view query fails, with one warn per failing (cg, view) pair', async () => {
-      // VM query fails; WM and SWM succeed. The failed layer emits
-      // exactly one warn identifying the (cg, view) pair, and the
-      // surviving two project layers contribute results alongside
-      // the chat-turns WM result.
+      // Project-VM query fails; the other five layers succeed. The
+      // failed layer emits exactly one warn identifying the (cg, view)
+      // pair, and the surviving layers contribute results.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
-          result: { bindings: [{ uri: { value: 'urn:m:ct' }, text: { value: 'match match hit' } }] },
-        }) // chat-turns WM
+          result: { bindings: [{ uri: { value: 'urn:m:ctwm' }, text: { value: 'match agent context wm body' } }] },
+        }) // agent-context WM
         .mockResolvedValueOnce({
-          result: { bindings: [{ uri: { value: 'urn:m:wm' }, text: { value: 'match project wm' } }] },
+          result: { bindings: [{ uri: { value: 'urn:m:ctswm' }, text: { value: 'match agent context swm body' } }] },
+        }) // agent-context SWM
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:ctvm' }, text: { value: 'match agent context vm body' } }] },
+        }) // agent-context VM
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:pwm' }, text: { value: 'match project wm body' } }] },
         }) // project WM
         .mockResolvedValueOnce({
-          result: { bindings: [{ uri: { value: 'urn:m:swm' }, text: { value: 'match project swm' } }] },
+          result: { bindings: [{ uri: { value: 'urn:m:pswm' }, text: { value: 'match project swm body' } }] },
         }) // project SWM
         .mockRejectedValueOnce(new Error('verified-memory view offline')); // project VM
 
@@ -542,7 +601,13 @@ describe('DkgMemorySearchManager', () => {
 
       const results = await manager.search('match');
       const layers = results.map(r => r.layer).sort();
-      expect(layers).toEqual(['chat-turns-wm', 'project-swm', 'project-wm']);
+      expect(layers).toEqual([
+        'agent-context-swm',
+        'agent-context-vm',
+        'agent-context-wm',
+        'project-swm',
+        'project-wm',
+      ]);
 
       const vmWarns = warnSpy.mock.calls.filter(c =>
         typeof c[0] === 'string' && c[0].includes('project-vm'),
@@ -550,6 +615,76 @@ describe('DkgMemorySearchManager', () => {
       expect(vmWarns).toHaveLength(1);
       expect(vmWarns[0][0]).toContain('research-x');
       expect(vmWarns[0][0]).toContain('verified-memory');
+    });
+
+    it('emits a single info-level observability log per search call showing query, project, layers, and per-layer raw hits', async () => {
+      // Live-validation follow-up: without this log, we have no runtime
+      // signal distinguishing "slot called but query missed" from "slot
+      // never called at all". The log must fire once per `search()`
+      // call with query text, resolved project CG, total layer count,
+      // and per-layer raw hit counts.
+      vi.spyOn(client, 'query')
+        .mockResolvedValueOnce({
+          result: { bindings: [{ uri: { value: 'urn:m:actxwm' }, text: { value: 'hello world agent context wm hit' } }] },
+        })
+        .mockResolvedValueOnce({ result: { bindings: [] } })
+        .mockResolvedValueOnce({ result: { bindings: [] } })
+        .mockResolvedValueOnce({
+          result: {
+            bindings: [
+              { uri: { value: 'urn:m:pwm1' }, text: { value: 'hello world project wm first' } },
+              { uri: { value: 'urn:m:pwm2' }, text: { value: 'hello world project wm second' } },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({ result: { bindings: [] } })
+        .mockResolvedValueOnce({ result: { bindings: [] } });
+
+      const infoSpy = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { info: infoSpy, warn: vi.fn(), debug: vi.fn() } as any,
+      });
+
+      await manager.search('hello world');
+
+      const searchFiredLogs = infoSpy.mock.calls.filter(c =>
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+      );
+      expect(searchFiredLogs).toHaveLength(1);
+      const logLine = searchFiredLogs[0][0] as string;
+      expect(logLine).toContain('query="hello world"');
+      expect(logLine).toContain('project=research-x');
+      expect(logLine).toContain('layers=6');
+      expect(logLine).toContain('raw_hits=3');
+      expect(logLine).toContain('agent-context-wm:1');
+      expect(logLine).toContain('agent-context-swm:0');
+      expect(logLine).toContain('agent-context-vm:0');
+      expect(logLine).toContain('project-wm:2');
+      expect(logLine).toContain('project-swm:0');
+      expect(logLine).toContain('project-vm:0');
+    });
+
+    it('observability log uses ∅ for the project field when no project CG is resolved', async () => {
+      vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const infoSpy = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver(),
+        logger: { info: infoSpy, warn: vi.fn(), debug: vi.fn() } as any,
+      });
+
+      await manager.search('hello world');
+
+      const searchFiredLogs = infoSpy.mock.calls.filter(c =>
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+      );
+      expect(searchFiredLogs).toHaveLength(1);
+      const logLine = searchFiredLogs[0][0] as string;
+      expect(logLine).toContain('project=∅');
+      expect(logLine).toContain('layers=3');
+      expect(logLine).toContain('raw_hits=0');
     });
 
     it('returns an empty array for queries with no meaningful keywords', async () => {

@@ -1119,6 +1119,46 @@ describe('local agent integration registry helpers', () => {
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
+  it('treats a stored wake-only OpenClaw transport as enough to reuse the healthy-bridge fast path', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            wakeUrl: 'http://bridge.remote:9305/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
+          },
+        },
+      },
+    });
+    const runSetup = vi.fn();
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.transport.bridgeUrl).toBe('http://bridge.remote:9305');
+    expect(result.integration.transport.wakeUrl).toBe('http://bridge.remote:9305/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
+  });
+
   it('UI connect does not trust a healthy bridge fast-path for a first-time attach', async () => {
     const config = makeConfig();
     const runSetup = vi.fn().mockResolvedValue(undefined);

@@ -109,6 +109,7 @@ const MAX_ONTOLOGY_QUERY_TRIPLES = 320;
 const MAX_ONTOLOGY_VOCABULARIES = 6;
 const MAX_PREFERRED_ONTOLOGY_TERMS = 8;
 const MAX_ONTOLOGY_DESCRIPTION_CHARS = 220;
+const MAX_ONTOLOGY_REF_HINT_LENGTH = 256;
 const DKG_HAS_USER_MESSAGE = 'http://dkg.io/ontology/hasUserMessage';
 const DKG_HAS_ASSISTANT_MESSAGE = 'http://dkg.io/ontology/hasAssistantMessage';
 const SUCCESSFUL_SUBAGENT_RUN_STATUSES = new Set(['completed', 'ok', 'success']);
@@ -470,7 +471,7 @@ export class SemanticEnrichmentWorker {
         this.workerInstanceId,
         triples,
       );
-      if (!appendResult.completed) {
+      if (!appendResult.completed && !appendResult.alreadyApplied) {
         throw new Error(`Semantic append did not complete for ${event.id}`);
       }
     } catch (err: any) {
@@ -575,7 +576,7 @@ export class SemanticEnrichmentWorker {
   private buildSharedPromptGuidance(): string[] {
     return [
       'Use only safe IRIs for subject and predicate.',
-      'For literal objects, return a quoted N-Triples literal string such as "\\"Acme\\"" or "\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>."',
+      'For literal objects, return the object field as a JSON string containing a quoted N-Triples literal. Examples: `\\"Acme\\"` and `\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>`.',
       'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
       'Extend the existing graph in place and reuse the provided source URIs, message URIs, root entities, and attachment/file URIs whenever relevant.',
       'Do not create detached duplicate file, document, turn, or message entities.',
@@ -611,7 +612,7 @@ export class SemanticEnrichmentWorker {
     if (context.source === 'override') {
       return [
         '- Source: override',
-        `- Ontology ref override: ${context.ontologyRef}`,
+        `- Ontology ref override: ${this.renderPromptLiteral(context.ontologyRef)}`,
         '- Use this ontology if you know it. If it is unfamiliar or insufficient, fall back to schema.org-compatible terms.',
       ];
     }
@@ -681,7 +682,7 @@ export class SemanticEnrichmentWorker {
   private async buildFileImportSource(payload: FileImportSemanticEventPayload): Promise<PromptSourceContext> {
     const markdownHash = payload.mdIntermediateHash ?? payload.fileHash;
     const markdown = await this.client.fetchFileText(markdownHash, 'text/markdown');
-    const explicitOntologyRef = payload.ontologyRef?.trim();
+    const explicitOntologyRef = this.normalizeOntologyRefHint(payload.ontologyRef);
     const section = [
       'Source material:',
       `- Context graph: ${payload.contextGraphId}`,
@@ -691,7 +692,7 @@ export class SemanticEnrichmentWorker {
       ...(payload.mdIntermediateHash ? [`- Markdown intermediate hash: ${payload.mdIntermediateHash}`] : []),
       `- Detected content type: ${payload.detectedContentType}`,
       ...(payload.sourceFileName ? [`- Source file name: ${payload.sourceFileName}`] : []),
-      ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${explicitOntologyRef}`] : []),
+      ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${this.renderPromptLiteral(explicitOntologyRef)}`] : []),
       '- Markdown source:',
       truncate(markdown, MAX_SOURCE_TEXT_CHARS),
     ].join('\n');
@@ -706,7 +707,7 @@ export class SemanticEnrichmentWorker {
     sourceText: string,
   ): Promise<OntologyContext> {
     const explicitOntologyRef = payload.kind === 'file_import'
-      ? payload.ontologyRef?.trim()
+      ? this.normalizeOntologyRefHint(payload.ontologyRef)
       : undefined;
     if (explicitOntologyRef) {
       return {
@@ -1002,11 +1003,22 @@ export class SemanticEnrichmentWorker {
   }
 
   private extractAssistantText(messages: unknown[]): string {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const candidate = this.extractTextFromMessage(messages[index]);
+    const assistantMessages = messages.filter((message) => this.isAssistantRoleMessage(message));
+    const candidates = assistantMessages.length > 0 ? assistantMessages : messages;
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const candidate = this.extractTextFromMessage(candidates[index]);
       if (candidate) return candidate;
     }
     return '';
+  }
+
+  private isAssistantRoleMessage(message: unknown): boolean {
+    if (!isRecord(message)) return false;
+    const role = typeof message.role === 'string' ? message.role.trim().toLowerCase() : '';
+    if (role === 'assistant') return true;
+    const author = isRecord(message.author) ? message.author : undefined;
+    const authorRole = typeof author?.role === 'string' ? author.role.trim().toLowerCase() : '';
+    return authorRole === 'assistant';
   }
 
   private extractTextFromMessage(message: unknown): string {
@@ -1042,6 +1054,24 @@ export class SemanticEnrichmentWorker {
       if (combined) return combined;
     }
     return '';
+  }
+
+  private normalizeOntologyRefHint(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const normalized = trimmed
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized) return undefined;
+    if (normalized.length > MAX_ONTOLOGY_REF_HINT_LENGTH) return undefined;
+    if (/[\u0000-\u001f\u007f]/.test(normalized)) return undefined;
+    return normalized;
+  }
+
+  private renderPromptLiteral(value: string): string {
+    return JSON.stringify(value);
   }
 
   private parseTriplesFromAssistantText(rawText: string): SemanticTripleInput[] {

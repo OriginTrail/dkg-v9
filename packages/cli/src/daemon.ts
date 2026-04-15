@@ -37,6 +37,7 @@ import {
   validateSubGraphName,
   validateAssertionName,
   validateContextGraphId,
+  assertSafeRdfTerm,
   isSafeIri,
   contextGraphSharedMemoryUri,
   contextGraphAssertionUri,
@@ -1970,6 +1971,7 @@ function hasStoredLocalAgentTransportConfig(
     integration.transport?.bridgeUrl
     || integration.transport?.gatewayUrl
     || integration.transport?.healthUrl
+    || integration.transport?.wakeUrl
     || integration.runtime?.ready === true,
   );
 }
@@ -1979,11 +1981,31 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   if (storedOpenClawIntegration?.enabled === false) return [];
 
   const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
+  const explicitWakeUrl = openclawIntegration?.transport.wakeUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.wakeUrl)
+    : undefined;
+  const inferredWakeTarget = explicitWakeUrl
+    ? explicitWakeUrl.endsWith('/api/dkg-channel/semantic-enrichment/wake')
+      ? {
+          name: 'gateway' as const,
+          baseUrl: explicitWakeUrl.slice(0, -'/api/dkg-channel/semantic-enrichment/wake'.length),
+        }
+      : explicitWakeUrl.endsWith('/semantic-enrichment/wake')
+        ? {
+            name: 'bridge' as const,
+            baseUrl: explicitWakeUrl.slice(0, -'/semantic-enrichment/wake'.length),
+          }
+        : undefined
+    : undefined;
   const explicitBridgeBase = openclawIntegration?.transport.bridgeUrl
     ? trimTrailingSlashes(openclawIntegration.transport.bridgeUrl)
+    : inferredWakeTarget?.name === 'bridge'
+      ? inferredWakeTarget.baseUrl
     : undefined;
   const explicitGatewayBase = openclawIntegration?.transport.gatewayUrl
     ? trimTrailingSlashes(openclawIntegration.transport.gatewayUrl)
+    : inferredWakeTarget?.name === 'gateway'
+      ? inferredWakeTarget.baseUrl
     : undefined;
   const bridgeLooksLikeGateway =
     explicitBridgeBase?.endsWith("/api/dkg-channel") ?? false;
@@ -2117,7 +2139,7 @@ export async function notifyLocalAgentIntegrationWake(
       method: 'POST',
       headers,
       body: JSON.stringify(wake),
-      signal: AbortSignal.timeout(1_000),
+      signal: AbortSignal.timeout(3_000),
     });
     if (!response.ok) {
       return {
@@ -3047,16 +3069,33 @@ function isSemanticTripleInput(value: unknown): value is SemanticTripleInput {
     && value.object.trim().length > 0;
 }
 
+function isSafeSemanticObjectInput(value: string): boolean {
+  if (isSafeIri(value)) return true;
+  if (!value.startsWith('"')) return false;
+  try {
+    assertSafeRdfTerm(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeSemanticTripleInputs(raw: unknown): SemanticTripleInput[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   if (raw.length === 0) return [];
   const triples: SemanticTripleInput[] = [];
   for (const entry of raw) {
     if (!isSemanticTripleInput(entry)) return undefined;
+    const subject = entry.subject.trim();
+    const predicate = entry.predicate.trim();
+    const object = entry.object.trim();
+    if (!isSafeIri(subject) || !isSafeIri(predicate) || !isSafeSemanticObjectInput(object)) {
+      return undefined;
+    }
     triples.push({
-      subject: entry.subject.trim(),
-      predicate: entry.predicate.trim(),
-      object: entry.object.trim(),
+      subject,
+      predicate,
+      object,
     });
   }
   return triples;
@@ -3257,12 +3296,30 @@ async function readCurrentSemanticTripleCount(
   return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
 }
 
+async function readSemanticProvenanceTripleCount(
+  agent: Pick<DKGAgent, 'store'>,
+  graph: string,
+  eventId: string,
+): Promise<number> {
+  const provenanceUri = `urn:dkg:semantic-enrichment:${eventId}`;
+  const result = await agent.store.query(`
+    SELECT ?count WHERE {
+      GRAPH <${graph}> {
+        <${provenanceUri}> <${SEMANTIC_ENRICHMENT_COUNT_PREDICATE}> ?count .
+      }
+    }
+    LIMIT 1
+  `) as { bindings?: Array<Record<string, string>> };
+  return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
+}
+
 function buildSemanticAppendQuads(args: {
   agentDid: string;
   eventId: string;
   graph: string;
   sourceRef: string;
   triples: SemanticTripleInput[];
+  semanticTripleCount: number;
   extractedAt: string;
 }): Array<{ subject: string; predicate: string; object: string; graph: string }> {
   const provenanceUri = `urn:dkg:semantic-enrichment:${args.eventId}`;
@@ -3287,6 +3344,7 @@ function buildSemanticAppendQuads(args: {
     { subject: provenanceUri, predicate: EXTRACTED_AT_PREDICATE, object: `"${args.extractedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: args.graph },
     { subject: provenanceUri, predicate: EXTRACTION_METHOD_PREDICATE, object: JSON.stringify(SEMANTIC_ENRICHMENT_METHOD), graph: args.graph },
     { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_EVENT_ID_PREDICATE, object: JSON.stringify(args.eventId), graph: args.graph },
+    { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE, object: `"${args.semanticTripleCount}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: args.graph },
   );
 
   for (const subject of sourceLinkedSubjects) {
@@ -4093,6 +4151,12 @@ async function handleRequest(
     const normalizedProjectContextGraphId = typeof projectContextGraphId === 'string'
       ? projectContextGraphId.trim() || undefined
       : undefined;
+    if (normalizedProjectContextGraphId) {
+      const validation = validateContextGraphId(normalizedProjectContextGraphId);
+      if (!validation.valid) {
+        return jsonResponse(res, 400, { error: validation.reason ?? 'Invalid "projectContextGraphId"' });
+      }
+    }
     try {
       await memoryManager.storeChatExchange(
         sessionId,
@@ -4216,9 +4280,6 @@ async function handleRequest(
     }
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
-    const semanticTripleCount = typeof payload.semanticTripleCount === 'number' && Number.isFinite(payload.semanticTripleCount)
-      ? payload.semanticTripleCount
-      : 0;
     if (!eventId || !leaseOwner) {
       return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
     }
@@ -4232,6 +4293,11 @@ async function handleRequest(
       return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
     }
     const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
+    const semanticTripleCount = eventPayload?.kind === 'file_import'
+      ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
+      : eventPayload
+        ? await readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId)
+        : 0;
     if (eventPayload?.kind === 'file_import') {
       const descriptor = semanticEnrichmentDescriptorFromRow(row, semanticTripleCount);
       updateExtractionStatusSemanticDescriptor(extractionStatus, eventPayload.assertionUri, descriptor);
@@ -4316,10 +4382,11 @@ async function handleRequest(
       if (row.status === 'completed') {
         const semanticTripleCount = eventPayload.kind === 'file_import'
           ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
-          : triples.length;
+          : await readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId);
         return jsonResponse(res, 200, {
           applied: false,
           alreadyApplied: true,
+          completed: true,
           semanticEnrichment: semanticEnrichmentDescriptorFromRow(row, semanticTripleCount),
         });
       }
@@ -4342,6 +4409,7 @@ async function handleRequest(
         graph: targetGraph,
         sourceRef,
         triples,
+        semanticTripleCount: triples.length,
         extractedAt,
       });
       if (eventPayload.kind === 'file_import') {

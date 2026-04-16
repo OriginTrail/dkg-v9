@@ -2071,31 +2071,11 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   if (storedOpenClawIntegration?.enabled === false) return [];
 
   const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
-  const explicitWakeUrl = openclawIntegration?.transport.wakeUrl
-    ? trimTrailingSlashes(openclawIntegration.transport.wakeUrl)
-    : undefined;
-  const inferredWakeTarget = explicitWakeUrl
-    ? explicitWakeUrl.endsWith('/api/dkg-channel/semantic-enrichment/wake')
-      ? {
-          name: 'gateway' as const,
-          baseUrl: explicitWakeUrl.slice(0, -'/api/dkg-channel/semantic-enrichment/wake'.length),
-        }
-      : explicitWakeUrl.endsWith('/semantic-enrichment/wake')
-        ? {
-            name: 'bridge' as const,
-            baseUrl: explicitWakeUrl.slice(0, -'/semantic-enrichment/wake'.length),
-          }
-        : undefined
-    : undefined;
   const explicitBridgeBase = openclawIntegration?.transport.bridgeUrl
     ? trimTrailingSlashes(openclawIntegration.transport.bridgeUrl)
-    : inferredWakeTarget?.name === 'bridge'
-      ? inferredWakeTarget.baseUrl
     : undefined;
   const explicitGatewayBase = openclawIntegration?.transport.gatewayUrl
     ? trimTrailingSlashes(openclawIntegration.transport.gatewayUrl)
-    : inferredWakeTarget?.name === 'gateway'
-      ? inferredWakeTarget.baseUrl
     : undefined;
   const bridgeLooksLikeGateway =
     explicitBridgeBase?.endsWith("/api/dkg-channel") ?? false;
@@ -2139,6 +2119,39 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   return targets;
 }
 
+function getWakeDerivedOpenClawTarget(
+  config: DkgConfig,
+  targetName?: 'bridge' | 'gateway',
+): OpenClawChannelTarget | undefined {
+  const transport = getLocalAgentIntegration(config, 'openclaw')?.transport;
+  const wakeUrl = transport?.wakeUrl ? trimTrailingSlashes(transport.wakeUrl) : undefined;
+  if (!wakeUrl) return undefined;
+
+  if (!transport?.gatewayUrl && wakeUrl.endsWith('/api/dkg-channel/semantic-enrichment/wake')) {
+    const gatewayBase = wakeUrl.slice(0, -'/api/dkg-channel/semantic-enrichment/wake'.length);
+    const normalizedGatewayBase = buildOpenClawGatewayBase(gatewayBase);
+    const target: OpenClawChannelTarget = {
+      name: 'gateway',
+      inboundUrl: `${normalizedGatewayBase}/inbound`,
+      healthUrl: `${normalizedGatewayBase}/health`,
+    };
+    return !targetName || targetName === 'gateway' ? target : undefined;
+  }
+
+  if (!transport?.bridgeUrl && wakeUrl.endsWith('/semantic-enrichment/wake')) {
+    const bridgeBase = wakeUrl.slice(0, -'/semantic-enrichment/wake'.length);
+    const target: OpenClawChannelTarget = {
+      name: 'bridge',
+      inboundUrl: `${bridgeBase}/inbound`,
+      streamUrl: `${bridgeBase}/inbound/stream`,
+      healthUrl: `${bridgeBase}/health`,
+    };
+    return !targetName || targetName === 'bridge' ? target : undefined;
+  }
+
+  return undefined;
+}
+
 type OpenClawBridgeHealthState = Record<string, unknown> & {
   ok: boolean;
   channel?: string;
@@ -2165,7 +2178,8 @@ function transportPatchFromOpenClawTarget(
   targetName: 'bridge' | 'gateway' | undefined,
 ): LocalAgentIntegrationTransport | undefined {
   if (!targetName) return undefined;
-  const target = getOpenClawChannelTargets(config).find((item) => item.name === targetName);
+  const target = getWakeDerivedOpenClawTarget(config, targetName)
+    ?? getOpenClawChannelTargets(config).find((item) => item.name === targetName);
   if (!target) return undefined;
 
   if (target.name === 'bridge') {
@@ -2416,7 +2430,14 @@ export async function probeOpenClawChannelHealth(
   bridgeAuthToken: string | undefined,
   opts: { ignoreBridgeCache?: boolean; timeoutMs?: number } = {},
 ): Promise<OpenClawChannelHealthReport> {
-  const targets = getOpenClawChannelTargets(config);
+  const configuredTargets = getOpenClawChannelTargets(config);
+  const wakeDerivedTarget = getWakeDerivedOpenClawTarget(config);
+  const targets = wakeDerivedTarget
+    ? [
+        wakeDerivedTarget,
+        ...configuredTargets.filter((target) => target.name !== wakeDerivedTarget.name),
+      ]
+    : configuredTargets;
   let bridge: OpenClawBridgeHealthState | undefined;
   let gateway: OpenClawGatewayHealthState | undefined;
   let lastError = 'No OpenClaw channel health endpoint configured';

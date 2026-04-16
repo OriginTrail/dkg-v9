@@ -112,6 +112,14 @@ export class DkgNodePlugin {
    * failure or after a successful load.
    */
   private lastLocalAgentIntegrationLoadError: string | null = null;
+  /**
+   * Live semantic-enrichment availability hint sent on daemon-bound requests.
+   * `undefined` means startup state is still unknown, so the daemon may fall
+   * back to stored capability metadata. Once the adapter knows the worker is
+   * unavailable or explicitly disabled, this flips to `false` so new semantic
+   * jobs are not queued into an undrainable outbox.
+   */
+  private semanticEnrichmentAvailabilityHint: boolean | undefined = undefined;
   private nodePeerId: string | undefined;
   /**
    * In-flight handle for the node peer ID probe, used to debounce
@@ -223,11 +231,18 @@ export class DkgNodePlugin {
     }
     const semanticEnrichmentSupported = this.channelPlugin?.isSemanticEnrichmentActive() === true
       ? true
-      : undefined;
+      : this.semanticEnrichmentAvailabilityHint === false
+        ? false
+        : undefined;
     this.client.setLocalAgentRequestContext({
       integrationId: 'openclaw',
-      ...(semanticEnrichmentSupported === true ? { semanticEnrichmentSupported } : {}),
+      ...(semanticEnrichmentSupported !== undefined ? { semanticEnrichmentSupported } : {}),
     });
+  }
+
+  private setSemanticEnrichmentAvailabilityHint(value: boolean | undefined): void {
+    this.semanticEnrichmentAvailabilityHint = value;
+    this.syncClientLocalAgentRequestContext();
   }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
@@ -517,7 +532,7 @@ export class DkgNodePlugin {
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
-      this.syncClientLocalAgentRequestContext();
+      this.setSemanticEnrichmentAvailabilityHint(false);
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
       // default log level) until either the reason changes or the load
@@ -549,7 +564,7 @@ export class DkgNodePlugin {
     this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
-      this.syncClientLocalAgentRequestContext();
+      this.setSemanticEnrichmentAvailabilityHint(false);
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
     }
@@ -582,7 +597,7 @@ export class DkgNodePlugin {
       });
     } catch (err: any) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
-      this.syncClientLocalAgentRequestContext();
+      this.setSemanticEnrichmentAvailabilityHint(false);
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
     }
@@ -590,7 +605,9 @@ export class DkgNodePlugin {
     await this.channelPlugin?.startSemanticEnrichmentWorker().catch((err: any) => {
       api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${err?.message ?? String(err)}`);
     });
-    this.syncClientLocalAgentRequestContext();
+    this.setSemanticEnrichmentAvailabilityHint(
+      this.channelPlugin?.isSemanticEnrichmentActive() === true ? true : false,
+    );
 
     if (bridgeAlreadyReady || !this.channelPlugin) {
       return;

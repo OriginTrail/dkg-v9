@@ -314,6 +314,15 @@ function extractJsonCandidates(raw: string): string[] {
   return [...new Set(candidates)];
 }
 
+function isSemanticLeaseConflict(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes('semantic enrichment lease is no longer owned by this worker')
+    || (normalized.includes('/api/semantic-enrichment/events/renew') && normalized.includes('responded 409'))
+    || (normalized.includes('/api/semantic-enrichment/events/release') && normalized.includes('responded 409'))
+    || normalized.includes('"renewed":false')
+    || normalized.includes('"released":false');
+}
+
 export class SemanticEnrichmentWorker {
   private api: OpenClawPluginApi;
   private client: DkgDaemonClient;
@@ -590,7 +599,7 @@ export class SemanticEnrichmentWorker {
     } catch (err: any) {
       if (syncStopState()) return;
       const message = err?.message ?? String(err);
-      leaseLost = message.includes('responded 409');
+      leaseLost = isSemanticLeaseConflict(message);
       if (!leaseLost) {
         await this.client
           .failSemanticEnrichmentEvent(event.id, this.workerInstanceId, message)
@@ -703,7 +712,7 @@ export class SemanticEnrichmentWorker {
         this.api.logger.warn?.(
           `[semantic-enrichment] lease renew failed for ${eventId}: ${err?.message ?? String(err)}`,
         );
-        if ((err?.message ?? String(err)).includes('responded 409')) {
+        if (isSemanticLeaseConflict(err?.message ?? String(err))) {
           markLeaseLost();
           return;
         }

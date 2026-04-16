@@ -542,6 +542,8 @@ describe('SemanticEnrichmentWorker', () => {
         claimSemanticEnrichmentEvent: claim,
         appendSemanticEnrichmentEvent: append,
         failSemanticEnrichmentEvent: fail,
+        fetchFileText: vi.fn().mockResolvedValue('# Brief\n\nAcme project update.'),
+        query: vi.fn().mockResolvedValue({ results: { bindings: [] } }),
       }),
     );
 
@@ -923,6 +925,82 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(append).toHaveBeenCalledTimes(1);
     expect(fail).not.toHaveBeenCalled();
+  });
+
+  it('treats append source-mismatch conflicts as normal failures instead of reclaimed leases', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-append-source-mismatch',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-append-source-mismatch',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-append-source-mismatch',
+            userMessage: 'Track the change.',
+            assistantReply: 'Noted.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn().mockRejectedValue(
+      new Error(
+        'DKG daemon /api/semantic-enrichment/events/append responded 409: {"error":"Semantic enrichment source no longer matches the current assertion state"}',
+      ),
+    );
+    const fail = vi.fn().mockResolvedValue({ status: 'dead_letter' });
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+
+    const worker = new SemanticEnrichmentWorker(
+      {
+        ...makeApi({
+          subagent: {
+            run: vi.fn().mockResolvedValue({ runId: 'run-append-source-mismatch' }),
+            waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+            getSessionMessages: vi.fn().mockResolvedValue({
+              messages: [{ role: 'assistant', text: '{"triples":[]}' }],
+            }),
+            deleteSession: vi.fn().mockResolvedValue(undefined),
+          } as any,
+        }),
+        logger,
+      },
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-append-source-mismatch',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(fail).toHaveBeenCalledWith(
+      'evt-append-source-mismatch',
+      expect.any(String),
+      expect.stringContaining('Semantic enrichment source no longer matches the current assertion state'),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('lease for chat_turn:evt-append-source-mismatch was reclaimed before completion'),
+    );
   });
 
   it('bounds shutdown waiting time when a drain is still in flight', async () => {

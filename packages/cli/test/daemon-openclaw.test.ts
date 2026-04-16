@@ -140,6 +140,28 @@ describe('OpenClaw channel routing helpers', () => {
     }))).toEqual([]);
   });
 
+  it('does not synthesize normal chat targets from a wake-only transport', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            wakeUrl: 'http://wake-only.local:9301/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9201/inbound',
+        streamUrl: 'http://127.0.0.1:9201/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9201/health',
+      },
+    ]);
+  });
+
   it('adds the bridge auth header only for standalone bridge requests', () => {
     const bridgeHeaders = buildOpenClawChannelHeaders(
       {

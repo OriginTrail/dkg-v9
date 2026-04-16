@@ -234,6 +234,7 @@ export class DkgNodePlugin {
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
   private crossChannelHookRegistered = false;
+  private crossChannelHookCleanup: (() => void) | null = null;
 
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
@@ -441,6 +442,13 @@ export class DkgNodePlugin {
 
     if (!hookMap.has('message:sent')) hookMap.set('message:sent', []);
     hookMap.get('message:sent')!.push(onSent);
+
+    this.crossChannelHookCleanup = () => {
+      const recv = hookMap.get('message:received');
+      if (recv) hookMap.set('message:received', recv.filter(h => h !== onReceived));
+      const sent = hookMap.get('message:sent');
+      if (sent) hookMap.set('message:sent', sent.filter(h => h !== onSent));
+    };
 
     this.crossChannelHookRegistered = true;
     api.logger.info?.('[dkg] Cross-channel persistence registered (internal hooks: message:received + message:sent)');
@@ -733,11 +741,15 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
-    // Stop integration modules
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
+    }
+    if (this.crossChannelHookCleanup) {
+      this.crossChannelHookCleanup();
+      this.crossChannelHookCleanup = null;
+      this.crossChannelHookRegistered = false;
     }
     await this.channelPlugin?.stop();
   }

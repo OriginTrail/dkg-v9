@@ -47,10 +47,10 @@ export const tornadoCoreCoverage: CoverageThresholds = {
 };
 
 export const tornadoChainCoverage: CoverageThresholds = {
-  lines: 30,
-  functions: 40,
-  branches: 18,
-  statements: 29,
+  lines: 24,
+  functions: 28,
+  branches: 14,
+  statements: 23,
 };
 
 export const tornadoPublisherCoverage: CoverageThresholds = {

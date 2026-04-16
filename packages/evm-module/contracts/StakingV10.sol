@@ -12,6 +12,7 @@ import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
+import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
@@ -69,6 +70,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         governs the V8 legacy address-keyed path only).
     uint256 public constant WITHDRAWAL_DELAY = 15 days;
 
+    /// @notice EpochStorage shard ID for the reward pool. Matches V8
+    ///         `Staking.EPOCH_POOL_INDEX` — the two contracts read the same
+    ///         reward pool.
+    uint256 private constant EPOCH_POOL_INDEX = 1;
+
     // NOTE: `EPOCHS_PER_MONTH` is not defined here. The relock math works in
     // raw epoch counts — Chronos exposes an absolute epoch number, and lock
     // tiers {0, 1, 3, 6, 12} are the authoritative lock set per
@@ -91,6 +97,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ProfileStorage public profileStorage;
     Staking public staking;
     IERC20 public token;
+    EpochStorage public epochStorage;
 
     // ========================================================================
     // Events
@@ -226,6 +233,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         staking = Staking(hub.getContractAddress("Staking"));
         token = IERC20(hub.getContractAddress("Token"));
+        epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -1067,16 +1075,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *           `rewardsSnapshot` is `pos.rewards` captured once before
      *           the walk — matching the spec's semantics of "the
      *           compounded rewards value at the time of claim".
-     *        5. Per-epoch reward:
-     *              reward_e = effStake_e * nodeEpochScorePerStake[e] / 1e18
-     *           scale matches V8 `_prepareForStakeChange`
-     *           (`scoreEarned18 = stakeBase * scorePerStakeDiff36 / SCALE18`).
-     *           In the V8 address-keyed path the score is further converted
-     *           to TRAC via `reward = delegatorScore18 * netNodeRewards /
-     *           nodeScore18` — that conversion lives in Phase 11, which will
-     *           replace this formula with the actual Paymaster flow. Phase 5
-     *           treats the score-weighted effective stake as the reward TRAC
-     *           stub so the claim bookkeeping path can be unit-tested end-to-end.
+     *        5. Per-epoch reward (two-step, mirrors V8 Staking.sol:568-593):
+     *           a. `delegatorScore18 = effStake * scorePerStake36 / 1e18`
+     *           b. `netNodeRewards = epochPool * nodeScore / allNodesScore
+     *              - operatorFee` (first claimer per (node, epoch) computes
+     *              and caches via `delegatorsInfo`; subsequent claimers read
+     *              the cached value).
+     *           c. `trac_reward = delegatorScore18 * netNodeRewards /
+     *              nodeScore18`
      *        6. If the window produced zero reward (all scores were zero or
      *           the Paymaster was empty), advance `lastClaimedEpoch` to
      *           skip the walk on the next call but emit nothing and skip
@@ -1088,16 +1094,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *           and global `increaseNodeStake` / `increaseTotalStake` +
      *           `setLastClaimedEpoch` + emit `RewardsClaimed`.
      *
-     *      **TRAC source — Phase 11.** Phase 5 `claim` does NOT pull TRAC
-     *      from any external source. The StakingStorage vault must be
-     *      pre-funded with the reward TRAC by Phase 11's Paymaster /
-     *      EpochStorage integration; unit tests simulate this by calling
-     *      `Token.mint(stakingStorage, rewardTotal)` before `claim`. If
-     *      the vault is under-funded, `increaseNodeStake` +
-     *      `increaseTotalStake` still succeed (they are pure accounting
-     *      mutations), but a later `finalizeWithdrawal` would revert on
-     *      the `transferStake` underflow. It is Phase 11's responsibility
-     *      to keep the vault funded in step with reward accrual.
+     *      **TRAC source.** TRAC is already in StakingStorage at claim time
+     *      — publishers deposit it during publishing via `Paymaster.coverCost`,
+     *      which distributes tokens across the epoch range into EpochStorage.
+     *      `claim()` reads `epochStorage.getEpochPool(1, e)` to compute each
+     *      epoch's gross reward but does not transfer any TRAC itself. The
+     *      vault balance invariant holds because the TRAC deposited by
+     *      publishers covers all claims.
      */
     function claim(
         address staker,
@@ -1153,32 +1156,48 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 effStake = raw + rewardsSnapshot;
             }
 
-            // Per-epoch score-per-stake from RandomSamplingStorage.
-            // `nodeEpochScorePerStake[e][identityId]` is stored at 1e36
-            // scale (score18 * SCALE18 / totalNodeStake_wei — see
-            // `RandomSampling.submitProof` at `:273`). Dividing by 1e18
-            // gives a 1e18-scaled score value matching V8's
-            // `_prepareForStakeChange` dimensional output:
-            //   scoreEarned18 = stakeBase * scorePerStakeDiff36 / SCALE18
-            // In the V8 reward path this `scoreEarned18` is further
-            // converted to TRAC via `reward = delegatorScore18 *
-            // netNodeRewards / nodeScore18`, where netNodeRewards comes
-            // from `epochStorage.getEpochPool(...) * nodeScore18 /
-            // allNodesScore18 - operatorFee`. That conversion is Phase 11's
-            // responsibility; Phase 5 treats the 1e18-scaled score as the
-            // reward TRAC stub so the claim bookkeeping can be exercised
-            // end-to-end under unit test.
-            //
-            // NOTE: Unlike a "cumulative index" design, V8's
-            // `nodeEpochScorePerStake` is PER-EPOCH — each epoch's value
-            // is the score-per-stake accrued within that epoch alone. No
-            // `[e] - [e-1]` subtraction is needed (or correct).
+            // Score computation (unchanged from Phase 5) — then score→TRAC
+            // conversion added by Phase 11.  `scorePerStake36` is PER-EPOCH,
+            // not cumulative — no `[e] - [e-1]` subtraction needed.
             uint256 scorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(
                 e,
                 identityId
             );
 
-            rewardTotal += (effStake * scorePerStake36) / SCALE18;
+            // Step 1: delegator's score for this epoch
+            uint256 delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
+            if (delegatorScore18 == 0) continue;
+
+            uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
+            if (nodeScore18 == 0) continue;
+
+            // Step 2: convert score → TRAC (V8 pattern from Staking.sol:568-593)
+            uint256 netNodeRewards;
+            if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, e)) {
+                uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
+                if (allNodesScore18 > 0) {
+                    uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
+                        * nodeScore18) / allNodesScore18;
+                    uint96 operatorFeeAmount = uint96(
+                        (grossNodeRewards
+                            * profileStorage.getLatestOperatorFeePercentage(identityId))
+                            / parametersStorage.maxOperatorFee()
+                    );
+                    netNodeRewards = grossNodeRewards - operatorFeeAmount;
+                    delegatorsInfo.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
+                    delegatorsInfo.setNetNodeEpochRewards(identityId, e, netNodeRewards);
+                    stakingStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
+                }
+            } else {
+                netNodeRewards = delegatorsInfo.getNetNodeEpochRewards(identityId, e);
+            }
+
+            // Set operator fee flag for scoreless epochs to not block Profile.updateOperatorFee
+            if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, e)) {
+                delegatorsInfo.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
+            }
+
+            rewardTotal += (delegatorScore18 * netNodeRewards) / nodeScore18;
         }
 
         if (rewardTotal == 0) {
@@ -1226,23 +1245,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // 4. Advance the position's claim cursor to the walked boundary so
         //    subsequent calls in the same epoch are pure no-ops.
         convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
-
-        // WARNING: claim() increases StakingStorage accounting (nodeStake /
-        // totalStake / delegatorStakeBase) by `rewardTotal` ahead of the
-        // actual TRAC arriving in the StakingStorage vault. Phase 11 MUST
-        // land before ANY testnet/mainnet deployment — otherwise
-        // finalizeWithdrawal will underflow the vault and leave the
-        // totalStake invariant broken.
-        //
-        // Phase 11 wires Paymaster/EpochStorage to push reward TRAC into
-        // StakingStorage in the same transaction as this accounting update,
-        // restoring the invariant.
-        //
-        // For Phase 5 unit tests, the fixture pre-funds the vault via
-        // Token.mint(stakingStorage, amount).
-        //
-        // TODO(Phase 11): pull `rewardTotal` TRAC from Paymaster/EpochStorage
-        // into StakingStorage.
 
         emit RewardsClaimed(tokenId, uint96(rewardTotal));
     }

@@ -92,6 +92,7 @@ const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
 const SYNC_AUTH_MAX_AGE_MS = 30_000;
+const META_REFRESH_COOLDOWN_MS = 30_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -236,6 +237,7 @@ export class DKGAgent {
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
+  private readonly metaRefreshTimestamps = new Map<string, number>();
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   private readonly localAgents = new Map<string, AgentKeyRecord>();
@@ -806,7 +808,7 @@ export class DKGAgent {
             }
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
-            this.syncContextGraphFromConnectedPeers(contextGraphId).catch(() => {});
+            this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
@@ -937,6 +939,7 @@ export class DKGAgent {
       }
 
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
+      const knownCgsBefore = new Set(this.config.syncContextGraphs ?? []);
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
@@ -957,6 +960,18 @@ export class DKGAgent {
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
+
+      // Sync durable data for any CGs discovered after the initial sync pass.
+      // Without this, newly discovered private CGs would only sync on the next
+      // peer connection since they weren't in syncContextGraphs during the
+      // first syncFromPeer call.
+      const allCgsAfter = this.config.syncContextGraphs ?? [];
+      const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
+      if (newlyDiscovered.length > 0) {
+        this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
+        const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
+        this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      }
 
       const wsContextGraphIds = this.config.syncContextGraphs ?? [];
       if (wsContextGraphIds.length > 0) {
@@ -4637,11 +4652,25 @@ export class DKGAgent {
     }
 
     const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
-    // Check against both agent address (V10) and identity ID (legacy)
-    const allowed = participants?.some((p) =>
+    let allowed = participants?.some((p) =>
       p.toLowerCase() === recoveredAddress.toLowerCase() ||
       p === String(requesterIdentityId),
     ) ?? false;
+
+    // Requester has valid on-chain identity but is not in our local participant
+    // list. The curator may have invited them after our last meta sync — try
+    // refreshing the meta graph from the curator before denying.
+    if (!allowed) {
+      const refreshed = await this.refreshMetaFromCurator(request.contextGraphId);
+      if (refreshed) {
+        const freshParticipants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
+        allowed = freshParticipants?.some((p) =>
+          p.toLowerCase() === recoveredAddress.toLowerCase() ||
+          p === String(requesterIdentityId),
+        ) ?? false;
+      }
+    }
+
     if (allowed) {
       this.seenPrivateSyncRequestIds.set(request.requestId, now);
     }
@@ -4745,6 +4774,133 @@ export class DKGAgent {
     const onChainParticipants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
     if (!onChainParticipants) return null;
     return onChainParticipants.map((id) => String(id));
+  }
+
+  /**
+   * Re-sync the meta graph for a private CG from the curator to pick up
+   * newly added participants. Rate-limited to avoid abuse.
+   * Returns true if meta was refreshed, false if skipped or failed.
+   */
+  private async refreshMetaFromCurator(contextGraphId: string): Promise<boolean> {
+    const now = Date.now();
+    const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
+    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
+      return false;
+    }
+    this.metaRefreshTimestamps.set(contextGraphId, now);
+
+    const ctx = createOperationContext('sync');
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+
+    const curatorResult = await this.store.query(
+      `SELECT ?curator WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator
+        }
+      } LIMIT 1`,
+    );
+    if (curatorResult.type !== 'bindings' || curatorResult.bindings.length === 0) {
+      return false;
+    }
+    const curatorDid = (curatorResult.bindings[0] as Record<string, string>)['curator'] ?? '';
+    const didPrefix = 'did:dkg:agent:';
+    if (!curatorDid.startsWith(didPrefix)) {
+      return false;
+    }
+    const curatorIdentifier = curatorDid.slice(didPrefix.length);
+
+    // Resolve curator identifier to a peer ID. The DID value is either a
+    // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
+    // wallet addresses, look up via agent registry or fall back to scanning
+    // connected peers' known agent registrations.
+    let curatorPeerId = curatorIdentifier;
+    if (curatorIdentifier.startsWith('0x')) {
+      let resolved = false;
+      try {
+        const agents = await this.discovery.findAgents();
+        const match = agents.find(
+          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+        );
+        if (match) {
+          curatorPeerId = match.peerId;
+          resolved = true;
+        }
+      } catch { /* registry unavailable */ }
+
+      // Fallback: look up the creator peer ID from the ontology definition
+      // graph or the _meta graph. The dkg:creator triple uses the libp2p
+      // peer ID while dkg:curator uses the wallet address.
+      if (!resolved) {
+        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+        const creatorResult = await this.store.query(
+          `SELECT ?creator WHERE {
+            {
+              GRAPH <${ontologyGraph}> {
+                <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
+              }
+            } UNION {
+              GRAPH <${cgMetaGraph}> {
+                <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
+              }
+            }
+          } LIMIT 1`,
+        );
+        if (creatorResult.type === 'bindings' && creatorResult.bindings.length > 0) {
+          const creatorDid = (creatorResult.bindings[0] as Record<string, string>)['creator'] ?? '';
+          if (creatorDid.startsWith(didPrefix)) {
+            const creatorId = creatorDid.slice(didPrefix.length);
+            if (!creatorId.startsWith('0x')) {
+              curatorPeerId = creatorId;
+              resolved = true;
+            }
+          }
+        }
+      }
+
+      if (!resolved) return false;
+    }
+
+    if (curatorPeerId === this.peerId) {
+      return false;
+    }
+
+    let connections = this.node.libp2p.getConnections();
+    let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+
+    // If not directly connected, try dialing via relay using agent registry info
+    if (!isConnected) {
+      try {
+        const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
+        if (agent?.relayAddress) {
+          const { peerIdFromString } = await import('@libp2p/peer-id');
+          const { multiaddr } = await import('@multiformats/multiaddr');
+          const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
+          const pid = peerIdFromString(curatorPeerId);
+          await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+          await this.node.libp2p.dial(pid);
+          connections = this.node.libp2p.getConnections();
+          isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+        }
+      } catch { /* dial failed — curator unreachable */ }
+    }
+
+    if (!isConnected) {
+      return false;
+    }
+
+    try {
+      const deadline = Date.now() + 10_000;
+      const metaQuads = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
+      if (metaQuads.length > 0) {
+        await this.store.insert(metaQuads);
+        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaQuads.length} triples from curator ${curatorPeerId.slice(-8)}`);
+        return true;
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return false;
   }
 
   /**

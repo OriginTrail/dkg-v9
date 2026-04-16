@@ -41,7 +41,6 @@ export interface FileImportSemanticEventPayload {
   detectedContentType: string;
   sourceFileName?: string;
   ontologyRef?: string;
-  projectContextGraphId?: string;
 }
 
 export type SemanticEnrichmentEventPayload =

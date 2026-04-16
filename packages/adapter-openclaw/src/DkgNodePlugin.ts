@@ -200,12 +200,6 @@ export class DkgNodePlugin {
     const matchingCandidate = candidates.find((candidate) =>
       this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
     );
-    if (matchingCandidate && existingWakeAuth && existingWakeAuth !== matchingCandidate.auth) {
-      return {
-        url: normalizedExistingWakeUrl,
-        auth: existingWakeAuth,
-      };
-    }
     const existingDerivedCandidate = this.buildDerivedWakeCandidates(existing).find((candidate) =>
       this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
     );

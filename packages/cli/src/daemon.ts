@@ -1374,6 +1374,7 @@ async function runDaemonInner(
   // default) populate this with a completed record on the same request; async
   // workflows can be layered later without changing the endpoint contract.
   const extractionStatus = new Map<string, ExtractionStatusRecord>();
+  reconcileOpenClawSemanticAvailability(config, extractionStatus, dashDb);
 
   // Round 6 Bug 19: per-assertion mutex for the import-file snapshot+
   // insert+rollback sequence. Without this, concurrent imports of the
@@ -1980,6 +1981,8 @@ function extractLocalAgentIntegrationPatch(body: Record<string, unknown>): Local
     bridgeUrl: body.bridgeUrl,
     gatewayUrl: body.gatewayUrl,
     healthUrl: body.healthUrl,
+    wakeUrl: body.wakeUrl,
+    wakeAuth: body.wakeAuth,
   });
   patch.transport = transport || topLevelTransport;
   patch.capabilities = normalizeLocalAgentCapabilities(body.capabilities);
@@ -2252,16 +2255,19 @@ export function canQueueLocalAgentSemanticEnrichment(
   if (!stored?.enabled) return false;
   if (stored.capabilities?.semanticEnrichment === false) return false;
   if (stored.capabilities?.semanticEnrichment === true) return true;
-  if (normalizedId === 'openclaw') {
-    const registrationMode = typeof stored.metadata?.registrationMode === 'string'
-      ? stored.metadata.registrationMode.trim()
-      : '';
-    if (registrationMode === 'setup-runtime') return false;
-    return stored.runtime?.ready === true
-      || stored.runtime?.status === 'ready'
-      || stored.runtime?.status === 'degraded';
-  }
   return false;
+}
+
+export function reconcileOpenClawSemanticAvailability(
+  config: DkgConfig,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
+  reason = 'OpenClaw semantic enrichment is unavailable on this runtime',
+): number {
+  const stored = getStoredLocalAgentIntegrations(config).openclaw;
+  if (!stored) return 0;
+  if (stored.enabled === true && stored.capabilities?.semanticEnrichment !== false) return 0;
+  return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
 }
 
 export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
@@ -7454,6 +7460,7 @@ async function handleRequest(
       const result = source === 'node-ui'
         ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
+      reconcileOpenClawSemanticAvailability(config, extractionStatus, dashDb);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
     } catch (err: any) {
@@ -7477,15 +7484,8 @@ async function handleRequest(
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
       const integration = updateLocalAgentIntegration(config, id, parsed);
-      if (
-        normalizedId === 'openclaw'
-        && (integration.enabled !== true || integration.capabilities.semanticEnrichment === false)
-      ) {
-        deadLetterUnavailableOpenClawSemanticEvents(
-          extractionStatus,
-          dashDb,
-          'OpenClaw semantic enrichment is unavailable on this runtime',
-        );
+      if (normalizedId === 'openclaw') {
+        reconcileOpenClawSemanticAvailability(config, extractionStatus, dashDb);
       }
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });

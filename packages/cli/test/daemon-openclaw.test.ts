@@ -17,6 +17,7 @@ import {
   notifyLocalAgentIntegrationWake,
   canQueueLocalAgentSemanticEnrichment,
   queueLocalAgentSemanticEnrichmentBestEffort,
+  reconcileOpenClawSemanticAvailability,
   fileImportSourceIdentityMatchesCurrentState,
   normalizeQueriedLiteralValue,
   normalizeOntologyQuadObjectInput,
@@ -442,7 +443,7 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
-  it('allows semantic queueing for already-ready OpenClaw records before explicit capability re-registration lands', () => {
+  it('does not queue semantic jobs from stale ready OpenClaw state when explicit capability support is missing', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
         openclaw: {
@@ -456,7 +457,7 @@ describe('best-effort semantic enqueue helper', () => {
           },
         },
       },
-    }), 'openclaw')).toBe(true);
+    }), 'openclaw')).toBe(false);
   });
 
   it('does not queue semantic jobs during first-attach connecting state without explicit capability support', () => {
@@ -501,6 +502,54 @@ describe('best-effort semantic enqueue helper', () => {
         },
       },
     }), 'openclaw')).toBe(false);
+  });
+
+  it('dead-letters queued semantic events at reconciliation time when stored OpenClaw support is disabled', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: false,
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('does not dead-letter queued semantic events at reconciliation time when support is merely unknown', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn(),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            runtime: {
+              status: 'ready',
+              ready: true,
+            },
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
   });
 
   it('still persists the semantic event when OpenClaw is enabled but wake transport metadata is temporarily unavailable', () => {
@@ -2003,6 +2052,36 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.wakeUrl).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+
+  it('preserves wake transport metadata when OpenClaw updates still use the legacy top-level transport shim', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const integration = updateLocalAgentIntegration(config, 'openclaw', {
+      bridgeUrl: 'http://127.0.0.1:9301',
+      healthUrl: 'http://127.0.0.1:9301/health',
+      wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      wakeAuth: 'bridge-token',
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+    }, new Date('2026-04-13T10:50:00.000Z'));
+
+    expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
+    expect(integration.transport.healthUrl).toBe('http://127.0.0.1:9301/health');
+    expect(integration.transport.wakeUrl).toBe('http://127.0.0.1:9301/semantic-enrichment/wake');
+    expect(integration.transport.wakeAuth).toBe('bridge-token');
   });
 });
 

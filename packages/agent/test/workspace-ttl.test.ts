@@ -152,15 +152,7 @@ describe('Workspace TTL sync filtering', () => {
       { subject: 'urn:ttl-sync:old', predicate: 'http://schema.org/name', object: '"Old Data"', graph: '' },
     ]);
 
-    // Wait for it to expire
-    await sleep(3000);
-
-    // Write fresh entity
-    await nodeA.share('ttl-sync-test', [
-      { subject: 'urn:ttl-sync:new', predicate: 'http://schema.org/name', object: '"New Data"', graph: '' },
-    ]);
-
-    // Node B connects and syncs
+    // Set up nodeB while the stale data expires (saves wall-clock time)
     nodeB = await DKGAgent.create({
       name: 'TtlSyncB',
       listenPort: 0,
@@ -176,6 +168,14 @@ describe('Workspace TTL sync filtering', () => {
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
     if (addrA) await nodeB.connectTo(addrA);
     await sleep(1000);
+
+    // Ensure the old data has expired (TTL is 2s; node setup above took > 2s)
+    await sleep(1000);
+
+    // Write fresh entity right before sync so it's within the TTL window
+    await nodeA.share('ttl-sync-test', [
+      { subject: 'urn:ttl-sync:new', predicate: 'http://schema.org/name', object: '"New Data"', graph: '' },
+    ]);
 
     const synced = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, ['ttl-sync-test']);
     expect(synced).toBeGreaterThan(0);

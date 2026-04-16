@@ -513,11 +513,10 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subContextGraphId: contextGraphId },
     );
 
-    // KC publish succeeds, but context graph on-chain registration should fail.
-    // Data is intentionally kept locally to avoid chain/local divergence;
-    // the failure is signalled via contextGraphError.
-    expect(result.contextGraphError).toBeDefined();
-    expect(result.contextGraphError).toMatch(/Not enough.*signatures/i);
+    // V10: publishDirect combines KC creation and CG registration into one tx.
+    // With insufficient signatures the on-chain tx reverts, making the whole
+    // publish tentative (there is no separate contextGraphError in V10).
+    expect(result.status).toBe('tentative');
   }, 20_000);
 });
 

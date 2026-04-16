@@ -2175,19 +2175,13 @@ export class DKGAgent {
     let merkleRoot = params.merkleRoot;
     if (!merkleRoot) {
       const batch = (this.chain as any).getBatch?.(params.batchId);
-      if (!batch?.merkleRoot) {
-        throw new Error(
-          `Cannot resolve merkle root for batch ${params.batchId}. ` +
-          `Provide merkleRoot explicitly or use a chain adapter that supports getBatch.`,
-        );
-      }
-      merkleRoot = batch.merkleRoot;
+      merkleRoot = batch?.merkleRoot;
     }
 
     const result = await this.chain.verify({
       contextGraphId: BigInt(params.contextGraphId),
       batchId: params.batchId,
-      merkleRoot: merkleRoot!,
+      merkleRoot,
       signerSignatures: params.participantSignatures ?? [],
     });
     this.log.info(ctx, `addBatchToContextGraph: batch=${params.batchId} → ctxGraph=${params.contextGraphId} success=${result.success}`);

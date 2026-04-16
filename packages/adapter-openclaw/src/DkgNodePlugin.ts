@@ -424,10 +424,13 @@ export class DkgNodePlugin {
       const ctx = event?.context;
       const channelId = ctx?.channelId;
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      if (ctx?.success === false) return;
+      const key = conversationKey(ctx);
+      if (ctx?.success === false) {
+        pendingUserMessages.delete(key);
+        return;
+      }
 
       const content = typeof ctx?.content === 'string' ? ctx.content : '';
-      const key = conversationKey(ctx);
       const userMessage = pendingUserMessages.get(key) ?? '';
       pendingUserMessages.delete(key);
 

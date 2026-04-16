@@ -941,6 +941,60 @@ describe('SemanticEnrichmentWorker', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('stop timed out after 5000ms'),
     );
+    expect((worker as any).drainInFlight).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('clears a timed-out stale drain so a reused worker can drain again after restart', async () => {
+    vi.useFakeTimers();
+    let resolveOldDrain!: () => void;
+    let resolveNewDrain!: () => void;
+    const oldDrain = new Promise<void>((resolve) => {
+      resolveOldDrain = resolve;
+    });
+    const newDrain = new Promise<void>((resolve) => {
+      resolveNewDrain = resolve;
+    });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        } as any,
+      }),
+      makeClient(),
+    );
+
+    const drainOnce = vi.fn()
+      .mockImplementationOnce(() => oldDrain)
+      .mockImplementationOnce(() => newDrain);
+    (worker as any).drainOnce = drainOnce;
+
+    await worker.start();
+    worker.poke();
+    await Promise.resolve();
+    expect(drainOnce).toHaveBeenCalledTimes(1);
+
+    const stopPromise = worker.stop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await stopPromise;
+    expect((worker as any).drainInFlight).toBeNull();
+
+    await worker.start();
+    worker.poke();
+    await Promise.resolve();
+    expect(drainOnce).toHaveBeenCalledTimes(2);
+    expect((worker as any).drainInFlight).not.toBeNull();
+
+    resolveOldDrain();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect((worker as any).drainInFlight).not.toBeNull();
+
+    resolveNewDrain();
+    await worker.flush();
     vi.useRealTimers();
   });
 

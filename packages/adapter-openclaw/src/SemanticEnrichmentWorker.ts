@@ -324,6 +324,7 @@ export class SemanticEnrichmentWorker {
   private tickTimer: ReturnType<typeof setTimeout> | null = null;
   private drainInFlight: Promise<void> | null = null;
   private drainRequested = false;
+  private drainGeneration = 0;
   private readonly pending = new Map<string, PendingWakeRecord>();
 
   constructor(api: OpenClawPluginApi, client: DkgDaemonClient) {
@@ -362,6 +363,7 @@ export class SemanticEnrichmentWorker {
     if (this.started) return;
     this.stopSignal = this.createStopSignal();
     this.stopped = false;
+    this.drainRequested = false;
     if (!this.getRuntimeProbe().supported) return;
     this.started = true;
     this.scheduleTick(0);
@@ -435,6 +437,9 @@ export class SemanticEnrichmentWorker {
         }),
       ]);
       if (timedOut) {
+        this.drainGeneration += 1;
+        this.drainInFlight = null;
+        this.drainRequested = false;
         this.api.logger.warn?.(
           `[semantic-enrichment] stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for an in-flight drain; continuing shutdown`,
         );
@@ -459,13 +464,17 @@ export class SemanticEnrichmentWorker {
     }
 
     this.drainRequested = false;
-    this.drainInFlight = this.drainOnce()
+    const drainGeneration = ++this.drainGeneration;
+    const drainPromise = this.drainOnce()
       .catch((err: any) => {
         this.api.logger.warn?.(
           `[semantic-enrichment] drain failed: ${err?.message ?? String(err)}`,
         );
       })
       .finally(() => {
+        if (this.drainGeneration !== drainGeneration || this.drainInFlight !== drainPromise) {
+          return;
+        }
         this.drainInFlight = null;
         if (this.stopped) return;
         if (this.drainRequested) {
@@ -477,6 +486,7 @@ export class SemanticEnrichmentWorker {
         // reclaimed leases.
         this.scheduleTick(CLAIM_POLL_INTERVAL_MS);
       });
+    this.drainInFlight = drainPromise;
   }
 
   private async drainOnce(): Promise<void> {

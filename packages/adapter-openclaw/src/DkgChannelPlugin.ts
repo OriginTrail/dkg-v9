@@ -1936,8 +1936,7 @@ export class DkgChannelPlugin {
   private handleSemanticEnrichmentWake(payload: SemanticEnrichmentWakeEnvelope): boolean {
     const worker = this.ensureSemanticEnrichmentWorker();
     if (!worker) return false;
-    const probe = worker.getRuntimeProbe();
-    if (!probe.supported) return false;
+    if (!worker.isActive()) return false;
     worker.noteWake({
       kind: payload.eventKind,
       eventKey: payload.eventId,

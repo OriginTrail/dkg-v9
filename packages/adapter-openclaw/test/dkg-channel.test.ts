@@ -338,6 +338,7 @@ describe('DkgChannelPlugin', () => {
       } as any,
     });
     plugin.register(api);
+    await plugin.startSemanticEnrichmentWorker();
 
     const port = await waitForBridgePort(plugin);
     const wakeUrl = `http://127.0.0.1:${port}/semantic-enrichment/wake`;
@@ -385,6 +386,44 @@ describe('DkgChannelPlugin', () => {
     const worker = (plugin as any).ensureSemanticEnrichmentWorker();
     expect(claimSemanticEnrichmentEvent).toHaveBeenCalled();
     expect(worker.getPendingSummaries()).toEqual([]);
+  });
+
+  it('gateway semantic wake endpoint returns 503 when the semantic worker has been stopped', async () => {
+    const registerHttpRoute = vi.fn();
+    const api = makeApi({
+      registerHttpRoute,
+      runtime: {
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        },
+      } as any,
+    }) as any;
+    plugin.register(api);
+    await plugin.startSemanticEnrichmentWorker();
+    await plugin.stopSemanticEnrichmentWorker();
+
+    const wakeRoute = registerHttpRoute.mock.calls
+      .map((call) => call[0])
+      .find((route: any) => route.path === '/api/dkg-channel/semantic-enrichment/wake');
+    expect(wakeRoute).toBeTruthy();
+
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+    await wakeRoute.handler({
+      body: {
+        kind: 'semantic_enrichment',
+        eventKind: 'chat_turn',
+        eventId: 'evt-gateway-stopped',
+      },
+    }, res);
+
+    expect(res.writeHead).toHaveBeenCalledWith(503, { 'Content-Type': 'application/json' });
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
   });
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {

@@ -379,8 +379,8 @@ describe('DkgNodePlugin', () => {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:19789',
           bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
-          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
-          wakeAuth: 'bridge-token',
+          wakeUrl: 'http://127.0.0.1:19789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
         },
       });
     } finally {

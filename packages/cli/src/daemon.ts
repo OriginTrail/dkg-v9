@@ -2252,8 +2252,10 @@ export function canQueueLocalAgentSemanticEnrichment(
   opts?: { liveSemanticEnrichmentSupported?: boolean },
 ): boolean {
   const normalizedId = normalizeIntegrationId(integrationId);
-  if (opts?.liveSemanticEnrichmentSupported === true && normalizedId === 'openclaw') return true;
   const stored = getStoredLocalAgentIntegrations(config)[normalizedId];
+  if (opts?.liveSemanticEnrichmentSupported === true && normalizedId === 'openclaw') {
+    return stored?.enabled === true;
+  }
   if (!stored?.enabled) return false;
   if (stored.capabilities?.semanticEnrichment === false) return false;
   if (stored.capabilities?.semanticEnrichment === true) return true;

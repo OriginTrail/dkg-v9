@@ -444,9 +444,22 @@ describe('best-effort semantic enqueue helper', () => {
   });
 
   it('allows queueing when the live adapter request advertises semantic enrichment support before stored capability sync lands', () => {
-    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw', {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+          },
+        },
+      },
+    }), 'openclaw', {
       liveSemanticEnrichmentSupported: true,
     })).toBe(true);
+
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw', {
+      liveSemanticEnrichmentSupported: true,
+    })).toBe(false);
 
     const dashDb = {
       getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
@@ -460,7 +473,16 @@ describe('best-effort semantic enqueue helper', () => {
     };
 
     const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
-      config: makeConfig(),
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+            },
+          },
+        },
+      }),
       dashDb: dashDb as any,
       integrationId: 'openclaw',
       kind: 'chat_turn',

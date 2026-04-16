@@ -608,12 +608,12 @@ export class DkgNodePlugin {
       }
     }
 
-    if (liveBridgeUrl) {
-      transport.wakeUrl = `${liveBridgeUrl}/semantic-enrichment/wake`;
-      transport.wakeAuth = 'bridge-token';
-    } else if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
+    if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
       transport.wakeUrl = `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`;
       transport.wakeAuth = 'gateway';
+    } else if (liveBridgeUrl) {
+      transport.wakeUrl = `${liveBridgeUrl}/semantic-enrichment/wake`;
+      transport.wakeAuth = 'bridge-token';
     } else if (transport.bridgeUrl) {
       transport.wakeUrl = `${transport.bridgeUrl}/semantic-enrichment/wake`;
       transport.wakeAuth = 'bridge-token';

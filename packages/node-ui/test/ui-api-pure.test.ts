@@ -41,7 +41,6 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
-  IMPORT_SOURCES,
   gameApi,
 } from '../src/ui/api.js';
 
@@ -64,15 +63,15 @@ afterEach(() => {
 
 describe('fileUrl', () => {
   it('preserves sha256: prefix', () => {
-    expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256:abcdef');
+    expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256%3Aabcdef');
   });
 
   it('preserves keccak256: prefix', () => {
-    expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256:abcdef');
+    expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256%3Aabcdef');
   });
 
   it('adds sha256: prefix to bare hashes', () => {
-    expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256:abcdef0123456789');
+    expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256%3Aabcdef0123456789');
   });
 
   it('appends contentType query param when provided', () => {
@@ -469,11 +468,6 @@ describe('gameApi', () => {
   });
 });
 
-describe('IMPORT_SOURCES', () => {
-  it('contains expected sources', () => {
-    expect(IMPORT_SOURCES).toContain('claude');
-    expect(IMPORT_SOURCES).toContain('chatgpt');
-    expect(IMPORT_SOURCES).toContain('gemini');
-    expect(IMPORT_SOURCES).toContain('other');
-  });
-});
+// IMPORT_SOURCES test block removed — the constant was retired along
+// with /api/memory/import as part of the openclaw-dkg-primary-memory
+// work. See Dashboard / ui/api.ts for the deletion context.

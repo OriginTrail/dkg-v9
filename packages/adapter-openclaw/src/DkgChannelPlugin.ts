@@ -17,6 +17,7 @@
  * full context continuity.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
@@ -214,6 +215,41 @@ interface PersistTurnOptions {
 interface InboundChatOptions {
   attachmentRefs?: OpenClawAttachmentRef[];
   contextEntries?: ChatContextEntry[];
+  /**
+   * UI-selected project context graph ID for this turn. The node UI stamps
+   * this onto the outbound `/api/openclaw-channel/send` payload; the
+   * adapter uses it to scope slot-backed memory recall and per-project
+   * memory imports to the user's current project. Optional — turns that
+   * arrive without it run in the documented degraded mode
+   * (single-graph agent-context only, or `needs_clarification` on write).
+   */
+  uiContextGraphId?: string;
+}
+
+/**
+ * Per-dispatch context propagated through Node's AsyncLocalStorage so that
+ * `DkgMemorySessionResolver.getSession(sessionKey)` — invoked by the
+ * memory-slot search manager from inside the dispatch call tree — can
+ * observe the UI-selected project context graph for the owning turn.
+ *
+ * Scoping via ALS rather than a shared `Map<sessionKey, state>` is
+ * load-bearing: OpenClaw can dispatch multiple overlapping turns on the
+ * same `sessionKey` (same user, same chat, same agent). A shared map
+ * keyed by `sessionKey` would let a later turn's stash clobber an
+ * earlier still-running turn's state, silently routing that turn's
+ * recall to the wrong project. ALS isolates each dispatch's store to
+ * its own async call tree regardless of sessionKey overlap.
+ *
+ * Codex Bug B6 — the TTL-based cache that preceded this ALS was scoped
+ * wrong.
+ */
+interface DkgDispatchContext {
+  /** UI-selected project context graph stamped on the turn envelope. */
+  uiContextGraphId?: string;
+  /** The OpenClaw-resolved sessionKey this dispatch is running on. */
+  sessionKey?: string;
+  /** Turn correlation id, for diagnostics. */
+  correlationId?: string;
 }
 
 function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
@@ -224,6 +260,67 @@ function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
   const value = typeof record.value === 'string' ? record.value.trim() : '';
   if (!key || !label || !value) return null;
   return { key, label, value };
+}
+
+/**
+ * Strip ASCII control characters (C0 + DEL) from a diagnostic-log field
+ * so a crafted envelope value cannot inject a forged log line via
+ * embedded `\n`, `\r`, or other control chars. Matches the same
+ * character range as `sanitizeChatContextEntries` (`[\u0000-\u001F\u007F]`)
+ * applied elsewhere in the dispatch path; this helper runs earlier,
+ * inside the diagnostic formatter, so the log integrity does not depend
+ * on upstream sanitization timing.
+ */
+function sanitizeDiagnosticField(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, ' ');
+}
+
+/**
+ * Format a one-line diagnostic describing the parsed envelope for an
+ * inbound chat turn. Used by `handleInboundHttp` and
+ * `handleInboundStreamHttp` to give operators runtime ground truth on
+ * whether the UI-selected project (`uiContextGraphId`) and the
+ * `contextEntries` the renderer sees are actually arriving at the
+ * adapter bridge. The log line is info-level because it is the only
+ * observable signal for the envelope-stamping chain between the UI
+ * dropdown and the agent body renderer; without it, operators have to
+ * guess whether a "can't see UI state" symptom is a UI React-state bug,
+ * a daemon-proxy dropout, or an agent-interpretation issue.
+ *
+ * Log-injection hardening: `normalizeChatContextEntry` only trims
+ * whitespace at parse time — it does NOT strip control characters.
+ * Full control-char sanitization (`sanitizeChatContextEntries`) happens
+ * later in `processInbound`/`processInboundStream`, AFTER this
+ * diagnostic log has already fired. So this formatter runs its own
+ * sanitization pass (`sanitizeDiagnosticField`) on every field it
+ * echoes — correlation id, `uiContextGraphId`, entry keys, entry
+ * values — to defeat a crafted envelope like
+ * `value: "foo\n[dkg-channel] FAKE LOG LINE: bar"` from injecting a
+ * forged log line. Bridge auth limits the reach of this attack to
+ * authorized callers anyway, but log integrity should not be
+ * load-bearing on authorization.
+ */
+export function formatInboundTurnDiagnostic(
+  correlationId: string,
+  uiContextGraphId: string | undefined,
+  contextEntries: ChatContextEntry[] | undefined,
+): string {
+  const safeCorrelationId = sanitizeDiagnosticField(correlationId);
+  const safeUiContextGraphId = uiContextGraphId === undefined
+    ? '∅'
+    : sanitizeDiagnosticField(uiContextGraphId);
+  const entryCount = contextEntries?.length ?? 0;
+  const entrySummary = entryCount > 0
+    ? ` [${contextEntries!
+        .map((entry) => `${sanitizeDiagnosticField(entry.key)}=${sanitizeDiagnosticField(entry.value)}`)
+        .join(', ')}]`
+    : '';
+  return (
+    '[dkg-channel] inbound turn: ' +
+    `correlationId=${safeCorrelationId}, ` +
+    `uiContextGraphId=${safeUiContextGraphId}, ` +
+    `contextEntries=${entryCount}${entrySummary}`
+  );
 }
 
 function normalizeChatContextEntries(raw: unknown): ChatContextEntry[] | undefined {
@@ -257,6 +354,16 @@ export class DkgChannelPlugin {
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
   }>();
+  /**
+   * Per-dispatch AsyncLocalStorage holding the UI-selected project
+   * context graph for the currently-running turn. Populated by
+   * `runWithDispatchContext` at the start of each dispatch and read by
+   * `getSessionProjectContextGraphId` from inside the dispatch's async
+   * call tree. Automatically scoped to the dispatch — no explicit
+   * clear needed, concurrent turns on the same `sessionKey` cannot
+   * collide.
+   */
+  private readonly dispatchContext = new AsyncLocalStorage<DkgDispatchContext>();
   private readonly port: number;
   private useGatewayRoute = false;
   private channelRegistered = false;
@@ -272,6 +379,54 @@ export class DkgChannelPlugin {
     private readonly client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  /**
+   * Read the UI-selected project context graph for the currently-running
+   * dispatch. Used by `DkgMemorySessionResolver` inside `DkgNodePlugin`
+   * to scope slot-backed memory recall to the user's current project.
+   *
+   * Implementation: reads from AsyncLocalStorage, so the value is only
+   * visible to code running inside the dispatch's async call tree. The
+   * `sessionKey` argument is used as a sanity check — if the dispatch
+   * stamped a different sessionKey than the caller is asking about, we
+   * return `undefined` rather than a mismatched CG. Tool calls made
+   * during the dispatch all share the same sessionKey, so the check
+   * costs nothing in practice.
+   *
+   * Returns `undefined` when:
+   * - the caller is not inside an active dispatch (no ALS store),
+   * - the dispatch carried no `uiContextGraphId` (non-UI turn, or user
+   *   deselected the project),
+   * - the caller's `sessionKey` does not match the dispatch's
+   *   `sessionKey` (defensive: indicates a misuse where the resolver
+   *   is being called from outside the owning dispatch's call tree).
+   */
+  getSessionProjectContextGraphId(sessionKey: string | undefined): string | undefined {
+    const store = this.dispatchContext.getStore();
+    if (!store) return undefined;
+    if (!store.uiContextGraphId) return undefined;
+    if (sessionKey && store.sessionKey && sessionKey !== store.sessionKey) {
+      return undefined;
+    }
+    return store.uiContextGraphId;
+  }
+
+  /**
+   * Run `fn` inside an AsyncLocalStorage-scoped dispatch context so that
+   * any `getSessionProjectContextGraphId` call issued from inside `fn`
+   * (directly or via async descendants) observes the per-turn UI context
+   * graph. Scope is automatically cleared when `fn` resolves, rejects,
+   * or throws — no manual cleanup required.
+   *
+   * Concurrent dispatches on the same `sessionKey` each get their own
+   * isolated store; one cannot clobber another.
+   */
+  private runWithDispatchContext<T>(
+    context: DkgDispatchContext,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return this.dispatchContext.run(context, fn);
   }
 
   // ---------------------------------------------------------------------------
@@ -610,6 +765,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -621,7 +779,7 @@ export class DkgChannelPlugin {
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
@@ -637,13 +795,28 @@ export class DkgChannelPlugin {
 
     if (typeof api.routeInboundMessage === 'function') {
       api.logger.info?.(`[dkg-channel] Dispatching via api.routeInboundMessage for: ${correlationId}`);
-      const reply = await api.routeInboundMessage({
-        channelName: CHANNEL_NAME,
-        senderId: identity || 'owner',
-        senderIsOwner: true,
-        text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
+      // B13: The plugin-sdk dispatch path (dispatchViaPluginSdk) runs the
+      // turn inside an ALS scope so slot-backed tool calls can observe the
+      // UI-selected `uiContextGraphId`. The `routeInboundMessage` fallback
+      // used when `runtime.channel` is unavailable must do the same, or
+      // tool calls fired during this dispatch will read an empty ALS store
+      // and silently degrade recall to `agent-context` only. We don't have
+      // a resolved sessionKey on this path (routing lives in
+      // runtime.channel), so the context carries only `uiContextGraphId`
+      // and `correlationId`.
+      const dispatchContext: DkgDispatchContext = {
+        uiContextGraphId,
         correlationId,
-      } as any);
+      };
+      const reply = await this.runWithDispatchContext(dispatchContext, () =>
+        api.routeInboundMessage!({
+          channelName: CHANNEL_NAME,
+          senderId: identity || 'owner',
+          senderIsOwner: true,
+          text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
+          correlationId,
+        } as any),
+      );
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
       }, true);
@@ -666,6 +839,7 @@ export class DkgChannelPlugin {
     identity: string,
     attachmentRefs?: OpenClawAttachmentRef[],
     contextEntries?: ChatContextEntry[],
+    uiContextGraphId?: string,
   ): Promise<ChannelOutboundReply> {
     const log = this.api!.logger;
     const runtime = this.runtime;
@@ -744,15 +918,34 @@ export class DkgChannelPlugin {
       } : {}),
     };
 
-    // 5. Dispatch and collect reply
+    // 5. Dispatch and collect reply.
+    //
+    // Scope the entire dispatch call tree inside an AsyncLocalStorage
+    // context that carries the UI-selected project context graph for
+    // THIS turn. `DkgMemorySearchManager.search` (fired by the memory
+    // slot's tool calls during this dispatch) reads the CG via
+    // `getSessionProjectContextGraphId`, which reads from the ALS store.
+    // When this promise resolves/rejects the ALS scope is cleared
+    // automatically. Concurrent overlapping dispatches on the same
+    // sessionKey each get their own isolated store; one cannot clobber
+    // another. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     if (sdk?.dispatchInboundReplyWithBase) {
       log.info?.('[dkg-channel] Using plugin-sdk dispatchInboundReplyWithBase');
-      return this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId);
+      return this.runWithDispatchContext(dispatchContext, () =>
+        this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId),
+      );
     }
 
     // 6. Direct runtime dispatch fallback (no sdk)
     log.debug?.('[dkg-channel] Using direct runtime dispatch');
-    return this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId);
+    return this.runWithDispatchContext(dispatchContext, () =>
+      this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId),
+    );
   }
 
   private dispatchWithSdk(
@@ -879,6 +1072,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -887,7 +1083,7 @@ export class DkgChannelPlugin {
     }
 
     if (!runtime?.channel || !cfg) {
-      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries });
+      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
       return;
     }
@@ -906,6 +1102,13 @@ export class DkgChannelPlugin {
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
     }
+    // ALS-scoped dispatch context for this streaming turn — see the
+    // matching comment in dispatchViaPluginSdk. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
@@ -987,7 +1190,9 @@ export class DkgChannelPlugin {
           ),
         );
 
-    const dispatchCompletion = dispatchFn()
+    // Run the dispatch inside the ALS scope so tool calls fired by the
+    // slot during streaming observe the UI-selected CG for this turn.
+    const dispatchCompletion = this.runWithDispatchContext(dispatchContext, dispatchFn)
       .then(() => {
         dispatchTerminal = 'done';
         push({ type: 'done' });
@@ -1220,8 +1425,10 @@ export class DkgChannelPlugin {
   }
 
   /**
-   * Persist a chat turn to the DKG agent-memory graph.
-   * Fire-and-forget — errors are logged but don't affect the reply.
+   * Persist a chat turn into the `'chat-turns'` Working Memory assertion of
+   * the `'agent-context'` context graph via the daemon's
+   * `/api/openclaw-channel/persist-turn` route. Fire-and-forget — errors
+   * are logged but don't affect the reply.
    */
   private async persistTurn(
     userMessage: string,
@@ -1356,7 +1563,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1384,13 +1591,17 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
           return;
         }
+        const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+          ? parsed.uiContextGraphId.trim()
+          : undefined;
         const { text, correlationId, identity } = parsed;
         if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
           return;
         }
-        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
+        this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
@@ -1419,7 +1630,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1446,12 +1657,16 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
+      const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+        ? parsed.uiContextGraphId.trim()
+        : undefined;
       const { text, correlationId, identity } = parsed;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
       // Write SSE headers
       res.writeHead(200, {
@@ -1465,7 +1680,7 @@ export class DkgChannelPlugin {
       res.on('error', () => { clientDisconnected = true; });
 
       try {
-        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries })) {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId })) {
           if (clientDisconnected) break;
           const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
           if (!ok) await new Promise<void>((r) => res.once('drain', r));
@@ -1500,14 +1715,18 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
+      const uiContextGraphId = typeof body.uiContextGraphId === 'string' && body.uiContextGraphId.trim()
+        ? body.uiContextGraphId.trim()
+        : undefined;
       const { text, correlationId, identity } = body;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
+      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {

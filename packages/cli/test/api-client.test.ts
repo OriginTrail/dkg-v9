@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
 
 const PORT = 8899;
@@ -23,13 +26,16 @@ function mockFetchError(status: number, body: unknown) {
 describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
+  let tempDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-test-'));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   describe('GET endpoints', () => {
@@ -120,6 +126,27 @@ describe('ApiClient', () => {
       const body = JSON.parse((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-paranet');
+    });
+
+    it('createContextGraph() includes private and participant identity options when provided', async () => {
+      globalThis.fetch = mockFetchOk({ created: 'GuardianTest', uri: 'did:dkg:context-graph:GuardianTest' });
+      await client.createContextGraph('GuardianTest', 'Guardian Test', 'private graph', {
+        private: true,
+        participantIdentityIds: [11n, '12', 13],
+        requiredSignatures: 1,
+      });
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/create`);
+      const body = JSON.parse(opts.body);
+      expect(body).toEqual({
+        id: 'GuardianTest',
+        name: 'Guardian Test',
+        description: 'private graph',
+        private: true,
+        participantIdentityIds: ['11', '12', '13'],
+        requiredSignatures: 1,
+      });
     });
 
     it('publishCclPolicy() posts policy payload', async () => {
@@ -231,6 +258,36 @@ describe('ApiClient', () => {
         json: () => Promise.reject(new Error('no json')),
       });
       await expect(client.status()).rejects.toThrow('Internal Server Error');
+    });
+
+    it('prefers extraction.error for multipart import failures and preserves the parsed body', async () => {
+      const filePath = join(tempDir, 'sample.pdf');
+      await writeFile(filePath, Buffer.from('%PDF-1.4\n', 'utf-8'));
+      globalThis.fetch = mockFetchError(400, {
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await client.importAssertionFile('paper', { filePath, contextGraphId: 'research' });
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('PDF converter crashed');
+      expect((thrown as Error & { httpStatus: number }).httpStatus).toBe(400);
+      expect((thrown as Error & { responseBody?: unknown }).responseBody).toEqual({
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
     });
   });
 

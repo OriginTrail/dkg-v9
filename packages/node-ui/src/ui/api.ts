@@ -158,14 +158,35 @@ export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
 // --- Sync Status ---
 export const fetchSyncStatus = () => get<any>('/api/sync/status');
 
-export async function createContextGraph(id: string, name: string, description?: string): Promise<{ created: string; uri: string }> {
+// --- Agent Identity ---
+export interface AgentIdentity {
+  agentAddress: string;
+  agentDid: string;
+  name: string;
+  framework?: string;
+  peerId: string;
+  nodeIdentityId: string;
+}
+
+export const fetchCurrentAgent = () => get<AgentIdentity>('/api/agent/identity');
+
+export async function createContextGraph(
+  id: string,
+  name: string,
+  description?: string,
+  opts?: { allowedAgents?: string[]; accessPolicy?: number },
+): Promise<{ created: string; uri: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
     const res = await fetch(`${BASE}/api/paranet/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ id, name, description }),
+      body: JSON.stringify({
+        id, name, description,
+        ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
+        ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
+      }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -182,6 +203,47 @@ export async function createContextGraph(id: string, name: string, description?:
     clearTimeout(timeout);
   }
 }
+
+// --- Context Graph Participant Management ---
+export const addParticipant = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+
+export const removeParticipant = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+
+export const listParticipants = (contextGraphId: string) =>
+  get<{ contextGraphId: string; allowedAgents: string[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+
+// --- Join Request flow (Phase 2: signed requests + approval) ---
+export interface SignedJoinRequest {
+  contextGraphId: string;
+  agentAddress: string;
+  timestamp: number;
+  signature: string;
+}
+
+export interface PendingJoinRequest {
+  agentAddress: string;
+  name?: string;
+  signature: string;
+  timestamp: number;
+  status: string;
+}
+
+export const signJoinRequest = (contextGraphId: string) =>
+  post<SignedJoinRequest>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`, {});
+
+export const submitJoinRequest = (contextGraphId: string, req: SignedJoinRequest & { agentName?: string }) =>
+  post<{ ok: boolean; status: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`, req);
+
+export const listJoinRequests = (contextGraphId: string) =>
+  get<{ contextGraphId: string; requests: PendingJoinRequest[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+
+export const approveJoinRequest = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+
+export const rejectJoinRequest = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
 
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
@@ -270,8 +332,14 @@ export async function importFile(
 }
 
 // --- Query ---
-export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>
-  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix });
+export const executeQuery = (
+  sparql: string,
+  contextGraphId?: string,
+  includeSharedMemory?: boolean,
+  graphSuffix?: '_shared_memory',
+  view?: 'verified-memory' | 'shared-working-memory',
+) =>
+  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
 
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
@@ -330,11 +398,11 @@ export const fetchExtractionStatus = (assertionName: string, contextGraphId: str
 
 /** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {
+  const normalizedHash = hash.startsWith('sha256:') || hash.startsWith('keccak256:')
+    ? hash
+    : `sha256:${hash}`;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  if (hash.startsWith('keccak256:') || hash.startsWith('sha256:')) {
-    return `${BASE}/api/file/${hash}${params}`;
-  }
-  return `${BASE}/api/file/sha256:${hash}${params}`;
+  return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
 export interface SwmRootEntity {
@@ -478,27 +546,11 @@ export const publishMemorySession = (
 export const fetchMemoryStats = () =>
   get<{ contextGraphId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
-export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
-export type ImportSource = (typeof IMPORT_SOURCES)[number];
-
-export interface ImportMemoryQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-}
-
-export interface ImportMemoryResult {
-  batchId: string | null;
-  source: ImportSource;
-  memoryCount: number;
-  tripleCount: number;
-  entityCount: number;
-  quads: ImportMemoryQuad[];
-  quadsTruncated?: boolean;
-  warnings?: string[];
-}
-export const importMemories = (text: string, source?: ImportSource, useLlm?: boolean) =>
-  post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
+// IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
+// importMemories were retired with the /api/memory/import V9 relic as
+// part of the openclaw-dkg-primary-memory work. Agents write memory via
+// the adapter's dkg_memory_import tool, and file-import flows go through
+// /api/assertion/:name/import-file directly.
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>
@@ -554,6 +606,15 @@ interface LocalAgentChatRequestOptions {
   identity?: string;
   attachments?: LocalAgentChatAttachmentRef[];
   contextEntries?: LocalAgentChatContextEntry[];
+  /**
+   * UI-selected project context graph for this turn. Forwarded to the
+   * adapter's channel bridge as `uiContextGraphId` on the envelope so the
+   * adapter's DKG memory slot can scope slot-backed recall to the user's
+   * current project. `DkgMemorySearchManager.search` reads it via the
+   * per-session resolver; `dkg_memory_import` uses it as the fallback CG
+   * when the agent does not supply one explicitly.
+   */
+  contextGraphId?: string;
 }
 
 export const sendOpenClawChat = (peerId: string, text: string) =>
@@ -574,6 +635,7 @@ export async function sendOpenClawLocalChat(
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -609,6 +671,7 @@ export async function streamOpenClawLocalChat(
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -1045,6 +1108,8 @@ export async function streamLocalAgentChat(
     sessionId?: string;
     attachments?: LocalAgentChatAttachmentRef[];
     contextEntries?: LocalAgentChatContextEntry[];
+    /** UI-selected project context graph for this turn (memory scope). */
+    contextGraphId?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();
@@ -1123,7 +1188,7 @@ export const shutdownNode = () =>
 export const fetchIntegrations = () =>
   get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; contextGraphs: any[] }>('/api/integrations');
 export const subscribeToContextGraph = (contextGraphId: string) =>
-  post<{ subscribed: string }>('/api/subscribe', { contextGraphId });
+  post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
 
 // --- Notifications ---
 

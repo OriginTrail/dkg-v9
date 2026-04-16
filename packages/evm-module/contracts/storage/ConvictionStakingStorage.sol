@@ -345,14 +345,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     }
 
     function setLastClaimedEpoch(uint256 tokenId, uint64 epoch) external onlyContracts {
-        require(positions[tokenId].raw > 0, "No position");
+        require(positions[tokenId].identityId != 0, "No position");
         positions[tokenId].lastClaimedEpoch = epoch;
         emit LastClaimedEpochUpdated(tokenId, epoch);
     }
 
     function deletePosition(uint256 tokenId) external onlyContracts {
         Position memory pos = positions[tokenId];
-        require(pos.raw > 0, "No position");
+        require(pos.identityId != 0, "No position");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         uint96 raw = pos.raw;

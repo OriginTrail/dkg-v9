@@ -491,6 +491,22 @@ describe('@unit ConvictionStakingStorage', () => {
     it('Reverts on missing position', async () => {
       await expect(ConvictionStakingStorage.deletePosition(42)).to.be.revertedWith('No position');
     });
+
+    it('Succeeds on a rewards-only position (raw==0, identityId!=0)', async () => {
+      // Phase 5 round-2 fix: deletePosition uses `identityId != 0` as the
+      // existence sentinel so it accepts a position that was partially drained
+      // to raw==0 but still has a live identityId (rewards-only state).
+      await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 0, ONE_X);
+      // Drain raw to 0 — position becomes rewards-only (identityId still set).
+      await ConvictionStakingStorage.decreaseRaw(1, 1000);
+      const pos = await ConvictionStakingStorage.getPosition(1);
+      expect(pos.raw).to.equal(0);
+      expect(pos.identityId).to.equal(ALICE_ID);
+      // deletePosition must succeed — old `raw > 0` guard would have reverted.
+      await expect(ConvictionStakingStorage.deletePosition(1)).to.not.be.reverted;
+      const deleted = await ConvictionStakingStorage.getPosition(1);
+      expect(deleted.identityId).to.equal(0);
+    });
   });
 
   describe('setLastClaimedEpoch', () => {
@@ -504,6 +520,20 @@ describe('@unit ConvictionStakingStorage', () => {
       await expect(
         ConvictionStakingStorage.setLastClaimedEpoch(1, 1),
       ).to.be.revertedWith('No position');
+    });
+
+    it('Succeeds on a rewards-only position (raw==0, identityId!=0)', async () => {
+      // Phase 5 round-2 fix: setLastClaimedEpoch uses `identityId != 0` so
+      // it works on positions where raw has been fully drained but the
+      // position struct is still alive (rewards-only state).
+      await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 0, ONE_X);
+      await ConvictionStakingStorage.decreaseRaw(1, 1000);
+      const pos = await ConvictionStakingStorage.getPosition(1);
+      expect(pos.raw).to.equal(0);
+      expect(pos.identityId).to.equal(ALICE_ID);
+      // Must succeed — old `raw > 0` guard would have reverted.
+      await ConvictionStakingStorage.setLastClaimedEpoch(1, 99);
+      expect((await ConvictionStakingStorage.getPosition(1)).lastClaimedEpoch).to.equal(99);
     });
   });
 

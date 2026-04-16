@@ -509,4 +509,228 @@ describe('@integration V10 Phase 11 — full reward flywheel', function () {
     const opFee = await StakingStorageContract.getOperatorFeeBalance(identityId);
     expect(opFee).to.equal(0n);
   });
+
+  // -----------------------------------------------------------------------
+  // 3-way mixed V8 + multiple V10 positions on the same node
+  // -----------------------------------------------------------------------
+
+  it('3-way same-node: Carol(V8 1000) + Alice(V10 6x 1000) + Bob(V10 2x 1000) share rewards correctly', async function () {
+    // Actors
+    const nodeOp = accounts[1];
+    const nodeAdmin = accounts[2];
+    const alice = accounts[3];   // V10, 12-epoch lock = 6x
+    const bob = accounts[4];     // V10, 3-epoch lock = 2x
+    const carol = accounts[5];   // V8, 1x
+
+    // No operator fee — 0% for clean math
+    const { identityId } = await createProfile(ProfileContract, {
+      operational: nodeOp,
+      admin: nodeAdmin,
+    });
+
+    // ------------------------------------------------------------------
+    // Stake: Alice V10 1000 TRAC @ 12 epochs (6x) → effective 6000
+    // ------------------------------------------------------------------
+    const ALICE_RAW = toTRAC(1_000);
+    const ALICE_LOCK = 12;
+    const ALICE_MULT = 6n * SCALE18;
+    const ALICE_EFF = (ALICE_RAW * ALICE_MULT) / SCALE18; // 6000e18
+
+    await Token.mint(alice.address, ALICE_RAW);
+    await Token.connect(alice).approve(await StakingV10Contract.getAddress(), ALICE_RAW);
+    await NFT.connect(alice).createConviction(identityId, ALICE_RAW, ALICE_LOCK);
+    const aliceTokenId = 0n;
+
+    const alicePos = await ConvictionStorageContract.getPosition(aliceTokenId);
+    expect(alicePos.identityId).to.equal(identityId);
+    expect(alicePos.raw).to.equal(ALICE_RAW);
+    expect(alicePos.multiplier18).to.equal(ALICE_MULT);
+
+    // ------------------------------------------------------------------
+    // Stake: Bob V10 1000 TRAC @ 3 epochs (2x) → effective 2000
+    // ------------------------------------------------------------------
+    const BOB_RAW = toTRAC(1_000);
+    const BOB_LOCK = 3;
+    const BOB_MULT = 2n * SCALE18;
+    const BOB_EFF = (BOB_RAW * BOB_MULT) / SCALE18; // 2000e18
+
+    await Token.mint(bob.address, BOB_RAW);
+    await Token.connect(bob).approve(await StakingV10Contract.getAddress(), BOB_RAW);
+    await NFT.connect(bob).createConviction(identityId, BOB_RAW, BOB_LOCK);
+    const bobTokenId = 1n;
+
+    const bobPos = await ConvictionStorageContract.getPosition(bobTokenId);
+    expect(bobPos.identityId).to.equal(identityId);
+    expect(bobPos.raw).to.equal(BOB_RAW);
+    expect(bobPos.multiplier18).to.equal(BOB_MULT);
+
+    // ------------------------------------------------------------------
+    // Stake: Carol V8 1000 TRAC (1x) → effective 1000
+    // ------------------------------------------------------------------
+    const CAROL_RAW = toTRAC(1_000);
+    const CAROL_EFF = CAROL_RAW; // 1000e18
+
+    await Token.mint(carol.address, CAROL_RAW);
+    await Token.connect(carol).approve(await StakingContract.getAddress(), CAROL_RAW);
+    await StakingContract.connect(carol).stake(identityId, CAROL_RAW);
+
+    // ------------------------------------------------------------------
+    // Effective stake calculations:
+    //   nodeStake (StakingStorage) = Alice 1000 + Bob 1000 + Carol 1000 = 3000
+    //   nodeEffV10 (ConvictionStakingStorage) = Alice 6000 + Bob 2000 = 8000
+    //   nodeV10BaseStake = Alice 1000 + Bob 1000 = 2000
+    //   effectiveNodeStake = 3000 + (8000 - 2000) = 9000
+    //
+    //   Carol share = 1000/9000 = 1/9
+    //   Alice share = 6000/9000 = 2/3
+    //   Bob share   = 2000/9000 = 2/9
+    //   Total       = 1/9 + 6/9 + 2/9 = 9/9 ✓
+    // ------------------------------------------------------------------
+    const TOTAL_EFF_3WAY = ALICE_EFF + BOB_EFF + CAROL_EFF; // 9000e18
+
+    // Sanity: combined raw node stake = 3000 TRAC
+    const nodeStake = await StakingStorageContract.getNodeStake(identityId);
+    expect(nodeStake).to.equal(ALICE_RAW + BOB_RAW + CAROL_RAW);
+
+    const stakingEpoch = await Chronos.getCurrentEpoch();
+
+    // ------------------------------------------------------------------
+    // Fund epoch pool with 9000 TRAC for clean math
+    // ------------------------------------------------------------------
+    const EPOCH_POOL = toTRAC(9_000);
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      EPOCH_POOL_INDEX,
+      stakingEpoch,
+      stakingEpoch,
+      EPOCH_POOL,
+    );
+    const ssAddr = await StakingStorageContract.getAddress();
+    await Token.mint(ssAddr, EPOCH_POOL);
+
+    // ------------------------------------------------------------------
+    // Inject scores (single node in the network)
+    // ------------------------------------------------------------------
+    const nodeScore = toTRAC(1_000);
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      stakingEpoch,
+      nodeScore,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      stakingEpoch,
+      identityId,
+      nodeScore,
+    );
+
+    // scorePerStake36 = nodeScore * 1e18 / effectiveNodeStake
+    //                 = 1000e18 * 1e18 / 9000e18
+    const scorePerStake36 = (nodeScore * SCALE18) / TOTAL_EFF_3WAY;
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      stakingEpoch,
+      identityId,
+      scorePerStake36,
+    );
+
+    // ------------------------------------------------------------------
+    // Advance one epoch
+    // ------------------------------------------------------------------
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
+    const currentEpoch = await Chronos.getCurrentEpoch();
+    expect(currentEpoch).to.be.gt(stakingEpoch);
+
+    // ------------------------------------------------------------------
+    // Alice claims (V10)
+    // ------------------------------------------------------------------
+    await NFT.connect(alice).claim(aliceTokenId);
+    const alicePosAfter = await ConvictionStorageContract.getPosition(aliceTokenId);
+    const aliceReward = alicePosAfter.rewards;
+
+    // ------------------------------------------------------------------
+    // Bob claims (V10)
+    // ------------------------------------------------------------------
+    await NFT.connect(bob).claim(bobTokenId);
+    const bobPosAfter = await ConvictionStorageContract.getPosition(bobTokenId);
+    const bobReward = bobPosAfter.rewards;
+
+    // ------------------------------------------------------------------
+    // Carol claims (V8)
+    // ------------------------------------------------------------------
+    const carolKey = hre.ethers.keccak256(
+      hre.ethers.solidityPacked(['address'], [carol.address]),
+    );
+    const carolCumBefore = await StakingStorageContract.getDelegatorCumulativeEarnedRewards(
+      identityId,
+      carolKey,
+    );
+    await StakingContract.connect(carol).claimDelegatorRewards(
+      identityId,
+      stakingEpoch,
+      carol.address,
+    );
+    const carolCumAfter = await StakingStorageContract.getDelegatorCumulativeEarnedRewards(
+      identityId,
+      carolKey,
+    );
+    const carolReward = carolCumAfter - carolCumBefore;
+
+    // ------------------------------------------------------------------
+    // Expected values (0% operator fee → net = gross = 9000 TRAC)
+    // ------------------------------------------------------------------
+    const netNodeRewards = EPOCH_POOL; // single node, allNodesScore = nodeScore
+
+    const expectedAlice = (netNodeRewards * ALICE_EFF) / TOTAL_EFF_3WAY; // 6000/9000 = 2/3
+    const expectedBob = (netNodeRewards * BOB_EFF) / TOTAL_EFF_3WAY;     // 2000/9000 = 2/9
+    const expectedCarol = (netNodeRewards * CAROL_EFF) / TOTAL_EFF_3WAY; // 1000/9000 = 1/9
+
+    // ------------------------------------------------------------------
+    // Assertion A: individual reward shares
+    // ------------------------------------------------------------------
+    expect(aliceReward).to.be.closeTo(expectedAlice, 10_000);
+    expect(bobReward).to.be.closeTo(expectedBob, 10_000);
+    expect(carolReward).to.be.closeTo(expectedCarol, 10_000);
+
+    // Sanity: Alice ~= 6x Carol, Bob ~= 2x Carol
+    if (carolReward > 0n) {
+      expect(aliceReward).to.be.closeTo(carolReward * 6n, toTRAC(1));
+      expect(bobReward).to.be.closeTo(carolReward * 2n, toTRAC(1));
+    }
+
+    // Sanity: Alice ~= 3x Bob
+    if (bobReward > 0n) {
+      expect(aliceReward).to.be.closeTo(bobReward * 3n, toTRAC(1));
+    }
+
+    // ------------------------------------------------------------------
+    // Assertion B: conservation — total claimed <= netNodeRewards, dust small
+    // ------------------------------------------------------------------
+    const totalClaimed = aliceReward + bobReward + carolReward;
+    expect(totalClaimed).to.be.lte(netNodeRewards);
+    const dust = netNodeRewards - totalClaimed;
+    expect(dust).to.be.lte(10_000n);
+
+    // ------------------------------------------------------------------
+    // Assertion C: vault balance invariant
+    // ------------------------------------------------------------------
+    const totalStake = await StakingStorageContract.getTotalStake();
+    const vaultBalance = await Token.balanceOf(ssAddr);
+    expect(vaultBalance).to.be.gte(totalStake);
+
+    // ------------------------------------------------------------------
+    // Assertion D: operator fee = 0
+    // ------------------------------------------------------------------
+    const opFee = await StakingStorageContract.getOperatorFeeBalance(identityId);
+    expect(opFee).to.equal(0n);
+
+    // ------------------------------------------------------------------
+    // Log summary
+    // ------------------------------------------------------------------
+    console.log('\n  3-Way Mixed Reward Summary:');
+    console.log(`    Epoch pool:          ${hre.ethers.formatEther(EPOCH_POOL)} TRAC`);
+    console.log(`    Alice (V10 6x):      ${hre.ethers.formatEther(aliceReward)} TRAC  (expected ${hre.ethers.formatEther(expectedAlice)})`);
+    console.log(`    Bob   (V10 2x):      ${hre.ethers.formatEther(bobReward)} TRAC  (expected ${hre.ethers.formatEther(expectedBob)})`);
+    console.log(`    Carol (V8  1x):      ${hre.ethers.formatEther(carolReward)} TRAC  (expected ${hre.ethers.formatEther(expectedCarol)})`);
+    console.log(`    Total claimed:       ${hre.ethers.formatEther(totalClaimed)} TRAC`);
+    console.log(`    Rounding dust:       ${dust.toString()} wei`);
+    console.log(`    Vault balance:       ${hre.ethers.formatEther(vaultBalance)} TRAC`);
+    console.log(`    Total stake:         ${hre.ethers.formatEther(totalStake)} TRAC`);
+  });
 });

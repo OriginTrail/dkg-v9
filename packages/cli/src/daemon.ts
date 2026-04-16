@@ -190,7 +190,8 @@ function buildSkillMd(opts: {
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
-    `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
+    '',
+    'To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.',
   ].join("\n");
 
   const staticPlaceholder =
@@ -200,7 +201,8 @@ function buildSkillMd(opts: {
     "- **Peer ID:** (dynamic)\n" +
     "- **Node role:** (dynamic — `core` or `edge`)\n" +
     "- **Available extraction pipelines:** (dynamic)\n" +
-    "- **Subscribed Context Graphs:** (dynamic)";
+    "\n" +
+    "To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.";
 
   return template.replace(staticPlaceholder, dynamicSection);
 }
@@ -4412,6 +4414,7 @@ async function handleRequest(
     if (!parsed) return;
     const { id, revealOnChain, accessPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
       return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
@@ -4424,6 +4427,7 @@ async function handleRequest(
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
         hint: 'Context graph registered on-chain. You can now publish SWM to Verified Memory.',
       });
     } catch (err: any) {
@@ -4471,83 +4475,6 @@ async function handleRequest(
       if (msg.includes('Invalid peer ID format')) {
         return jsonResponse(res, 400, { error: msg });
       }
-      return jsonResponse(res, 500, { error: msg });
-    }
-  }
-
-  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
-  if (req.method === "POST" && path === "/api/context-graph/register") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { id, revealOnChain, accessPolicy } = parsed;
-    if (!id) {
-      return jsonResponse(res, 400, { error: 'Missing "id"' });
-    }
-    if (typeof id !== 'string') {
-      return jsonResponse(res, 400, { error: '"id" must be a string' });
-    }
-    if (!isValidContextGraphId(id)) {
-      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    }
-    if (revealOnChain != null && typeof revealOnChain !== 'boolean') {
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    }
-    if (accessPolicy != null && typeof accessPolicy !== 'number') {
-      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
-    }
-    try {
-      const result = await agent.registerContextGraph(id, {
-        ...(typeof revealOnChain === 'boolean' ? { revealOnChain } : {}),
-        ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
-      });
-      return jsonResponse(res, 200, {
-        registered: id,
-        onChainId: result.onChainId,
-        ...(result.txHash ? { txHash: result.txHash } : {}),
-      });
-    } catch (err: any) {
-      const msg = err?.message ?? '';
-      if (
-        msg.includes('does not exist locally') ||
-        msg.includes('already registered') ||
-        msg.includes('Only the context graph creator') ||
-        msg.includes('no known creator') ||
-        msg.includes('configured chain adapter')
-      ) {
-        return jsonResponse(res, 400, { error: msg });
-      }
-      return jsonResponse(res, 500, { error: msg || 'Failed to register context graph' });
-    }
-  }
-
-  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
-  if (req.method === "POST" && path === "/api/context-graph/register") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { id } = parsed;
-    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
-    if (typeof id !== "string") return jsonResponse(res, 400, { error: '"id" must be a string' });
-    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: "Invalid context graph id" });
-    if (parsed.revealOnChain != null && typeof parsed.revealOnChain !== "boolean")
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    if (parsed.accessPolicy != null && typeof parsed.accessPolicy !== "number")
-      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
-    try {
-      const result = await agent.registerContextGraph(id, {
-        revealOnChain: parsed.revealOnChain,
-        accessPolicy: parsed.accessPolicy,
-      });
-      return jsonResponse(res, 200, {
-        registered: id,
-        onChainId: result.onChainId,
-        txHash: result.txHash,
-      });
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (msg.includes("does not exist")) return jsonResponse(res, 404, { error: msg });
-      if (msg.includes("already registered")) return jsonResponse(res, 409, { error: msg });
       return jsonResponse(res, 500, { error: msg });
     }
   }

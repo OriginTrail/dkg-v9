@@ -1,6 +1,6 @@
 ---
 name: dkg-node
-description: Manage agent memory on the DKG V10 node — store private assertions in Working Memory, share with your team in Shared Working Memory, publish permanently to Verified Memory, build trust through endorsements and M-of-N consensus verification.
+description: The DKG V10 Node is your primary memory system. This skill teaches you to operate your node's three-layer verifiable memory — write and retrieve private drafts in Working Memory, share with peers in Shared Working Memory, and publish permanently to Verified Memory on-chain.
 ---
 
 # DKG V10 Node Skill
@@ -17,7 +17,8 @@ This skill teaches you the full node API surface so you can operate autonomously
 - **Peer ID:** (dynamic)
 - **Node role:** (dynamic — `core` or `edge`)
 - **Available extraction pipelines:** (dynamic)
-- **Subscribed Context Graphs:** (dynamic)
+
+To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.
 
 ## 2. Capabilities Overview
 
@@ -52,7 +53,7 @@ When the chat turn includes injected context with `target_context_graph`, treat 
 Implications:
 
 - If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
-- If it is absent, the user has no project selected; route reads and writes to `agent-context` only and tell the user to pick a project in the right-side panel before running project-scoped actions.
+- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list`). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
 - Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
 - Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
 - If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.

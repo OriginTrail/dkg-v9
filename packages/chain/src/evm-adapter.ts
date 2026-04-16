@@ -173,6 +173,33 @@ export class EVMChainAdapter implements ChainAdapter {
     return s;
   }
 
+  /**
+   * Pick the next signer in the pool that the on-chain ContextGraphs contract
+   * authorizes for the target context graph. Falls back to round-robin only
+   * when the auth surface is unavailable.
+   */
+  private async nextAuthorizedSigner(contextGraphId: bigint): Promise<Wallet> {
+    if (!this.contracts.contextGraphs) {
+      return this.nextSigner();
+    }
+
+    const start = this.signerIndex % this.signerPool.length;
+    for (let i = 0; i < this.signerPool.length; i += 1) {
+      const idx = (start + i) % this.signerPool.length;
+      const signer = this.signerPool[idx];
+      const authorized = await this.contracts.contextGraphs.isAuthorizedPublisher(contextGraphId, signer.address);
+      if (authorized) {
+        this.signerIndex = idx + 1;
+        return signer;
+      }
+    }
+
+    throw new Error(
+      `No authorized publisher wallet found in signer pool for context graph ${contextGraphId.toString()}. ` +
+      'Ensure at least one configured wallet is permitted by on-chain publish authority.',
+    );
+  }
+
   /** All operational wallet addresses (for display / funding). */
   getSignerAddresses(): string[] {
     return this.signerPool.map((s) => s.address);
@@ -1078,8 +1105,53 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
-    // V10 publishDirect handles context graph registration automatically
-    // when contextGraphId is set. Delegate to createKnowledgeAssetsV10.
+    await this.init();
+    if (!this.contracts.knowledgeAssets) {
+      throw new Error('KnowledgeAssets contract not deployed.');
+    }
+    if (!this.contracts.knowledgeAssetsStorage) {
+      throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
+    }
+
+    const signer = await this.nextAuthorizedSigner(params.contextGraphId);
+    const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);
+    const receiverRs = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
+    const receiverVSs = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
+    const participantIdentityIds = params.participantSignatures.map((s) => s.identityId);
+    const participantRs = params.participantSignatures.map((s) => ethers.hexlify(s.r));
+    const participantVSs = params.participantSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const ka = this.contracts.knowledgeAssets.connect(signer) as any;
+    const kaAddress = await this.contracts.knowledgeAssets.getAddress();
+
+    if (this.contracts.token && params.tokenAmount > 0n) {
+      const token = this.contracts.token.connect(signer) as Contract;
+      const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
+    const tx = await ka.publishToContextGraph(
+      params.kaCount,
+      params.publisherNodeIdentityId,
+      ethers.hexlify(params.merkleRoot),
+      params.publicByteSize,
+      params.epochs,
+      params.tokenAmount,
+      ethers.ZeroAddress,
+      ethers.hexlify(params.publisherSignature.r),
+      ethers.hexlify(params.publisherSignature.vs),
+      receiverIdentityIds,
+      receiverRs,
+      receiverVSs,
+      params.contextGraphId,
+      participantIdentityIds,
+      participantRs,
+      participantVSs,
+    );
+
     const ackSignatures = [
       ...params.receiverSignatures,
       ...params.participantSignatures,
@@ -1171,7 +1243,7 @@ export class EVMChainAdapter implements ChainAdapter {
       );
     }
 
-    const txSigner = this.nextSigner();
+    const txSigner = await this.nextAuthorizedSigner(params.contextGraphId);
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 

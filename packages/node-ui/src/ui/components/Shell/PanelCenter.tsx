@@ -1,8 +1,9 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
+import { authHeaders } from '../../api.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -77,6 +78,73 @@ function MemoryStackView() {
   );
 }
 
+function DocumentViewer({ docRef }: { docRef: string }) {
+  const { tabs, activeTabId, closeTab } = useTabsStore();
+  const setActiveTab = useTabsStore(s => s.setActiveTab);
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const currentTab = tabs.find(t => t.id === activeTabId);
+  const docLabel = currentTab?.label ?? 'Document';
+
+  const handleBack = () => {
+    const projectTab = tabs.find(t => t.id.startsWith('project:'));
+    if (projectTab) {
+      setActiveTab(projectTab.id);
+    }
+    closeTab(activeTabId);
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    const fileHash = docRef.replace('urn:dkg:file:', '');
+    fetch(`/api/file/${encodeURIComponent(fileHash)}`, { headers: authHeaders() })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then(text => { setContent(text); setLoading(false); })
+      .catch(err => { setError(err.message); setLoading(false); });
+  }, [docRef]);
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{
+        flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
+        padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
+      }}>
+        <button
+          onClick={handleBack}
+          style={{
+            border: '1px solid var(--border-default)', borderRadius: 5, background: 'none',
+            color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, padding: '4px 10px',
+            cursor: 'pointer', fontFamily: 'var(--font-sans)',
+          }}
+        >
+          ← Back to Project
+        </button>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+        {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
+        {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
+        {content && (
+          <pre style={{
+            fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
+            color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            background: 'var(--bg-surface)', borderRadius: 8, padding: 16,
+            border: '1px solid var(--border-default)', margin: 0,
+          }}>
+            {content}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
 
@@ -111,6 +179,11 @@ function ViewContainer() {
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
     return <ProjectView contextGraphId={cgId} />;
+  }
+
+  if (activeTabId.startsWith('doc:')) {
+    const docRef = activeTabId.slice(4);
+    return <DocumentViewer docRef={docRef} />;
   }
 
   if (activeTabId.startsWith('wm:')) {

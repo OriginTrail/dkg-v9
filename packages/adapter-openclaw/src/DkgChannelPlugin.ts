@@ -349,6 +349,11 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
+  private memoryReAssert: (() => void) | null = null;
+
+  setMemoryReAssert(fn: () => void): void {
+    this.memoryReAssert = fn;
+  }
   private readonly pendingTurnPersistence = new Map<string, {
     attempt: number;
     timer: ReturnType<typeof setTimeout> | null;
@@ -775,6 +780,10 @@ export class DkgChannelPlugin {
       throw new Error('Invalid context entries');
     }
 
+    // Re-assert memory-slot capability before dispatch so our runtime
+    // handles recall even if memory-core's dreaming sidecar overwrote it.
+    this.memoryReAssert?.();
+
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
@@ -1081,6 +1090,8 @@ export class DkgChannelPlugin {
     if (opts?.contextEntries != null && contextEntries === undefined) {
       throw new Error('Invalid context entries');
     }
+
+    this.memoryReAssert?.();
 
     if (!runtime?.channel || !cfg) {
       const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId });

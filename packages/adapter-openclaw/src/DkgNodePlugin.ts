@@ -328,6 +328,14 @@ export class DkgNodePlugin {
       }
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
 
+      // Wire the channel plugin to re-assert our memory-slot capability
+      // before each inbound turn dispatch. This guarantees our runtime
+      // handles recall even when memory-core's dreaming sidecar overwrites
+      // the single-slot capability store during plugin loading.
+      if (this.channelPlugin && this.memoryPlugin) {
+        this.channelPlugin.setMemoryReAssert(() => this.memoryPlugin?.reAssertCapability());
+      }
+
       // Cache the API handle so `ensureNodePeerId` can log from the lazy
       // re-probe call tree, which fires outside of any register() scope
       // when a later resolver call asks for the default agent address.

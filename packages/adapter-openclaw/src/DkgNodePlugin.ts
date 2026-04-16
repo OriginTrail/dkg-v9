@@ -33,39 +33,6 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
-function extractTextContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .filter((b: any) => b?.type === 'text' && typeof b?.text === 'string')
-    .map((b: any) => b.text)
-    .join('\n');
-}
-
-function findLastByRole(messages: any[], role: string): any | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === role) return messages[i];
-  }
-  return undefined;
-}
-
-function extractToolCalls(messages: any[]): Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined {
-  const calls: Array<{ name: string; args: Record<string, unknown>; result: unknown }> = [];
-  for (const msg of messages) {
-    if (msg?.role !== 'assistant' || !Array.isArray(msg?.toolUse)) continue;
-    for (const tool of msg.toolUse) {
-      if (typeof tool?.name === 'string') {
-        calls.push({
-          name: tool.name,
-          args: tool.args ?? {},
-          result: tool.result ?? null,
-        });
-      }
-    }
-  }
-  return calls.length > 0 ? calls : undefined;
-}
-
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
   chatAttachments: true,
@@ -403,15 +370,16 @@ export class DkgNodePlugin {
   }
 
   /**
-   * Register cross-channel turn persistence via the `agent_end` hook.
-   * Fires once after every completed agent dispatch across ALL OpenClaw
-   * channels (Telegram, WhatsApp, API, etc.). The DKG UI channel bridge
-   * already persists with richer data (correlation IDs, attachment refs)
-   * via DkgChannelPlugin.queueTurnPersistence, so it's skipped here.
+   * Register cross-channel turn persistence via the gateway's internal
+   * hook system (`message:received` + `message:sent`). Fires for ALL
+   * OpenClaw channels (Telegram, WhatsApp, API, etc.). The DKG UI
+   * channel bridge already persists with richer data (correlation IDs,
+   * attachment refs) via DkgChannelPlugin.queueTurnPersistence, so
+   * `dkg-ui` is skipped here.
    *
-   * The `agent_end` event carries the full messages array from the run,
-   * including user input, assistant reply, and tool calls — no buffering
-   * needed.
+   * Registers directly into the gateway's global hook map because
+   * external plugins only receive `setup-runtime` mode where both
+   * `api.on` and `api.registerHook` are noops.
    */
   private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
     if (this.crossChannelHookRegistered) return;

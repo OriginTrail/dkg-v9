@@ -1500,7 +1500,7 @@ describe('DkgNodePlugin', () => {
 
     function makeMockApi(): OpenClawPluginApi {
       return {
-        config: {},
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
         registrationMode: 'full' as const,
         registerTool: () => {},
         registerHook: () => {},
@@ -1757,7 +1757,7 @@ describe('DkgNodePlugin', () => {
 
       try {
         plugin.register({
-          config: {},
+          config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
           registrationMode: 'full' as const,
           registerTool: () => {},
           registerHook: () => {},
@@ -1838,7 +1838,7 @@ describe('DkgNodePlugin', () => {
 
       try {
         plugin.register({
-          config: {},
+          config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
           registrationMode: 'full' as const,
           registerTool: () => {},
           registerHook: () => {},

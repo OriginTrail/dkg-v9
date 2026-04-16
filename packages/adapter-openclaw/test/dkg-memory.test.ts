@@ -654,7 +654,10 @@ describe('DkgMemorySearchManager', () => {
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;
-      expect(logLine).toContain('query="hello world"');
+      // Info-level log carries counts + metadata only — no user text
+      // (the raw query is derived from user messages and may contain
+      // PII, so it is logged at debug level).
+      expect(logLine).not.toContain('query=');
       expect(logLine).toContain('project=research-x');
       expect(logLine).toContain('layers=6');
       expect(logLine).toContain('raw_hits=3');
@@ -664,6 +667,12 @@ describe('DkgMemorySearchManager', () => {
       expect(logLine).toContain('project-wm:2');
       expect(logLine).toContain('project-swm:0');
       expect(logLine).toContain('project-vm:0');
+      // Query text goes to debug level only.
+      const debugLogs = (manager as any).deps.logger.debug.mock.calls.filter(
+        (c: any[]) => typeof c[0] === 'string' && c[0].includes('[dkg-memory] search query:'),
+      );
+      expect(debugLogs).toHaveLength(1);
+      expect(debugLogs[0][0]).toContain('hello world');
     });
 
     it('observability log uses ∅ for the project field when no project CG is resolved', async () => {

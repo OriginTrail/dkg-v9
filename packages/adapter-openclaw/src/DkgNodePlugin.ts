@@ -321,7 +321,11 @@ export class DkgNodePlugin {
       if (!this.memoryPlugin) {
         this.memoryPlugin = new DkgMemoryPlugin(this.client, memoryConfig, this.memorySessionResolver);
       }
-      this.memoryPlugin.register(api);
+      const registered = this.memoryPlugin.register(api);
+      if (!registered) {
+        api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
+        return;
+      }
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
 
       // Cache the API handle so `ensureNodePeerId` can log from the lazy

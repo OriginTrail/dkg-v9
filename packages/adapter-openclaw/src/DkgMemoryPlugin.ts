@@ -315,11 +315,18 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     const perLayerBreakdown = settled
       .map(s => `${s.plan.layer}:${s.bindings.length}`)
       .join(', ');
+    // Info-level log carries only counts and metadata — no user text.
+    // The raw query is derived from user/assistant messages and may
+    // contain secrets or PII, so it is logged at debug level only
+    // (silent at default log verbosity).
     this.deps.logger?.info?.(
-      `[dkg-memory] search fired: query="${truncate(query, 80)}", ` +
+      `[dkg-memory] search fired: ` +
       `project=${projectContextGraphId ?? '∅'}, ` +
       `layers=${plans.length}, ` +
       `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
+    );
+    this.deps.logger?.debug?.(
+      `[dkg-memory] search query: "${truncate(query, 80)}"`,
     );
 
     // Dedup by (contextGraphId, uri), keeping the highest-trust layer
@@ -539,8 +546,8 @@ export class DkgMemoryPlugin {
     private readonly resolver: DkgMemorySessionResolver,
   ) {}
 
-  register(api: OpenClawPluginApi): void {
-    this.registerCapability(api);
+  register(api: OpenClawPluginApi): boolean {
+    return this.registerCapability(api);
   }
 
   /**
@@ -558,13 +565,13 @@ export class DkgMemoryPlugin {
    *    no-ops the registration and logs a diagnostic so the operator
    *    can rerun setup if they meant to elect it.
    */
-  private registerCapability(api: OpenClawPluginApi): void {
+  private registerCapability(api: OpenClawPluginApi): boolean {
     if (typeof api.registerMemoryCapability !== 'function') {
       api.logger.warn?.(
         '[dkg-memory] api.registerMemoryCapability is not available — gateway is older than the memory-slot contract. ' +
         'The adapter no longer ships a compatibility `dkg_memory_search` tool; upgrade the gateway to restore recall.',
       );
-      return;
+      return false;
     }
 
     if (!isMemorySlotOwnedByThisAdapter(api)) {
@@ -573,7 +580,7 @@ export class DkgMemoryPlugin {
         'skipping memory-capability registration so this adapter does not silently override the elected ' +
         'memory provider. Rerun `dkg setup` to elect adapter-openclaw into the memory slot if that was the intent.',
       );
-      return;
+      return false;
     }
 
     const capability: MemoryPluginCapability = {
@@ -582,6 +589,7 @@ export class DkgMemoryPlugin {
     api.registerMemoryCapability(capability);
     const modeLabel = (api.registrationMode ?? 'full');
     api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
+    return true;
   }
 }
 

@@ -416,49 +416,66 @@ export class DkgNodePlugin {
   private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
     if (this.crossChannelHookRegistered) return;
 
-    // `api.on` (typed plugin hooks) is only wired when
-    // registrationMode === 'full'; in setup-runtime it's a silent noop.
-    // We attempt on every register() call so the first `full`-mode
-    // multi-phase call picks it up.
-    const mode = api.registrationMode ?? 'full';
-    if (mode !== 'full') {
-      api.logger.debug?.(`[dkg] Cross-channel hook deferred (mode=${mode}, need full)`);
+    // The gateway only exposes api.on (typed plugin hooks) in
+    // registrationMode === 'full'. External plugins get 'setup-runtime'
+    // where both api.on and api.registerHook are noops.
+    //
+    // Workaround: register directly into the gateway's internal hook
+    // map (a global singleton on `globalThis`) for the 'message:sent'
+    // event. This fires after every outbound message across ALL channels
+    // and carries channelId + message content on the event context.
+    const hookKey = Symbol.for('openclaw.internalHookHandlers');
+    const hookMap = (globalThis as any)[hookKey] as Map<string, Array<(event: any) => void>> | undefined;
+    if (!hookMap) {
+      api.logger.debug?.('[dkg] Cross-channel persistence: internal hook map not found (not in gateway)');
       return;
     }
 
     const DKG_UI_CHANNEL = 'dkg-ui';
     const client = this.client;
+    const pendingUserMessages = new Map<string, string>();
 
-    api.on('agent_end', async (event: any, ctx: any) => {
+    const onReceived = (event: any) => {
+      const ctx = event?.context;
       const channelId = ctx?.channelId;
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) return;
+      const content = typeof ctx?.content === 'string' ? ctx.content : '';
+      if (!content) return;
+      const key = `${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+      pendingUserMessages.set(key, content);
+    };
 
-      const messages: any[] = event.messages;
-      const lastUser = findLastByRole(messages, 'user');
-      const lastAssistant = findLastByRole(messages, 'assistant');
-      if (!lastUser && !lastAssistant) return;
+    const onSent = async (event: any) => {
+      const ctx = event?.context;
+      const channelId = ctx?.channelId;
+      if (!channelId || channelId === DKG_UI_CHANNEL) return;
+      if (ctx?.success === false) return;
 
-      const userMessage = extractTextContent(lastUser?.content);
-      const assistantReply = extractTextContent(lastAssistant?.content);
-      if (!userMessage && !assistantReply) return;
+      const content = typeof ctx?.content === 'string' ? ctx.content : '';
+      const key = `${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+      const userMessage = pendingUserMessages.get(key) ?? '';
+      pendingUserMessages.delete(key);
 
-      const sessionId = ctx?.sessionKey ?? ctx?.sessionId ?? `openclaw:${channelId}:default`;
+      if (!userMessage && !content) return;
 
-      const toolCalls = extractToolCalls(messages);
+      const sessionId = `openclaw:${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
 
       try {
-        await client.storeChatTurn(sessionId, userMessage, assistantReply, {
-          toolCalls: toolCalls?.length ? toolCalls : undefined,
-        });
+        await client.storeChatTurn(sessionId, userMessage, content);
         api.logger.info?.(`[dkg] Cross-channel turn persisted (${channelId})`);
       } catch (err: any) {
         api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
       }
-    });
+    };
+
+    if (!hookMap.has('message:received')) hookMap.set('message:received', []);
+    hookMap.get('message:received')!.push(onReceived);
+
+    if (!hookMap.has('message:sent')) hookMap.set('message:sent', []);
+    hookMap.get('message:sent')!.push(onSent);
 
     this.crossChannelHookRegistered = true;
-    api.logger.info?.('[dkg] Cross-channel persistence registered via api.on(agent_end)');
+    api.logger.info?.('[dkg] Cross-channel persistence registered (internal hooks: message:received + message:sent)');
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {

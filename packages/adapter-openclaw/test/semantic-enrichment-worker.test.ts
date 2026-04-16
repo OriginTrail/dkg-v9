@@ -354,6 +354,72 @@ describe('SemanticEnrichmentWorker', () => {
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
+  it('requires an explicit successful wait status before reading session messages', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-missing-wait-status',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-missing-wait-status',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-missing-wait-status',
+            userMessage: 'hello again',
+            assistantReply: 'pending',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn();
+    const fail = vi.fn().mockResolvedValue({ status: 'pending' });
+    const getSessionMessages = vi.fn();
+    const deleteSession = vi.fn().mockResolvedValue(undefined);
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-missing-wait-status' }),
+          waitForRun: vi.fn().mockResolvedValue({}),
+          getSessionMessages,
+          deleteSession,
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-missing-wait-status',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(getSessionMessages).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(
+      'evt-missing-wait-status',
+      worker.getWorkerInstanceId(),
+      expect.stringContaining('did not report a terminal success status'),
+    );
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
+
   it('fails the event when the subagent returns malformed non-JSON output instead of silently treating it as zero triples', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({

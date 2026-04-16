@@ -142,6 +142,14 @@ export class DkgNodePlugin {
     }
     return capabilities;
   }
+
+  private inferWakeAuthFromUrl(wakeUrl: string | undefined): 'bridge-token' | 'gateway' | undefined {
+    const trimmed = wakeUrl?.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
+    if (trimmed.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
+    return undefined;
+  }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
    * list of subscribed context graphs for the write-path clarification
@@ -583,9 +591,7 @@ export class DkgNodePlugin {
       transport.wakeAuth = 'bridge-token';
     } else if (existingWakeUrl) {
       transport.wakeUrl = existingWakeUrl;
-      if (existingWakeAuth) {
-        transport.wakeAuth = existingWakeAuth;
-      }
+      transport.wakeAuth = existingWakeAuth ?? this.inferWakeAuthFromUrl(existingWakeUrl);
     }
 
     return transport;

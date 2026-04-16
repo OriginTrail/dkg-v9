@@ -446,6 +446,9 @@ describe('best-effort semantic enqueue helper', () => {
       localAgentIntegrations: {
         openclaw: {
           enabled: true,
+          metadata: {
+            registrationMode: 'full',
+          },
           runtime: {
             status: 'ready',
             ready: true,
@@ -463,6 +466,23 @@ describe('best-effort semantic enqueue helper', () => {
           runtime: {
             status: 'connecting',
             ready: false,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
+  it('does not queue semantic jobs for setup-runtime OpenClaw registrations without explicit capability support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          metadata: {
+            registrationMode: 'setup-runtime',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
           },
         },
       },

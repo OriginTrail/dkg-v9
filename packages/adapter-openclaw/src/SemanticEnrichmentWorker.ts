@@ -497,7 +497,10 @@ export class SemanticEnrichmentWorker {
         timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
       });
       const waitStatus = typeof waitResult?.status === 'string' ? waitResult.status.trim().toLowerCase() : '';
-      if (waitStatus && !SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
+      if (!waitStatus) {
+        throw new Error(`OpenClaw subagent run ${runId} did not report a terminal success status`);
+      }
+      if (!SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
         throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult?.status}"`);
       }
       const messages = await subagent.getSessionMessages({

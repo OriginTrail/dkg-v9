@@ -2253,6 +2253,10 @@ export function canQueueLocalAgentSemanticEnrichment(
   if (stored.capabilities?.semanticEnrichment === false) return false;
   if (stored.capabilities?.semanticEnrichment === true) return true;
   if (normalizedId === 'openclaw') {
+    const registrationMode = typeof stored.metadata?.registrationMode === 'string'
+      ? stored.metadata.registrationMode.trim()
+      : '';
+    if (registrationMode === 'setup-runtime') return false;
     return stored.runtime?.ready === true
       || stored.runtime?.status === 'ready'
       || stored.runtime?.status === 'degraded';

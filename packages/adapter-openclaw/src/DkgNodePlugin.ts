@@ -266,6 +266,7 @@ export class DkgNodePlugin {
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
+  private crossChannelHookRegistered = false;
 
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
@@ -309,6 +310,12 @@ export class DkgNodePlugin {
       this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
+      }
+      // api.on (typed plugin hooks) is only wired in `full` mode.
+      // The first call is usually `setup-runtime` (noop); a later
+      // multi-phase call may arrive with `full` — register then.
+      if (!this.crossChannelHookRegistered && runtimeEnabled) {
+        this.registerCrossChannelPersistence(api);
       }
       return;
     }
@@ -407,14 +414,23 @@ export class DkgNodePlugin {
    * needed.
    */
   private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
+    if (this.crossChannelHookRegistered) return;
+
+    // `api.on` (typed plugin hooks) is only wired when
+    // registrationMode === 'full'; in setup-runtime it's a silent noop.
+    // We attempt on every register() call so the first `full`-mode
+    // multi-phase call picks it up.
+    const mode = api.registrationMode ?? 'full';
+    if (mode !== 'full') {
+      api.logger.debug?.(`[dkg] Cross-channel hook deferred (mode=${mode}, need full)`);
+      return;
+    }
+
     const DKG_UI_CHANNEL = 'dkg-ui';
     const client = this.client;
 
-    api.logger.info?.('[dkg] Cross-channel persistence hook registered (agent_end)');
-
-    api.registerHook('agent_end', async (event: any, ctx: any) => {
+    api.on('agent_end', async (event: any, ctx: any) => {
       const channelId = ctx?.channelId;
-      api.logger.info?.(`[dkg] agent_end fired: channel=${channelId ?? 'none'} success=${event?.success} msgs=${Array.isArray(event?.messages) ? event.messages.length : 'n/a'}`);
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
       if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) return;
 
@@ -435,11 +451,14 @@ export class DkgNodePlugin {
         await client.storeChatTurn(sessionId, userMessage, assistantReply, {
           toolCalls: toolCalls?.length ? toolCalls : undefined,
         });
-        api.logger.debug?.(`[dkg] Cross-channel turn persisted (${channelId})`);
+        api.logger.info?.(`[dkg] Cross-channel turn persisted (${channelId})`);
       } catch (err: any) {
         api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
       }
-    }, { name: 'dkg-cross-channel-persist' });
+    });
+
+    this.crossChannelHookRegistered = true;
+    api.logger.info?.('[dkg] Cross-channel persistence registered via api.on(agent_end)');
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {

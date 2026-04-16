@@ -10,7 +10,7 @@ export default function (api) {
   const log = api.logger ?? console;
 
   if (instance) {
-    log.info?.('[dkg-entry] Re-registering tools into new registry (gateway multi-phase init)');
+    log.info?.(`[dkg-entry] Re-registering (gateway multi-phase init, mode=${api.registrationMode ?? 'unknown'})`);
     instance.register(api);
     return;
   }

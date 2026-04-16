@@ -410,8 +410,11 @@ export class DkgNodePlugin {
     const DKG_UI_CHANNEL = 'dkg-ui';
     const client = this.client;
 
+    api.logger.info?.('[dkg] Cross-channel persistence hook registered (agent_end)');
+
     api.registerHook('agent_end', async (event: any, ctx: any) => {
       const channelId = ctx?.channelId;
+      api.logger.info?.(`[dkg] agent_end fired: channel=${channelId ?? 'none'} success=${event?.success} msgs=${Array.isArray(event?.messages) ? event.messages.length : 'n/a'}`);
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
       if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) return;
 

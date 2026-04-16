@@ -416,6 +416,9 @@ describe('OpenClaw persist-turn validation', () => {
   });
 
   it('accepts completed attachment refs backed by extraction status records', async () => {
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - 1000).toISOString();
+    const completedAt = now.toISOString();
     const attachmentRefs = [{
       assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
       fileHash: 'sha256:abc123',
@@ -436,8 +439,8 @@ describe('OpenClaw persist-turn validation', () => {
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
         rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
-        startedAt: '2026-04-14T12:00:00Z',
-        completedAt: '2026-04-14T12:00:01Z',
+        startedAt,
+        completedAt,
       }],
     ]);
 
@@ -448,6 +451,9 @@ describe('OpenClaw persist-turn validation', () => {
   });
 
   it('accepts sub-graph attachment refs backed by extraction status records without querying the store', async () => {
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - 1000).toISOString();
+    const completedAt = now.toISOString();
     const attachmentRefs = [{
       assertionUri: 'did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc',
       fileHash: 'sha256:abc123',
@@ -465,8 +471,8 @@ describe('OpenClaw persist-turn validation', () => {
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
         rootEntity: 'did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc',
-        startedAt: '2026-04-14T12:00:00Z',
-        completedAt: '2026-04-14T12:00:01Z',
+        startedAt,
+        completedAt,
       }],
     ]);
 

@@ -3,6 +3,7 @@
   "name": "DKG Node UI Bridge",
   "version": "0.0.1",
   "description": "Connects a local OpenClaw agent to a DKG V10 node for node-backed chat, memory, and agent-network capabilities.",
+  "kind": "memory",
   "channels": ["dkg-ui"],
   "configSchema": {
     "type": "object",
@@ -18,19 +19,10 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Enable DKG memory tools and file-watcher sync"
-          },
-          "memoryDir": {
-            "type": "string",
-            "description": "Override watched memory directory"
-          },
-          "watchDebounceMs": {
-            "type": "number",
-            "default": 1500,
-            "description": "File watcher debounce interval (ms)"
+            "description": "Register the DKG memory-slot capability (slot-backed recall via api.registerMemoryCapability). No conventional tools are exposed: reads flow through the slot, and writes flow directly through daemon HTTP routes documented in the agent SKILL.md (POST /api/assertion/create + POST /api/assertion/:name/write)."
           }
         },
-        "description": "DKG memory integration"
+        "description": "DKG memory integration. Reads flow through api.registerMemoryCapability (slot-backed recall via DkgMemorySearchManager's WM+SWM+VM fan-out). Writes are NOT exposed as an adapter tool in v1 — the agent persists memory through direct daemon routes listed in packages/cli/skills/dkg-node/SKILL.md §5 (POST /api/assertion/create + POST /api/assertion/:name/write). The retired memoryDir / watchDebounceMs / file-watcher-sync configuration surface and the retired dkg_memory_import / dkg_memory_search adapter tools are no longer accepted."
       },
       "channel": {
         "type": "object",

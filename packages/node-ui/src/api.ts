@@ -4,7 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
-import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
+import { type ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
@@ -448,77 +448,95 @@ export async function handleNodeUIRequest(
     }
   }
 
+  // B38: `/api/memory/sessions/:id/publication` and
+  // `/api/memory/sessions/:id/publish` are both backed by a
+  // shared-memory read path that the openclaw-dkg-primary-memory
+  // workstream broke by design: chat turns now live in Working Memory
+  // assertions (`agent-context/chat-turns`) and never reach SWM
+  // automatically, so `getSessionPublicationStatus` always reports
+  // `empty` and `publishSession` throws
+  // `No shared memory entities found for session ...`. The chat-memory
+  // methods still exist with a TODO pointing at the v2 follow-up
+  // (reimplement via `agent.assertion.promote` against the chat-turns
+  // WM assertion), but exposing them through these routes in v1 just
+  // returns misleading empty statuses or 400s to the UI. Return 501
+  // Not Implemented with a stable error code and a pointer at the
+  // follow-up issue so callers can gracefully degrade instead of
+  // treating the misleading response as a real publication state.
   if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publication') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publication'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    try {
-      const status = await memoryManager.getSessionPublicationStatus(sessionId);
-      return json(res, 200, status);
-    } catch (err: any) {
-      return json(res, 500, { error: err.message ?? 'Failed to fetch session publication status' });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based publication flow ' +
+        'returns misleading empty state. A future release will re-implement session promotion ' +
+        'via agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
   if (req.method === 'POST' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publish') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publish'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    const body = await readBody(req);
-    let payload: { rootEntities?: unknown; clearAfter?: unknown };
-    try {
-      payload = JSON.parse(body || '{}');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON payload' });
-    }
-    const rootEntities = Array.isArray(payload.rootEntities)
-      ? payload.rootEntities.filter((r): r is string => typeof r === 'string')
-      : undefined;
-    const clearSharedMemoryAfter = payload.clearAfter === true;
-    try {
-      const result = await memoryManager.publishSession(sessionId, {
-        rootEntities,
-        clearSharedMemoryAfter,
-      });
-      return json(res, 200, result);
-    } catch (err: any) {
-      const message = err?.message ?? 'Failed to publish session';
-      const status = /No shared memory entities found|Selected root entities/.test(message) ? 400 : 500;
-      return json(res, status, { error: message });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based /publish flow ' +
+        'has nothing to promote. A future release will re-implement session promotion via ' +
+        'agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
-  if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
-    let body: string;
-    try {
-      body = await readBody(req, IMPORT_MAX_BYTES);
-    } catch (err) {
-      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
-      throw err;
-    }
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON body' });
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return json(res, 400, { error: 'Request body must be a JSON object' });
-    }
-    const { text, source, useLlm } = parsed;
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return json(res, 400, { error: 'Missing or empty "text" field' });
-    }
-    const importSource = IMPORT_SOURCES.includes(source) ? source : 'other';
-    try {
-      const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
-      return json(res, 200, result);
-    } catch (err: any) {
-      console.error('[node-ui] Import memories failed:', err);
-      return json(res, 500, { error: 'Failed to import memories' });
-    }
+  // B52: POST /api/memory/import was retired as part of the
+  // openclaw-dkg-primary-memory work. It was a V9 relic that required LLM
+  // API keys on the node and wrote dkg:ImportedMemory ad-hoc types into a
+  // throwaway sidecar graph. Rather than let existing callers fall
+  // through to the generic 404 (wire-level contract break with no
+  // migration signal), serve a 410 Gone stub that names the two
+  // replacements so external CLI scripts, MCP servers, and local agents
+  // see a clear migration pointer. Mirrors the B38 pattern for the
+  // session-publication routes above.
+  if (req.method === 'POST' && path === '/api/memory/import') {
+    return json(res, 410, {
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
+      reason:
+        'This endpoint was a V9 relic that required LLM API keys on the node and wrote ' +
+        'ad-hoc `dkg:ImportedMemory` triples into a throwaway sidecar graph. It was retired ' +
+        'as part of the openclaw-dkg-primary-memory workstream.',
+      // Codex B64: callers following this pointer for the first write to
+      // a fresh project CG need the create step before the write step —
+      // `POST /api/assertion/:name/write` fails if the assertion does not
+      // already exist. List both routes in order so the migration path is
+      // reachable for both existing and brand-new assertions. The previous
+      // `dkg_memory_import` adapter-tool replacement was retired along
+      // with this endpoint (see eccbe19d) and has been dropped from this
+      // list so non-OpenClaw callers do not chase a tool that no longer
+      // exists.
+      replacements: [
+        {
+          surface: 'daemon HTTP route',
+          method: 'POST',
+          path: '/api/assertion/create',
+          description:
+            'One-time assertion bootstrap for a fresh project context graph. ' +
+            'POST `{ contextGraphId, name: "memory" }` to create the WM assertion ' +
+            'on first use. Idempotent: already-created assertions are a no-op. ' +
+            'Call this before the first `/api/assertion/:name/write` on a new CG; ' +
+            'subsequent writes do not need it.',
+        },
+        {
+          surface: 'daemon HTTP route',
+          method: 'POST',
+          path: '/api/assertion/:name/write',
+          description:
+            'Direct V10 WM assertion write route on the daemon. Use when writing from ' +
+            'a non-OpenClaw caller (CLI, external agent, MCP server) that already has a ' +
+            'resolved context graph id and peer identity. The assertion at `:name` must ' +
+            'exist first — bootstrap it via `POST /api/assertion/create` on a fresh CG.',
+        },
+      ],
+    });
   }
 
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
@@ -526,7 +544,7 @@ export async function handleNodeUIRequest(
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 200, { contextGraphId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 200, { contextGraphId: 'agent-context', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 
@@ -679,6 +697,4 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
     req.on('error', reject);
   });
 }
-
-const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 

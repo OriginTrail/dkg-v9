@@ -866,8 +866,14 @@ describe('DkgNodePlugin', () => {
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       )).toBe(false);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load stored OpenClaw integration state'));
+      // Retry-backoff follow-up: the "aborting startup re-registration"
+      // warn now includes a "(reason: ...)" suffix pulled from the
+      // captured load error. The raw "Failed to load stored OpenClaw
+      // integration state" text that used to be a warn is now emitted
+      // at debug level to avoid flooding the log on cold daemons — so
+      // only the dedup warn is asserted here.
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason: temporary daemon outage'));
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -925,7 +931,10 @@ describe('DkgNodePlugin', () => {
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(1_000);
+      // Retry-backoff follow-up: first retry delay is now 5s (not 1s),
+      // so advance by the new base delay before asserting the retry
+      // fired.
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(fakeFetch.mock.calls.filter((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
@@ -933,12 +942,274 @@ describe('DkgNodePlugin', () => {
       expect(fakeFetch.mock.calls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(true);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load stored OpenClaw integration state'));
+      // The dedup warn format now embeds the load-error reason; the
+      // raw "Failed to load..." text is emitted at debug level and is
+      // not asserted here.
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason: temporary daemon outage'));
     } finally {
       vi.useRealTimers();
       await plugin?.stop();
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('retry backoff grows exponentially and warns only once per distinct failure reason', async () => {
+    // Live-validation follow-up: prior to this change the retry loop
+    // fired every 1 s with a warn-level log on every attempt, which
+    // flooded the gateway log when the daemon was not yet up on cold
+    // start. The fix: 5 s base delay, 2x exponential growth capped at
+    // 60 s, and log dedup that emits one warn per distinct failure
+    // reason with subsequent repeats at debug level.
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const warn = vi.fn();
+    const debug = vi.fn();
+    const info = vi.fn();
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        throw new Error('daemon cold start');
+      }
+      return { ok: true, json: async () => ({ ok: true, integration: { id: 'openclaw' } }) };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { warn, debug, info },
+      };
+
+      plugin.register(mockApi);
+      await Promise.resolve();
+
+      const getCallCount = () =>
+        fakeFetch.mock.calls.filter((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
+        ).length;
+
+      // Initial register fires one sync call.
+      expect(getCallCount()).toBe(1);
+      // Attempt 1 scheduled for base delay (5s). Advance 4s — still no retry.
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(getCallCount()).toBe(1);
+      // Cross the 5s boundary — retry #1 lands.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getCallCount()).toBe(2);
+      // Attempt 2 delay is 10s. Advance 9s — still no new retry.
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(getCallCount()).toBe(2);
+      // Cross the 10s boundary — retry #2 lands.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getCallCount()).toBe(3);
+      // Attempt 3 delay is 20s. Advance 19s — still no new retry.
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(getCallCount()).toBe(3);
+      // Cross the 20s boundary — retry #3 lands.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getCallCount()).toBe(4);
+
+      // Dedup: exactly ONE warn with this reason across all four attempts,
+      // even though the sync function was called four times. The repeated
+      // sync calls see the same reason and drop to debug level.
+      const warnCallsWithReason = warn.mock.calls.filter((call) =>
+        String(call[0]).includes('reason: daemon cold start'),
+      );
+      expect(warnCallsWithReason).toHaveLength(1);
+      // Debug is called on every subsequent attempt from both the
+      // dedup path (syncLocalAgentIntegrationState) and the catch site
+      // in loadStoredOpenClawIntegration — we only assert at least 3
+      // debug hits (one per extra attempt beyond the first) to keep the
+      // test resilient to future log-site refactors.
+      const debugCallsWithReason = debug.mock.calls.filter((call) =>
+        String(call[0]).includes('daemon cold start'),
+      );
+      expect(debugCallsWithReason.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('retry delay caps at 60s after enough failed attempts', async () => {
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        throw new Error('daemon unreachable');
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { warn: vi.fn(), debug: vi.fn(), info: vi.fn() },
+      };
+
+      plugin.register(mockApi);
+      await Promise.resolve();
+
+      const getCallCount = () =>
+        fakeFetch.mock.calls.filter((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
+        ).length;
+
+      // Chew through the ramp (5s → 10s → 20s → 40s → 60s) and then
+      // verify the next two attempts both fire on the 60s cap rather
+      // than growing further (80s, 160s would both push past the cap).
+      expect(getCallCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(5_000); // attempt 2 lands
+      await vi.advanceTimersByTimeAsync(10_000); // attempt 3 lands
+      await vi.advanceTimersByTimeAsync(20_000); // attempt 4 lands
+      await vi.advanceTimersByTimeAsync(40_000); // attempt 5 lands
+      expect(getCallCount()).toBe(5);
+      await vi.advanceTimersByTimeAsync(60_000); // attempt 6 lands at the cap
+      expect(getCallCount()).toBe(6);
+      await vi.advanceTimersByTimeAsync(60_000); // attempt 7 also lands at the cap
+      expect(getCallCount()).toBe(7);
+    } finally {
+      vi.useRealTimers();
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('skips the stored-integration retry loop entirely when both memory and channel are disabled', async () => {
+    // Live-validation follow-up: when the adapter has nothing runtime
+    // to sync (both integrations disabled), the daemon fetch is pure
+    // overhead and used to loop at 1 Hz. With the fix it short-circuits
+    // before the first load call so cold daemons do not burn CPU or
+    // log spam on metadata-only plugin loads.
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn();
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { warn: vi.fn(), debug: vi.fn() },
+      };
+
+      plugin.register(mockApi);
+      await Promise.resolve();
+      // Advance a full minute — if the retry loop were active we'd see
+      // multiple GETs by now.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const getCalls = fakeFetch.mock.calls.filter((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
+      );
+      expect(getCalls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('registers the memory slot capability in setup-runtime mode on a slot-owning gateway', () => {
+    // Live-validation follow-up: prior code classified setup-runtime as
+    // lightweight and skipped memory-module registration entirely. That
+    // left `registerMemoryCapability` unregistered on any gateway that
+    // stayed in setup-runtime mode, silently disabling slot-backed
+    // recall. With the fix, setup-runtime is a runtime mode — memory
+    // slot registers as long as plugins.slots.memory names this adapter.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const registerMemoryCapability = vi.fn();
+    const info = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {
+        plugins: {
+          slots: { memory: 'adapter-openclaw' },
+        },
+      } as any,
+      registrationMode: 'setup-runtime',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info, warn: vi.fn(), debug: vi.fn() },
+    };
+
+    plugin.register(mockApi);
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+    // Log line must include the registration mode so operators can tell
+    // which pass of the gateway multi-phase init actually wired up the
+    // slot.
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('registerMemoryCapability called (registrationMode=setup-runtime)'),
+    );
+  });
+
+  it('does NOT register the memory slot capability in setup-only or cli-metadata modes (regression guard)', () => {
+    // Negative counterpart of the setup-runtime test above. Widening
+    // the runtime gate was an explicit decision for setup-runtime only;
+    // setup-only and cli-metadata must still skip memory registration
+    // because those modes have no runtime at all and the gateway does
+    // not expect tool dispatch on them.
+    for (const mode of ['setup-only', 'cli-metadata'] as const) {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      const registerMemoryCapability = vi.fn();
+      const mockApi: OpenClawPluginApi = {
+        config: {
+          plugins: { slots: { memory: 'adapter-openclaw' } },
+        } as any,
+        registrationMode: mode,
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability,
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      };
+
+      plugin.register(mockApi);
+
+      expect(registerMemoryCapability, `mode=${mode}`).not.toHaveBeenCalled();
     }
   });
 
@@ -988,7 +1259,7 @@ describe('DkgNodePlugin', () => {
     expect(String(warn.mock.calls[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
-  it('upgrades from setup-runtime to full runtime without losing the memory tool surface', () => {
+  it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       memory: { enabled: true },
@@ -1009,20 +1280,32 @@ describe('DkgNodePlugin', () => {
     expect(setupRuntimeTools).toHaveLength(0);
 
     const fullRuntimeTools: OpenClawTool[] = [];
+    const registerMemoryCapability = vi.fn();
     const fullRuntimeApi: OpenClawPluginApi = {
-      config: {},
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      } as any,
       registrationMode: 'full',
       registerTool: (tool) => fullRuntimeTools.push(tool),
       registerHook: () => {},
+      registerMemoryCapability,
       on: () => {},
       logger: {},
       workspaceDir: 'C:/tmp/openclaw-upgrade-test',
     };
     plugin.register(fullRuntimeApi);
 
+    // The adapter no longer registers dkg_memory_import or
+    // dkg_memory_search as conventional tools — both reads and writes
+    // flow through the memory slot via registerMemoryCapability.
     const fullToolNames = fullRuntimeTools.map((tool) => tool.name);
-    expect(fullToolNames).toContain('dkg_memory_search');
-    expect(fullToolNames).toContain('dkg_memory_import');
+    expect(fullToolNames).not.toContain('dkg_memory_search');
+    expect(fullToolNames).not.toContain('dkg_memory_import');
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('does not re-register the OpenClaw channel routes when the same plugin instance upgrades to full runtime', async () => {
@@ -1077,5 +1360,523 @@ describe('DkgNodePlugin', () => {
       await plugin.stop();
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('memory resolver reads the UI-selected CG stashed on the channel plugin session state', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 0 },
+    });
+
+    let registeredCapability: any = null;
+    const mockApi = {
+      // Codex B58: slot-ownership gate requires plugins.slots.memory to
+      // name adapter-openclaw before DkgMemoryPlugin.register will claim
+      // the slot. Stamp it here so this dispatch-context test exercises
+      // the full registration path.
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerChannel: () => {},
+      registerHttpRoute: () => {},
+      registerMemoryCapability: (capability: any) => {
+        registeredCapability = capability;
+      },
+      on: () => {},
+      logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    } as unknown as OpenClawPluginApi;
+
+    // Stub fetch so the plugin's best-effort getStatus + listContextGraphs
+    // probes during register() resolve cleanly. /api/status returns a real
+    // peer ID so DkgNodePlugin.nodePeerId populates and the runtime can
+    // hand back an actual DkgMemorySearchManager (not the null-manager
+    // fallback that fires when peer ID is still undefined — Codex B12).
+    // /api/context-graph/list returns an empty array so the subscribed-CG
+    // preflight terminates cleanly. Any other call returns an empty 200.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, peerId: 'peer-dispatch-test' }),
+        } as Response;
+      }
+      if (url.includes('/api/context-graph/list')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ contextGraphs: [] }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+
+    try {
+      plugin.register(mockApi);
+      expect(registeredCapability).not.toBeNull();
+
+      // Let the best-effort probes kicked off inside register() flush so
+      // nodePeerId is populated before we exercise the runtime path below.
+      // Codex B59: without this, the peer-ID probe is still pending and
+      // getMemorySearchManager returns { manager: null, error } — and the
+      // original `toBeDefined()` assertion passed only because `null` is
+      // "defined" in vitest's loose sense, silently masking the real
+      // B12 null-manager fallback path.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Before any dispatch: resolver returns no projectContextGraphId for
+      // any sessionKey — the ALS store is empty outside of an active
+      // dispatch. The runtime still hands back a real manager because the
+      // peer-ID probe succeeded above; null-manager fallback only fires
+      // when the resolver cannot produce an agent address.
+      const runtime = registeredCapability.runtime;
+      const resultBefore = await runtime.getMemorySearchManager({ sessionKey: 'session-xyz' });
+      expect(resultBefore.manager).not.toBeNull();
+      expect(resultBefore.error).toBeUndefined();
+
+      const channelPlugin = (plugin as any).channelPlugin as any;
+      expect(channelPlugin).toBeDefined();
+
+      // Simulate a dispatch scope by running the memorySessionResolver
+      // lookup inside `channelPlugin.dispatchContext.run`, the same
+      // AsyncLocalStorage the real dispatch uses. Inside the scope the
+      // resolver sees the stashed CG; outside the scope it returns
+      // undefined. This mirrors what a real slot-backed tool call does
+      // during a live dispatch. Codex Bug B6.
+      const dispatchStore = {
+        uiContextGraphId: 'research-x',
+        sessionKey: 'session-xyz',
+        correlationId: 'corr-test',
+      };
+      const insideScope = channelPlugin.dispatchContext.run(dispatchStore, () => {
+        return (plugin as any).memorySessionResolver.getSession('session-xyz');
+      });
+      expect(insideScope?.projectContextGraphId).toBe('research-x');
+
+      // Outside the scope: resolver returns a session with NO project CG.
+      const outsideScope = (plugin as any).memorySessionResolver.getSession('session-xyz');
+      expect(outsideScope?.projectContextGraphId).toBeUndefined();
+
+      // And the channel plugin's own getter is scope-aware too.
+      expect(channelPlugin.getSessionProjectContextGraphId('session-xyz')).toBeUndefined();
+      const insideScopeGetter = channelPlugin.dispatchContext.run(dispatchStore, () => {
+        return channelPlugin.getSessionProjectContextGraphId('session-xyz');
+      });
+      expect(insideScopeGetter).toBe('research-x');
+    } finally {
+      await plugin.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  describe('node peer ID lazy re-probe (Codex B9)', () => {
+    // Helper: makes a fetch stub that routes /api/status calls through a
+    // user-supplied handler and counts them. /api/context-graph/list (fired
+    // by listContextGraphs in the same refresh) always resolves empty so
+    // we don't have to care about its shape in these tests.
+    function makeFetchStub(statusHandler: (callIndex: number) => Response | Promise<Response>) {
+      const statusCalls: Array<{ url: string }> = [];
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          const idx = statusCalls.length;
+          statusCalls.push({ url });
+          return statusHandler(idx);
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(JSON.stringify({ contextGraphs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      return { fetchFn, statusCalls };
+    }
+
+    function makeMockApi(): OpenClawPluginApi {
+      return {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registrationMode: 'full' as const,
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: () => {},
+        on: () => {},
+        logger: { info: () => {}, warn: () => {}, debug: () => {} },
+      } as unknown as OpenClawPluginApi;
+    }
+
+    // Drain enough event-loop turns for a fire-and-forget fetch chain
+    // (`ensureNodePeerId` → `probeNodePeerIdOnce` → `getStatus` → `fetch`
+    // → response.json → state assignment → `.finally` cleanup) to
+    // actually settle. Real-world fetch chains are ~15-20 microtask
+    // hops; a generous count here is cheaper than a wall-clock wait.
+    const flushMicrotasks = async () => {
+      for (let i = 0; i < 50; i++) {
+        await Promise.resolve();
+      }
+    };
+
+    it('lazily re-probes peer ID when the register-time probe failed', async () => {
+      // First /api/status fire rejects (daemon not ready). Second fire
+      // (triggered lazily by a resolver call) succeeds.
+      const { fetchFn, statusCalls } = makeFetchStub((idx) => {
+        if (idx === 0) {
+          return new Response('daemon starting', { status: 503 });
+        }
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:test-peer' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Drain the register-time probe (it fires-and-forgets).
+        await flushMicrotasks();
+        // Register-time probe saw a 503, so peerId is still undefined and
+        // any call to getDefaultAgentAddress reflects that.
+        expect((plugin as any).nodePeerId).toBeUndefined();
+        const resolver = (plugin as any).memorySessionResolver;
+        const firstCall = resolver.getDefaultAgentAddress();
+        expect(firstCall).toBeUndefined();
+        // That call triggered a lazy re-probe. Let it complete.
+        await flushMicrotasks();
+        // Now the cached peer ID is populated; subsequent resolver calls
+        // see it immediately, no further fetch fire.
+        const statusCallsBefore = statusCalls.length;
+        const secondCall = resolver.getDefaultAgentAddress();
+        expect(secondCall).toBe('did:dkg:agent:test-peer');
+        expect(statusCalls.length).toBe(statusCallsBefore);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('debounces concurrent resolver fires to a single in-flight probe', async () => {
+      // All /api/status fires succeed. But a single burst of 10 resolver
+      // calls before any drain must produce exactly ONE fetch to
+      // /api/status (1 from register + 0 from the burst, since the
+      // register-time probe is in flight and the burst should await it).
+      let resolveStatus: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => {
+        resolveStatus = resolve;
+      });
+      const { fetchFn, statusCalls } = makeFetchStub(async () => {
+        await gate;
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:debounced' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        // The register-time probe has already started and is parked on
+        // the gate. 10 resolver calls in a burst must NOT each fire a
+        // new /api/status because the in-flight probe guard collapses
+        // them onto the same pending promise.
+        const resolver = (plugin as any).memorySessionResolver;
+        for (let i = 0; i < 10; i++) {
+          resolver.getDefaultAgentAddress();
+        }
+        // Only one /api/status call fired (the register-time one).
+        expect(statusCalls.length).toBe(1);
+        // Release the gate; drain; probe completes.
+        resolveStatus!();
+        await flushMicrotasks();
+        // After drain, the cache is populated; a new resolver call returns
+        // the peerId without firing a third /api/status.
+        const finalCall = resolver.getDefaultAgentAddress();
+        expect(finalCall).toBe('did:dkg:agent:debounced');
+        expect(statusCalls.length).toBe(1);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('recovers on every subsequent call when /api/status keeps failing', async () => {
+      // Permanent failure. Every resolver call returns undefined (so B2's
+      // retryable clarification surfaces to the caller), and every call
+      // triggers a re-probe attempt — but the in-flight debounce means
+      // bursts within a single drain window collapse to one fetch fire.
+      const { fetchFn, statusCalls } = makeFetchStub(() => {
+        return new Response('daemon down', { status: 503 });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        // One call from register-time probe (that saw the 503).
+        const initialCalls = statusCalls.length;
+        expect(initialCalls).toBeGreaterThanOrEqual(1);
+
+        const resolver = (plugin as any).memorySessionResolver;
+
+        // Call the resolver, let its probe resolve (to 503), call again.
+        // Each cycle should trigger ONE new /api/status call — not
+        // zero (previous "soft-brick" behavior), not ten.
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await flushMicrotasks();
+        const afterFirstLazy = statusCalls.length;
+        expect(afterFirstLazy).toBe(initialCalls + 1);
+
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await flushMicrotasks();
+        const afterSecondLazy = statusCalls.length;
+        expect(afterSecondLazy).toBe(initialCalls + 2);
+
+        // Never throws, never loops forever. Just keeps returning
+        // undefined and keeps re-probing on demand.
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('does NOT re-probe when the register-time probe already succeeded', async () => {
+      // Register-time probe hits /api/status once and resolves. Burst of
+      // resolver calls afterwards hits exactly ZERO additional /api/status
+      // fires, because `nodePeerId` is cached.
+      const { fetchFn, statusCalls } = makeFetchStub(() => {
+        return new Response(JSON.stringify({ peerId: 'did:dkg:agent:happy-path' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await flushMicrotasks();
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:happy-path');
+        const baselineCalls = statusCalls.length;
+        const resolver = (plugin as any).memorySessionResolver;
+        for (let i = 0; i < 20; i++) {
+          expect(resolver.getDefaultAgentAddress()).toBe('did:dkg:agent:happy-path');
+        }
+        expect(statusCalls.length).toBe(baselineCalls);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe('context-graph cache filter on synced + non-system (Codex B51 + B54)', () => {
+    it('caches only entries with synced=true AND isSystem=false (includes local private CGs per B54)', async () => {
+      // B51: `agent.listContextGraphs()` returns every known CG —
+      // including system paranets (ontology, agents registry) and
+      // discovered-but-not-synced ontology entries. The cache is the
+      // needs_clarification availability list AND the B42 / B46 / B48
+      // subscribed-project allowlist for `dkg_memory_import`, so
+      // including non-locally-usable or system entries would advertise
+      // targets the node cannot actually write to.
+      //
+      // B54: local private CGs are legitimately recorded as
+      // `subscribed: false, synced: true` by `createContextGraph({
+      // private: true })` (agent/src/dkg-agent.ts:2041-2045). B51's
+      // original strict `subscribed === true` filter dropped these
+      // and broke `dkg_memory_import` writes against legitimate
+      // private targets. The relaxed filter uses `synced === true`
+      // to accept both public-subscribed AND local-private while
+      // still excluding system paranets and discovered-but-not-
+      // synced entries.
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: 'peer-b51' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(
+            JSON.stringify({
+              contextGraphs: [
+                // Valid: public subscribed, synced, non-system → cached
+                { id: 'research-public', subscribed: true, synced: true, isSystem: false },
+                // System paranet → filtered out (isSystem)
+                { id: 'ontology', subscribed: true, synced: true, isSystem: true },
+                // Subscribed but not yet synced (gossip subscribe lag) → filtered out
+                { id: 'research-syncing', subscribed: true, synced: false, isSystem: false },
+                // Reserved graph name → filtered out (pre-existing guard)
+                { id: 'agent-context', subscribed: true, synced: true, isSystem: false },
+                // B54 case: local PRIVATE CG, subscribed=false, synced=true → cached
+                { id: 'research-private', subscribed: false, synced: true, isSystem: false },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+
+      try {
+        plugin.register({
+          config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+          registrationMode: 'full' as const,
+          registerTool: () => {},
+          registerHook: () => {},
+          registerMemoryCapability: () => {},
+          on: () => {},
+          logger: { info: () => {}, warn: () => {}, debug: () => {} },
+        } as unknown as OpenClawPluginApi);
+
+        // Drain the register-time refresh.
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+
+        const resolver = (plugin as any).memorySessionResolver;
+        const cached = resolver.listAvailableContextGraphs();
+        // Only the two synced + non-system + non-reserved entries:
+        // public subscribed and local private. Ontology (system),
+        // subscribed-but-unsynced, and agent-context (reserved) are
+        // all filtered.
+        expect(cached).toEqual(['research-public', 'research-private']);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe('context-graph cache refresh in-flight promise sharing (Codex B49)', () => {
+    // B49: `refreshMemoryResolverState` used to gate concurrent calls
+    // with a boolean that returned immediately while a background
+    // refresh was in flight. That broke
+    // `refreshAvailableContextGraphs` awaiters — they would resolve
+    // against the still-stale cache instead of awaiting the in-flight
+    // refresh. The fix tracks the refresh promise and returns it to
+    // concurrent callers so all awaiters observe the populated cache.
+
+    it('concurrent refreshAvailableContextGraphs calls share a single daemon fetch and all observe the populated cache', async () => {
+      // Gate the context-graph listing so we can start a second
+      // concurrent refresh while the first is in flight.
+      let releaseListGate!: () => void;
+      const listGate = new Promise<void>((resolve) => {
+        releaseListGate = resolve;
+      });
+      let listCallCount = 0;
+
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: 'peer-b49' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          listCallCount++;
+          await listGate;
+          // B51 + B54: the refresh now filters on `synced: true` and
+          // `!isSystem`, so the mock entry has to carry both flags to
+          // end up in the cache.
+          return new Response(
+            JSON.stringify({
+              contextGraphs: [
+                { id: 'research-b49-fresh', subscribed: true, synced: true, isSystem: false },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+
+      try {
+        plugin.register({
+          config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+          registrationMode: 'full' as const,
+          registerTool: () => {},
+          registerHook: () => {},
+          registerMemoryCapability: () => {},
+          on: () => {},
+          logger: { info: () => {}, warn: () => {}, debug: () => {} },
+        } as unknown as OpenClawPluginApi);
+
+        // Register-time fire-and-forget refresh is in flight and blocked
+        // on the gate. Drain enough microtasks to let the
+        // /api/context-graph/list call reach the gate.
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+        expect(listCallCount).toBe(1);
+
+        const resolver = (plugin as any).memorySessionResolver;
+        // Cache is still empty because the in-flight refresh is parked.
+        expect(resolver.listAvailableContextGraphs()).toEqual([]);
+
+        // Start a second concurrent refresh via the resolver. This is
+        // the B49 regression path: previously this call would return
+        // immediately with the stale (empty) cache because the boolean
+        // guard short-circuited the duplicate call.
+        const secondRefreshPromise = resolver.refreshAvailableContextGraphs();
+
+        // Release the gate so the in-flight daemon fetch completes.
+        releaseListGate();
+
+        // Await the second refresh — it MUST observe the populated
+        // cache, not the stale one. And the daemon fetch must have
+        // only fired once (both callers share the promise).
+        const secondResult = await secondRefreshPromise;
+        expect(secondResult).toEqual(['research-b49-fresh']);
+        expect(listCallCount).toBe(1);
+        expect(resolver.listAvailableContextGraphs()).toEqual(['research-b49-fresh']);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 });

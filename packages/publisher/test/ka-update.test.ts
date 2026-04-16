@@ -1,15 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, UpdateHandler, autoPartition, computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot, computeFlatKCRootV10 as computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'test-update';
-const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+let PARANET: string = 'test-update';
+let DATA_GRAPH: string;
 const ENTITY_A = 'urn:test:entity:a';
 const ENTITY_B = 'urn:test:entity:b';
 
@@ -115,14 +117,32 @@ describe('KAUpdateRequest encode/decode', () => {
 
 describe('UpdateHandler', () => {
   let store: OxigraphStore;
-  let chain: MockChainAdapter;
+  let chain: EVMChainAdapter;
   let publisher: DKGPublisher;
   let handler: UpdateHandler;
-  const wallet = ethers.Wallet.createRandom();
+  const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const cgId = await createTestContextGraph(chain);
+    PARANET = String(cgId);
+    DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
     publisher = new DKGPublisher({
@@ -130,10 +150,13 @@ describe('UpdateHandler', () => {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     handler = new UpdateHandler(store, chain, eventBus);
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('applies a verified KA update: deletes old triples, inserts new ones', async () => {

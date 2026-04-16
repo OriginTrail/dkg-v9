@@ -80,22 +80,21 @@ export async function deployContracts(rpcUrl: string): Promise<string> {
     proc.stdout?.on('data', (d) => { stdout += d.toString(); });
     proc.stderr?.on('data', (d) => { stderr += d.toString(); });
 
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`Deploy failed (code ${code}):\n${stderr}\n${stdout}`));
+    proc.on('close', (code, signal) => {
+      // Parse Hub address from stdout even if the process was killed
+      // (e.g. OOM after deploy completed but during GC cleanup)
+      const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
+      if (hubMatch) {
+        resolve(hubMatch[1]);
         return;
       }
 
-      const lines = stdout.split('\n');
-      for (const line of lines) {
-        if (line.includes('"Hub"') && line.includes('deployed at')) {
-          const match = line.match(/deployed at (0x[0-9a-fA-F]+)/);
-          if (match) { resolve(match[1]); return; }
-        }
+      if (code !== 0) {
+        reject(new Error(`Deploy failed (code ${code}, signal ${signal}):\n${stderr}\n${stdout}`));
+        return;
       }
-      const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
-      if (hubMatch) { resolve(hubMatch[1]); }
-      else { reject(new Error(`Hub address not found in deploy output:\n${stdout}`)); }
+
+      reject(new Error(`Hub address not found in deploy output:\n${stdout}`));
     });
   });
 }
@@ -291,6 +290,18 @@ export async function setMinimumRequiredSignatures(
 export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   const rpcUrl = `http://127.0.0.1:${port}`;
 
+  // Kill any orphaned process left on this port from a previous crashed run
+  try {
+    const { execSync } = await import('node:child_process');
+    const pids = execSync(`lsof -ti:${port} 2>/dev/null`, { encoding: 'utf8' }).trim();
+    if (pids) {
+      for (const pid of pids.split('\n')) {
+        try { process.kill(Number(pid), 'SIGKILL'); } catch {}
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch {}
+
   let stderrOutput = '';
   let stdoutOutput = '';
   let processExitCode: number | null = null;
@@ -300,7 +311,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   });
   const hardhatProcess = spawn(
     process.execPath,
-    [hardhatCli, 'node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
+    ['--max-old-space-size=2048', hardhatCli, 'node', '--no-deploy', '--port', String(port), '--config', 'hardhat.node.config.ts'],
     {
       cwd: EVM_MODULE_DIR,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -312,7 +323,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   hardhatProcess.on('exit', (code) => { processExitCode = code; });
   hardhatProcess.on('error', (err) => { stderrOutput += `\nspawn error: ${err.message}`; });
 
-  const startupTimeout = process.env.CI ? 120_000 : 15_000;
+  const startupTimeout = process.env.CI ? 120_000 : 60_000;
   const ready = await waitForNode(rpcUrl, startupTimeout);
   if (!ready) {
     hardhatProcess.kill('SIGTERM');
@@ -358,7 +369,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
 
 export function killHardhat(ctx: HardhatContext | null): void {
   if (ctx?.process) {
-    ctx.process.kill('SIGTERM');
+    ctx.process.kill('SIGKILL');
   }
 }
 

@@ -26,6 +26,8 @@ import type {
   V10PublishDirectParams,
   V10UpdateKCParams,
   ConvictionAccountInfo,
+  FairSwapPurchaseInfo,
+  PermanentPublishParams,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -128,6 +130,7 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
+  fairSwapJudge?: Contract;
 }
 
 /**
@@ -236,6 +239,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
+    }
+
+    try {
+      this.contracts.fairSwapJudge = await this.resolveContract('FairSwapJudge');
+    } catch {
+      // FairSwapJudge not deployed — fair swap operations unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -612,31 +621,63 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsStorage) return { verified: false };
+    if (!this.contracts.knowledgeAssetsStorage && !this.contracts.knowledgeCollectionStorage) {
+      return { verified: false };
+    }
 
     try {
       const receipt = await this.provider.getTransactionReceipt(txHash);
       if (!receipt || receipt.status !== 1) return { verified: false };
 
-      const storage = this.contracts.knowledgeAssetsStorage;
-      const storageAddress = (await storage.getAddress()).toLowerCase();
-
       let onChainMerkleRoot: Uint8Array | undefined;
-      for (const log of receipt.logs) {
-        if (log.address.toLowerCase() !== storageAddress) continue;
-        try {
-          const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
-            onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
-            break;
-          }
-        } catch { /* parse failure — skip */ }
+
+      // V9: KnowledgeBatchUpdated on KnowledgeAssetsStorage
+      if (!onChainMerkleRoot && this.contracts.knowledgeAssetsStorage) {
+        const storage = this.contracts.knowledgeAssetsStorage;
+        const storageAddress = (await storage.getAddress()).toLowerCase();
+        for (const log of receipt.logs) {
+          if (log.address.toLowerCase() !== storageAddress) continue;
+          try {
+            const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
+              onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
+              break;
+            }
+          } catch { /* parse failure — skip */ }
+        }
+      }
+
+      // V10: KnowledgeCollectionUpdated on KnowledgeCollectionStorage
+      if (!onChainMerkleRoot && this.contracts.knowledgeCollectionStorage) {
+        const kcs = this.contracts.knowledgeCollectionStorage;
+        const kcsAddress = (await kcs.getAddress()).toLowerCase();
+        for (const log of receipt.logs) {
+          if (log.address.toLowerCase() !== kcsAddress) continue;
+          try {
+            const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed?.name === 'KnowledgeCollectionUpdated' && BigInt(parsed.args.id) === batchId) {
+              onChainMerkleRoot = ethers.getBytes(parsed.args.merkleRoot);
+              break;
+            }
+          } catch { /* parse failure — skip */ }
+        }
       }
 
       if (!onChainMerkleRoot) return { verified: false };
 
-      const onChainPublisher: string = await storage.getBatchPublisher(batchId);
-      if (onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
+      // Check publisher address: try V10 storage first, then V9
+      let onChainPublisher: string | undefined;
+      if (this.contracts.knowledgeCollectionStorage) {
+        try {
+          onChainPublisher = await this.contracts.knowledgeCollectionStorage.getLatestMerkleRootPublisher(batchId);
+        } catch { /* not found in V10 storage */ }
+      }
+      if ((!onChainPublisher || onChainPublisher === ethers.ZeroAddress) && this.contracts.knowledgeAssetsStorage) {
+        try {
+          onChainPublisher = await this.contracts.knowledgeAssetsStorage.getBatchPublisher(batchId);
+        } catch { /* not found in V9 storage */ }
+      }
+      if (!onChainPublisher || onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
         return { verified: false };
       }
 
@@ -809,6 +850,29 @@ export class EVMChainAdapter implements ChainAdapter {
                   publisherAddress: mint?.publisherAddress ?? '',
                   startKAId: mint?.startKAId ?? '0',
                   endKAId: mint?.endKAId ?? '0',
+                },
+              };
+            }
+          }
+        }
+      }
+
+      if (eventType === 'ParanetCreated') {
+        const v9Registry = this.contracts.paranetV9Registry;
+        if (v9Registry) {
+          const eventFilter = v9Registry.filters.ParanetCreated();
+          const logs = await v9Registry.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+          for (const log of logs) {
+            const parsed = v9Registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed) {
+              yield {
+                type: 'ParanetCreated',
+                blockNumber: log.blockNumber,
+                data: {
+                  paranetId: parsed.args.paranetId?.toString() ?? '',
+                  creator: parsed.args.creator?.toString() ?? '',
+                  accessPolicy: Number(parsed.args.accessPolicy ?? 0),
+                  txHash: log.transactionHash,
                 },
               };
             }
@@ -1000,20 +1064,9 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('ContextGraphs contract not deployed.');
     }
 
-    const identityIds = params.signerSignatures.map((s) => s.identityId);
-    const rValues = params.signerSignatures.map((s) => ethers.hexlify(s.r));
-    const vsValues = params.signerSignatures.map((s) => ethers.hexlify(s.vs));
-
-    if (!params.merkleRoot) {
-      throw new Error('merkleRoot is required for on-chain addBatchToContextGraph');
-    }
-    const tx = await this.contracts.contextGraphs.addBatchToContextGraph(
+    const tx = await this.contracts.contextGraphs.registerKnowledgeCollection(
       params.contextGraphId,
       params.batchId,
-      ethers.hexlify(params.merkleRoot),
-      identityIds,
-      rValues,
-      vsValues,
     );
     const receipt = await tx.wait();
 
@@ -1025,87 +1078,29 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
-    await this.init();
-    if (!this.contracts.knowledgeAssets) {
-      throw new Error('KnowledgeAssets contract not deployed.');
-    }
-    if (!this.contracts.knowledgeAssetsStorage) {
-      throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
-    }
-
-    const signer = await this.nextSigner();
-    const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);
-    const receiverRs = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
-    const receiverVSs = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
-    const participantIdentityIds = params.participantSignatures.map((s) => s.identityId);
-    const participantRs = params.participantSignatures.map((s) => ethers.hexlify(s.r));
-    const participantVSs = params.participantSignatures.map((s) => ethers.hexlify(s.vs));
-
-    const ka = this.contracts.knowledgeAssets.connect(signer) as any;
-    const kaAddress = await this.contracts.knowledgeAssets.getAddress();
-
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const token = this.contracts.token.connect(signer) as Contract;
-      const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
-      if (currentAllowance < params.tokenAmount) {
-        const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
-        await approveTx.wait();
-      }
-    }
-
-    const tx = await ka.publishToContextGraph(
-      params.kaCount,
-      params.publisherNodeIdentityId,
-      ethers.hexlify(params.merkleRoot),
-      params.publicByteSize,
-      params.epochs,
-      params.tokenAmount,
-      ethers.ZeroAddress,
-      ethers.hexlify(params.publisherSignature.r),
-      ethers.hexlify(params.publisherSignature.vs),
-      receiverIdentityIds,
-      receiverRs,
-      receiverVSs,
-      params.contextGraphId,
-      participantIdentityIds,
-      participantRs,
-      participantVSs,
+    // V10 publishDirect handles context graph registration automatically
+    // when contextGraphId is set. Delegate to createKnowledgeAssetsV10.
+    const ackSignatures = [
+      ...params.receiverSignatures,
+      ...params.participantSignatures,
+    ].filter((s, i, arr) =>
+      i === arr.findIndex((a) => a.identityId === s.identityId),
     );
-    const receipt = await tx.wait();
 
-    let batchId = 0n;
-    let startKAId = 0n;
-    let endKAId = 0n;
-    let publisherAddress = signer.address;
-
-    for (const log of receipt.logs) {
-      try {
-        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
-          topics: [...log.topics],
-          data: log.data,
-        });
-        if (parsed?.name === 'UALRangeReserved') {
-          publisherAddress = parsed.args.publisher;
-          startKAId = BigInt(parsed.args.startId);
-          endKAId = BigInt(parsed.args.endId);
-        }
-        if (parsed?.name === 'KnowledgeBatchCreated') {
-          batchId = BigInt(parsed.args.batchId);
-        }
-      } catch { /* not this contract */ }
-    }
-
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
-
-    return {
-      batchId,
-      startKAId,
-      endKAId,
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      blockTimestamp,
-      publisherAddress,
-    };
+    return this.createKnowledgeAssetsV10({
+      publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
+      contextGraphId: params.contextGraphId,
+      merkleRoot: params.merkleRoot,
+      knowledgeAssetsAmount: params.kaCount,
+      byteSize: params.publicByteSize,
+      epochs: params.epochs,
+      tokenAmount: params.tokenAmount,
+      isImmutable: false,
+      publisherNodeIdentityId: params.publisherNodeIdentityId,
+      publisherSignature: params.publisherSignature,
+      ackSignatures,
+      paymaster: ethers.ZeroAddress,
+    });
   }
 
   async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
@@ -1421,14 +1416,36 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
 
-    // Look up the current tokenAmount on-chain to carry it forward
+    // Look up the current tokenAmount on-chain to carry it forward.
+    // V10 batches live in KnowledgeCollectionStorage; fall back to
+    // KnowledgeAssetsStorage (V9) if not found.
     let currentTokenAmount = 0n;
     if (kcs) {
       try {
-        currentTokenAmount = await kcs.getTokenAmount(params.kcId);
+        currentTokenAmount = BigInt(await kcs.getTokenAmount(params.kcId));
+      } catch { /* not in KCS */ }
+    }
+    if (currentTokenAmount === 0n && this.contracts.knowledgeAssetsStorage) {
+      try {
+        const batch = await this.contracts.knowledgeAssetsStorage.getBatch(params.kcId);
+        if (batch && batch.tokenAmount != null) {
+          currentTokenAmount = BigInt(batch.tokenAmount);
+        }
+      } catch { /* not in KAS either */ }
+    }
+
+    // The V10 contract requires newTokenAmount >= the cost of the new byte
+    // size (ask * newByteSize / 1024). Carry forward the current amount but
+    // also ensure it covers the cost for the new payload.
+    let requiredForNewSize = 0n;
+    if (this.contracts.askStorage) {
+      try {
+        const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
+        requiredForNewSize = (ask * params.newByteSize * 1n) / 1024n;
       } catch { /* use 0 */ }
     }
-    const newTokenAmount = params.newTokenAmount ?? currentTokenAmount;
+    const baseTokenAmount = params.newTokenAmount ?? currentTokenAmount;
+    const newTokenAmount = baseTokenAmount > requiredForNewSize ? baseTokenAmount : requiredForNewSize;
 
     // Look up the contextGraphId for this KC
     const contextGraphStorage = this.contracts.contextGraphStorage;
@@ -1495,6 +1512,17 @@ export class EVMChainAdapter implements ChainAdapter {
       vs: ackSigs.map(s => ethers.hexlify(s.vs)),
     };
 
+    // Approve TRAC for the V10 update — the contract may transferFrom
+    // for the newTokenAmount (same policy as publishDirect).
+    if (this.contracts.token && newTokenAmount > 0n) {
+      const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+      const prevAllowance = await tokenWithSigner.allowance(signer.address, kav10Address);
+      if (prevAllowance < newTokenAmount) {
+        const approveTx = await tokenWithSigner.approve(kav10Address, newTokenAmount);
+        await approveTx.wait();
+      }
+    }
+
     const tx = await ka.updateDirect(updateParams, ethers.ZeroAddress);
 
     const receipt = await tx.wait();
@@ -1512,18 +1540,23 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
     await this.init();
-    const staking = this.contracts.staking!;
-    const stakingAddr = await staking.getAddress();
+
+    let nft: Contract;
+    try {
+      nft = await this.resolveContract('DKGStakingConvictionNFT');
+    } catch {
+      throw new Error('DKGStakingConvictionNFT contract not deployed.');
+    }
+    const nftAddr = await nft.getAddress();
 
     if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingAddr);
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddr);
       if (currentAllowance < amount) {
-        const approveTx = await this.contracts.token.approve(stakingAddr, ethers.MaxUint256);
-        await approveTx.wait();
+        await (await this.contracts.token.approve(nftAddr, ethers.MaxUint256)).wait();
       }
     }
 
-    const tx = await staking.stakeWithLock(identityId, amount, lockEpochs);
+    const tx = await nft.stake(identityId, amount, lockEpochs);
     const receipt = await tx.wait();
 
     return {
@@ -1535,9 +1568,20 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
     await this.init();
-    const staking = this.contracts.staking!;
-    const multiplier18: bigint = await staking.getDelegatorConvictionMultiplier(identityId, delegator);
-    return { multiplier: Number(multiplier18) / 1e18 };
+
+    let nft: Contract;
+    try {
+      nft = await this.resolveContract('DKGStakingConvictionNFT');
+    } catch {
+      return { multiplier: 1.0 };
+    }
+
+    try {
+      const multiplier18: bigint = await nft.getDelegatorConvictionMultiplier(identityId, delegator);
+      return { multiplier: Number(multiplier18) / 1e18 };
+    } catch {
+      return { multiplier: 1.0 };
+    }
   }
 
   // =====================================================================
@@ -1762,5 +1806,178 @@ export class EVMChainAdapter implements ChainAdapter {
   async getContract(name: string): Promise<Contract> {
     await this.init();
     return this.resolveContract(name);
+  }
+
+  // ===== FairSwap =====
+
+  async initiatePurchase(
+    seller: string, kcId: bigint, kaId: bigint, price: bigint,
+  ): Promise<{ purchaseId: bigint } & TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    if (this.contracts.token && price > 0n) {
+      const fsjAddr = await this.contracts.fairSwapJudge.getAddress();
+      const allowance: bigint = await this.contracts.token.allowance(this.signer.address, fsjAddr);
+      if (allowance < price) {
+        await (await this.contracts.token.approve(fsjAddr, ethers.MaxUint256)).wait();
+      }
+    }
+
+    const tx = await this.contracts.fairSwapJudge.initiatePurchase(seller, kcId, kaId, price);
+    const receipt = await tx.wait();
+
+    let purchaseId = 0n;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = this.contracts.fairSwapJudge.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'PurchaseInitiated') {
+          purchaseId = BigInt(parsed.args.purchaseId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+
+    return { purchaseId, hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async fulfillPurchase(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    const tx = await this.contracts.fairSwapJudge.fulfillPurchase(
+      purchaseId, ethers.hexlify(encryptedDataRoot), ethers.hexlify(keyCommitment),
+    );
+    const receipt = await tx.wait();
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    const tx = await this.contracts.fairSwapJudge.revealKey(purchaseId, ethers.hexlify(key));
+    const receipt = await tx.wait();
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async claimPayment(purchaseId: bigint): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    const tx = await this.contracts.fairSwapJudge.claimPayment(purchaseId);
+    const receipt = await tx.wait();
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async claimRefund(purchaseId: bigint): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    const tx = await this.contracts.fairSwapJudge.claimRefund(purchaseId);
+    const receipt = await tx.wait();
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async disputeDelivery(purchaseId: bigint, proof: Uint8Array): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
+
+    const tx = await this.contracts.fairSwapJudge.disputeDelivery(purchaseId, proof);
+    const receipt = await tx.wait();
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
+  }
+
+  async getFairSwapPurchase(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null> {
+    await this.init();
+    if (!this.contracts.fairSwapJudge) return null;
+
+    try {
+      const [buyer, seller, kcId, kaId, price, state] =
+        await this.contracts.fairSwapJudge.getPurchase(purchaseId);
+      if (buyer === ethers.ZeroAddress) return null;
+      return {
+        purchaseId,
+        buyer,
+        seller,
+        kcId: BigInt(kcId),
+        kaId: BigInt(kaId),
+        price: BigInt(price),
+        state: Number(state),
+      };
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return null;
+      throw err;
+    }
+  }
+
+  // ===== Permanent Publishing =====
+
+  async publishKnowledgeAssetsPermanent(params: PermanentPublishParams): Promise<OnChainPublishResult> {
+    await this.init();
+    if (!this.contracts.knowledgeAssets) throw new Error('KnowledgeAssets contract not deployed.');
+
+    const publishSigner = this.nextSigner();
+    const kaAddr = await this.contracts.knowledgeAssets.getAddress();
+
+    if (this.contracts.token && params.tokenAmount > 0n) {
+      const allowance: bigint = await this.contracts.token.allowance(publishSigner.address, kaAddr);
+      if (allowance < params.tokenAmount) {
+        await (await (this.contracts.token.connect(publishSigner) as Contract).approve(kaAddr, ethers.MaxUint256)).wait();
+      }
+    }
+
+    const identityIds = params.receiverSignatures.map((s) => s.identityId);
+    const rValues = params.receiverSignatures.map((s) => s.r);
+    const vsValues = params.receiverSignatures.map((s) => s.vs);
+
+    const ka = this.contracts.knowledgeAssets.connect(publishSigner) as Contract;
+    const tx = await ka.batchMintKnowledgeAssetsPermanent(
+      params.kaCount,
+      params.publisherNodeIdentityId,
+      params.merkleRoot,
+      params.publicByteSize,
+      params.tokenAmount,
+      params.publisherSignature.r,
+      params.publisherSignature.vs,
+      identityIds,
+      rValues,
+      vsValues,
+    );
+
+    const receipt = await tx.wait();
+    const storageIface = this.contracts.knowledgeAssetsStorage!.interface;
+
+    let batchId = 0n;
+    let startKAId: bigint | undefined;
+    let endKAId: bigint | undefined;
+    let publisherAddress = publishSigner.address;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = storageIface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+        }
+      } catch { /* different contract log */ }
+    }
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    return {
+      batchId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress: publishSigner.address,
+      gasUsed: receipt.gasUsed ? BigInt(receipt.gasUsed) : undefined,
+      effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
+      tokenAmount: params.tokenAmount,
+    };
   }
 }

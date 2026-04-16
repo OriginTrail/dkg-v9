@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -18,7 +18,9 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
@@ -29,6 +31,18 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 function buildSnapshotFactQuads(opts: {
   paranetId: string;
@@ -126,10 +140,10 @@ describe('AgentWallet', () => {
   it('DKGAgent.create() persists identity across restarts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-persist-'));
     try {
-      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
+      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
       const peerId1 = agent1.wallet.keypair.publicKey;
 
-      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
+      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
       const peerId2 = agent2.wallet.keypair.publicKey;
 
       expect(Buffer.from(peerId2).toString('hex')).toBe(
@@ -246,12 +260,11 @@ describe('Profile Builder', () => {
 describe('ProfileManager', () => {
   it('publishes a profile as a KC via the Publisher', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
     const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
     const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
-    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
+    const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
 
     const manager = new ProfileManager(publisher, store);
     const result = await manager.publishProfile({
@@ -268,12 +281,11 @@ describe('ProfileManager', () => {
 
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
     const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
     const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
-    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
+    const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
 
     const manager = new ProfileManager(publisher, store);
 
@@ -520,7 +532,7 @@ describe('PeerId key extraction', () => {
       name: 'KeyTest',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -556,7 +568,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true, outputData: new Uint8Array([42]) }),
         },
       ],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     expect(agent.wallet).toBeDefined();
@@ -577,7 +589,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true }),
         },
       ],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await agent.start();
@@ -624,7 +636,7 @@ describe('Genesis Knowledge', () => {
     const agent = await DKGAgent.create({
       name: 'GenesisTest',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     const result = await store.query(
@@ -645,8 +657,8 @@ describe('Genesis Knowledge', () => {
 
   it('genesis loading is idempotent', async () => {
     const store = new OxigraphStore();
-    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store, chainAdapter: new MockChainAdapter() });
-    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store, chainAdapter: new MockChainAdapter() });
+    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
+    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
 
     const result = await store.query(
       `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v }`,
@@ -664,7 +676,7 @@ describe('Genesis Knowledge', () => {
     const agent = await DKGAgent.create({
       name: 'PolicyBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -738,7 +750,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'ContextPolicyBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -806,7 +818,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'RevokeDefaultBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -860,7 +872,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'RevokeContextBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -913,12 +925,12 @@ decisions: []
     const owner = await DKGAgent.create({
       name: 'OwnerBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const other = await DKGAgent.create({
       name: 'OtherBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await owner.start();
@@ -951,12 +963,12 @@ decisions: []
     const owner = await DKGAgent.create({
       name: 'OwnerRevokeBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const other = await DKGAgent.create({
       name: 'OtherRevokeBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await owner.start();
@@ -990,7 +1002,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'ValidateBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-validate', name: 'Ops Validate' });
@@ -1021,7 +1033,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'CollisionBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-collision', name: 'Ops Collision' });
@@ -1060,7 +1072,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'SnapshotBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-snapshot', name: 'Ops Snapshot' });
@@ -1152,8 +1164,8 @@ decisions:
     await storeA.insert(quads);
     await storeB.insert(quads);
 
-    const agentA = await DKGAgent.create({ name: 'DeterministicA', store: storeA, chainAdapter: new MockChainAdapter() });
-    const agentB = await DKGAgent.create({ name: 'DeterministicB', store: storeB, chainAdapter: new MockChainAdapter() });
+    const agentA = await DKGAgent.create({ name: 'DeterministicA', store: storeA, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
+    const agentB = await DKGAgent.create({ name: 'DeterministicB', store: storeB, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
 
     const resolvedA = await agentA.resolveFactsFromSnapshot({
       paranetId: 'ops-deterministic',
@@ -1271,7 +1283,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   it('DKGAgentConfig accepts syncContextGraphs array', async () => {
     const agent = await DKGAgent.create({
       name: 'SyncConfigTest',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: ['my-custom-paranet', 'another-paranet'],
     });
     expect(agent).toBeDefined();
@@ -1282,7 +1294,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeSyncScope',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1301,7 +1313,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeSyncScopeNoTrack',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1320,7 +1332,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoPeers',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1344,7 +1356,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'SyncDedupTest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1394,7 +1406,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthRequest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1405,7 +1417,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         onChainId: '1',
       });
 
-      const chain = (agent as any).chain as MockChainAdapter;
+      const chain = (agent as any).chain as EVMChainAdapter;
       const identityId = await chain.ensureProfile();
       const origSignMessage = chain.signMessage.bind(chain);
       (chain as any).signMessage = async (...args: unknown[]) => ({ r: new Uint8Array(32), vs: new Uint8Array(32) });
@@ -1427,7 +1439,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('denies private sync requests when requester is not an allowed participant', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthDeny',
       listenHost: '127.0.0.1',
@@ -1436,21 +1448,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     try {
       await agent.start();
       await chain.ensureProfile();
-      (chain as any).contextGraphs.set(1n, {
-        manager: chain.signerAddress,
-        participantIdentityIds: [999n],
-        requiredSignatures: 1,
-        metadataBatchId: 0n,
-        active: true,
-        batches: [],
-      });
       (agent as any).subscribedContextGraphs.set('private-cg', {
         name: 'private-cg',
         subscribed: false,
         synced: true,
         onChainId: '1',
       });
-
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => [999n];
       (chain as any).verifyACKIdentity = async () => true;
 
       const allowed = await (agent as any).authorizeSyncRequest({
@@ -1474,7 +1479,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('rejects replayed private sync requests', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const wallet = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
       name: 'PrivateSyncReplay',
@@ -1543,7 +1548,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       agent = await DKGAgent.create({
         name: 'PublicWarnTest',
         listenHost: '127.0.0.1',
-        chainAdapter: new MockChainAdapter(),
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         queryAccess: { defaultPolicy: 'public' },
       });
       await agent.start();
@@ -1568,7 +1573,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       agent = await DKGAgent.create({
         name: 'DenyDefaultTest',
         listenHost: '127.0.0.1',
-        chainAdapter: new MockChainAdapter(),
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
       await agent.start();
 
@@ -1586,7 +1591,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseFallbackTest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1608,7 +1613,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseMetaPhase',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1630,7 +1635,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseWorkspace',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1647,7 +1652,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('canReadContextGraph allows locally subscribed private CGs when identityId is 0n', async () => {
-    const chain = new MockChainAdapter('mock:0');
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).getIdentityId = async () => 0n;
     const agent = await DKGAgent.create({
       name: 'CanReadLocal',
@@ -1675,7 +1680,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('authorizeSyncRequest uses verifySyncIdentity when available', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const wallet = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
       name: 'SyncIdentityTest',
@@ -1739,7 +1744,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'BuildReqPublic',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();

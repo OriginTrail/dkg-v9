@@ -8,11 +8,25 @@
  * 5. Publish with private triples + synthetic anchor
  * 6. Multi-paranet queries
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -89,7 +103,7 @@ describe('Publish → Query (single agent)', () => {
       name: 'PublishQueryBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(agent);
@@ -121,7 +135,7 @@ describe('Publish → Query (single agent)', () => {
       name: 'PrivateBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(agent);
@@ -156,10 +170,10 @@ describe('Publish → Query (single agent)', () => {
 describe('Publish → Replicate → Query (two agents)', () => {
   it('publishes on A, replicates to B via GossipSub, queries on B', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ReplicateA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'ReplicateA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'ReplicateB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'ReplicateB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -192,10 +206,10 @@ describe('Publish → Replicate → Query (two agents)', () => {
 describe('CCL snapshot-resolved evaluation (two agents)', () => {
   it('resolves the same snapshot facts on both nodes and evaluates without caller facts', async () => {
     const agentA = await DKGAgent.create({
-      name: 'CclSnapshotA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'CclSnapshotA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'CclSnapshotB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'CclSnapshotB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -296,7 +310,7 @@ describe('Update flow (agent level)', () => {
       name: 'UpdateBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(agent);
@@ -346,7 +360,7 @@ describe('Update flow (agent level)', () => {
       name: 'PrivUpdateBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(agent);
@@ -382,7 +396,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'QuerySafeBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -395,7 +409,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'ConstructBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -408,7 +422,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'AskBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -421,7 +435,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'DescribeBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -434,7 +448,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'PrefixBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -449,7 +463,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'InsertReject',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -463,7 +477,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'DeleteReject',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -477,7 +491,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'DropReject',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -491,7 +505,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'LoadReject',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -505,7 +519,7 @@ describe('Query safety (SPARQL guard)', () => {
       name: 'EmbeddedReject',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -524,7 +538,7 @@ describe('Multi-paranet queries', () => {
       name: 'MultiParaBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
     agents.push(agent);
@@ -570,10 +584,10 @@ describe('Multi-paranet queries', () => {
 describe('GossipSub KC/KA metadata replication', () => {
   it('receiver stores KC metadata for gossip-replicated publishes', async () => {
     const agentA = await DKGAgent.create({
-      name: 'MetaPublisher', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'MetaPublisher', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'MetaReceiver', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'MetaReceiver', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -610,10 +624,10 @@ describe('GossipSub KC/KA metadata replication', () => {
 
   it('multiple publishes produce distinct KCs on receiver (no UAL collision)', async () => {
     const agentA = await DKGAgent.create({
-      name: 'MultiPubA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'MultiPubA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'MultiPubB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'MultiPubB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -653,10 +667,10 @@ describe('GossipSub KC/KA metadata replication', () => {
 
   it('receiver KC metadata has correct paranet reference', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ParaRefA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'ParaRefA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'ParaRefB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+      name: 'ParaRefB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 

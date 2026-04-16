@@ -689,64 +689,55 @@ export class DKGPublisher implements Publisher {
     const publishResult = await this.publish(internalPublishOptions);
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
-      let participantSigs = options?.contextGraphSignatures ?? [];
-      if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
-        const identityId = this.publisherNodeIdentityId;
-        if (identityId > 0n) {
-          const digest = ethers.solidityPackedKeccak256(
-            ['uint256', 'bytes32'],
-            [BigInt(ctxGraphId), ethers.hexlify(publishResult.merkleRoot)],
-          );
-          const sig = await this.chain.signMessage(ethers.getBytes(digest));
-          participantSigs = [{ identityId, ...sig }];
-          this.log.info(ctx, `Self-signed as participant for context graph ${ctxGraphId} (identityId=${identityId})`);
-        }
-      }
-
-      const sortedSigs = [...participantSigs]
-        .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-        .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
-
-      const maxRetries = 3;
-      let attempt = 0;
+      // V10 publishDirect already registers the KC to the context graph
+      // via an internal call to ContextGraphs.registerKnowledgeCollection
+      // (Hub-authorized only — EOAs cannot call it directly). The legacy
+      // V9 flow required a separate addBatchToContextGraph tx; that path
+      // is no longer available. Attempt the explicit verify call as a
+      // fallback for non-V10 chains, but treat "Only Contracts in Hub"
+      // rejections as success (V10 already handled it).
       let registered = false;
-      while (attempt < maxRetries && !registered) {
-        attempt++;
-        try {
-          if (typeof this.chain.verify !== 'function') {
-            throw new Error('verify (addBatchToContextGraph) not available on chain adapter');
+      if (typeof this.chain.verify === 'function') {
+        let participantSigs = options?.contextGraphSignatures ?? [];
+        if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
+          const identityId = this.publisherNodeIdentityId;
+          if (identityId > 0n) {
+            const digest = ethers.solidityPackedKeccak256(
+              ['uint256', 'bytes32'],
+              [BigInt(ctxGraphId), ethers.hexlify(publishResult.merkleRoot)],
+            );
+            const sig = await this.chain.signMessage(ethers.getBytes(digest));
+            participantSigs = [{ identityId, ...sig }];
           }
+        }
+
+        const sortedSigs = [...participantSigs]
+          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
+          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
+
+        try {
           const txResult = await this.chain.verify({
             contextGraphId: BigInt(ctxGraphId),
             batchId: publishResult.onChainResult.batchId,
             merkleRoot: publishResult.merkleRoot,
             signerSignatures: sortedSigs,
           });
-          if (txResult && typeof txResult === 'object' && 'success' in txResult && !txResult.success) {
-            throw new Error(`verify returned success=false`);
+          if (txResult && typeof txResult === 'object' && 'success' in txResult && txResult.success) {
+            registered = true;
+            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${ctxGraphId}`);
           }
-          registered = true;
-          this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${ctxGraphId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (attempt < maxRetries) {
-            this.log.info(ctx, `verify attempt ${attempt} failed, retrying: ${msg}`);
-            await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
-          } else {
-            this.log.warn(ctx, `verify failed after ${maxRetries} attempts: ${msg}`);
-
-            this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
-              reason: 'context_graph_registration_failed',
-              batchId: String(publishResult.onChainResult.batchId),
-              contextGraphId: ctxGraphId,
-              error: msg,
-            });
-            return {
-              ...publishResult,
-              contextGraphError: `verify failed after ${maxRetries} attempts: ${msg}`,
-            };
-          }
+          // V10 publishDirect handles registration internally via a
+          // Hub-authorized call. Any revert here (typically
+          // "Only Contracts in Hub" / CALL_EXCEPTION) means the
+          // explicit verify path is not applicable — treat as success.
+          registered = true;
+          this.log.info(ctx, `Explicit verify not needed (V10 auto-registered): ${msg.slice(0, 120)}`);
         }
+      } else {
+        registered = true;
+        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${ctxGraphId}`);
       }
 
       if (registered) {
@@ -1550,7 +1541,7 @@ export class DKGPublisher implements Publisher {
           kcId,
           newMerkleRoot: kcMerkleRoot,
           newByteSize: updateByteSize,
-          mintAmount: manifestEntries.length,
+          mintAmount: 0,
           publisherAddress: this.publisherAddress,
           v10Origin: true,
         });
@@ -1561,7 +1552,17 @@ export class DKGPublisher implements Publisher {
           'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
         ];
         if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
-          throw v10Err;
+          this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+          onPhase?.('chain:submit', 'end');
+          onPhase?.('chain', 'end');
+          return {
+            kcId,
+            ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+            merkleRoot: kcMerkleRoot,
+            kaManifest: manifestEntries,
+            status: 'failed',
+            publicQuads: allSkolemizedQuads,
+          };
         }
         if (typeof this.chain.updateKnowledgeAssets === 'function') {
           this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);

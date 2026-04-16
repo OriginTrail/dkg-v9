@@ -1,15 +1,28 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveMsOption } from '../src/publisher-runner.js';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('publisher wallets', () => {
   it('adds, loads, and removes publisher wallets', async () => {
@@ -157,11 +170,11 @@ describe('publisher wallets', () => {
 
     const writer = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', wallet.address),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair,
       publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await writer.writeToWorkspace('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
@@ -270,11 +283,11 @@ describe('publisher wallets', () => {
     const keypair = await generateEd25519Keypair();
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', wallet.address),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair,
       publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await dkgPublisher.writeToWorkspace('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },

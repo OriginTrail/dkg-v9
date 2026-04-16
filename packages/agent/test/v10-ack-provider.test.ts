@@ -1,10 +1,25 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { NoChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
-async function createAgent(chainAdapter: MockChainAdapter | NoChainAdapter) {
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
+async function createAgent(chainAdapter: ChainAdapter) {
   const store = new OxigraphStore();
   const agent = await DKGAgent.create({
     name: 'AckProviderTestAgent',
@@ -25,8 +40,8 @@ describe('v10 ACK provider wiring', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('uses V10 publish path when chain supports V10 (MockChainAdapter)', async () => {
-    const chain = new MockChainAdapter('mock:31337');
+  it('uses V10 publish path when chain supports V10 (EVMChainAdapter)', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     ({ agent } = await createAgent(chain));
 
     const result = await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [

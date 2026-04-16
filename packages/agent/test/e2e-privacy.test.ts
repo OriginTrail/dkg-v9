@@ -5,13 +5,13 @@
  * Contrast with e2e-workspace.test.ts which confirms normal workspace writes
  * DO replicate.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { contextGraphDataUri, SYSTEM_PARANETS, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   generateKCMetadata,
-  computeTripleHashV10,
   computeFlatKCRootV10,
   TripleStoreAsyncLiftPublisher,
   AsyncLiftRunner,
@@ -26,7 +26,7 @@ async function insertWithMeta(
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
 ) {
   await store.insert(quads);
-  const ual = `did:dkg:test:mock:31337/${Date.now()}`;
+  const ual = `did:dkg:test:evm:31337/${Date.now()}`;
   const kaEntries: KAMetadata[] = quads.map((q, i) => ({
     rootEntity: q.subject,
     kcUal: ual,
@@ -59,6 +59,18 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
 describe('Private data isolation (2 nodes)', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
@@ -76,12 +88,12 @@ describe('Private data isolation (2 nodes)', () => {
     nodeA = await DKGAgent.create({
       name: 'PrivacyA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     nodeB = await DKGAgent.create({
       name: 'PrivacyB',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
 
     await nodeA.start();
@@ -223,26 +235,13 @@ describe('Private context graph sync auth (3 nodes)', () => {
   });
 
   it('allows an authorized node to sync a private context graph and blocks a bad actor', async () => {
-    walletA = ethers.Wallet.createRandom();
-    walletB = ethers.Wallet.createRandom();
-    walletC = ethers.Wallet.createRandom();
+    walletA = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    walletB = new ethers.Wallet(HARDHAT_KEYS.REC1_OP);
+    walletC = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
 
-    const chainA = new MockChainAdapter('mock:31337', walletA.address);
-    const chainB = new MockChainAdapter('mock:31337', walletB.address);
-    const chainC = new MockChainAdapter('mock:31337', walletC.address);
-
-    chainA.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletA.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainB.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletB.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainC.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletC.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const chainB = createEVMAdapter(HARDHAT_KEYS.REC1_OP);
+    const chainC = createEVMAdapter(HARDHAT_KEYS.REC2_OP);
 
     nodeA = await DKGAgent.create({ name: 'PrivateSyncA', listenPort: 0, chainAdapter: chainA });
     nodeB = await DKGAgent.create({ name: 'PrivateSyncB', listenPort: 0, chainAdapter: chainB });
@@ -258,15 +257,10 @@ describe('Private context graph sync auth (3 nodes)', () => {
     await nodeC.connectTo(addrA);
     await sleep(500);
 
-    const idA = 1n;
-    const idB = 2n;
-    const idC = 3n;
-
-    (chainA as any).identities.set(walletA.address, idA);
-    (chainA as any).identities.set(walletB.address, idB);
-    (chainA as any).identities.set(walletC.address, idC);
-    (chainB as any).identities.set(walletB.address, idB);
-    (chainC as any).identities.set(walletC.address, idC);
+    const { coreProfileId, receiverIds } = getSharedContext();
+    const idA = BigInt(coreProfileId);
+    const idB = BigInt(receiverIds[0]);
+    const idC = BigInt(receiverIds[1]);
 
     await nodeA.createContextGraph({
       id: PRIVATE_PARANET,
@@ -338,9 +332,6 @@ describe('Context graph access matrix (3 nodes)', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
   let nodeC: DKGAgent;
-  let walletA: ethers.Wallet;
-  let walletB: ethers.Wallet;
-  let walletC: ethers.Wallet;
 
   afterAll(async () => {
     try {
@@ -353,26 +344,9 @@ describe('Context graph access matrix (3 nodes)', () => {
   });
 
   it('enforces public/private x durable/SWM x authorized/unauthorized sync matrix', async () => {
-    walletA = ethers.Wallet.createRandom();
-    walletB = ethers.Wallet.createRandom();
-    walletC = ethers.Wallet.createRandom();
-
-    const chainA = new MockChainAdapter('mock:31337', walletA.address);
-    const chainB = new MockChainAdapter('mock:31337', walletB.address);
-    const chainC = new MockChainAdapter('mock:31337', walletC.address);
-
-    chainA.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletA.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainB.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletB.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainC.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletC.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const chainB = createEVMAdapter(HARDHAT_KEYS.REC1_OP);
+    const chainC = createEVMAdapter(HARDHAT_KEYS.REC2_OP);
 
     nodeA = await DKGAgent.create({ name: 'MatrixA', listenPort: 0, chainAdapter: chainA });
     nodeB = await DKGAgent.create({ name: 'MatrixB', listenPort: 0, chainAdapter: chainB });
@@ -388,14 +362,10 @@ describe('Context graph access matrix (3 nodes)', () => {
     await nodeC.connectTo(addrA);
     await sleep(500);
 
-    const idA = 1n;
-    const idB = 2n;
-    const idC = 3n;
-    (chainA as any).identities.set(walletA.address, idA);
-    (chainA as any).identities.set(walletB.address, idB);
-    (chainA as any).identities.set(walletC.address, idC);
-    (chainB as any).identities.set(walletB.address, idB);
-    (chainC as any).identities.set(walletC.address, idC);
+    const { coreProfileId, receiverIds } = getSharedContext();
+    const idA = BigInt(coreProfileId);
+    const idB = BigInt(receiverIds[0]);
+    const idC = BigInt(receiverIds[1]);
 
     await nodeA.createContextGraph({ id: MATRIX_PUBLIC_PARANET, name: 'Matrix Public' });
     nodeB.subscribeToContextGraph(MATRIX_PUBLIC_PARANET);
@@ -498,19 +468,13 @@ describe('Unscoped query privacy (2 nodes)', () => {
   });
 
   it('excludes private CG data from unscoped queries', async () => {
-    const walletA = ethers.Wallet.createRandom();
-    const chainA = new MockChainAdapter('mock:31337', walletA.address);
-    chainA.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletA.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
 
     nodeA = await DKGAgent.create({ name: 'UnscopedPrivacy', listenPort: 0, chainAdapter: chainA });
     await nodeA.start();
     await sleep(500);
 
-    const idA = 1n;
-    (chainA as any).identities.set(walletA.address, idA);
+    const idA = await chainA.getIdentityId();
 
     await nodeA.createContextGraph({ id: 'public-cg', name: 'Public CG' });
     // Create a private CG — createContextGraph auto-adds the creator (identity 1)
@@ -547,7 +511,7 @@ describe('Unscoped query privacy (2 nodes)', () => {
     );
     expect(publicResult.bindings.length).toBe(1);
 
-    // Scoped query to private CG is denied (node A identity 1 not in participants [99])
+    // Scoped query to private CG is denied (node A identity not in participants [99])
     const privateResult = await nodeA.query(
       `SELECT ?name WHERE { <${privateEntity}> <http://schema.org/name> ?name }`,
       { contextGraphId: 'private-cg' },
@@ -581,15 +545,13 @@ describe('Participant IDs stored in meta graph (not ontology)', () => {
   });
 
   it('stores participant identity IDs in the CG meta graph', async () => {
-    const walletA = ethers.Wallet.createRandom();
-    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
 
     nodeA = await DKGAgent.create({ name: 'ParticipantMetaGraph', listenPort: 0, chainAdapter: chainA });
     await nodeA.start();
     await sleep(500);
 
-    const idA = await chainA.ensureProfile();
-    (chainA as any).identities.set(walletA.address, idA);
+    const idA = await chainA.getIdentityId();
 
     await nodeA.createContextGraph({
       id: 'private-meta-test',
@@ -631,9 +593,6 @@ describe('Private context graph late join sync (3 nodes)', () => {
   let curator: DKGAgent;
   let syncerA: DKGAgent;
   let syncerB: DKGAgent;
-  let walletA: ethers.Wallet;
-  let walletB: ethers.Wallet;
-  let walletC: ethers.Wallet;
 
   afterAll(async () => {
     try { await curator?.stop(); } catch { /* */ }
@@ -642,35 +601,14 @@ describe('Private context graph late join sync (3 nodes)', () => {
   });
 
   it('syncs invited private graph data for an early and a late participant via real DKG sync/query flows', async () => {
-    walletA = ethers.Wallet.createRandom();
-    walletB = ethers.Wallet.createRandom();
-    walletC = ethers.Wallet.createRandom();
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const chainB = createEVMAdapter(HARDHAT_KEYS.REC1_OP);
+    const chainC = createEVMAdapter(HARDHAT_KEYS.REC2_OP);
 
-    const chainA = new MockChainAdapter('mock:31337', walletA.address);
-    const chainB = new MockChainAdapter('mock:31337', walletB.address);
-    const chainC = new MockChainAdapter('mock:31337', walletC.address);
-
-    chainA.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletA.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainB.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletB.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-    chainC.signMessage = async (digest: Uint8Array) => {
-      const sig = ethers.Signature.from(await walletC.signMessage(digest));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    };
-
-    const idA = 11n;
-    const idB = 12n;
-    const idC = 13n;
-    (chainA as any).identities.set(walletA.address, idA);
-    (chainA as any).identities.set(walletB.address, idB);
-    (chainA as any).identities.set(walletC.address, idC);
-    (chainB as any).identities.set(walletB.address, idB);
-    (chainC as any).identities.set(walletC.address, idC);
+    const { coreProfileId, receiverIds } = getSharedContext();
+    const idA = BigInt(coreProfileId);
+    const idB = BigInt(receiverIds[0]);
+    const idC = BigInt(receiverIds[1]);
 
     curator = await DKGAgent.create({ name: 'GuardianCurator', listenPort: 0, chainAdapter: chainA });
     syncerA = await DKGAgent.create({ name: 'GuardianSyncerA', listenPort: 0, chainAdapter: chainB });

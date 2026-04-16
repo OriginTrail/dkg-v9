@@ -332,15 +332,14 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   // Error path: invalid kcId for update returns meaningful error
   // -------------------------------------------------------------------------
 
-  it('V10 UPDATE: updating non-existent KC throws descriptive error', async () => {
+  it('V10 UPDATE: updating non-existent KC returns failed status', async () => {
 
     const bogusKcId = 999999n;
-    await expect(
-      publisher.update(bogusKcId, {
-        contextGraphId: CONTEXT_GRAPH,
-        quads: [q('urn:evm-e2e:ghost', 'http://schema.org/name', '"Ghost"')],
-      }),
-    ).rejects.toThrow();
+    const result = await publisher.update(bogusKcId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:ghost', 'http://schema.org/name', '"Ghost"')],
+    });
+    expect(result.status).toBe('failed');
   }, 30_000);
 
   // -------------------------------------------------------------------------

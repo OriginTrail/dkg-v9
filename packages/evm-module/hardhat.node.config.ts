@@ -29,9 +29,9 @@ const config: HardhatUserConfig = {
     hardhat: {
       environment: 'development',
       chainId: 31337,
-      gas: isCoverage ? 80_000_000 : 15_000_000,
+      gas: 15_000_000,
       gasMultiplier: 1,
-      blockGasLimit: isCoverage ? 80_000_000 : 30_000_000,
+      blockGasLimit: 30_000_000,
       hardfork: 'shanghai',
       accounts: { count: 200 },
       throwOnTransactionFailures: true,

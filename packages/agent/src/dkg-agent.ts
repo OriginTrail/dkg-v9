@@ -971,6 +971,12 @@ export class DKGAgent {
         this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
         const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
         this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
+        for (const id of newlyDiscovered) {
+          const sub = this.subscribedContextGraphs.get(id);
+          if (sub && sub.metaSynced === false) {
+            sub.metaSynced = true;
+          }
+        }
       }
 
       const wsContextGraphIds = this.config.syncContextGraphs ?? [];
@@ -4787,7 +4793,6 @@ export class DKGAgent {
     if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
       return false;
     }
-    this.metaRefreshTimestamps.set(contextGraphId, now);
 
     const ctx = createOperationContext('sync');
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
@@ -4812,50 +4817,54 @@ export class DKGAgent {
 
     // Resolve curator identifier to a peer ID. The DID value is either a
     // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
-    // wallet addresses, look up via agent registry or fall back to scanning
-    // connected peers' known agent registrations.
+    // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
+    // stores the libp2p peer ID) over the agent registry (which may return
+    // an arbitrary match when multiple agents register the same wallet).
     let curatorPeerId = curatorIdentifier;
     if (curatorIdentifier.startsWith('0x')) {
       let resolved = false;
-      try {
-        const agents = await this.discovery.findAgents();
-        const match = agents.find(
-          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-        );
-        if (match) {
-          curatorPeerId = match.peerId;
-          resolved = true;
-        }
-      } catch { /* registry unavailable */ }
 
-      // Fallback: look up the creator peer ID from the ontology definition
+      // Preferred: look up the creator peer ID from the ontology definition
       // graph or the _meta graph. The dkg:creator triple uses the libp2p
       // peer ID while dkg:curator uses the wallet address.
-      if (!resolved) {
-        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-        const creatorResult = await this.store.query(
-          `SELECT ?creator WHERE {
-            {
-              GRAPH <${ontologyGraph}> {
-                <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
-              }
-            } UNION {
-              GRAPH <${cgMetaGraph}> {
-                <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
-              }
+      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const creatorResult = await this.store.query(
+        `SELECT ?creator WHERE {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
             }
-          } LIMIT 1`,
-        );
-        if (creatorResult.type === 'bindings' && creatorResult.bindings.length > 0) {
-          const creatorDid = (creatorResult.bindings[0] as Record<string, string>)['creator'] ?? '';
-          if (creatorDid.startsWith(didPrefix)) {
-            const creatorId = creatorDid.slice(didPrefix.length);
-            if (!creatorId.startsWith('0x')) {
-              curatorPeerId = creatorId;
-              resolved = true;
+          } UNION {
+            GRAPH <${cgMetaGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
             }
           }
+        } LIMIT 1`,
+      );
+      if (creatorResult.type === 'bindings' && creatorResult.bindings.length > 0) {
+        const creatorDid = (creatorResult.bindings[0] as Record<string, string>)['creator'] ?? '';
+        if (creatorDid.startsWith(didPrefix)) {
+          const creatorId = creatorDid.slice(didPrefix.length);
+          if (!creatorId.startsWith('0x')) {
+            curatorPeerId = creatorId;
+            resolved = true;
+          }
         }
+      }
+
+      // Fallback: agent registry lookup (non-deterministic if multiple agents
+      // share the same wallet address, but better than failing outright)
+      if (!resolved) {
+        try {
+          const agents = await this.discovery.findAgents();
+          const match = agents.find(
+            (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+          );
+          if (match) {
+            curatorPeerId = match.peerId;
+            resolved = true;
+          }
+        } catch { /* registry unavailable */ }
       }
 
       if (!resolved) return false;
@@ -4868,21 +4877,33 @@ export class DKGAgent {
     let connections = this.node.libp2p.getConnections();
     let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
 
-    // If not directly connected, try dialing via relay using agent registry info
+    // If not directly connected, try dialing — first a regular dial (the peer
+    // store may already have direct multiaddrs), then via relay as fallback.
     if (!isConnected) {
       try {
-        const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
-        if (agent?.relayAddress) {
-          const { peerIdFromString } = await import('@libp2p/peer-id');
-          const { multiaddr } = await import('@multiformats/multiaddr');
-          const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
-          const pid = peerIdFromString(curatorPeerId);
-          await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        const pid = peerIdFromString(curatorPeerId);
+
+        try {
           await this.node.libp2p.dial(pid);
           connections = this.node.libp2p.getConnections();
           isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+        } catch { /* direct dial failed, try relay */ }
+
+        if (!isConnected) {
+          const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
+          if (agent?.relayAddress) {
+            const { multiaddr } = await import('@multiformats/multiaddr');
+            const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
+            await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+            await this.node.libp2p.dial(pid);
+            connections = this.node.libp2p.getConnections();
+            isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+          }
         }
-      } catch { /* dial failed — curator unreachable */ }
+      } catch (err) {
+        this.log.warn(ctx, `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     if (!isConnected) {
@@ -4894,6 +4915,7 @@ export class DKGAgent {
       const metaQuads = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
       if (metaQuads.length > 0) {
         await this.store.insert(metaQuads);
+        this.metaRefreshTimestamps.set(contextGraphId, now);
         this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaQuads.length} triples from curator ${curatorPeerId.slice(-8)}`);
         return true;
       }

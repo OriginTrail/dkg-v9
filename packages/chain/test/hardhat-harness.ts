@@ -46,12 +46,16 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const p = new JsonRpcProvider(url);
-      await p.getBlockNumber();
-      return true;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+      });
+      if (res.ok) return true;
     } catch {
-      await new Promise((r) => setTimeout(r, 500));
+      // node not ready yet
     }
+    await new Promise((r) => setTimeout(r, 500));
   }
   return false;
 }

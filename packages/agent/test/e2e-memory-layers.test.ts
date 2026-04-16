@@ -33,6 +33,7 @@ async function createAgent(name: string) {
     name,
     listenPort: 0,
     chainAdapter: chain,
+    nodeRole: 'core',
   });
   agents.push(agent);
   await agent.start();
@@ -204,6 +205,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       name: 'LayersA',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     agents.push(nodeA);
 
@@ -211,6 +213,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       name: 'LayersB',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     agents.push(nodeB);
 

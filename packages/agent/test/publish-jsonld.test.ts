@@ -14,6 +14,7 @@ async function createAgent(name: string) {
     skills: [],
     chainAdapter: new MockChainAdapter(),
     store,
+    nodeRole: 'core',
   });
   agents.push(agent);
   stores.push(store);

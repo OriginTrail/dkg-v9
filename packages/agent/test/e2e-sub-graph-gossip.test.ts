@@ -43,11 +43,13 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
       name: 'SubGossipA',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'SubGossipB',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();

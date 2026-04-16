@@ -12,6 +12,7 @@ async function createAgent(chainAdapter: MockChainAdapter | NoChainAdapter) {
     listenHost: '127.0.0.1',
     store,
     chainAdapter,
+    nodeRole: 'core',
   });
   await agent.start();
   return { agent, store, chain: chainAdapter };

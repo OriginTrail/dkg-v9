@@ -60,18 +60,21 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'ProtoB',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeC = await DKGAgent.create({
       name: 'ProtoC',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -209,12 +212,14 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'CtxProtoB',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -323,12 +328,14 @@ describe('E2E: Link existing published KC to context graph', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'LinkB',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -410,6 +417,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: chain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -455,6 +463,7 @@ describe('E2E: Context graph registration rejected with insufficient participant
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();

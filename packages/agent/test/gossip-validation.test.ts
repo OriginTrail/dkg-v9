@@ -359,12 +359,14 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
       name: 'GossipReceiver',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     integrationAgents.push(agentA, agentB);
 
@@ -410,12 +412,14 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
       listenPort: 0,
       skills: [],
       chainAdapter: chainA,
+      nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
       name: 'TentReceiver',
       listenPort: 0,
       skills: [],
       chainAdapter: chainB,
+      nodeRole: 'core',
     });
     integrationAgents.push(agentA, agentB);
 
@@ -445,7 +449,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     );
 
     const statuses = statusResult.bindings.map(b => b['status']);
-    const hasConfirmed = statuses.some(s => s === '"confirmed"');
-    expect(hasConfirmed).toBe(true);
+    const hasTentative = statuses.some(s => s === '"tentative"');
+    expect(hasTentative).toBe(true);
   }, 25000);
 });

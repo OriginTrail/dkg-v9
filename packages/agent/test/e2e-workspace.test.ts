@@ -32,11 +32,13 @@ describe('Workspace E2E (2 nodes)', () => {
       name: 'WorkspaceA',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'WorkspaceB',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
+      nodeRole: 'core',
     });
 
     await nodeA.start();

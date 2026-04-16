@@ -90,6 +90,7 @@ describe('Publish → Query (single agent)', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
     });
     agents.push(agent);
     await agent.start();
@@ -121,6 +122,7 @@ describe('Publish → Query (single agent)', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
     });
     agents.push(agent);
     await agent.start();
@@ -154,10 +156,10 @@ describe('Publish → Query (single agent)', () => {
 describe('Publish → Replicate → Query (two agents)', () => {
   it('publishes on A, replicates to B via GossipSub, queries on B', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ReplicateA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ReplicateA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'ReplicateB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ReplicateB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -190,10 +192,10 @@ describe('Publish → Replicate → Query (two agents)', () => {
 describe('CCL snapshot-resolved evaluation (two agents)', () => {
   it('resolves the same snapshot facts on both nodes and evaluates without caller facts', async () => {
     const agentA = await DKGAgent.create({
-      name: 'CclSnapshotA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'CclSnapshotA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'CclSnapshotB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'CclSnapshotB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -295,6 +297,7 @@ describe('Update flow (agent level)', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
     });
     agents.push(agent);
     await agent.start();
@@ -344,6 +347,7 @@ describe('Update flow (agent level)', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
     });
     agents.push(agent);
     await agent.start();
@@ -521,6 +525,7 @@ describe('Multi-paranet queries', () => {
       listenPort: 0,
       skills: [],
       chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
     });
     agents.push(agent);
     await agent.start();
@@ -565,10 +570,10 @@ describe('Multi-paranet queries', () => {
 describe('GossipSub KC/KA metadata replication', () => {
   it('receiver stores KC metadata for gossip-replicated publishes', async () => {
     const agentA = await DKGAgent.create({
-      name: 'MetaPublisher', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'MetaPublisher', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'MetaReceiver', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'MetaReceiver', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -605,10 +610,10 @@ describe('GossipSub KC/KA metadata replication', () => {
 
   it('multiple publishes produce distinct KCs on receiver (no UAL collision)', async () => {
     const agentA = await DKGAgent.create({
-      name: 'MultiPubA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'MultiPubA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'MultiPubB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'MultiPubB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 
@@ -648,10 +653,10 @@ describe('GossipSub KC/KA metadata replication', () => {
 
   it('receiver KC metadata has correct paranet reference', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ParaRefA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ParaRefA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
-      name: 'ParaRefB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ParaRefB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(), nodeRole: 'core',
     });
     agents.push(agentA, agentB);
 

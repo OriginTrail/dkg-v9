@@ -37,12 +37,14 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'CtxB',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();

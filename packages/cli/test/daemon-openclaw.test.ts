@@ -1169,6 +1169,29 @@ describe('OpenClaw persist-turn validation', () => {
     })).toBe(false);
   });
 
+  it('rejects non-string or invalid projectContextGraphId values in persist-turn payloads', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 42,
+    })).toBe(false);
+
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 'bad graph id',
+    })).toBe(false);
+
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 'project-alpha',
+    })).toBe(true);
+  });
+
   it('rejects attachment ref arrays when any entry is malformed', () => {
     const validRef = {
       assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',

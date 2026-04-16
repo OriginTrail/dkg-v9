@@ -3010,6 +3010,9 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   attachmentRefs?: unknown;
   projectContextGraphId?: unknown;
 } {
+  const normalizedProjectContextGraphId = typeof payload.projectContextGraphId === 'string'
+    ? payload.projectContextGraphId.trim()
+    : payload.projectContextGraphId;
   return (
     typeof payload.sessionId === "string" &&
     payload.sessionId.trim().length > 0 &&
@@ -3029,6 +3032,17 @@ export function isValidOpenClawPersistTurnPayload(payload: {
       payload.persistenceState === 'stored' ||
       payload.persistenceState === 'failed' ||
       payload.persistenceState === 'pending'
+    ) &&
+    (
+      payload.projectContextGraphId === undefined ||
+      payload.projectContextGraphId === null ||
+      (
+        typeof normalizedProjectContextGraphId === 'string' &&
+        (
+          normalizedProjectContextGraphId.length === 0 ||
+          validateContextGraphId(normalizedProjectContextGraphId).valid
+        )
+      )
     )
   );
 }

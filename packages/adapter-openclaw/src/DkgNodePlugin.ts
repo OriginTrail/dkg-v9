@@ -227,9 +227,12 @@ export class DkgNodePlugin {
       this.client.setLocalAgentRequestContext(null);
       return;
     }
+    const semanticEnrichmentSupported = this.channelPlugin?.isSemanticEnrichmentActive() === true
+      ? true
+      : undefined;
     this.client.setLocalAgentRequestContext({
       integrationId: 'openclaw',
-      semanticEnrichmentSupported: this.channelPlugin?.isSemanticEnrichmentActive() === true,
+      ...(semanticEnrichmentSupported === true ? { semanticEnrichmentSupported } : {}),
     });
   }
   /**

@@ -33,6 +33,30 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
+function findLastByRole(messages: any[], role: string): any | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === role) return messages[i];
+  }
+  return undefined;
+}
+
+function extractToolCalls(messages: any[]): Array<{ name: string; args: Record<string, unknown>; result: unknown }> | undefined {
+  const calls: Array<{ name: string; args: Record<string, unknown>; result: unknown }> = [];
+  for (const msg of messages) {
+    if (msg?.role !== 'assistant' || !Array.isArray(msg?.toolUse)) continue;
+    for (const tool of msg.toolUse) {
+      if (typeof tool?.name === 'string') {
+        calls.push({
+          name: tool.name,
+          args: tool.args ?? {},
+          result: tool.result ?? null,
+        });
+      }
+    }
+  }
+  return calls.length > 0 ? calls : undefined;
+}
+
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
   chatAttachments: true,
@@ -363,47 +387,40 @@ export class DkgNodePlugin {
   }
 
   /**
-   * Register cross-channel turn persistence hooks. Fires for ALL
-   * OpenClaw channels (Telegram, WhatsApp, API, etc.) except the DKG UI
-   * channel bridge (which already persists with richer data via
-   * DkgChannelPlugin.queueTurnPersistence).
+   * Register cross-channel turn persistence via the `agent_end` hook.
+   * Fires once after every completed agent dispatch across ALL OpenClaw
+   * channels (Telegram, WhatsApp, API, etc.). The DKG UI channel bridge
+   * already persists with richer data (correlation IDs, attachment refs)
+   * via DkgChannelPlugin.queueTurnPersistence, so it's skipped here.
    *
-   * Strategy: stash the user message on `message_received`, then pair
-   * it with the assistant reply on `message_sent` and persist the turn
-   * to the DKG via the daemon's persist-turn endpoint.
+   * The `agent_end` event carries the full messages array from the run,
+   * including user input, assistant reply, and tool calls — no buffering
+   * needed.
    */
   private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
     const DKG_UI_CHANNEL = 'dkg-ui';
-    const pendingUserMessages = new Map<string, { from: string; content: string; timestamp: number }>();
     const client = this.client;
 
-    api.registerHook('message_received', async (event: any, ctx: any) => {
+    api.registerHook('agent_end', async (event: any, ctx: any) => {
       const channelId = ctx?.channelId;
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      const key = `${channelId}:${ctx?.conversationId ?? 'default'}`;
-      pendingUserMessages.set(key, {
-        from: event?.from ?? 'unknown',
-        content: typeof event?.content === 'string' ? event.content : '',
-        timestamp: event?.timestamp ?? Date.now(),
-      });
-    }, { name: 'dkg-cross-channel-receive' });
+      if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) return;
 
-    api.registerHook('message_sent', async (event: any, ctx: any) => {
-      const channelId = ctx?.channelId;
-      if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      if (!event?.success) return;
-      const key = `${channelId}:${ctx?.conversationId ?? 'default'}`;
-      const pending = pendingUserMessages.get(key);
-      pendingUserMessages.delete(key);
+      const messages: any[] = event.messages;
+      const lastUser = findLastByRole(messages, 'user');
+      const lastAssistant = findLastByRole(messages, 'assistant');
+      if (!lastUser && !lastAssistant) return;
 
-      const userMessage = pending?.content ?? '';
-      const assistantReply = typeof event?.content === 'string' ? event.content : '';
+      const userMessage = typeof lastUser?.content === 'string' ? lastUser.content : '';
+      const assistantReply = typeof lastAssistant?.content === 'string' ? lastAssistant.content : '';
       if (!userMessage && !assistantReply) return;
 
-      const sessionId = `openclaw:${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+      const sessionId = ctx?.sessionKey ?? ctx?.sessionId ?? `openclaw:${channelId}:default`;
+
+      const toolCalls = extractToolCalls(messages);
 
       try {
-        await client.persistTurn({ sessionId, userMessage, assistantReply });
+        await client.persistTurn({ sessionId, userMessage, assistantReply, toolCalls });
         api.logger.debug?.(`[dkg] Cross-channel turn persisted (${channelId})`);
       } catch (err: any) {
         api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);

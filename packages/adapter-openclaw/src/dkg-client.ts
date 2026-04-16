@@ -285,12 +285,14 @@ export class DkgDaemonClient {
     userMessage: string;
     assistantReply: string;
     turnId?: string;
+    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
   }): Promise<void> {
     await this.post('/api/openclaw-channel/persist-turn', {
       sessionId: params.sessionId,
       userMessage: params.userMessage,
       assistantReply: params.assistantReply,
       turnId: params.turnId ?? randomUUID(),
+      ...(params.toolCalls ? { toolCalls: params.toolCalls } : {}),
     });
   }
 

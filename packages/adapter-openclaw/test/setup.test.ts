@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import {
   discoverWorkspace,
   discoverAgentName,
@@ -10,6 +11,8 @@ import {
   writeWorkspaceConfig,
   installCanonicalNodeSkill,
 } from '../src/setup.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -300,6 +303,90 @@ describe('mergeOpenClawConfig', () => {
       '/other/plugin',
       'C:/Projects/dkg-v9/packages/adapter-openclaw',
     ]);
+  });
+
+  it('writes plugins.slots.memory = "adapter-openclaw" to elect the adapter into the memory slot', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.slots).toBeDefined();
+    expect(config.plugins.slots.memory).toBe('adapter-openclaw');
+  });
+
+  it('preserves an existing plugins.slots object when adding the memory slot', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        slots: {
+          contextEngine: 'some-context-engine',
+          other: 'other-value',
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(config.plugins.slots.contextEngine).toBe('some-context-engine');
+    expect(config.plugins.slots.other).toBe('other-value');
+  });
+
+  it('refuses to merge when plugins.slots.contextEngine === "adapter-openclaw" (wrong-slot guard)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        slots: { contextEngine: 'adapter-openclaw' },
+      },
+    }));
+
+    expect(() => mergeOpenClawConfig(configPath, '/path/to/adapter')).toThrow(/contextEngine/);
+  });
+
+  it('overwrites a different plugins.slots.memory value with a log line', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        slots: { memory: 'memory-core' },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.slots.memory).toBe('adapter-openclaw');
+  });
+
+  it('is idempotent on plugins.slots.memory re-runs — byte-identical output', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackupCount).toBe(firstBackupCount);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// openclaw.plugin.json — manifest kind declaration
+// ---------------------------------------------------------------------------
+
+describe('openclaw.plugin.json manifest', () => {
+  it('declares kind: "memory" so the adapter is eligible for memory-slot election', () => {
+    const manifestPath = join(__dirname, '..', 'openclaw.plugin.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    expect(manifest.kind).toBe('memory');
+    expect(manifest.id).toBe('adapter-openclaw');
   });
 });
 

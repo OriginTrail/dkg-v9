@@ -1,6 +1,6 @@
 /**
  * DkgNodePlugin — OpenClaw adapter that connects any OpenClaw agent to a
- * running DKG V9 daemon.
+ * running DKG V10 daemon.
  *
  * All tools route through DkgDaemonClient → daemon HTTP API.
  * There is no embedded DKGAgent — the daemon owns the node, triple store,
@@ -8,20 +8,24 @@
  *
  * Integration modules:
  *   - DKG UI channel bridge (DkgChannelPlugin)
- *   - DKG-backed memory search (DkgMemoryPlugin)
- *   - Memory write capture (WriteCapture)
+ *   - DKG-backed memory slot plugin (DkgMemoryPlugin) — registers an
+ *     upstream `MemoryPluginCapability` via `api.registerMemoryCapability`.
+ *     No adapter-side write tool: memory writes flow through daemon HTTP
+ *     routes documented in `packages/cli/skills/dkg-node/SKILL.md`
+ *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
+ *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
-import { readFile } from 'node:fs/promises';
-import { existsSync, readdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
   type LocalAgentIntegrationTransport,
 } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
-import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
-import { WriteCapture } from './write-capture.js';
+import {
+  DkgMemoryPlugin,
+  type DkgMemorySession,
+  type DkgMemorySessionResolver,
+} from './DkgMemoryPlugin.js';
 import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
@@ -43,7 +47,37 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
 } as const;
-const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
+/**
+ * Base delay before the first retry of `syncLocalAgentIntegrationState`
+ * after a failed daemon fetch. The retry is exponential — each failure
+ * doubles the previous wait, capped at `LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS`.
+ * First delay is 5 s (not 1 s) so a cold daemon has a useful grace window
+ * before the first retry fires.
+ */
+const LOCAL_AGENT_STATE_RETRY_BASE_DELAY_MS = 5_000;
+/** Cap on the retry delay growth. 60 s matches typical cold-start windows. */
+const LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS = 60_000;
+
+/**
+ * Delay before the deferred "first-failure" re-probe of the node peer ID
+ * fires after `refreshMemoryResolverState` reports a missing peerId at
+ * register time. Gives the daemon a grace window to finish startup when
+ * the gateway registers before `/api/status` is healthy. Subsequent
+ * recovery is handled by the on-demand `ensureNodePeerId` fired from the
+ * resolver when an actual call needs the peerId. Codex Bug B9.
+ */
+const NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS = 5_000;
+/**
+ * Wall-clock TTL for the subscribed-context-graph cache consulted by
+ * `memorySessionResolver.listAvailableContextGraphs`. Once the cache is
+ * older than this, the next resolver call fires a best-effort background
+ * refresh so newly-created or newly-subscribed CGs flow into the
+ * `needs_clarification` choices returned by `dkg_memory_import`. Set
+ * conservatively: the refresh is a single `/api/context-graphs` listing,
+ * cheap enough to run every few turns but not so frequent that it
+ * stampedes the daemon. Codex Bug B23.
+ */
+const AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS = 30_000;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
@@ -54,11 +88,144 @@ export class DkgNodePlugin {
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
-  private writeCapture: WriteCapture | null = null;
-  /** Guard: backlog import runs at most once per plugin lifecycle. */
-  private backlogImportDone: Promise<void> | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Retry attempt counter for `scheduleLocalAgentIntegrationRetry`. Used to
+   * compute the exponential-backoff delay (`base * 2^attempt`, capped).
+   * Reset to 0 on a successful `syncLocalAgentIntegrationState` call so
+   * subsequent transient failures start from the base delay again.
+   */
+  private localAgentIntegrationRetryAttempt = 0;
+  /**
+   * Last reason string logged by the retry loop, used to dedup identical
+   * warnings. One `warn` per distinct transition; repeats with the same
+   * reason are logged at `debug` level instead (typically silent at
+   * default log level). On success we emit one `info` line so operators
+   * see the recovery.
+   */
+  private lastLocalAgentIntegrationWarnReason: string | null = null;
+  /**
+   * Most recent error message captured by `loadStoredOpenClawIntegration`.
+   * Written at the catch site, read by the retry dedup logic in
+   * `syncLocalAgentIntegrationState`. Null when there is no pending
+   * failure or after a successful load.
+   */
+  private lastLocalAgentIntegrationLoadError: string | null = null;
+  private nodePeerId: string | undefined;
+  /**
+   * In-flight handle for the node peer ID probe, used to debounce
+   * concurrent `ensureNodePeerId` calls so multiple resolver fires do not
+   * stampede `/api/status`. Null when no probe is running. Codex Bug B9.
+   */
+  private peerIdProbeInFlight: Promise<void> | null = null;
+  /**
+   * Timer for the one-shot deferred retry after a failed initial probe
+   * at register time. Belt-and-suspenders with `ensureNodePeerId`: the
+   * lazy re-probe is the primary recovery path, but the deferred retry
+   * covers the case where a deployment sits idle between register and
+   * the first `dkg_memory_import` / slot search call. Codex Bug B9.
+   */
+  private peerIdDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Cached API handle used by `ensureNodePeerId` for logging. Set on register. */
+  private memoryResolverApi: OpenClawPluginApi | null = null;
+  /**
+   * Resolver wired to the live channel-plugin session-state map + a cached
+   * list of subscribed context graphs for the write-path clarification
+   * response. The `getSession` lookup returns the UI-selected project CG
+   * that `DkgChannelPlugin.dispatchViaPluginSdk` stashed on the resolved
+   * `sessionKey` at the start of the current dispatch, or `undefined` for
+   * non-UI turns / expired entries. `DkgMemorySearchManager.search` uses
+   * the CG to fire a second `/api/query` against the project's `'memory'`
+   * WM assertion; `dkg_memory_import` uses it as the fallback target CG
+   * when the agent does not supply one explicitly.
+   *
+   * `getDefaultAgentAddress` fires a best-effort `ensureNodePeerId()`
+   * when the cached peerId is still undefined. This keeps the B2
+   * retryable-clarification loop from soft-bricking permanently when the
+   * register-time probe hit a cold daemon: the next turn's resolver call
+   * self-heals the state. Codex Bug B9.
+   */
+  private readonly memorySessionResolver: DkgMemorySessionResolver = {
+    getSession: (sessionKey: string | undefined): DkgMemorySession | undefined => {
+      const projectContextGraphId = this.channelPlugin?.getSessionProjectContextGraphId(sessionKey);
+      if (this.nodePeerId === undefined) {
+        void this.ensureNodePeerId();
+      }
+      return {
+        projectContextGraphId,
+        agentAddress: this.nodePeerId,
+      };
+    },
+    getDefaultAgentAddress: () => {
+      if (this.nodePeerId === undefined) {
+        void this.ensureNodePeerId();
+      }
+      return this.nodePeerId;
+    },
+    // B17 + B23: The cache is populated fire-and-forget from
+    // `refreshMemoryResolverState` at register time. Two failure modes
+    // this lazy-refresh path covers:
+    //
+    // 1. (B17) If `dkg_memory_import` fires before the register-time
+    //    probe lands, the cache is empty and the `needs_clarification`
+    //    payload advertises an empty project list.
+    // 2. (B23) Once the cache is populated, any context graph that
+    //    gets created or subscribed later in the session (via the
+    //    `/api/context-graphs/*` endpoints) never appears in the cache,
+    //    so the clarification payload has stale choices until restart.
+    //
+    // Fix: lazy-refresh on EMPTY cache (case 1) OR on STALE cache
+    // (case 2) using a wall-clock TTL. The current call still returns
+    // synchronously with whatever we have; the next call sees the
+    // refreshed result once the probe completes. `refreshMemoryResolverState`
+    // already short-circuits concurrent calls via its own in-flight guard.
+    listAvailableContextGraphs: () => {
+      const now = Date.now();
+      const cacheAge = now - this.availableContextGraphCacheAt;
+      const shouldRefresh =
+        this.availableContextGraphCache.length === 0 ||
+        cacheAge >= AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS;
+      if (shouldRefresh && this.memoryResolverApi) {
+        void this.refreshMemoryResolverState(this.memoryResolverApi);
+      }
+      return this.availableContextGraphCache;
+    },
+    // B46: Force a synchronous refresh of the subscribed-CG cache and
+    // return the freshly-probed list. Used by
+    // `DkgMemoryPlugin.handleImport`'s B42 validation guard to retry
+    // against a fresh cache before hard-rejecting an explicit
+    // `contextGraphId` as a typo — avoids rejecting legitimate
+    // just-created CGs during the TTL window of the lazy cache.
+    // No-op when `memoryResolverApi` is null (plugin not yet
+    // registered, or memory module disabled).
+    refreshAvailableContextGraphs: async () => {
+      if (this.memoryResolverApi) {
+        await this.refreshMemoryResolverState(this.memoryResolverApi);
+      }
+      return this.availableContextGraphCache;
+    },
+  };
+  private availableContextGraphCache: string[] = [];
+  /**
+   * Wall-clock timestamp (ms epoch) of the last successful context-graph
+   * cache populate. `0` means never populated. Compared against
+   * `AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS` in
+   * `memorySessionResolver.listAvailableContextGraphs` to decide when to
+   * fire a lazy refresh. Codex Bug B23.
+   */
+  private availableContextGraphCacheAt = 0;
+  /**
+   * In-flight handle for a `refreshMemoryResolverState` call. Concurrent
+   * callers share this promise and await it instead of getting a stale
+   * cache back. Codex Bug B49: the previous boolean guard returned
+   * immediately on concurrent calls, so `refreshAvailableContextGraphs`
+   * callers who expected a synchronous refresh could observe the
+   * in-flight background refresh as "nothing to do" and see the stale
+   * cache. Tracking the promise lets multiple callers share one refresh
+   * while all observing the populated result.
+   */
+  private refreshStateInFlight: Promise<void> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -80,7 +247,17 @@ export class DkgNodePlugin {
     const setupOnly = registrationMode === 'setup-only';
     const setupRuntime = registrationMode === 'setup-runtime';
     const cliMetadataOnly = registrationMode === 'cli-metadata';
-    const lightweightRuntime = setupOnly || setupRuntime;
+    // `setup-runtime` IS a runtime mode: the OpenClaw gateway loads the
+    // adapter during its own setup phase and immediately accepts turns
+    // through the channel module, so integration modules must come up
+    // at that point. Only `setup-only` and `cli-metadata` are true
+    // metadata-only modes that skip integration wiring. The memory
+    // slot's `DkgMemoryPlugin.register` is pure wiring (no network I/O
+    // at register time) and the runtime factory's B12 null-manager
+    // fallback handles "peer ID not yet available" gracefully on first
+    // dispatch, so registering the slot early is safe even when the
+    // daemon is not yet healthy.
+    const runtimeEnabled = fullRuntime || setupRuntime;
 
     // Only expose the DKG agent tool surface during full runtime.
     if (fullRuntime) {
@@ -96,8 +273,8 @@ export class DkgNodePlugin {
     // Subsequent multi-phase calls should upgrade missing integrations without
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
-      this.registerIntegrationModules(api, { enableFullRuntime: fullRuntime });
-      if (fullRuntime || setupRuntime) {
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
       return;
@@ -111,15 +288,15 @@ export class DkgNodePlugin {
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
     // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: !lightweightRuntime });
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
 
-    if (fullRuntime || setupRuntime) {
+    if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
     }
   }
 
   /**
-   * Register DKG integration modules: channel, memory, write-capture.
+   * Register DKG integration modules: channel and memory.
    * Each module is optional — enabled via config flags.
    */
   private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {
@@ -134,41 +311,37 @@ export class DkgNodePlugin {
     }
 
     if (!opts?.enableFullRuntime) {
-      api.logger.info?.('[dkg] Lightweight OpenClaw registration — skipping full-runtime memory capture integrations');
+      api.logger.info?.('[dkg] Metadata-only OpenClaw registration — skipping memory-slot integration');
       return;
     }
 
     // --- Memory module ---
     const memoryConfig = this.config.memory;
     if (memoryConfig?.enabled) {
-      // Auto-detect memory directory from shared memory if not configured
-      const memoryDir = memoryConfig.memoryDir
-        ?? (api.workspaceDir ? `${api.workspaceDir}/memory` : undefined)
-        ?? '';
-
-      const effectiveConfig = { ...memoryConfig, memoryDir };
-
-      // Memory search manager (reads)
       if (!this.memoryPlugin) {
-        this.memoryPlugin = new DkgMemoryPlugin(this.client, effectiveConfig);
+        this.memoryPlugin = new DkgMemoryPlugin(this.client, memoryConfig, this.memorySessionResolver);
       }
-      this.memoryPlugin.register(api);
-      api.logger.info?.('[dkg] Memory module enabled — DKG-backed search active');
-
-      // Write capture (writes)
-      if (!this.writeCapture) {
-        this.writeCapture = new WriteCapture(this.client, effectiveConfig);
-        this.writeCapture.register(api);
-
-        // Fire-and-forget: backlog import on first-ever install.
-        // Runs at gateway startup (not session_start) so it works regardless
-        // of which channel the user interacts through.
-        if (!this.backlogImportDone) {
-          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
-            .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
-        }
+      const registered = this.memoryPlugin.register(api);
+      if (!registered) {
+        api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
+        return;
       }
-      api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
+      api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
+
+      // Cache the API handle so `ensureNodePeerId` can log from the lazy
+      // re-probe call tree, which fires outside of any register() scope
+      // when a later resolver call asks for the default agent address.
+      // Codex Bug B9.
+      this.memoryResolverApi = api;
+
+      // Best-effort: populate node peer ID + subscribed context-graph cache
+      // for the memory resolver. Both are non-blocking; failures just leave
+      // the resolver with empty state (single-graph fallback on reads,
+      // empty availableContextGraphs on the write-path clarification). Only
+      // runs when memory is enabled so tool-only test setups that stub
+      // `globalThis.fetch` for unrelated assertions are not polluted by a
+      // surprise `/api/status` probe.
+      void this.refreshMemoryResolverState(api);
     }
   }
 
@@ -189,10 +362,20 @@ export class DkgNodePlugin {
 
   private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
     if (this.localAgentIntegrationRetryTimer) return;
+    // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped). On every
+    // successful sync `localAgentIntegrationRetryAttempt` resets to 0
+    // so transient failures after a healthy period start from the
+    // base delay again rather than inheriting the old cadence.
+    const attempt = this.localAgentIntegrationRetryAttempt;
+    const delay = Math.min(
+      LOCAL_AGENT_STATE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+      LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS,
+    );
+    this.localAgentIntegrationRetryAttempt = attempt + 1;
     this.localAgentIntegrationRetryTimer = setTimeout(() => {
       this.localAgentIntegrationRetryTimer = null;
       void this.syncLocalAgentIntegrationState(api, registrationMode);
-    }, LOCAL_AGENT_STATE_RETRY_DELAY_MS);
+    }, delay);
   }
 
   private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
@@ -207,13 +390,47 @@ export class DkgNodePlugin {
   }
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+    // Skip the retry loop entirely when the adapter has no runtime
+    // integrations to sync. The stored-integration fetch is a no-op for
+    // metadata-only loads and used to burn a 1 Hz warn loop on cold
+    // daemons for no operator benefit.
+    const anyIntegrationEnabled =
+      this.config.memory?.enabled === true || this.config.channel?.enabled === true;
+    if (!anyIntegrationEnabled) {
+      return;
+    }
+
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
-      api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      // Log dedup: emit exactly one `warn` per distinct failure reason,
+      // then downgrade repeats of the same reason to `debug` (silent at
+      // default log level) until either the reason changes or the load
+      // succeeds. Prevents a cold daemon from flooding the gateway log
+      // with identical lines on every retry tick.
+      const reason = this.lastLocalAgentIntegrationLoadError ?? 'fetch failed';
+      const retryMessage =
+        '[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state' +
+        ` (reason: ${reason})`;
+      if (this.lastLocalAgentIntegrationWarnReason !== reason) {
+        api.logger.warn?.(retryMessage);
+        this.lastLocalAgentIntegrationWarnReason = reason;
+      } else {
+        api.logger.debug?.(retryMessage);
+      }
       this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
       return;
     }
+    // Successful load — reset dedup + retry counter and log recovery once
+    // if we were previously retrying, so operators see the transition.
     this.clearLocalAgentIntegrationRetry();
+    if (this.localAgentIntegrationRetryAttempt > 0) {
+      api.logger.info?.(
+        `[dkg] Stored OpenClaw integration state loaded after ${this.localAgentIntegrationRetryAttempt} retry attempt(s)`,
+      );
+    }
+    this.localAgentIntegrationRetryAttempt = 0;
+    this.lastLocalAgentIntegrationWarnReason = null;
+    this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
@@ -284,9 +501,20 @@ export class DkgNodePlugin {
 
   private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
     try {
-      return await this.client.getLocalAgentIntegration('openclaw');
+      const result = await this.client.getLocalAgentIntegration('openclaw');
+      // Clear any stale error from an earlier failed attempt so the
+      // retry dedup logic in `syncLocalAgentIntegrationState` can
+      // distinguish a fresh failure reason from the previous one.
+      this.lastLocalAgentIntegrationLoadError = null;
+      return result;
     } catch (err: any) {
-      api.logger.warn?.(`[dkg] Failed to load stored OpenClaw integration state: ${err.message}`);
+      const reason = typeof err?.message === 'string' && err.message.length > 0 ? err.message : String(err);
+      this.lastLocalAgentIntegrationLoadError = reason;
+      // Emit the underlying fetch error at `debug` level on every
+      // attempt (silent at default log level). The caller in
+      // `syncLocalAgentIntegrationState` emits the one operator-visible
+      // warn with dedup semantics.
+      api.logger.debug?.(`[dkg] Failed to load stored OpenClaw integration state: ${reason}`);
       return undefined;
     }
   }
@@ -406,7 +634,10 @@ export class DkgNodePlugin {
   async stop(): Promise<void> {
     // Stop integration modules
     this.clearLocalAgentIntegrationRetry();
-    this.writeCapture?.stop();
+    if (this.peerIdDeferredRetryTimer) {
+      clearTimeout(this.peerIdDeferredRetryTimer);
+      this.peerIdDeferredRetryTimer = null;
+    }
     await this.channelPlugin?.stop();
   }
 
@@ -415,98 +646,223 @@ export class DkgNodePlugin {
     return this.client;
   }
 
-  // ---------------------------------------------------------------------------
-  // Backlog import
-  // ---------------------------------------------------------------------------
+  /**
+   * Populate the memory resolver's node-peer-ID + subscribed context-graph
+   * cache from the daemon. Non-blocking; failures warn and leave caches
+   * empty so the resolver falls back to single-graph reads and an empty
+   * needs_clarification list on writes.
+   *
+   * When the peer-ID probe leaves `nodePeerId` undefined (daemon startup
+   * race, `/api/status` 5xx, network flap), schedules a deferred one-shot
+   * retry so a gateway that sits idle until the first `dkg_memory_import`
+   * call still recovers. The primary recovery path is the on-demand
+   * `ensureNodePeerId` fired by the resolver. Codex Bug B9.
+   */
+  private refreshMemoryResolverState(api: OpenClawPluginApi): Promise<void> {
+    // B49: Concurrent callers share one in-flight refresh. The previous
+    // boolean guard (`availableContextGraphsRefreshing`) returned
+    // immediately when a background refresh was already running, so
+    // `refreshAvailableContextGraphs()` awaiters could observe
+    // "nothing to do" and return against the still-stale cache. Track
+    // the promise instead so all awaiters block on the same refresh
+    // and see the populated cache when it settles.
+    if (this.refreshStateInFlight) {
+      return this.refreshStateInFlight;
+    }
+
+    const run = async (): Promise<void> => {
+      try {
+        // Route through `ensureNodePeerId` so the in-flight promise
+        // guard is populated while this probe runs. Any resolver call
+        // that fires concurrently (e.g., a memory slot search during
+        // the same tick) will await the same peer-ID promise instead
+        // of firing a duplicate /api/status call. Codex Bug B9.
+        await this.ensureNodePeerId();
+        try {
+          const result = await this.client.listContextGraphs();
+          const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
+          const ids: string[] = [];
+          for (const entry of graphs) {
+            const id = typeof entry?.id === 'string'
+              ? entry.id
+              : typeof entry?.contextGraphId === 'string'
+                ? entry.contextGraphId
+                : undefined;
+            if (!id || id === 'agent-context') continue;
+            // B51 + B54: `agent.listContextGraphs()` returns every context
+            // graph the node knows about — including system paranets
+            // (ontology, agents registry), locally-created private CGs,
+            // public local CGs, subscribed gossip CGs, and discovered-
+            // but-not-subscribed ontology entries. Each entry carries
+            // `subscribed: boolean`, `synced: boolean`, and
+            // `isSystem: boolean` flags (per
+            // `packages/agent/src/dkg-agent.ts:3541-3620`).
+            //
+            // This cache is the `needs_clarification` availability list
+            // AND the B42 / B46 / B48 subscribed-project allowlist for
+            // `dkg_memory_import`, so the filter shape matters:
+            //
+            //   - B51 (initial filter) used `subscribed === true`, which
+            //     correctly excluded system paranets and discovered-not-
+            //     subscribed entries.
+            //   - B54 (this fix) discovered that `createContextGraph({
+            //     private: true })` records local private CGs as
+            //     `subscribed: false` (see dkg-agent.ts:2041-2045, the
+            //     `subscribed: !opts.private` line). My strict B51 filter
+            //     therefore dropped private CGs from the allowlist, and
+            //     `dkg_memory_import` hard-rejected them as "not in the
+            //     subscribed project list" even though they are the most
+            //     obvious legitimate write target for a local agent.
+            //
+            // Relax the filter to `synced === true && !isSystem`. Every
+            // locally usable CG — public subscribed, local public,
+            // local private — has `synced: true` in the listing. System
+            // paranets also have `synced: true` but are filtered by the
+            // `isSystem` check. Discovered-but-not-yet-synced gossip
+            // entries (subscribed via `subscribe()` but not yet
+            // data-synced) have `synced: false` and are excluded until
+            // sync lands.
+            //
+            // Tradeoff: this is more permissive than B51 and could
+            // include discovered-but-not-subscribed ontology entries
+            // that happen to have triples locally. The alternative
+            // (restricting to `subscribed: true`) is strictly worse
+            // because it creates a correctness regression for private
+            // local CGs — a first-class feature, not an edge case.
+            // Discovered-but-not-subscribed writes either succeed at
+            // the daemon layer (local-only assertion) or fail with a
+            // daemon error, neither of which is as bad as a hard-block
+            // on legitimate private writes.
+            if (entry?.synced !== true) continue;
+            if (entry?.isSystem === true) continue;
+            ids.push(id);
+          }
+          this.availableContextGraphCache = ids;
+          // B23: record the successful-populate wall-clock time so the
+          // resolver's lazy-refresh path can TTL-check staleness.
+          this.availableContextGraphCacheAt = Date.now();
+        } catch (err: any) {
+          api.logger.debug?.(`[dkg-memory] Could not refresh context-graph cache: ${err?.message ?? err}`);
+        }
+      } finally {
+        // Schedule the deferred retry inside the promise body so every
+        // caller (including the one that triggered the refresh and any
+        // concurrent awaiters) observes the retry scheduling through
+        // the shared finally chain.
+        if (this.nodePeerId === undefined) {
+          this.schedulePeerIdDeferredRetry(api);
+        }
+      }
+    };
+
+    const tracked = run().finally(() => {
+      // Clear the slot only if we're still the tracked promise — a
+      // concurrent caller that started after us would have taken
+      // over, though the guard above prevents that in practice.
+      if (this.refreshStateInFlight === tracked) {
+        this.refreshStateInFlight = null;
+      }
+    });
+    this.refreshStateInFlight = tracked;
+    return tracked;
+  }
 
   /**
-   * On first-ever install, import all existing memory files into the DKG graph.
-   * Checks if any ImportedMemory items exist — if so, this isn't the first run.
+   * Single-shot `/api/status` call that updates `nodePeerId` on success
+   * and logs on failure. Pulled out of `refreshMemoryResolverState` so it
+   * can be reused by `ensureNodePeerId` without dragging the CG cache
+   * refresh along. Does NOT debounce — callers are responsible for
+   * preventing concurrent calls (see `ensureNodePeerId`'s in-flight
+   * promise guard).
    */
-  private async runBacklogImportIfNeeded(
-    api: OpenClawPluginApi,
-    client: DkgDaemonClient,
-    memoryConfig: NonNullable<DkgOpenClawConfig['memory']>,
-  ): Promise<void> {
-    // Check if any memories already exist in the graph
-    const checkSparql = `SELECT (COUNT(?m) AS ?cnt) WHERE {
-      { ?m a <http://dkg.io/ontology/ImportedMemory> . }
-      UNION
-      { GRAPH ?g { ?m a <http://dkg.io/ontology/ImportedMemory> . } }
-    }`;
-
+  private async probeNodePeerIdOnce(api: OpenClawPluginApi): Promise<void> {
     try {
-      const result = await client.query(checkSparql, {
-        contextGraphId: 'agent-memory',
-        includeSharedMemory: true,
-      });
-      const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
-      const countRaw = bindings[0]?.cnt;
-      const count = typeof countRaw === 'object' && countRaw?.value != null
-        ? parseInt(String(countRaw.value), 10)
-        : typeof countRaw === 'string'
-          ? parseInt(countRaw.replace(/^"(\d+)".*$/, '$1'), 10)
-          : 0;
-
-      api.logger.debug?.(`[dkg] Backlog check: count=${count}, raw=${JSON.stringify(countRaw)}`);
-
-      if (count > 0) {
-        api.logger.info?.(`[dkg] Backlog import skipped — ${count} memories already in graph`);
+      const status = await this.client.getStatus();
+      if (status.ok && status.peerId) {
+        this.nodePeerId = status.peerId;
         return;
       }
+      // B30: `DkgDaemonClient.getStatus()` already converts transport /
+      // HTTP failures into `{ ok: false, error }`, so the `catch` block
+      // below almost never runs — the previous implementation's log
+      // message was effectively dead code and peer-ID probe failures
+      // were silent. Log the non-ok branch explicitly at warn level so
+      // operators can diagnose why every memory call is falling back
+      // to `needs_clarification`. The `status.ok && status.peerId`
+      // check above handles the successful-but-no-peerId edge case
+      // (daemon not yet fully initialized) — fall through to the same
+      // warn log so it too is visible.
+      if (!status.ok) {
+        const reason = (status as any).error ?? 'unknown error';
+        api.logger.warn?.(
+          `[dkg-memory] Node peer ID probe failed — daemon /api/status returned not-ok: ${reason}. ` +
+          'Working-memory reads and writes will return needs_clarification until the next retry lands.',
+        );
+      } else {
+        api.logger.warn?.(
+          '[dkg-memory] Node peer ID probe returned ok but no peerId — daemon is up but has not yet ' +
+          'published a peer identity. Retrying on the next lazy-probe tick.',
+        );
+      }
     } catch (err: any) {
-      api.logger.warn?.(`[dkg] Backlog check failed: ${err.message} — skipping import`);
-      return;
+      // Defense-in-depth: `getStatus()` catches its own transport errors,
+      // but a future refactor might throw (e.g. from a JSON parse in the
+      // client layer). Keep the catch so that path is also diagnosed.
+      api.logger.warn?.(
+        `[dkg-memory] Node peer ID probe threw unexpectedly: ${err?.message ?? err}`,
+      );
     }
+  }
 
-    // First install — collect and import all memory files
-    const filesToImport: string[] = [];
-    const memoryDir = memoryConfig.memoryDir ?? '';
+  /**
+   * On-demand best-effort re-probe of the node peer ID, fired by the
+   * memory resolver when a caller asks for the default agent address and
+   * the cached peerId is still undefined. Debounced via
+   * `peerIdProbeInFlight`: concurrent callers share the same promise so
+   * a burst of resolver fires collapses to one `/api/status` call.
+   *
+   * Returns immediately without firing if:
+   * - `nodePeerId` is already populated (no-op),
+   * - the memory resolver API was never cached (register() hasn't run or
+   *   memory module was disabled — nothing to probe against),
+   * - a probe is already in flight.
+   *
+   * Codex Bug B9 — fixes the "register-time one-shot probe fails →
+   * permanent soft-brick" case where every subsequent turn got B2's
+   * retryable clarification with no actual retry path.
+   */
+  private ensureNodePeerId(): Promise<void> {
+    if (this.nodePeerId !== undefined) return Promise.resolve();
+    const api = this.memoryResolverApi;
+    if (!api) return Promise.resolve();
+    if (this.peerIdProbeInFlight) return this.peerIdProbeInFlight;
 
-    // Collect MEMORY.md
-    if (memoryDir) {
-      const workspaceDir = dirname(resolve(memoryDir));
-      const memoryMd = join(workspaceDir, 'MEMORY.md');
-      if (existsSync(memoryMd)) filesToImport.push(memoryMd);
-    }
+    const probe = this.probeNodePeerIdOnce(api).finally(() => {
+      this.peerIdProbeInFlight = null;
+    });
+    this.peerIdProbeInFlight = probe;
+    return probe;
+  }
 
-    // Collect memory/*.md files
-    if (memoryDir) {
-      const absMemDir = resolve(memoryDir);
-      if (existsSync(absMemDir)) {
-        try {
-          const entries = readdirSync(absMemDir, { recursive: true });
-          for (const entry of entries) {
-            const name = String(entry);
-            if (name.endsWith('.md')) {
-              filesToImport.push(join(absMemDir, name));
-            }
-          }
-        } catch { /* scan failed — skip */ }
-      }
-    }
-
-    if (filesToImport.length === 0) {
-      api.logger.info?.('[dkg] Backlog import: no memory files found');
-      return;
-    }
-
-    api.logger.info?.(`[dkg] Backlog import: importing ${filesToImport.length} memory file(s)…`);
-    let imported = 0;
-
-    for (const filePath of filesToImport) {
-      try {
-        const content = await readFile(filePath, 'utf-8');
-        if (!content.trim()) continue;
-        await client.importMemories(content.trim(), 'other', { useLlm: true });
-        imported++;
-        api.logger.info?.(`[dkg] Backlog import: imported ${filePath}`);
-      } catch (err: any) {
-        api.logger.warn?.(`[dkg] Backlog import failed for ${filePath}: ${err.message}`);
-      }
-    }
-
-    api.logger.info?.(`[dkg] Backlog import complete: ${imported}/${filesToImport.length} files imported`);
+  /**
+   * Schedules a one-shot deferred retry of the peer-ID probe. Cheap
+   * belt-and-suspenders for the case where a gateway registers against a
+   * daemon that is still booting and then sits idle for seconds before
+   * the first resolver call would fire `ensureNodePeerId` lazily. No-op
+   * if a retry is already scheduled or if `nodePeerId` has already been
+   * populated by a concurrent lazy probe. Codex Bug B9.
+   */
+  private schedulePeerIdDeferredRetry(api: OpenClawPluginApi): void {
+    if (this.peerIdDeferredRetryTimer) return;
+    this.peerIdDeferredRetryTimer = setTimeout(() => {
+      this.peerIdDeferredRetryTimer = null;
+      if (this.nodePeerId !== undefined) return;
+      void this.probeNodePeerIdOnce(api);
+    }, NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS);
+    // Node's `Timer.unref()` keeps the deferred retry from holding the
+    // event loop open past shutdown. Missing on some non-Node runtimes
+    // (e.g. browser fakes), so guard with optional chaining.
+    (this.peerIdDeferredRetryTimer as any)?.unref?.();
   }
 
   // ---------------------------------------------------------------------------

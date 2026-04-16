@@ -5,33 +5,41 @@ describe('ChatMemoryManager', () => {
   let manager: ChatMemoryManager;
   let mockQuery: ReturnType<typeof vi.fn>;
   let mockShare: ReturnType<typeof vi.fn>;
+  let mockCreateAssertion: ReturnType<typeof vi.fn>;
+  let mockWriteAssertion: ReturnType<typeof vi.fn>;
   let mockCreateContextGraph: ReturnType<typeof vi.fn>;
   let mockListContextGraphs: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockQuery = vi.fn();
     mockShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-1' });
+    mockCreateAssertion = vi.fn().mockResolvedValue({ assertionUri: 'urn:test:assertion', alreadyExists: false });
+    mockWriteAssertion = vi.fn().mockResolvedValue({ written: 0 });
     mockCreateContextGraph = vi.fn().mockResolvedValue(undefined);
-    mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
+    mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-context', name: 'Agent Context' }]);
 
     manager = new ChatMemoryManager(
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
   });
 
-  it('stores a chat exchange and writes quads to shared memory', async () => {
+  it('stores a chat exchange via writeAssertion to agent-context / chat-turns', async () => {
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('session-1', 'Hello', 'Hi there!');
 
-    expect(mockShare).toHaveBeenCalledWith('agent-memory', expect.any(Array), { localOnly: true });
-    const quads = mockShare.mock.calls[0][1];
+    expect(mockWriteAssertion).toHaveBeenCalledWith('agent-context', 'chat-turns', expect.any(Array));
+    expect(mockShare).not.toHaveBeenCalled();
+    const quads = mockWriteAssertion.mock.calls[0][2];
     expect(quads.length).toBeGreaterThanOrEqual(12);
     const sessionTriple = quads.find((q: any) => q.predicate?.includes('sessionId'));
     expect(sessionTriple).toBeDefined();
@@ -46,7 +54,7 @@ describe('ChatMemoryManager', () => {
       failureReason: 'timeout',
     });
 
-    const quads = mockShare.mock.calls[0][1];
+    const quads = mockWriteAssertion.mock.calls[0][2];
     const failureReasonQuad = quads.find((q: any) => q.predicate?.includes('failureReason'));
     expect(failureReasonQuad).toBeDefined();
     expect(failureReasonQuad.object).toBe('"timeout"');
@@ -73,7 +81,7 @@ describe('ChatMemoryManager', () => {
       },
     );
 
-    const quads = mockShare.mock.calls[0][1];
+    const quads = mockWriteAssertion.mock.calls[0][2];
     const attachmentQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/attachmentRefs');
     const usedToolQuad = quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/usedTool');
     expect(attachmentQuad).toBeDefined();
@@ -98,9 +106,9 @@ describe('ChatMemoryManager', () => {
     await manager.storeChatExchange('session-1', 'First message', 'First reply');
     await manager.storeChatExchange('session-1', 'Second message', 'Second reply');
 
-    expect(mockShare).toHaveBeenCalledTimes(2);
-    const firstQuads = mockShare.mock.calls[0][1];
-    const secondQuads = mockShare.mock.calls[1][1];
+    expect(mockWriteAssertion).toHaveBeenCalledTimes(2);
+    const firstQuads = mockWriteAssertion.mock.calls[0][2];
+    const secondQuads = mockWriteAssertion.mock.calls[1][2];
     const firstSessionTriple = firstQuads.find((q: any) => q.predicate?.includes('sessionId'));
     const secondSessionTriple = secondQuads.find((q: any) => q.predicate?.includes('sessionId'));
     const replyEdge = secondQuads.find((q: any) => q.predicate?.includes('replyTo'));
@@ -110,22 +118,25 @@ describe('ChatMemoryManager', () => {
     expect(secondQuads.length).toBe(11);
   });
 
-  it('creates agent-memory context graph when not in list', async () => {
+  it('creates agent-context context graph when not in list', async () => {
     mockListContextGraphs.mockResolvedValueOnce([]);
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     const m = new ChatMemoryManager(
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
     await m.storeChatExchange('s1', 'x', 'y');
     expect(mockCreateContextGraph).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'agent-memory', name: 'Agent Memory' }),
+      expect.objectContaining({ id: 'agent-context', name: 'Agent Context', private: true }),
     );
   });
 
@@ -354,7 +365,7 @@ describe('ChatMemoryManager', () => {
       .mockResolvedValueOnce({ bindings: [{ c: '1' }] });   // entities
 
     const stats = await manager.getStats();
-    expect(stats.contextGraphId).toBe('agent-memory');
+    expect(stats.contextGraphId).toBe('agent-context');
     expect(stats.initialized).toBe(true);
     expect(stats.sessionCount).toBe(3);
     expect(stats.totalTriples).toBe(10);
@@ -366,11 +377,14 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test', model: 'gpt-5-mini', baseURL: 'https://api.openai.com/v1' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
@@ -417,18 +431,10 @@ describe('ChatMemoryManager', () => {
     expect(status.dataTripleCount).toBe(12);
   });
 
-  it('getSessionRootEntities widens the openclaw local session to imported memory roots', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ bindings: [] }) // ensureInitialized
-      .mockResolvedValueOnce({ bindings: [] }); // root query
-
-    await manager.getSessionRootEntities('openclaw:dkg-ui');
-
-    const query = String(mockQuery.mock.calls[1][0]);
-    expect(query).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/ImportedMemory>');
-    expect(query).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/MemoryImport>');
-    expect(query).toContain('?s <http://dkg.io/ontology/extractedFrom> ?batch');
-  });
+  // The 'getSessionRootEntities widens the openclaw local session to
+  // imported memory roots' test was removed with the retirement of the
+  // /api/memory/import V9 relic and the ImportedMemory / MemoryImport
+  // special-case branch inside buildSessionRootPattern.
 
   it('getSessionRootEntities keeps regular chat sessions scoped to their own graph roots', async () => {
     mockQuery
@@ -453,11 +459,14 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory,
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
 
     mockQuery
@@ -469,7 +478,7 @@ describe('ChatMemoryManager', () => {
 
     const result = await managerWithPublish.publishSession('s-2');
     expect(publishFromSharedMemory).toHaveBeenCalledWith(
-      'agent-memory',
+      'agent-context',
       { rootEntities: ['urn:dkg:chat:session:s-2', 'urn:dkg:chat:msg:m-2'] },
       { clearSharedMemoryAfter: false },
     );
@@ -489,11 +498,14 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory,
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
 
     mockQuery
@@ -508,7 +520,7 @@ describe('ChatMemoryManager', () => {
     });
 
     expect(publishFromSharedMemory).toHaveBeenCalledWith(
-      'agent-memory',
+      'agent-context',
       { rootEntities: ['urn:dkg:chat:msg:m-3'] },
       { clearSharedMemoryAfter: false },
     );
@@ -523,11 +535,14 @@ describe('ChatMemoryManager', () => {
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory,
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
 
     mockQuery
@@ -688,17 +703,21 @@ describe('ChatMemoryManager', () => {
   });
 });
 
-describe('ChatMemoryManager privacy guarantees', () => {
+describe('ChatMemoryManager WM write discipline', () => {
   let mockQuery: ReturnType<typeof vi.fn>;
   let mockShare: ReturnType<typeof vi.fn>;
+  let mockCreateAssertion: ReturnType<typeof vi.fn>;
+  let mockWriteAssertion: ReturnType<typeof vi.fn>;
   let mockCreateContextGraph: ReturnType<typeof vi.fn>;
   let mockListContextGraphs: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockQuery = vi.fn();
     mockShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-1' });
+    mockCreateAssertion = vi.fn().mockResolvedValue({ assertionUri: 'urn:test:assertion', alreadyExists: false });
+    mockWriteAssertion = vi.fn().mockResolvedValue({ written: 0 });
     mockCreateContextGraph = vi.fn().mockResolvedValue(undefined);
-    mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
+    mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-context', name: 'Agent Context' }]);
   });
 
   function createManager() {
@@ -706,40 +725,42 @@ describe('ChatMemoryManager privacy guarantees', () => {
       {
         query: mockQuery,
         share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
         publishFromSharedMemory: vi.fn().mockResolvedValue({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
       { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
     );
   }
 
-  it('all shared memory writes use localOnly: true', async () => {
+  it('chat-turn writes go through writeAssertion, not share', async () => {
     const manager = createManager();
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('s1', 'Hello', 'Hi');
 
-    for (const call of mockShare.mock.calls) {
-      expect(call[2]).toEqual({ localOnly: true });
-    }
+    expect(mockWriteAssertion).toHaveBeenCalled();
+    expect(mockShare).not.toHaveBeenCalled();
   });
 
-  it('storeChatExchange never writes without localOnly flag', async () => {
+  it('writeAssertion targets agent-context / chat-turns on every call', async () => {
     const manager = createManager();
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('s2', 'msg', 'reply');
     await manager.storeChatExchange('s2', 'msg2', 'reply2');
     await manager.storeChatExchange('s3', 'new session', 'new reply');
 
-    expect(mockShare.mock.calls.length).toBeGreaterThanOrEqual(3);
-    for (const call of mockShare.mock.calls) {
-      const opts = call[2];
-      expect(opts).toBeDefined();
-      expect(opts.localOnly).toBe(true);
+    expect(mockWriteAssertion.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of mockWriteAssertion.mock.calls) {
+      expect(call[0]).toBe('agent-context');
+      expect(call[1]).toBe('chat-turns');
+      expect(Array.isArray(call[2])).toBe(true);
     }
   });
 
-  it('agent-memory context graph is created with private: true', async () => {
+  it('agent-context context graph is created with private: true when missing from the list', async () => {
     mockListContextGraphs.mockResolvedValueOnce([]);
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     const manager = createManager();
@@ -747,7 +768,7 @@ describe('ChatMemoryManager privacy guarantees', () => {
 
     expect(mockCreateContextGraph).toHaveBeenCalledTimes(1);
     const createOpts = mockCreateContextGraph.mock.calls[0][0];
-    expect(createOpts.id).toBe('agent-memory');
+    expect(createOpts.id).toBe('agent-context');
     expect(createOpts.private).toBe(true);
   });
 
@@ -766,25 +787,28 @@ describe('ChatMemoryManager privacy guarantees', () => {
     }
   });
 
-  it('shared memory writes target the agent-memory context graph exclusively', async () => {
+  it('createAssertion is called once at ensureInitialized for the chat-turns assertion', async () => {
     const manager = createManager();
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('s1', 'secret', 'reply');
+    await manager.storeChatExchange('s1', 'another', 'reply');
 
-    for (const call of mockShare.mock.calls) {
-      expect(call[0]).toBe('agent-memory');
-    }
+    // ensureInitialized should create the assertion once per manager lifetime.
+    const chatTurnsCreates = mockCreateAssertion.mock.calls.filter(
+      (c: any) => c[0] === 'agent-context' && c[1] === 'chat-turns',
+    );
+    expect(chatTurnsCreates.length).toBeGreaterThanOrEqual(1);
+    expect(chatTurnsCreates.length).toBeLessThanOrEqual(1);
   });
 
-  it('second session also uses localOnly writes', async () => {
+  it('second session also writes through writeAssertion to the chat-turns assertion', async () => {
     const manager = createManager();
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('session-A', 'First session msg', 'reply');
     await manager.storeChatExchange('session-B', 'Second session msg', 'reply');
 
-    expect(mockShare.mock.calls.length).toBe(2);
-    for (const call of mockShare.mock.calls) {
-      expect(call[2]).toEqual({ localOnly: true });
-    }
+    expect(mockWriteAssertion.mock.calls.length).toBe(2);
+    // share must never be called on the chat-turn path (SWM, wrong layer)
+    expect(mockShare).not.toHaveBeenCalled();
   });
 });

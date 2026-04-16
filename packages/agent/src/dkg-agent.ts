@@ -1933,6 +1933,8 @@ export class DKGAgent {
     }
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
+    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+
     const result = await this.publisher.publish({
       contextGraphId,
       quads,
@@ -1944,6 +1946,7 @@ export class DKGAgent {
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
+      publishContextGraphId: onChainId ?? undefined,
     });
 
     onPhase?.('broadcast', 'start');
@@ -2728,6 +2731,13 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
+    this.subscribedContextGraphs.set(opts.id, {
+      name: opts.name,
+      subscribed: !opts.private,
+      synced: true,
+      metaSynced: true,
+    });
+
     // Auto-register on-chain when the chain adapter supports it and the node
     // has an on-chain identity. This enables Verified Memory (publishFromSWM)
     // without a separate registerContextGraph call.
@@ -2744,13 +2754,6 @@ export class DKGAgent {
         this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-
-    this.subscribedContextGraphs.set(opts.id, {
-      name: opts.name,
-      subscribed: !opts.private,
-      synced: true,
-      metaSynced: true,
-    });
 
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);

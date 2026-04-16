@@ -3566,12 +3566,13 @@ async function readCurrentFileImportSourceIdentity(
   agent: Pick<DKGAgent, 'store'>,
   contextGraphId: string,
   assertionUri: string,
-): Promise<{ fileHash?: string; mdIntermediateHash?: string } | null> {
+): Promise<{ fileHash?: string; mdIntermediateHash?: string; importStartedAt?: string } | null> {
   const result = await agent.store.query(`
-    SELECT ?fileHash ?mdIntermediateHash WHERE {
+    SELECT ?fileHash ?mdIntermediateHash ?importStartedAt WHERE {
       GRAPH <${contextGraphMetaUri(contextGraphId)}> {
         OPTIONAL { <${assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash . }
         OPTIONAL { <${assertionUri}> <http://dkg.io/ontology/mdIntermediateHash> ?mdIntermediateHash . }
+        OPTIONAL { <${assertionUri}> <http://dkg.io/ontology/importStartedAt> ?importStartedAt . }
       }
     }
     LIMIT 1
@@ -3581,17 +3582,21 @@ async function readCurrentFileImportSourceIdentity(
   return {
     fileHash: normalizeQueriedLiteralValue(binding.fileHash),
     mdIntermediateHash: normalizeQueriedLiteralValue(binding.mdIntermediateHash),
+    importStartedAt: normalizeQueriedLiteralValue(binding.importStartedAt),
   };
 }
 
 export function fileImportSourceIdentityMatchesCurrentState(
   payload: FileImportSemanticEventPayload,
-  current: { fileHash?: string; mdIntermediateHash?: string } | null,
+  current: { fileHash?: string; mdIntermediateHash?: string; importStartedAt?: string } | null,
 ): boolean {
   if (!current?.fileHash || current.fileHash !== payload.fileHash) return false;
   const queuedMdHash = payload.mdIntermediateHash?.trim() || undefined;
   const currentMdHash = current.mdIntermediateHash?.trim() || undefined;
-  return currentMdHash === queuedMdHash;
+  if (currentMdHash !== queuedMdHash) return false;
+  const queuedImportStartedAt = payload.importStartedAt.trim();
+  const currentImportStartedAt = current.importStartedAt?.trim();
+  return !!currentImportStartedAt && currentImportStartedAt === queuedImportStartedAt;
 }
 
 async function readSemanticProvenanceTripleCount(
@@ -6423,6 +6428,12 @@ async function handleRequest(
           subject: assertionUri,
           predicate: "http://dkg.io/ontology/sourceFileHash",
           object: JSON.stringify(fileStoreEntry.keccak256),
+          graph: metaGraph,
+        },
+        {
+          subject: assertionUri,
+          predicate: "http://dkg.io/ontology/importStartedAt",
+          object: startedAtLiteral,
           graph: metaGraph,
         },
         // Row 17

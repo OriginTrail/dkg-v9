@@ -682,6 +682,7 @@ describe('file import semantic source identity matching', () => {
     expect(fileImportSourceIdentityMatchesCurrentState(payload, {
       fileHash: 'sha256:file-1',
       mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
     })).toBe(true);
   });
 
@@ -690,10 +691,17 @@ describe('file import semantic source identity matching', () => {
     expect(fileImportSourceIdentityMatchesCurrentState(payload, {
       fileHash: 'sha256:file-2',
       mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
     })).toBe(false);
     expect(fileImportSourceIdentityMatchesCurrentState(payload, {
       fileHash: 'sha256:file-1',
       mdIntermediateHash: 'sha256:md-2',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+    })).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:05:00.000Z',
     })).toBe(false);
   });
 });

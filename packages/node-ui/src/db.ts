@@ -1048,7 +1048,7 @@ export class DashboardDB {
     const tx = this.db.transaction((ts: number, error: string) => {
       const rows = this.db.prepare(`
         SELECT * FROM semantic_enrichment_events
-        WHERE status IN ('pending', 'leased')
+        WHERE status = 'pending'
         ORDER BY created_at ASC, id ASC
       `).all() as SemanticEnrichmentEventRow[];
       if (rows.length === 0) return [] as SemanticEnrichmentEventRow[];
@@ -1060,7 +1060,7 @@ export class DashboardDB {
             lease_expires_at = NULL,
             last_error = ?,
             updated_at = ?
-        WHERE status IN ('pending', 'leased')
+        WHERE status = 'pending'
       `).run(error, ts);
 
       return rows.map((row) => ({

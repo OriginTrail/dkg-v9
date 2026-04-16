@@ -640,6 +640,7 @@ async function runImportFileOrchestration(params: {
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/rootEntity', object: resolvedRootEntity, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
+    { subject: assertionUri, predicate: 'http://dkg.io/ontology/importStartedAt', object: startedAtLiteral, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: `"${triples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"0"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
@@ -1858,9 +1859,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-19 plus Round 9 Bug 27 `dkg:sourceFileName` (7 total) —
-    // no row 20 because Phase 1 did not run for a direct markdown upload.
-    expect(metaForAssertion).toHaveLength(7);
+    // Rows 14-20 plus Round 9 Bug 27 `dkg:sourceFileName` (8 total) —
+    // no `mdIntermediateHash` because Phase 1 did not run for a direct markdown upload.
+    expect(metaForAssertion).toHaveLength(8);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
@@ -1874,13 +1875,18 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceContentType')?.object).toBe('"text/markdown"');
     // Row 16 — load-bearing: sourceFileHash lets a caller recover the blob
     expect(byPredicate('sourceFileHash')?.object).toBe(`"${result.fileHash}"`);
-    // Row 17
+    // Row 17 — import start time is persisted so stale same-byte re-import jobs
+    // can be rejected during semantic-enrichment identity checks.
+    expect(byPredicate('importStartedAt')?.object).toMatch(
+      /^".+"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/,
+    );
+    // Row 18
     expect(byPredicate('extractionMethod')?.object).toBe('"structural"');
-    // Row 18 — structural triple count matches the Phase 2 result
+    // Row 19 — structural triple count matches the Phase 2 result
     expect(byPredicate('structuralTripleCount')?.object).toBe(`"${result.extraction.tripleCount}"^^<${XSD_INTEGER}>`);
-    // Row 19 — V10.0 has no semantic extraction yet
+    // Row 20 — V10.0 has no semantic extraction yet
     expect(byPredicate('semanticTripleCount')?.object).toBe(`"0"^^<${XSD_INTEGER}>`);
-    // Row 20 — absent because Phase 1 did not run for a direct markdown upload
+    // `mdIntermediateHash` is absent because Phase 1 did not run for a direct markdown upload.
     expect(byPredicate('mdIntermediateHash')).toBeUndefined();
     // Round 9 Bug 27 — `dkg:sourceFileName` present on the UAL, carrying
     // the original upload filename literal. This is the new home for
@@ -1915,14 +1921,18 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-20 + Round 9 Bug 27 `dkg:sourceFileName` = 8 rows total.
-    expect(metaForAssertion).toHaveLength(8);
+    // Rows 14-21 + Round 9 Bug 27 `dkg:sourceFileName` = 9 rows total.
+    expect(metaForAssertion).toHaveLength(9);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
 
     // Row 15 — original content type is application/pdf in _meta
     expect(byPredicate('sourceContentType')?.object).toBe('"application/pdf"');
+    // Row 17 — import start time is persisted for semantic job invalidation.
+    expect(byPredicate('importStartedAt')?.object).toMatch(
+      /^".+"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/,
+    );
     // Row 20 — mdIntermediateHash now present, matching the wire value
     expect(byPredicate('mdIntermediateHash')?.object).toBe(`"${result.extraction.mdIntermediateHash}"`);
     // Round 9 Bug 27 — sourceFileName present on the UAL for the PDF upload.

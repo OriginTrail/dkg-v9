@@ -975,7 +975,13 @@ export class DKGAgent {
         for (const id of newlyDiscovered) {
           const sub = this.subscribedContextGraphs.get(id);
           if (sub && sub.metaSynced === false) {
-            sub.metaSynced = true;
+            const metaGraph = paranetMetaGraphUri(id);
+            const check = await this.store.query(
+              `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+            );
+            if (check.type === 'boolean' && check.value === true) {
+              sub.metaSynced = true;
+            }
           }
         }
       }

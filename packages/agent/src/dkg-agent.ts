@@ -1714,11 +1714,16 @@ export class DKGAgent {
    * Called on boot when no agents have been previously registered.
    */
   private async autoRegisterDefaultAgent(): Promise<void> {
-    const opKeys = this.config.chainConfig?.operationalKeys;
-    if (!opKeys?.length) return;
+    let opKey = this.config.chainConfig?.operationalKeys?.[0];
+    if (!opKey && typeof (this.chain as any).getOperationalPrivateKey === 'function') {
+      try {
+        opKey = (this.chain as any).getOperationalPrivateKey();
+      } catch { /* adapter without key — skip */ }
+    }
+    if (!opKey) return;
 
     const record = agentFromPrivateKey(
-      opKeys[0],
+      opKey,
       this.config.name ?? 'owner',
       this.config.framework,
     );
@@ -4788,16 +4793,25 @@ export class DKGAgent {
   }
 
   private async getPrivateContextGraphParticipants(contextGraphId: string): Promise<string[] | null> {
-    // V10 model: check allowedAgents first (agent addresses)
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    const add = (value: string | undefined) => {
+      if (!value) return;
+      const key = value.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(value);
+    };
+
     const localAgentParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents;
-    if (localAgentParticipants && localAgentParticipants.length > 0) {
-      return localAgentParticipants;
+    if (localAgentParticipants) {
+      for (const p of localAgentParticipants) add(p);
     }
 
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
 
-    // Check _meta for dkg:allowedAgent triples (V10 agent model)
+    // V10 agent model: allowedAgent triples (wallet addresses)
     const agentResult = await this.store.query(
       `SELECT ?agent WHERE {
         GRAPH <${cgMetaGraph}> {
@@ -4805,14 +4819,14 @@ export class DKGAgent {
         }
       }`,
     );
-    if (agentResult.type === 'bindings' && agentResult.bindings.length > 0) {
-      return agentResult.bindings
-        .map((row) => row['agent'])
-        .filter((value): value is string => typeof value === 'string')
-        .map((value) => value.replace(/^"|"$/g, ''));
+    if (agentResult.type === 'bindings') {
+      for (const row of agentResult.bindings) {
+        const raw = row['agent'];
+        if (typeof raw === 'string') add(raw.replace(/^"|"$/g, ''));
+      }
     }
 
-    // Legacy: check for participantIdentityIds (backward compat, returns as strings)
+    // Legacy identity model: participantIdentityIds (numeric IDs as strings)
     const metaResult = await this.store.query(
       `SELECT ?identityId WHERE {
         GRAPH <${cgMetaGraph}> {
@@ -4820,19 +4834,20 @@ export class DKGAgent {
         }
       }`,
     );
-    if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
-      return metaResult.bindings
-        .map((row) => row['identityId'])
-        .filter((value): value is string => typeof value === 'string')
-        .map((value) => value.replace(/^"|"$/g, ''));
+    if (metaResult.type === 'bindings') {
+      for (const row of metaResult.bindings) {
+        const raw = row['identityId'];
+        if (typeof raw === 'string') add(raw.replace(/^"|"$/g, ''));
+      }
     }
 
-    // Check on-chain participants (identity IDs as strings for uniform comparison)
+    if (merged.length > 0) return merged;
+
+    // Fall back to on-chain participants (identity IDs as strings)
     const onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
       return null;
     }
-
     const onChainParticipants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
     if (!onChainParticipants) return null;
     return onChainParticipants.map((id) => String(id));

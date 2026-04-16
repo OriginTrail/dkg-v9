@@ -1668,7 +1668,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
       });
       (agent as any).isPrivateContextGraph = async () => true;
-      (agent as any).getPrivateContextGraphParticipants = async () => [1n];
+      (agent as any).getPrivateContextGraphParticipants = async () => ['1'];
 
       const canRead = await (agent as any).canReadContextGraph('local-private-cg');
       expect(canRead).toBe(true);

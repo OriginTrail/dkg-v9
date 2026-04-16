@@ -323,6 +323,10 @@ export class DkgNodePlugin {
       }
       const registered = this.memoryPlugin.register(api);
       if (!registered) {
+        // Clear any stale re-assert callback from a previous registration
+        // so the channel plugin doesn't steal the slot back from the
+        // newly elected provider on subsequent turns.
+        this.channelPlugin?.setMemoryReAssert(null);
         api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
         return;
       }

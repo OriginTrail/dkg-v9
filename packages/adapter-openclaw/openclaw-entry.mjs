@@ -76,7 +76,7 @@ export default function (api) {
   // after adapter/CLI upgrades unless re-synced. This runs on every plugin
   // load, is idempotent (skips when content matches), and non-fatal.
   try {
-    const skillSrc = fileURLToPath(new URL('../../cli/skills/dkg-node/SKILL.md', import.meta.url));
+    const skillSrc = fileURLToPath(new URL('../cli/skills/dkg-node/SKILL.md', import.meta.url));
     if (workspaceDir && existsSync(skillSrc)) {
       const skillDest = join(workspaceDir, 'skills', 'dkg-node', 'SKILL.md');
       const srcContent = readFileSync(skillSrc, 'utf-8');

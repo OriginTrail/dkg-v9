@@ -351,7 +351,7 @@ export class DkgChannelPlugin {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private memoryReAssert: (() => void) | null = null;
 
-  setMemoryReAssert(fn: () => void): void {
+  setMemoryReAssert(fn: (() => void) | null): void {
     this.memoryReAssert = fn;
   }
   private readonly pendingTurnPersistence = new Map<string, {

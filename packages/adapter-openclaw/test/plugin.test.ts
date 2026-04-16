@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
+import { SemanticEnrichmentWorker } from '../src/SemanticEnrichmentWorker.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
 describe('DkgNodePlugin', () => {
@@ -808,6 +809,67 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('does not start the semantic worker before honoring a stored explicit disconnect state', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              enabled: false,
+              runtime: { status: 'disconnected', ready: false },
+              metadata: { userDisabled: true },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    const startSpy = vi.spyOn(SemanticEnrichmentWorker.prototype, 'start').mockResolvedValue(undefined);
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const info = vi.fn();
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        runtime: {
+          subagent: {
+            run: vi.fn(),
+            waitForRun: vi.fn(),
+            getSessionMessages: vi.fn(),
+            deleteSession: vi.fn(),
+          },
+        } as any,
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info },
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('does not re-enable a legacy pre-flag disconnected OpenClaw integration on startup', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1031,12 +1093,13 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
       );
 
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      expect(readyCall).toBeTruthy();
+      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
         transport: {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
@@ -1093,12 +1156,13 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
       );
 
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      expect(readyCall).toBeTruthy();
+      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
         transport: {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
@@ -1179,6 +1243,72 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('refreshes a stored bridge-derived wakeUrl when the live bridge port rotates', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              transport: {
+                kind: 'openclaw-channel',
+                bridgeUrl: 'http://127.0.0.1:9201',
+                wakeUrl: 'http://127.0.0.1:9201/semantic-enrichment/wake',
+                wakeAuth: 'bridge-token',
+              },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+
+      expect(readyCall).toBeTruthy();
+      const payload = JSON.parse(String(readyCall?.[1]?.body));
+      expect(payload).toMatchObject({
+        transport: {
+          wakeAuth: 'bridge-token',
+        },
+      });
+      expect(payload.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
+      expect(payload.transport.wakeUrl).not.toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('aborts startup re-registration when stored OpenClaw integration state cannot be loaded', async () => {
     const originalFetch = globalThis.fetch;
     const warn = vi.fn();
@@ -1232,6 +1362,58 @@ describe('DkgNodePlugin', () => {
       // only the dedup warn is asserted here.
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason: temporary daemon outage'));
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('starts the semantic worker after startup integration sync succeeds when runtime.subagent is supported', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({ integration: null }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    const startSpy = vi.spyOn(SemanticEnrichmentWorker.prototype, 'start').mockResolvedValue(undefined);
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        runtime: {
+          subagent: {
+            run: vi.fn(),
+            waitForRun: vi.fn(),
+            getSessionMessages: vi.fn(),
+            deleteSession: vi.fn(),
+          },
+        } as any,
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;

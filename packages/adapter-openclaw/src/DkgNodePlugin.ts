@@ -165,11 +165,33 @@ export class DkgNodePlugin {
     return trimmed.replace(/\/+$/, '');
   }
 
+  private buildDerivedWakeCandidates(
+    transport: Pick<LocalAgentIntegrationTransport, 'bridgeUrl' | 'gatewayUrl'> | undefined,
+  ): Array<{ url: string; auth: 'bridge-token' | 'gateway' }> {
+    const candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
+    const gatewayUrl = transport?.gatewayUrl?.trim();
+    if (gatewayUrl) {
+      candidates.push({
+        url: `${gatewayUrl.replace(/\/+$/, '')}/api/dkg-channel/semantic-enrichment/wake`,
+        auth: 'gateway',
+      });
+    }
+    const bridgeUrl = transport?.bridgeUrl?.trim();
+    if (bridgeUrl) {
+      candidates.push({
+        url: `${bridgeUrl.replace(/\/+$/, '')}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
+    }
+    return candidates;
+  }
+
   private resolveWakeTransport(
-    existingWakeUrl: string | undefined,
+    existing: LocalAgentIntegrationTransport | undefined,
     existingWakeAuth: 'bridge-token' | 'gateway' | 'none' | undefined,
     candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }>,
   ): { url: string; auth?: 'bridge-token' | 'gateway' | 'none' } | undefined {
+    const existingWakeUrl = existing?.wakeUrl;
     const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
     if (!normalizedExistingWakeUrl) {
       return candidates[0];
@@ -178,19 +200,25 @@ export class DkgNodePlugin {
     const matchingCandidate = candidates.find((candidate) =>
       this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
     );
-    if (!matchingCandidate) {
-      return {
-        url: normalizedExistingWakeUrl,
-        auth: existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl),
-      };
-    }
-    if (existingWakeAuth && existingWakeAuth !== matchingCandidate.auth) {
+    if (matchingCandidate && existingWakeAuth && existingWakeAuth !== matchingCandidate.auth) {
       return {
         url: normalizedExistingWakeUrl,
         auth: existingWakeAuth,
       };
     }
-    return matchingCandidate;
+    const existingDerivedCandidate = this.buildDerivedWakeCandidates(existing).find((candidate) =>
+      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
+    );
+    if (existingDerivedCandidate) {
+      return candidates[0];
+    }
+    if (matchingCandidate) {
+      return matchingCandidate;
+    }
+    return {
+      url: normalizedExistingWakeUrl,
+      auth: existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl),
+    };
   }
 
   private syncClientLocalAgentRequestContext(): void {
@@ -491,6 +519,7 @@ export class DkgNodePlugin {
 
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
       // default log level) until either the reason changes or the load
@@ -521,6 +550,7 @@ export class DkgNodePlugin {
     this.lastLocalAgentIntegrationWarnReason = null;
     this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
     }
@@ -552,9 +582,14 @@ export class DkgNodePlugin {
         },
       });
     } catch (err: any) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
     }
+
+    await this.channelPlugin?.startSemanticEnrichmentWorker().catch((err: any) => {
+      api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${err?.message ?? String(err)}`);
+    });
 
     if (bridgeAlreadyReady || !this.channelPlugin) {
       return;
@@ -621,7 +656,6 @@ export class DkgNodePlugin {
     const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
 
-    const existingWakeUrl = existing?.wakeUrl?.trim();
     const existingWakeAuth = existing?.wakeAuth;
     const gatewayBaseUrl = this.resolveGatewayBaseUrl(
       api,
@@ -667,7 +701,7 @@ export class DkgNodePlugin {
       });
     }
 
-    const wakeTransport = this.resolveWakeTransport(existingWakeUrl, existingWakeAuth, wakeCandidates);
+    const wakeTransport = this.resolveWakeTransport(existing, existingWakeAuth, wakeCandidates);
     if (wakeTransport) {
       transport.wakeUrl = wakeTransport.url;
       if (wakeTransport.auth) {

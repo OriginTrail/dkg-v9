@@ -459,6 +459,26 @@ export class DkgChannelPlugin {
     return worker?.getRuntimeProbe().supported === true;
   }
 
+  async startSemanticEnrichmentWorker(): Promise<void> {
+    const semanticWorker = this.ensureSemanticEnrichmentWorker();
+    if (!semanticWorker) return;
+    const probe = semanticWorker.getRuntimeProbe();
+    if (probe.supported) {
+      this.api?.logger.info?.(
+        `[dkg-channel] runtime.subagent available for semantic wake coordination (worker=${semanticWorker.getWorkerInstanceId()})`,
+      );
+      await semanticWorker.start();
+      return;
+    }
+    this.api?.logger.warn?.(
+      `[dkg-channel] runtime.subagent unavailable for semantic wake coordination; missing ${probe.missing.join(', ') || 'subagent helpers'}`,
+    );
+  }
+
+  async stopSemanticEnrichmentWorker(): Promise<void> {
+    await this.semanticEnrichmentWorker?.stop();
+  }
+
   /**
    * Run `fn` inside an AsyncLocalStorage-scoped dispatch context so that
    * any `getSessionProjectContextGraphId` call issued from inside `fn`
@@ -510,25 +530,6 @@ export class DkgChannelPlugin {
         log.info?.(`[dkg-channel] runtime config-like keys: ${rtKeys || 'none'}`);
         const allRtKeys = Object.keys(rt).sort().join(', ');
         log.info?.(`[dkg-channel] runtime all keys: ${allRtKeys}`);
-      }
-    }
-
-    const semanticWorker = this.ensureSemanticEnrichmentWorker();
-    if (semanticWorker) {
-      const probe = semanticWorker.getRuntimeProbe();
-      if (probe.supported) {
-        log.info?.(
-          `[dkg-channel] runtime.subagent available for semantic wake coordination (worker=${semanticWorker.getWorkerInstanceId()})`,
-        );
-      } else {
-        log.warn?.(
-          `[dkg-channel] runtime.subagent unavailable for semantic wake coordination; missing ${probe.missing.join(', ') || 'subagent helpers'}`,
-        );
-      }
-      if (probe.supported) {
-        void semanticWorker.start().catch((err: any) => {
-          log.warn?.(`[dkg-channel] Semantic enrichment worker failed to start: ${err?.message ?? String(err)}`);
-        });
       }
     }
 

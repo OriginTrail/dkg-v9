@@ -47,6 +47,63 @@ jobs:
       - name: "Agent — gossip, workspace, integration (277 tests)"
         run: pnpm --filter @origintrail-official/dkg-agent test:coverage
 
+  product-tests:
+    name: "Product Surface Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm build
+
+      - name: "CLI — daemon, wallet, blue/green, importers"
+        run: pnpm --filter @origintrail-official/dkg test
+
+      - name: "Node UI — API routes, components, panels"
+        run: pnpm --filter @origintrail-official/dkg-node-ui test
+
+      - name: "Attested assets — quorum, sessions, canonical"
+        run: pnpm --filter @origintrail-official/dkg-attested-assets test
+
+      - name: "EPCIS — events, query, validation"
+        run: pnpm --filter @origintrail-official/dkg-epcis test
+
+      - name: "Query — handler, security, sub-graph"
+        run: pnpm --filter @origintrail-official/dkg-query test
+
+      - name: "MCP server — tools, connection"
+        run: pnpm --filter @origintrail-official/dkg-mcp-server test
+
+      - name: "Network simulation"
+        run: pnpm --filter @origintrail-official/dkg-network-sim test
+
+      - name: "Graph viz — RDF rendering helpers"
+        run: pnpm --filter @origintrail-official/dkg-graph-viz test
+
+      - name: "Adapter: autoresearch"
+        run: pnpm --filter @origintrail-official/dkg-adapter-autoresearch test
+
+      - name: "Adapter: ElizaOS"
+        run: pnpm --filter @origintrail-official/dkg-adapter-elizaos test
+
+      - name: "Adapter: Hermes"
+        run: pnpm --filter @origintrail-official/dkg-adapter-hermes test
+
+      - name: "Adapter: OpenClaw"
+        run: pnpm --filter @origintrail-official/dkg-adapter-openclaw test
+
   solidity:
     name: Solidity (Compile & Test)
     runs-on: ubuntu-latest

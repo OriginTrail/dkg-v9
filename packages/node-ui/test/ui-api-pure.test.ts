@@ -364,4 +364,3 @@ describe('UI API tests', () => {
   // with /api/memory/import as part of the openclaw-dkg-primary-memory
   // work. See Dashboard / ui/api.ts for the deletion context.
 });
-});

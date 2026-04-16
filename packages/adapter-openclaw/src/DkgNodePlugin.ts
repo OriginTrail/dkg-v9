@@ -33,6 +33,15 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
+function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((b: any) => b?.type === 'text' && typeof b?.text === 'string')
+    .map((b: any) => b.text)
+    .join('\n');
+}
+
 function findLastByRole(messages: any[], role: string): any | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role === role) return messages[i];
@@ -411,8 +420,8 @@ export class DkgNodePlugin {
       const lastAssistant = findLastByRole(messages, 'assistant');
       if (!lastUser && !lastAssistant) return;
 
-      const userMessage = typeof lastUser?.content === 'string' ? lastUser.content : '';
-      const assistantReply = typeof lastAssistant?.content === 'string' ? lastAssistant.content : '';
+      const userMessage = extractTextContent(lastUser?.content);
+      const assistantReply = extractTextContent(lastAssistant?.content);
       if (!userMessage && !assistantReply) return;
 
       const sessionId = ctx?.sessionKey ?? ctx?.sessionId ?? `openclaw:${channelId}:default`;

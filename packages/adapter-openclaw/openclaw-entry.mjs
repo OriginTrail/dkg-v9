@@ -43,10 +43,12 @@ export default function (api) {
   // Deep-clone integration sub-configs
   if (wsConfig.memory) {
     config.memory = { ...wsConfig.memory };
-    // Auto-set memoryDir from workspace if not explicit
-    if (!config.memory.memoryDir && workspaceDir) {
-      config.memory.memoryDir = join(workspaceDir, 'memory');
-    }
+    // Do NOT auto-populate `config.memory.memoryDir` here. The key was
+    // retired with the openclaw-dkg-primary-memory workstream along
+    // with the retirement warning itself (that warning was removed in
+    // commit 66211977 — first-product-release has no legacy install
+    // base to migrate from). We still clone `wsConfig.memory` to preserve
+    // any other fields operators may have set in their workspace config.
   }
   if (wsConfig.channel) {
     config.channel = { ...wsConfig.channel };

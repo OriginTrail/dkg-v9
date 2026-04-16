@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DkgDaemonClient } from '../src/dkg-client.js';
 
 describe('DkgDaemonClient', () => {
@@ -116,46 +116,131 @@ describe('DkgDaemonClient', () => {
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
-    await client.query('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'agent-memory' });
+    await client.query('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'agent-context' });
 
     const body = JSON.parse(fetchCalls[0][1]?.body as string);
-    expect(body.contextGraphId).toBe('agent-memory');
+    expect(body.contextGraphId).toBe('agent-context');
+  });
+
+  it('query should forward view + agentAddress + assertionName for WM reads', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+
+    await client.query('SELECT * WHERE { ?s ?p ?o }', {
+      contextGraphId: 'agent-context',
+      view: 'working-memory',
+      agentAddress: 'did:dkg:agent:test',
+      assertionName: 'chat-turns',
+      subGraphName: 'protocols',
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(body.view).toBe('working-memory');
+    expect(body.agentAddress).toBe('did:dkg:agent:test');
+    expect(body.assertionName).toBe('chat-turns');
+    expect(body.subGraphName).toBe('protocols');
   });
 
   // ---------------------------------------------------------------------------
   // Workspace write
   // ---------------------------------------------------------------------------
 
-  it('share should POST quads', async () => {
+  it('share should POST quads to /api/shared-memory/write with localOnly defaulted to true', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ shareOperationId: 'op-1' }), { status: 200 }),
     );
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
-    await client.share('agent-memory', quads);
+    await client.share('research-x', quads);
 
     const body = JSON.parse(fetchCalls[0][1]?.body as string);
-    expect(body.contextGraphId).toBe('agent-memory');
+    expect(body.contextGraphId).toBe('research-x');
     expect(body.quads).toHaveLength(1);
     expect(body.localOnly).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
-  // Memory import
+  // Working Memory assertion lifecycle
   // ---------------------------------------------------------------------------
 
-  it('importMemories should POST to /api/memory/import', async () => {
-    fetchResponses.push(
-      new Response(JSON.stringify({ batchId: 'b1', memoryCount: 3, tripleCount: 12 }), { status: 200 }),
+  it('createAssertion should POST to /api/assertion/create', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ assertionUri: 'urn:test:assertion:1' }), { status: 200 }),
     );
 
-    const result = await client.importMemories('Some memories', 'claude', { useLlm: true });
-    expect(result.batchId).toBe('b1');
+    const result = await client.createAssertion('agent-context', 'chat-turns');
 
-    const body = JSON.parse(fetchCalls[0][1]?.body as string);
-    expect(body.text).toBe('Some memories');
-    expect(body.source).toBe('claude');
-    expect(body.useLlm).toBe(true);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/create');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.contextGraphId).toBe('agent-context');
+    expect(body.name).toBe('chat-turns');
+    expect(body.subGraphName).toBeUndefined();
+    expect(result).toEqual({ assertionUri: 'urn:test:assertion:1', alreadyExists: false });
+  });
+
+  it('createAssertion should swallow 400 "already exists" into alreadyExists:true', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Assertion "chat-turns" already exists in context graph "agent-context"' }), { status: 400 }),
+    );
+
+    const result = await client.createAssertion('agent-context', 'chat-turns');
+    expect(result.alreadyExists).toBe(true);
+    expect(result.assertionUri).toBeNull();
+  });
+
+  it('createAssertion should propagate non-"already exists" errors', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Invalid "name": contains reserved characters' }), { status: 400 }),
+    );
+
+    await expect(client.createAssertion('agent-context', 'bad name')).rejects.toThrow(/Invalid/);
+  });
+
+  it('createAssertion should forward subGraphName when supplied', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ assertionUri: 'urn:test:assertion:2' }), { status: 200 }),
+    );
+
+    await client.createAssertion('research-x', 'memory', { subGraphName: 'protocols' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(body.subGraphName).toBe('protocols');
+  });
+
+  it('writeAssertion should POST to /api/assertion/:name/write with URL-encoded name', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ written: 3 }), { status: 200 }),
+    );
+
+    const quads = [
+      { subject: 'urn:a', predicate: 'urn:b', object: '"c"' },
+      { subject: 'urn:a', predicate: 'urn:d', object: '"e"' },
+      { subject: 'urn:a', predicate: 'urn:f', object: '"g"' },
+    ];
+    const result = await client.writeAssertion('agent-context', 'chat-turns', quads);
+
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/chat-turns/write');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.contextGraphId).toBe('agent-context');
+    expect(body.quads).toHaveLength(3);
+    expect(body.subGraphName).toBeUndefined();
+    expect(result).toEqual({ written: 3 });
+  });
+
+  it('writeAssertion should forward subGraphName when supplied', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ written: 1 }), { status: 200 }),
+    );
+
+    await client.writeAssertion('research-x', 'memory', [
+      { subject: 'urn:m', predicate: 'urn:p', object: '"v"' },
+    ], { subGraphName: 'protocols' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(body.subGraphName).toBe('protocols');
   });
 
   // ---------------------------------------------------------------------------

@@ -543,27 +543,11 @@ export const publishMemorySession = (
 export const fetchMemoryStats = () =>
   get<{ contextGraphId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
-export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
-export type ImportSource = (typeof IMPORT_SOURCES)[number];
-
-export interface ImportMemoryQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-}
-
-export interface ImportMemoryResult {
-  batchId: string | null;
-  source: ImportSource;
-  memoryCount: number;
-  tripleCount: number;
-  entityCount: number;
-  quads: ImportMemoryQuad[];
-  quadsTruncated?: boolean;
-  warnings?: string[];
-}
-export const importMemories = (text: string, source?: ImportSource, useLlm?: boolean) =>
-  post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
+// IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
+// importMemories were retired with the /api/memory/import V9 relic as
+// part of the openclaw-dkg-primary-memory work. Agents write memory via
+// the adapter's dkg_memory_import tool, and file-import flows go through
+// /api/assertion/:name/import-file directly.
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>
@@ -619,6 +603,15 @@ interface LocalAgentChatRequestOptions {
   identity?: string;
   attachments?: LocalAgentChatAttachmentRef[];
   contextEntries?: LocalAgentChatContextEntry[];
+  /**
+   * UI-selected project context graph for this turn. Forwarded to the
+   * adapter's channel bridge as `uiContextGraphId` on the envelope so the
+   * adapter's DKG memory slot can scope slot-backed recall to the user's
+   * current project. `DkgMemorySearchManager.search` reads it via the
+   * per-session resolver; `dkg_memory_import` uses it as the fallback CG
+   * when the agent does not supply one explicitly.
+   */
+  contextGraphId?: string;
 }
 
 export const sendOpenClawChat = (peerId: string, text: string) =>
@@ -639,6 +632,7 @@ export async function sendOpenClawLocalChat(
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -674,6 +668,7 @@ export async function streamOpenClawLocalChat(
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -1110,6 +1105,8 @@ export async function streamLocalAgentChat(
     sessionId?: string;
     attachments?: LocalAgentChatAttachmentRef[];
     contextEntries?: LocalAgentChatContextEntry[];
+    /** UI-selected project context graph for this turn (memory scope). */
+    contextGraphId?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();

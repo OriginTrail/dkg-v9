@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -280,15 +280,20 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(sessionCalls).toHaveLength(0);
   });
 
-  it('returns publication status for a valid session id', async () => {
-    const { fn: getSessionPublicationStatus, calls: pubCalls } = trackingFn(() => ({
-      sessionId: 'session-1',
-      workspaceTripleCount: 12,
-      dataTripleCount: 3,
-      scope: 'published',
-      rootEntityCount: 4,
-    }));
-    const memoryManager = { getSessionPublicationStatus } as any;
+  // Codex Bug B38: the session-publication routes are no-ops in v1
+  // because chat turns now live in Working Memory assertions rather
+  // than in shared memory — the old SWM-based publication flow has
+  // nothing to read. The routes short-circuit to HTTP 501 with a
+  // stable error code and a pointer at the v2 follow-up; chat-memory
+  // manager methods are never invoked. See api.ts for the handler
+  // and chat-memory.ts:1218-1224 for the TODO that tracks the v2
+  // promotion-based reimplementation.
+
+  it('returns 501 Not Implemented for GET /api/memory/sessions/:id/publication (Codex B38)', async () => {
+    const memoryManager = {
+      getSessionPublicationStatus: vi.fn(),
+      publishSession: vi.fn(),
+    } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -310,29 +315,21 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(pubCalls[0]).toEqual(['session-1']);
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      scope: 'published',
+    expect(state.statusCode).toBe(501);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
     });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
+    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
   });
 
-  it('publishes a session with selected roots and clearAfter option', async () => {
-    const { fn: publishSession, calls: publishCalls } = trackingFn(() => ({
-      sessionId: 'session-1',
-      rootEntityCount: 1,
-      status: 'confirmed',
-      tripleCount: 5,
-      publication: {
-        sessionId: 'session-1',
-        workspaceTripleCount: 5,
-        dataTripleCount: 5,
-        scope: 'published',
-        rootEntityCount: 1,
-      },
-    }));
-    const memoryManager = { publishSession } as any;
+  it('returns 501 Not Implemented for POST /api/memory/sessions/:id/publish (Codex B38)', async () => {
+    const memoryManager = {
+      getSessionPublicationStatus: vi.fn(),
+      publishSession: vi.fn(),
+    } as any;
 
     const { req, url } = createMockReq({
       method: 'POST',
@@ -359,54 +356,29 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(publishCalls[0]).toEqual(['session-1', {
-      rootEntities: ['urn:dkg:chat:msg:m-1'],
-      clearSharedMemoryAfter: true,
-    }]);
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      status: 'confirmed',
+    expect(state.statusCode).toBe(501);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
     });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
+    expect(memoryManager.publishSession).not.toHaveBeenCalled();
   });
 
-  it('returns 400 for invalid session id in publication route', async () => {
-    const { fn: getSessionPublicationStatus, calls: pubCalls } = trackingFn(() => undefined);
-    const memoryManager = { getSessionPublicationStatus } as any;
-
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1%2Fbad/publication',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(pubCalls).toHaveLength(0);
-  });
-
-  it('returns 400 for invalid session id in publish route', async () => {
-    const { fn: publishSession, calls: publishCalls } = trackingFn(() => undefined);
-    const memoryManager = { publishSession } as any;
-
+  // Codex Bug B52: the legacy `/api/memory/import` endpoint was retired
+  // in the openclaw-dkg-primary-memory workstream. Rather than let
+  // external callers fall through to the generic 404 (wire-level
+  // contract break with no migration signal), the route serves a 410
+  // Gone stub that names the two replacements — the adapter's
+  // `dkg_memory_import` tool and the daemon's
+  // `POST /api/assertion/:name/write` direct route. Mirrors the B38
+  // pattern for the session-publication routes above.
+  it('returns 410 Gone for POST /api/memory/import with migration pointers (Codex B52)', async () => {
     const { req, url } = createMockReq({
       method: 'POST',
-      path: '/api/memory/sessions/session-1%2Fbad/publish',
-      body: JSON.stringify({}),
+      path: '/api/memory/import',
+      body: JSON.stringify({ text: 'anything', source: 'claude' }),
       headers: { 'content-type': 'application/json' },
     });
     const { res, state } = createMockRes();
@@ -420,80 +392,31 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
       undefined,
       undefined,
       undefined,
-      memoryManager,
+      undefined, // memoryManager intentionally undefined — the stub doesn't need it
       undefined,
     );
 
     expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(publishCalls).toHaveLength(0);
-  });
-
-  it('returns 400 for session-scope publish validation errors', async () => {
-    const { fn: publishSession, calls: publishCalls } = trackingFn(() => {
-      throw new Error('Selected root entities are not part of session session-1');
+    expect(state.statusCode).toBe(410);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
     });
-    const memoryManager = { publishSession } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({ rootEntities: ['urn:dkg:chat:msg:other'] }),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({
-      error: 'Selected root entities are not part of session session-1',
-    });
-  });
-
-  it('returns 500 for unexpected publish failures', async () => {
-    const { fn: publishSession } = trackingFn(() => {
-      throw new Error('storage offline');
-    });
-    const memoryManager = { publishSession } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({}),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(500);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'storage offline' });
+    expect(body.reason).toMatch(/V9 relic|LLM API keys|sidecar graph/i);
+    expect(Array.isArray(body.replacements)).toBe(true);
+    // Codex B64: the 410 migration pointer must list BOTH the create step
+    // and the write step so callers bootstrapping a fresh project CG
+    // don't hit a failing first write. The retired `dkg_memory_import`
+    // adapter-tool replacement was dropped along with the tool itself
+    // (eccbe19d) — non-OpenClaw callers now go directly through the two
+    // daemon HTTP routes below.
+    expect(body.replacements.length).toBeGreaterThanOrEqual(2);
+    const replacementPaths = body.replacements.map((r: any) => r.path ?? r.name ?? '');
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/create/);
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/:name\/write/);
+    const allNames = body.replacements.map((r: any) => r.name ?? '').join(' ');
+    expect(allNames).not.toMatch(/dkg_memory_import/);
   });
 });
 

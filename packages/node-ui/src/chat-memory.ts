@@ -3,8 +3,41 @@ import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
-  query: (sparql: string, opts?: { contextGraphId?: string; graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean }) => Promise<any>;
-  share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ shareOperationId: string }>;
+  query: (
+    sparql: string,
+    opts?: {
+      contextGraphId?: string;
+      graphSuffix?: '_shared_memory';
+      includeSharedMemory?: boolean;
+      view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+      agentAddress?: string;
+      assertionName?: string;
+      subGraphName?: string;
+    },
+  ) => Promise<any>;
+  /**
+   * Direct SWM write primitive. Retained on the context so callers that
+   * legitimately want Shared Working Memory semantics (e.g. user-initiated
+   * promotion to a project's shared memory) have access to it, but chat-turn
+   * and per-project memory writes use `writeAssertion` instead.
+   */
+  share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean; subGraphName?: string }) => Promise<{ shareOperationId: string }>;
+  /**
+   * Create a per-agent Working Memory assertion graph. Idempotent: "already
+   * exists" is resolved quietly, any other error surfaces.
+   */
+  createAssertion: (
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ) => Promise<{ assertionUri: string | null; alreadyExists: boolean }>;
+  /** Append quads into an existing Working Memory assertion graph. */
+  writeAssertion: (
+    contextGraphId: string,
+    name: string,
+    quads: any[],
+    opts?: { subGraphName?: string },
+  ) => Promise<{ written: number }>;
   publishFromSharedMemory: (
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
@@ -12,6 +45,26 @@ export interface MemoryToolContext {
   ) => Promise<any>;
   createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
   listContextGraphs: () => Promise<any[]>;
+}
+
+/** Options passed to ChatMemoryManager at construction time. */
+export interface ChatMemoryManagerOptions {
+  /**
+   * The attached agent's address. Used as the `agentAddress` field on
+   * `view: 'working-memory'` queries so the query engine can route reads
+   * to the correct per-agent assertion graph. Defaults to `undefined`
+   * during tests / scripts; the daemon passes the node peer ID at runtime.
+   */
+  agentAddress?: string;
+  /**
+   * Target context graph for chat-turn persistence. Defaults to
+   * `'agent-context'`. Tests and scripts can override.
+   */
+  contextGraphId?: string;
+  /**
+   * Assertion name for chat-turn persistence. Defaults to `'chat-turns'`.
+   */
+  assertionName?: string;
 }
 
 export interface MemoryStats {
@@ -91,7 +144,25 @@ export interface ImportResult {
   warnings?: string[];
 }
 
-const MEMORY_CONTEXT_GRAPH = 'agent-memory';
+/**
+ * Chat-turn persistence target.
+ *
+ * V10 architectural note: writes go through Working Memory assertion routes
+ * (`agent.assertion.create` + `agent.assertion.write`), not SWM via
+ * `agent.share`. The `'chat-turns'` assertion inside the `'agent-context'`
+ * context graph is the single canonical home for all chat-turn persistence
+ * in the adapter; reads use `view: 'working-memory'` to hit the matching
+ * per-agent WM assertion graph.
+ *
+ * Triple shapes (`schema:Message` / `schema:Conversation` / `dkg:ChatTurn` +
+ * custom predicates) are preserved from the pre-v1 adapter for raw
+ * persistence. `21_TRI_MODAL_MEMORY.md §3` defines a different target model
+ * (markdown Knowledge Assets with YAML frontmatter and structural + semantic
+ * extraction). v1 of the openclaw-dkg-primary-memory work intentionally
+ * defers that migration; follow-up work tracks it.
+ */
+export const AGENT_CONTEXT_GRAPH = 'agent-context';
+export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -218,17 +289,6 @@ function buildSessionRootPattern(sessionUri: string): string {
     `{ ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }`,
   ];
 
-  if (sessionUri === OPENCLAW_LOCAL_SESSION_URI) {
-    clauses.push(
-      `{ ?s <${RDF_TYPE}> <${DKG_ONT}ImportedMemory> }`,
-      `{ ?s <${RDF_TYPE}> <${DKG_ONT}MemoryImport> }`,
-      `{
-      ?s <${DKG_ONT}extractedFrom> ?batch .
-      ?batch <${RDF_TYPE}> <${DKG_ONT}MemoryImport> .
-      }`,
-    );
-  }
-
   return `{
     ${clauses.join('\n    UNION ')}
   }`;
@@ -326,32 +386,69 @@ export class ChatMemoryManager {
   private initialized = false;
   private knownSessions = new Set<string>();
   private readonly llmClient = new LlmClient();
+  private readonly agentContextGraph: string;
+  private readonly chatTurnsAssertion: string;
+  private readonly assertionEnsured = new Set<string>();
+  readonly agentAddress: string | undefined;
 
   constructor(
     private tools: MemoryToolContext,
     private llmConfig: LlmConfig,
-  ) {}
+    options?: ChatMemoryManagerOptions,
+  ) {
+    this.agentAddress = options?.agentAddress;
+    this.agentContextGraph = options?.contextGraphId ?? AGENT_CONTEXT_GRAPH;
+    this.chatTurnsAssertion = options?.assertionName ?? CHAT_TURNS_ASSERTION;
+  }
 
   get contextGraphId(): string {
-    return MEMORY_CONTEXT_GRAPH;
+    return this.agentContextGraph;
   }
 
   updateConfig(llmConfig: LlmConfig): void {
     this.llmConfig = llmConfig;
   }
 
+  /**
+   * Build the read options block used for every WM query issued by this
+   * manager. Reads must match the layer writes land in — mixing SWM-writes
+   * with WM-reads produces silent empty results.
+   */
+  private wmReadOpts(overrides?: { assertionName?: string }): {
+    contextGraphId: string;
+    view: 'working-memory';
+    agentAddress?: string;
+    assertionName: string;
+  } {
+    return {
+      contextGraphId: this.agentContextGraph,
+      view: 'working-memory',
+      agentAddress: this.agentAddress,
+      assertionName: overrides?.assertionName ?? this.chatTurnsAssertion,
+    };
+  }
+
+  /**
+   * Lazy creation of the chat-turn context graph + assertion. Runs on the
+   * first `storeChatExchange` / `ensureInitialized` call and is idempotent
+   * thereafter.
+   */
   async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
+
+    // (1) Create the context graph. Uses the `#156` free-CG flow —
+    // `createContextGraph` defaults to unregistered, local-only, no chain
+    // cost. `private: true` prevents gossip subscription / broadcast.
     try {
       const contextGraphs = await this.tools.listContextGraphs();
       const exists = contextGraphs.some(
-        (p: any) => p.id === MEMORY_CONTEXT_GRAPH || p.contextGraphId === MEMORY_CONTEXT_GRAPH,
+        (p: any) => p.id === this.agentContextGraph || p.contextGraphId === this.agentContextGraph,
       );
       if (!exists) {
         await this.tools.createContextGraph({
-          id: MEMORY_CONTEXT_GRAPH,
-          name: 'Agent Memory',
-          description: 'Local private memory for agent chat conversations and extracted knowledge.',
+          id: this.agentContextGraph,
+          name: 'Agent Context',
+          description: 'Chat-turn working memory for local agent integrations.',
           private: true,
         });
       }
@@ -359,12 +456,29 @@ export class ChatMemoryManager {
       if (!err.message?.includes('already exists')) throw err;
     }
 
-    // Pre-populate known sessions so subsequent writes to existing
-    // sessions don't re-declare the session entity (DKG Rule 4).
+    // (2) Create the chat-turns Working Memory assertion graph. Idempotent
+    // via `createAssertion`'s client-side "already exists" handling.
+    const assertionKey = `${this.agentContextGraph}::${this.chatTurnsAssertion}`;
+    if (!this.assertionEnsured.has(assertionKey)) {
+      try {
+        await this.tools.createAssertion(this.agentContextGraph, this.chatTurnsAssertion);
+        this.assertionEnsured.add(assertionKey);
+      } catch (err: any) {
+        if (err?.message?.includes('already exists')) {
+          this.assertionEnsured.add(assertionKey);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // (3) Pre-populate known sessions so subsequent writes to existing
+    // sessions don't re-declare the session entity (DKG Rule 4). Reads
+    // target the WM assertion to stay consistent with writes.
     try {
       const result = await this.tools.query(
         `SELECT ?sid WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> . ?s <${DKG_ONT}sessionId> ?sid }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       for (const b of result.bindings ?? []) {
         const sid = stripRdfLiteral(b.sid ?? '');
@@ -468,7 +582,7 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -523,7 +637,7 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
+      await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     }
   }
 
@@ -598,13 +712,13 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     return triples.length;
   }
 
   async recall(sparql: string): Promise<any> {
     await this.ensureInitialized();
-    return this.tools.query(sparql, { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true });
+    return this.tools.query(sparql, this.wmReadOpts());
   }
 
   async semanticRecall(question: string): Promise<{ sparql: string; result: any }> {
@@ -631,7 +745,7 @@ export class ChatMemoryManager {
   async getStats(): Promise<MemoryStats> {
     await this.ensureInitialized();
     const base: MemoryStats = {
-      contextGraphId: MEMORY_CONTEXT_GRAPH,
+      contextGraphId: this.agentContextGraph,
       initialized: true,
       messageCount: 0,
       knowledgeTriples: 0,
@@ -642,19 +756,19 @@ export class ChatMemoryManager {
     try {
       const total = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       base.totalTriples = sumBindingValues(total.bindings, 'c');
 
       const sessions = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       base.sessionCount = sumBindingValues(sessions.bindings, 'c');
 
       const msgs = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Message> }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       base.messageCount = sumBindingValues(msgs.bindings, 'c');
 
@@ -666,13 +780,13 @@ export class ChatMemoryManager {
           UNION
           { ?s <${RDF_TYPE}> <${DKG_ONT}ToolInvocation> . ?s ?p ?o }
         }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       const chatTripleCount = sumBindingValues(chatRelatedTriples.bindings, 'c');
 
       const entities = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?e) AS ?c) WHERE { ?e <${RDF_TYPE}> ?t . FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:")) }`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       base.entityCount = sumBindingValues(entities.bindings, 'c');
 
@@ -690,14 +804,14 @@ export class ChatMemoryManager {
           OPTIONAL { ?e <${SCHEMA}name> ?label }
           FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:"))
         } LIMIT ${limit}`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       const entities: MemoryEntity[] = [];
       for (const b of result.bindings ?? []) {
         const uri = b.e;
         const propsResult = await this.tools.query(
           `SELECT ?p ?o WHERE { <${uri}> ?p ?o } LIMIT 20`,
-          { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+          this.wmReadOpts(),
         );
         entities.push({
           uri,
@@ -760,7 +874,7 @@ export class ChatMemoryManager {
             OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
           }
         } ORDER BY ${order}(?ts) LIMIT ${limit}`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
@@ -801,7 +915,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}sessionId> ?sid .
           OPTIONAL { ?m <${SCHEMA}isPartOf> ?s . ?m <${SCHEMA}dateCreated> ?mts }
         } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${expandedLimit}`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
       const sessionBindings = sessionsResult.bindings ?? [];
       if (sessionBindings.length === 0) return [];
@@ -834,7 +948,7 @@ export class ChatMemoryManager {
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
         } ORDER BY ?session ?ts`,
-        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+        this.wmReadOpts(),
       );
 
       const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
@@ -873,7 +987,7 @@ export class ChatMemoryManager {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
       }`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const turnCount = sumBindingValues(countResult.bindings, 'c');
     if (turnCount === 0) {
@@ -902,7 +1016,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}turnId> ?tid .
         OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
       } LIMIT 1`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
     const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
@@ -914,7 +1028,7 @@ export class ChatMemoryManager {
         ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
     if (!currentTurnId || currentTurnId !== turnId) {
@@ -958,7 +1072,7 @@ export class ChatMemoryManager {
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
       previousTurnQuery,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
@@ -973,7 +1087,7 @@ export class ChatMemoryManager {
               || (?ts = ${currentTsLiteral} && ?tid <= ${currentTurnIdLiteral})
             )
           }`,
-          { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+          this.wmReadOpts(),
         )
       : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
@@ -1022,7 +1136,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
         <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
       } LIMIT 1`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const turnMessages = (turnMessagesResult.bindings ?? [])[0];
     const userMsgUri = String(turnMessages?.user ?? '').replace(/[<>]/g, '');
@@ -1059,7 +1173,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
         }
       } LIMIT 5000`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
     const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
     for (const b of relatedSubjectsResult.bindings ?? []) {
@@ -1075,7 +1189,7 @@ export class ChatMemoryManager {
         VALUES ?s { ${values} }
         ?s ?p ?o .
       }`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
+      this.wmReadOpts(),
     );
 
     const quads = Array.isArray(deltaResult?.quads) ? deltaResult.quads : [];
@@ -1101,6 +1215,13 @@ export class ChatMemoryManager {
     };
   }
 
+  // TODO(openclaw-dkg-primary-memory v1 follow-up): the publish-session flow
+  // assumes chat turns live in SWM so they can be promoted to VM on-chain.
+  // Under v1, chat turns are written through Working Memory assertion routes
+  // instead — they never reach SWM automatically. These methods remain
+  // compilable but will typically return an `empty` publication scope. A
+  // future version should reimplement session promotion via
+  // `agent.assertion.promote` against the `chat-turns` WM assertion.
   async getSessionPublicationStatus(sessionId: string): Promise<SessionPublicationStatus> {
     await this.ensureInitialized();
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
@@ -1112,16 +1233,16 @@ export class ChatMemoryManager {
       ?s ?p ?o
     }`;
     const swmCountResult = await this.tools.query(countQuery, {
-      contextGraphId: MEMORY_CONTEXT_GRAPH,
+      contextGraphId: this.agentContextGraph,
       graphSuffix: '_shared_memory',
     });
     const dataCountResult = await this.tools.query(countQuery, {
-      contextGraphId: MEMORY_CONTEXT_GRAPH,
+      contextGraphId: this.agentContextGraph,
     });
 
     const rootEntityResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
+      { contextGraphId: this.agentContextGraph, graphSuffix: '_shared_memory' },
     );
 
     const sharedMemoryTripleCount = sumBindingValues(swmCountResult.bindings, 'c');
@@ -1153,7 +1274,7 @@ export class ChatMemoryManager {
     const rootPattern = buildSessionRootPattern(sessionUri);
     const result = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { contextGraphId: MEMORY_CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
+      { contextGraphId: this.agentContextGraph, graphSuffix: '_shared_memory' },
     );
 
     const roots = new Set<string>();
@@ -1197,202 +1318,20 @@ export class ChatMemoryManager {
     };
   }
 
-  async importMemories(
-    rawText: string,
-    source: ImportSource = 'other',
-    opts: { useLlm?: boolean } = {},
-  ): Promise<ImportResult> {
-    await this.ensureInitialized();
-    const batchId = crypto.randomUUID();
-    const batchUri = `${MEMORY_NS}import:${batchId}`;
-    const now = new Date().toISOString();
-
-    const llmEnabled = opts.useLlm === true && !!this.llmConfig?.apiKey;
-    const warnings: string[] = [];
-
-    let memories = llmEnabled
-      ? await this.parseMemoriesWithLlm(rawText)
-      : this.parseMemoriesHeuristic(rawText);
-
-    if (memories.length === 0 && llmEnabled) {
-      memories = this.parseMemoriesHeuristic(rawText);
-    }
-
-    if (memories.length === 0) {
-      return { batchId: null, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
-    }
-
-    const MAX_MEMORY_ITEMS = 5000;
-    if (memories.length > MAX_MEMORY_ITEMS) {
-      warnings.push(`Input contained ${memories.length} items; truncated to ${MAX_MEMORY_ITEMS}`);
-      memories = memories.slice(0, MAX_MEMORY_ITEMS);
-    }
-
-    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
-
-    quads.push(
-      { subject: batchUri, predicate: RDF_TYPE, object: `${DKG_ONT}MemoryImport`, graph: '' },
-      { subject: batchUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
-      { subject: batchUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
-      { subject: batchUri, predicate: `${DKG_ONT}itemCount`, object: `"${memories.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: '' },
-    );
-
-    for (const mem of memories) {
-      const memUri = `${MEMORY_NS}item:${crypto.randomUUID()}`;
-      quads.push(
-        { subject: memUri, predicate: RDF_TYPE, object: `${DKG_ONT}ImportedMemory`, graph: '' },
-        { subject: memUri, predicate: `${SCHEMA}text`, object: JSON.stringify(mem.text), graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}category`, object: `"${mem.category}"`, graph: '' },
-        { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}importBatch`, object: batchUri, graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
-      );
-    }
-
-    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
-
-    let entityCount = 0;
-    let extractionTripleCount = 0;
-    const allQuads = quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
-    if (llmEnabled) {
-      try {
-        const extraction = await this.extractKnowledgeFromImport(batchUri, memories);
-        entityCount = extraction.entityCount;
-        extractionTripleCount = extraction.tripleCount;
-        allQuads.push(...extraction.quads);
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        console.warn(`[ChatMemoryManager] Knowledge extraction failed for batch ${batchId}: ${msg}`);
-        warnings.push(`Knowledge extraction failed: ${msg}`);
-      }
-    }
-
-    const QUAD_PREVIEW_LIMIT = 500;
-    const result: ImportResult = {
-      batchId,
-      source,
-      memoryCount: memories.length,
-      tripleCount: quads.length + extractionTripleCount,
-      entityCount,
-      quads: allQuads.slice(0, QUAD_PREVIEW_LIMIT),
-      quadsTruncated: allQuads.length > QUAD_PREVIEW_LIMIT,
-    };
-    if (warnings.length > 0) result.warnings = warnings;
-    return result;
-  }
-
-  private async parseMemoriesWithLlm(
-    rawText: string,
-  ): Promise<Array<{ text: string; category: string }>> {
-    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    if (!apiKey) return this.parseMemoriesHeuristic(rawText);
-
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    try {
-      const body: Record<string, unknown> = {
-        model,
-        messages: [
-          { role: 'system', content: MEMORY_PARSE_PROMPT },
-          { role: 'user', content: rawText },
-        ],
-      };
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) return this.parseMemoriesHeuristic(rawText);
-      const data = (await res.json()) as any;
-      let output = data.choices?.[0]?.message?.content?.trim() ?? '';
-      output = output.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-      const parsed = JSON.parse(output);
-      if (!Array.isArray(parsed)) return this.parseMemoriesHeuristic(rawText);
-      const extractText = (m: any): string =>
-        (typeof m.text === 'string' && m.text.trim()) ||
-        (typeof m.memory === 'string' && m.memory.trim()) ||
-        (typeof m.content === 'string' && m.content.trim()) ||
-        '';
-      const results = parsed
-        .filter((m: any) => extractText(m).length > 0)
-        .map((m: any) => ({
-          text: extractText(m),
-          category: ['preference', 'fact', 'context', 'instruction', 'relationship'].includes(m.category)
-            ? m.category
-            : 'fact',
-        }));
-      if (results.length === 0) return this.parseMemoriesHeuristic(rawText);
-      return results;
-    } catch {
-      return this.parseMemoriesHeuristic(rawText);
-    }
-  }
-
-  parseMemoriesHeuristic(rawText: string): Array<{ text: string; category: string }> {
-    const lines = rawText
-      .split(/\n/)
-      .map(l => l.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s)\s*/, '').trim())
-      .filter(l =>
-        l.length > 3 &&
-        !l.match(/^(here are|last updated|memories|---)/i) &&
-        !l.match(/^```/),
-      );
-    return lines.map(text => ({ text, category: 'fact' }));
-  }
-
-  private async extractKnowledgeFromImport(
-    batchUri: string,
-    memories: Array<{ text: string; category: string }>,
-  ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
-    const empty = { entityCount: 0, tripleCount: 0, quads: [] };
-    const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
-    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-
-    const body: Record<string, unknown> = {
-      model,
-      messages: [
-        { role: 'system', content: MEMORY_KG_PROMPT },
-        { role: 'user', content: combined },
-      ],
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) return empty;
-    const data = (await res.json()) as any;
-    const output = data.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!output || output === 'NONE') return empty;
-
-    const triples = this.parseNTriples(output);
-    if (triples.length === 0) return empty;
-
-    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
-    for (const t of triples) {
-      quads.push({ ...t, graph: '' });
-    }
-    const rootEntities = new Set(triples.map(t => t.subject));
-    for (const entity of rootEntities) {
-      quads.push(
-        { subject: entity, predicate: `${DKG_ONT}extractedFrom`, object: batchUri, graph: '' },
-      );
-    }
-    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
-    return {
-      entityCount: rootEntities.size,
-      tripleCount: quads.length,
-      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
-    };
-  }
+  // importMemories / parseMemoriesWithLlm / parseMemoriesHeuristic /
+  // extractKnowledgeFromImport are retired as part of the openclaw-dkg-primary-memory
+  // work. /api/memory/import is a V9 relic that required LLM API keys on the
+  // node and wrote dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
+  // throwaway sidecar graph. v1 replaces it with the assertion-route write
+  // path inside the adapter (DkgMemoryPlugin.dkg_memory_import), which
+  // targets the 'memory' WM assertion of a resolved project context graph.
 
   async publishFromSwm(
     selection: 'all' | { rootEntities: string[] } = 'all',
     opts?: { clearSharedMemoryAfter?: boolean },
   ): Promise<PublishFromSwmResult> {
     await this.ensureInitialized();
-    const result = await this.tools.publishFromSharedMemory(MEMORY_CONTEXT_GRAPH, selection, {
+    const result = await this.tools.publishFromSharedMemory(this.agentContextGraph, selection, {
       clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
     });
     return {

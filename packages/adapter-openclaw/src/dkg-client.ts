@@ -1,9 +1,9 @@
 /**
  * Thin HTTP client for the DKG daemon API (localhost:9200 by default).
  *
- * All adapter modules (channel, memory, write-capture) use this client
- * instead of embedding a second DKGAgent.  The daemon owns the agent,
- * triple store, and Node UI.
+ * All adapter modules (channel, memory) use this client instead of
+ * embedding a second DKGAgent. The daemon owns the agent, triple store,
+ * and Node UI.
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
@@ -118,40 +118,110 @@ export class DkgDaemonClient {
   // SPARQL query
   // ---------------------------------------------------------------------------
 
+  /**
+   * Run a SPARQL query against the daemon. Forwards the full V10 field set
+   * the `/api/query` route accepts — `view` (`'working-memory' | 'shared-working-memory' | 'verified-memory'`),
+   * `agentAddress` (required for WM reads), `assertionName` (scopes WM reads
+   * to a single per-agent assertion), `subGraphName`, `verifiedGraph`,
+   * `graphSuffix`, `includeSharedMemory`.
+   */
   async query(
     sparql: string,
-    opts?: { contextGraphId?: string; graphSuffix?: string; includeSharedMemory?: boolean },
+    opts?: {
+      contextGraphId?: string;
+      graphSuffix?: string;
+      includeSharedMemory?: boolean;
+      view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+      agentAddress?: string;
+      assertionName?: string;
+      subGraphName?: string;
+      verifiedGraph?: string;
+    },
   ): Promise<any> {
     return this.post('/api/query', {
       sparql,
       contextGraphId: opts?.contextGraphId,
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
+      view: opts?.view,
+      agentAddress: opts?.agentAddress,
+      assertionName: opts?.assertionName,
+      subGraphName: opts?.subGraphName,
+      verifiedGraph: opts?.verifiedGraph,
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Shared memory write
+  // Shared memory write (SWM layer — NOT used by v1 chat-turn / memory paths)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Write quads to a context graph's Shared Working Memory graph. Retained
+   * as a general primitive for callers that deliberately want SWM semantics
+   * (e.g. user-initiated promotion). v1 chat-turn and per-project memory
+   * writes use `writeAssertion` instead — SWM is the wrong layer for private
+   * per-agent memory per `21_TRI_MODAL_MEMORY.md §5`.
+   */
   async share(
     contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-    opts?: { localOnly?: boolean },
+    opts?: { localOnly?: boolean; subGraphName?: string },
   ): Promise<{ shareOperationId: string }> {
-    return this.post('/api/shared-memory/write', { contextGraphId, quads, localOnly: opts?.localOnly ?? true });
+    return this.post('/api/shared-memory/write', {
+      contextGraphId,
+      quads,
+      localOnly: opts?.localOnly ?? true,
+      subGraphName: opts?.subGraphName,
+    });
   }
 
   // ---------------------------------------------------------------------------
-  // Memory import
+  // Working Memory — assertion lifecycle
   // ---------------------------------------------------------------------------
 
-  async importMemories(
-    text: string,
-    source: string,
-    opts?: { useLlm?: boolean },
-  ): Promise<{ batchId: string; memoryCount: number; tripleCount: number }> {
-    return this.post('/api/memory/import', { text, source, useLlm: opts?.useLlm ?? true });
+  /**
+   * Create a per-agent Working Memory assertion graph inside a context graph.
+   * Idempotent on the client side: 400 `"already exists"` errors from the
+   * daemon are swallowed and returned as `{ assertionUri: null, alreadyExists: true }`.
+   * Any other error surfaces normally.
+   */
+  async createAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> {
+    try {
+      const response = await this.post<{ assertionUri: string }>(
+        '/api/assertion/create',
+        { contextGraphId, name, subGraphName: opts?.subGraphName },
+      );
+      return { assertionUri: response.assertionUri, alreadyExists: false };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already exists')) {
+        return { assertionUri: null, alreadyExists: true };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Append quads into an existing Working Memory assertion. The assertion
+   * must have been created first — callers that create-then-write in a
+   * single call should use `ensureAssertion` + `writeAssertion` together,
+   * with `createAssertion` swallowing duplicates.
+   */
+  async writeAssertion(
+    contextGraphId: string,
+    name: string,
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+    opts?: { subGraphName?: string },
+  ): Promise<{ written: number }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/write`, {
+      contextGraphId,
+      quads,
+      subGraphName: opts?.subGraphName,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -159,9 +229,11 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * Persist a chat turn to the agent-memory graph via the daemon's
-   * chat-assistant persistence pathway.  This writes the same triples
-   * that the built-in Agent Hub chat produces.
+   * Persist a chat turn through the daemon's `/api/openclaw-channel/persist-turn`
+   * route, which delegates to `ChatMemoryManager.storeChatExchange`. As of
+   * v1 of the openclaw-dkg-primary-memory work the downstream writer targets
+   * the `'chat-turns'` Working Memory assertion of the `'agent-context'`
+   * context graph via `agent.assertion.write`, not `agent.share`.
    */
   async storeChatTurn(
     sessionId: string,

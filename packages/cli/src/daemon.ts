@@ -219,7 +219,8 @@ function buildSkillMd(opts: {
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
-    `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
+    '',
+    'To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.',
   ].join("\n");
 
   const staticPlaceholder =
@@ -229,7 +230,8 @@ function buildSkillMd(opts: {
     "- **Peer ID:** (dynamic)\n" +
     "- **Node role:** (dynamic — `core` or `edge`)\n" +
     "- **Available extraction pipelines:** (dynamic)\n" +
-    "- **Subscribed Context Graphs:** (dynamic)";
+    "\n" +
+    "To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.";
 
   return template.replace(staticPlaceholder, dynamicSection);
 }
@@ -1160,13 +1162,50 @@ async function runDaemonInner(
         contextGraphId?: string;
         graphSuffix?: "_shared_memory";
         includeSharedMemory?: boolean;
+        view?: "working-memory" | "shared-working-memory" | "verified-memory";
+        agentAddress?: string;
+        assertionName?: string;
+        subGraphName?: string;
       },
     ) => agent.query(sparql, opts),
     share: (
       contextGraphId: string,
       quads: any[],
-      opts?: { localOnly?: boolean },
+      opts?: { localOnly?: boolean; subGraphName?: string },
     ) => agent.share(contextGraphId, quads, opts),
+    createAssertion: async (
+      contextGraphId: string,
+      name: string,
+      opts?: { subGraphName?: string },
+    ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> => {
+      try {
+        const assertionUri = await agent.assertion.create(
+          contextGraphId,
+          name,
+          opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
+        );
+        return { assertionUri, alreadyExists: false };
+      } catch (err: any) {
+        if (err?.message?.includes("already exists")) {
+          return { assertionUri: null, alreadyExists: true };
+        }
+        throw err;
+      }
+    },
+    writeAssertion: async (
+      contextGraphId: string,
+      name: string,
+      quads: any[],
+      opts?: { subGraphName?: string },
+    ): Promise<{ written: number }> => {
+      await agent.assertion.write(
+        contextGraphId,
+        name,
+        quads,
+        opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
+      );
+      return { written: quads.length };
+    },
     publishFromSharedMemory: (
       contextGraphId: string,
       selection: "all" | { rootEntities: string[] },
@@ -1180,7 +1219,11 @@ async function runDaemonInner(
     }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
-  const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
+  const memoryManager = new ChatMemoryManager(
+    agentToolsContext,
+    config.llm ?? { apiKey: '' },
+    { agentAddress: agent.peerId },
+  );
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
@@ -2798,6 +2841,39 @@ export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmen
   return refs;
 }
 
+export interface OpenClawChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function normalizeOpenClawChatContextEntry(
+  raw: unknown,
+): OpenClawChatContextEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === "string" ? record.key.trim() : "";
+  const label = typeof record.label === "string" ? record.label.trim() : "";
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+export function normalizeOpenClawChatContextEntries(
+  raw: unknown,
+): OpenClawChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: OpenClawChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeOpenClawChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
+}
+
 export function hasOpenClawChatTurnContent(
   text: unknown,
   attachmentRefs: OpenClawAttachmentRef[] | undefined,
@@ -3460,13 +3536,22 @@ async function handleRequest(
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs? }
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs?, contextEntries?, contextGraphId? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
-  // returns the agent's reply.
+  // returns the agent's reply. `contextGraphId` carries the UI-selected
+  // project context graph so the adapter's memory slot can scope
+  // slot-backed recall to the user's current project.
   if (req.method === "POST" && path === "/api/openclaw-channel/send") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
+    let payload: {
+      text?: string;
+      correlationId?: string;
+      identity?: string;
+      attachmentRefs?: unknown;
+      contextEntries?: unknown;
+      contextGraphId?: unknown;
+    };
     try {
       payload = JSON.parse(body);
     } catch {
@@ -3477,12 +3562,26 @@ async function handleRequest(
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const normalizedContextEntries = normalizeOpenClawChatContextEntries(
+      payload.contextEntries,
+    );
+    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
+    }
+    const uiContextGraphId =
+      typeof payload.contextGraphId === "string" && payload.contextGraphId.trim()
+        ? payload.contextGraphId.trim()
+        : undefined;
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
       return jsonResponse(res, 400, { error: 'Missing "text"' });
     }
     const corrId = correlationId ?? crypto.randomUUID();
-    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(
+      agent,
+      extractionStatus,
+      normalizedAttachmentRefs,
+    );
     if (payload.attachmentRefs != null && attachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
@@ -3506,17 +3605,19 @@ async function handleRequest(
 
       try {
         const forwardRes = await fetch(target.inboundUrl, {
-          method: 'POST',
-          headers: buildOpenClawChannelHeaders(
-            target,
-            bridgeAuthToken,
-            { 'Content-Type': 'application/json' },
-          ),
+          method: "POST",
+          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, {
+            "Content-Type": "application/json",
+          }),
           body: JSON.stringify({
             text,
             correlationId: corrId,
-            identity: identity ?? 'owner',
+            identity: identity ?? "owner",
             ...(attachmentRefs ? { attachmentRefs } : {}),
+            ...(normalizedContextEntries
+              ? { contextEntries: normalizedContextEntries }
+              : {}),
+            ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
@@ -3569,7 +3670,14 @@ async function handleRequest(
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === "POST" && path === "/api/openclaw-channel/stream") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
+    let payload: {
+      text?: string;
+      correlationId?: string;
+      identity?: string;
+      attachmentRefs?: unknown;
+      contextEntries?: unknown;
+      contextGraphId?: unknown;
+    };
     try {
       payload = JSON.parse(body);
     } catch {
@@ -3580,6 +3688,16 @@ async function handleRequest(
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const normalizedContextEntries = normalizeOpenClawChatContextEntries(
+      payload.contextEntries,
+    );
+    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
+    }
+    const uiContextGraphId =
+      typeof payload.contextGraphId === "string" && payload.contextGraphId.trim()
+        ? payload.contextGraphId.trim()
+        : undefined;
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
       return jsonResponse(res, 400, { error: 'Missing "text"' });
@@ -3621,8 +3739,12 @@ async function handleRequest(
           body: JSON.stringify({
             text,
             correlationId: corrId,
-            identity: identity ?? 'owner',
+            identity: identity ?? "owner",
             ...(attachmentRefs ? { attachmentRefs } : {}),
+            ...(normalizedContextEntries
+              ? { contextEntries: normalizedContextEntries }
+              : {}),
+            ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
@@ -3713,8 +3835,11 @@ async function handleRequest(
   }
 
   // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, attachmentRefs?, ... }
-  // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
-  // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
+  // Called by the adapter to persist an OpenClaw turn into the `'chat-turns'`
+  // Working Memory assertion of the `'agent-context'` context graph (the
+  // ChatMemoryManager default since the openclaw-dkg-primary-memory retarget).
+  // Uses the same ChatMemoryManager pathway as the node-owned local-agent
+  // chat flow — chat-turn content never reaches Shared Working Memory in v1.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;
@@ -4319,6 +4444,7 @@ async function handleRequest(
     if (!parsed) return;
     const { id, revealOnChain, accessPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
       return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
@@ -4331,6 +4457,7 @@ async function handleRequest(
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
         hint: 'Context graph registered on-chain. You can now publish SWM to Verified Memory.',
       });
     } catch (err: any) {
@@ -4378,83 +4505,6 @@ async function handleRequest(
       if (msg.includes('Invalid peer ID format')) {
         return jsonResponse(res, 400, { error: msg });
       }
-      return jsonResponse(res, 500, { error: msg });
-    }
-  }
-
-  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
-  if (req.method === "POST" && path === "/api/context-graph/register") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { id, revealOnChain, accessPolicy } = parsed;
-    if (!id) {
-      return jsonResponse(res, 400, { error: 'Missing "id"' });
-    }
-    if (typeof id !== 'string') {
-      return jsonResponse(res, 400, { error: '"id" must be a string' });
-    }
-    if (!isValidContextGraphId(id)) {
-      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    }
-    if (revealOnChain != null && typeof revealOnChain !== 'boolean') {
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    }
-    if (accessPolicy != null && typeof accessPolicy !== 'number') {
-      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
-    }
-    try {
-      const result = await agent.registerContextGraph(id, {
-        ...(typeof revealOnChain === 'boolean' ? { revealOnChain } : {}),
-        ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
-      });
-      return jsonResponse(res, 200, {
-        registered: id,
-        onChainId: result.onChainId,
-        ...(result.txHash ? { txHash: result.txHash } : {}),
-      });
-    } catch (err: any) {
-      const msg = err?.message ?? '';
-      if (
-        msg.includes('does not exist locally') ||
-        msg.includes('already registered') ||
-        msg.includes('Only the context graph creator') ||
-        msg.includes('no known creator') ||
-        msg.includes('configured chain adapter')
-      ) {
-        return jsonResponse(res, 400, { error: msg });
-      }
-      return jsonResponse(res, 500, { error: msg || 'Failed to register context graph' });
-    }
-  }
-
-  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
-  if (req.method === "POST" && path === "/api/context-graph/register") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { id } = parsed;
-    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
-    if (typeof id !== "string") return jsonResponse(res, 400, { error: '"id" must be a string' });
-    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: "Invalid context graph id" });
-    if (parsed.revealOnChain != null && typeof parsed.revealOnChain !== "boolean")
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    if (parsed.accessPolicy != null && typeof parsed.accessPolicy !== "number")
-      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
-    try {
-      const result = await agent.registerContextGraph(id, {
-        revealOnChain: parsed.revealOnChain,
-        accessPolicy: parsed.accessPolicy,
-      });
-      return jsonResponse(res, 200, {
-        registered: id,
-        onChainId: result.onChainId,
-        txHash: result.txHash,
-      });
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (msg.includes("does not exist")) return jsonResponse(res, 404, { error: msg });
-      if (msg.includes("already registered")) return jsonResponse(res, 409, { error: msg });
       return jsonResponse(res, 500, { error: msg });
     }
   }

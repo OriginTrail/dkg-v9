@@ -187,12 +187,23 @@ export interface OpenClawChannelAdapter {
 export type MemorySource = 'memory' | 'sessions';
 
 /**
- * Narrower adapter-local discriminant identifying which of the four
+ * Narrower adapter-local discriminant identifying which of the six
  * retrieval layers produced a hit:
- *   - `chat-turns-wm`: agent-context chat history (WM view)
- *   - `project-wm`: project memory assertion, working-memory view
- *   - `project-swm`: project memory assertion, shared-working-memory view
- *   - `project-vm`: project memory assertion, verified-memory view
+ *   - `agent-context-wm`: agent-context graph, working-memory view
+ *   - `agent-context-swm`: agent-context graph, shared-working-memory view
+ *   - `agent-context-vm`: agent-context graph, verified-memory view
+ *   - `project-wm`: user-selected project graph, working-memory view
+ *   - `project-swm`: user-selected project graph, shared-working-memory view
+ *   - `project-vm`: user-selected project graph, verified-memory view
+ *
+ * Note the rename from the earlier `chat-turns-wm` layer: the slot-backed
+ * fan-out no longer pins on the `chat-turns` assertion, so the layer
+ * name describes the context graph + view pair rather than a specific
+ * assertion. Chat-turn content still lands in `agent-context-wm` because
+ * `ChatMemoryManager.storeChatExchange` writes into the `chat-turns`
+ * assertion under the agent's WM namespace — it's included in the WM
+ * view's graph-prefix scan along with any other literals the agent has
+ * written into the agent-context graph.
  *
  * Kept as an optional, non-upstream field on `MemorySearchResult` so the
  * closed upstream `source` union (`memory | sessions`) stays intact while
@@ -200,7 +211,9 @@ export type MemorySource = 'memory' | 'sessions';
  * assertions) can distinguish VM from SWM from WM without re-parsing `path`.
  */
 export type MemoryLayer =
-  | 'chat-turns-wm'
+  | 'agent-context-wm'
+  | 'agent-context-swm'
+  | 'agent-context-vm'
   | 'project-wm'
   | 'project-swm'
   | 'project-vm';

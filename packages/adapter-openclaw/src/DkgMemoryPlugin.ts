@@ -173,41 +173,51 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       .map(k => `CONTAINS(LCASE(STR(?text)), "${escapeSparqlString(k)}")`)
       .join(' || ');
 
-    const chatTurnsSparql = `SELECT ?uri ?text WHERE {
-        ?uri a <${NS.schema}Message> ;
-             <${NS.schema}text> ?text .
+    // Permissive SPARQL shape: find any subject with any literal object of
+    // reasonable length that contains at least one keyword. No `rdf:type`
+    // constraint, no specific predicate pin. This is the whole point of
+    // the broadened fan-out — agents can write memories in whatever RDF
+    // shape fits their domain (schema:description, rdfs:comment, custom
+    // ontology predicates, typed or untyped subjects) and slot-backed
+    // recall still finds them. The 20-character floor on `STRLEN(STR(?text))`
+    // excludes tiny metadata literals (boolean flags, numeric enums, short
+    // tags, single-word labels) that would otherwise be noise; any coherent
+    // memory statement or chat message is longer than that. ISO datetimes
+    // are exactly 20 characters and technically slip through, but they
+    // rarely contain search keywords, so the substring filter naturally
+    // excludes them.
+    const permissiveSparql = `SELECT ?uri ?pred ?text WHERE {
+        ?uri ?pred ?text .
+        FILTER(isLiteral(?text))
+        FILTER(STRLEN(STR(?text)) >= 20)
         FILTER(${filter})
       }
       LIMIT ${limit}`;
 
-    // Codex B65: do NOT hard-require `rdf:type schema:Thing`. The markdown
-    // extractor only emits `rdf:type` when frontmatter explicitly provides
-    // one, so project-memory entities written via the import-file pipeline
-    // often carry a `schema:description` without any type triple — and a
-    // mandatory `?uri a <schema:Thing>` join would make those entities
-    // silently unrecallable. The real discriminant is "has a description"
-    // (the write path always emits `schema:description` for memory entries),
-    // so that's the only required pattern. Keep the type as an OPTIONAL
-    // binding so callers can still filter on it if they later want to.
-    const projectMemorySparql = `SELECT ?uri ?text WHERE {
-        ?uri <${NS.schema}description> ?text .
-        OPTIONAL { ?uri a ?type }
-        FILTER(${filter})
-      }
-      LIMIT ${limit}`;
-
-    // Fan-out layout: 1 agent-context WM query for chat-turns +
-    // (when a project CG is resolved) 3 project-memory queries — one
-    // each for working-memory, shared-working-memory, and
-    // verified-memory. `chat-turns` is WM-only by persistence-path
-    // design (chat history only ever lands in the agent-context WM
-    // assertion), so there is no SWM/VM fan-out on the sessions side.
+    // Fan-out layout: 3 queries against the agent-context CG (working,
+    // shared, verified views) + (when a project CG is resolved) 3
+    // queries against the project CG (same three views), for 3 or 6
+    // queries per turn. The `assertionName` pin from the earlier
+    // design is intentionally dropped: with `view: 'working-memory'`
+    // and no assertion name, the query engine at
+    // `packages/query/src/dkg-query-engine.ts:46-59` returns a graph
+    // prefix spanning every assertion under the agent's namespace in
+    // the CG, which includes the `chat-turns` assertion (where
+    // `ChatMemoryManager.storeChatExchange` writes turn content) plus
+    // any other assertions the agent may have written memories into.
+    // SWM and VM views don't have assertion-level sub-graphing, so
+    // omitting `assertionName` is a no-op on those — the scope is
+    // already the whole shared-memory / verified-memory graph for
+    // the CG.
     //
     // Each layer carries a trust weight that multiplies the keyword-
     // overlap score during ranking: VM×1.3, SWM×1.15, WM×1.0. The
     // weighting nudges verified memories ahead of working drafts when
     // raw lexical overlap is comparable, without hard-preempting WM
-    // (a very strong WM match can still outrank a weak VM hit).
+    // (a very strong WM match can still outrank a weak VM hit). The
+    // same weighting applies uniformly across both context graphs —
+    // there is no inherent trust advantage of agent-context over
+    // project-scoped memories at the same view tier.
     //
     // Per-query `.catch → []` preserves partial-success semantics:
     // one failing (cg, view) pair emits exactly one warn and the
@@ -217,19 +227,33 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       source: MemorySource;
       trustWeight: number;
       contextGraphId: string;
-      assertionName: string;
       view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
       sparql: string;
     }
     const plans: LayerPlan[] = [
       {
-        layer: 'chat-turns-wm',
+        layer: 'agent-context-wm',
         source: 'sessions',
         trustWeight: 1.0,
         contextGraphId: AGENT_CONTEXT_GRAPH,
-        assertionName: CHAT_TURNS_ASSERTION,
         view: 'working-memory',
-        sparql: chatTurnsSparql,
+        sparql: permissiveSparql,
+      },
+      {
+        layer: 'agent-context-swm',
+        source: 'sessions',
+        trustWeight: 1.15,
+        contextGraphId: AGENT_CONTEXT_GRAPH,
+        view: 'shared-working-memory',
+        sparql: permissiveSparql,
+      },
+      {
+        layer: 'agent-context-vm',
+        source: 'sessions',
+        trustWeight: 1.3,
+        contextGraphId: AGENT_CONTEXT_GRAPH,
+        view: 'verified-memory',
+        sparql: permissiveSparql,
       },
     ];
     if (projectContextGraphId) {
@@ -239,27 +263,24 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           source: 'memory',
           trustWeight: 1.0,
           contextGraphId: projectContextGraphId,
-          assertionName: PROJECT_MEMORY_ASSERTION,
           view: 'working-memory',
-          sparql: projectMemorySparql,
+          sparql: permissiveSparql,
         },
         {
           layer: 'project-swm',
           source: 'memory',
           trustWeight: 1.15,
           contextGraphId: projectContextGraphId,
-          assertionName: PROJECT_MEMORY_ASSERTION,
           view: 'shared-working-memory',
-          sparql: projectMemorySparql,
+          sparql: permissiveSparql,
         },
         {
           layer: 'project-vm',
           source: 'memory',
           trustWeight: 1.3,
           contextGraphId: projectContextGraphId,
-          assertionName: PROJECT_MEMORY_ASSERTION,
           view: 'verified-memory',
-          sparql: projectMemorySparql,
+          sparql: permissiveSparql,
         },
       );
     }
@@ -271,7 +292,6 @@ export class DkgMemorySearchManager implements MemorySearchManager {
             contextGraphId: plan.contextGraphId,
             view: plan.view,
             agentAddress,
-            assertionName: plan.assertionName,
           })
           .then(r => ({ plan, bindings: extractBindings(r) }))
           .catch(err => {
@@ -283,6 +303,32 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       ),
     );
 
+    // Observability: one info-level log per search call showing the
+    // query, resolved project CG, layer count, and per-layer raw hit
+    // counts. This is the diagnostic we were missing during the
+    // 2026-04-15 live validation — without it, a failed recall was
+    // indistinguishable from "slot never called at all". The log
+    // fires once per `search()` invocation regardless of whether any
+    // layer returned hits, so operators can see the slot is alive
+    // and reason about why specific queries aren't matching.
+    const totalRawHits = settled.reduce((n, s) => n + s.bindings.length, 0);
+    const perLayerBreakdown = settled
+      .map(s => `${s.plan.layer}:${s.bindings.length}`)
+      .join(', ');
+    // Info-level log carries only counts and metadata — no user text.
+    // The raw query is derived from user/assistant messages and may
+    // contain secrets or PII, so it is logged at debug level only
+    // (silent at default log verbosity).
+    this.deps.logger?.info?.(
+      `[dkg-memory] search fired: ` +
+      `project=${projectContextGraphId ?? '∅'}, ` +
+      `layers=${plans.length}, ` +
+      `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
+    );
+    this.deps.logger?.debug?.(
+      `[dkg-memory] search query: "${truncate(query, 80)}"`,
+    );
+
     // Dedup by (contextGraphId, uri), keeping the highest-trust layer
     // when the same memory URI surfaces through multiple views (a
     // verified memory that is still in the WM draft buffer is the
@@ -290,11 +336,16 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // with near-identical snippets). A VM hit collapses an SWM or WM
     // hit for the same URI; SWM collapses a WM hit. The weighted
     // `score * trustWeight` from the surviving layer is what ranks.
+    // Trust tier is based on the view, not the context graph — a
+    // verified-memory hit in agent-context ties with a verified-memory
+    // hit in the project CG.
     const trustOrder: Record<MemoryLayer, number> = {
+      'agent-context-vm': 3,
       'project-vm': 3,
+      'agent-context-swm': 2,
       'project-swm': 2,
+      'agent-context-wm': 1,
       'project-wm': 1,
-      'chat-turns-wm': 1,
     };
     const best = new Map<string, MemorySearchResult & { _rank: number }>();
     for (const { plan, bindings } of settled) {
@@ -307,7 +358,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
         const weighted = rawScore * plan.trustWeight;
         const key = `${plan.contextGraphId}::${uri || hashString(text)}`;
         const candidate: MemorySearchResult & { _rank: number } = {
-          path: `dkg://${plan.contextGraphId}/${plan.assertionName}/${hashString(uri || text)}`,
+          path: `dkg://${plan.contextGraphId}/${plan.layer}/${hashString(uri || text)}`,
           startLine: 1,
           endLine: 1,
           score: rawScore,
@@ -495,8 +546,8 @@ export class DkgMemoryPlugin {
     private readonly resolver: DkgMemorySessionResolver,
   ) {}
 
-  register(api: OpenClawPluginApi): void {
-    this.registerCapability(api);
+  register(api: OpenClawPluginApi): boolean {
+    return this.registerCapability(api);
   }
 
   /**
@@ -514,13 +565,13 @@ export class DkgMemoryPlugin {
    *    no-ops the registration and logs a diagnostic so the operator
    *    can rerun setup if they meant to elect it.
    */
-  private registerCapability(api: OpenClawPluginApi): void {
+  private registerCapability(api: OpenClawPluginApi): boolean {
     if (typeof api.registerMemoryCapability !== 'function') {
       api.logger.warn?.(
         '[dkg-memory] api.registerMemoryCapability is not available — gateway is older than the memory-slot contract. ' +
         'The adapter no longer ships a compatibility `dkg_memory_search` tool; upgrade the gateway to restore recall.',
       );
-      return;
+      return false;
     }
 
     if (!isMemorySlotOwnedByThisAdapter(api)) {
@@ -529,14 +580,16 @@ export class DkgMemoryPlugin {
         'skipping memory-capability registration so this adapter does not silently override the elected ' +
         'memory provider. Rerun `dkg setup` to elect adapter-openclaw into the memory slot if that was the intent.',
       );
-      return;
+      return false;
     }
 
     const capability: MemoryPluginCapability = {
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);
-    api.logger.info?.('[dkg-memory] registerMemoryCapability called');
+    const modeLabel = (api.registrationMode ?? 'full');
+    api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
+    return true;
   }
 }
 

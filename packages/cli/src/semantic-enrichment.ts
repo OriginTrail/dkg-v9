@@ -34,6 +34,7 @@ export interface FileImportSemanticEventPayload {
   assertionName: string;
   assertionUri: string;
   importStartedAt: string;
+  sourceAgentAddress?: string;
   rootEntity?: string;
   fileHash: string;
   mdIntermediateHash?: string;

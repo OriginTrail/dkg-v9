@@ -366,13 +366,24 @@ async function runImportFileOrchestration(params: {
   multipartBody: Buffer;
   boundary: string;
   assertionName: string;
+  requestAgentAddress?: string;
   onInProgress?: (assertionUri: string, record: ExtractionStatusRecord) => void | Promise<void>;
   // Bug 19: per-assertion mutex map. If omitted, a fresh map is used
   // (safe for sequential tests). Concurrent-import tests that need to
   // observe the lock must pass a shared map across their parallel calls.
   assertionImportLocks?: Map<string, Promise<void>>;
 }): Promise<ImportFileResult> {
-  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName, onInProgress } = params;
+  const {
+    agent,
+    fileStore,
+    extractionRegistry,
+    extractionStatus,
+    multipartBody,
+    boundary,
+    assertionName,
+    requestAgentAddress = agent.peerId,
+    onInProgress,
+  } = params;
   const assertionImportLocks = params.assertionImportLocks ?? new Map<string, Promise<void>>();
 
   const fields = parseMultipart(multipartBody, boundary);
@@ -399,7 +410,7 @@ async function runImportFileOrchestration(params: {
   }
 
   const fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
-  const assertionUri = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
+  const assertionUri = contextGraphAssertionUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
   const startedAt = new Date().toISOString();
 
   // Round 14 Bug 42: per-assertion mutex BEFORE extraction — mirrors
@@ -480,7 +491,7 @@ async function runImportFileOrchestration(params: {
         filePath: fileStoreEntry.path,
         contentType: detectedContentType,
         ontologyRef,
-        agentDid: `did:dkg:agent:${agent.peerId}`,
+        agentDid: `did:dkg:agent:${requestAgentAddress}`,
       });
       mdIntermediate = md;
       pipelineUsed = detectedContentType;
@@ -518,7 +529,7 @@ async function runImportFileOrchestration(params: {
   // on the file URN is impossible on promote.
   const fileUri = `urn:dkg:file:${fileStoreEntry.keccak256}`;
   const provUri = `urn:dkg:extraction:${randomUUID()}`;
-  const agentDid = `did:dkg:agent:${agent.peerId}`;
+  const agentDid = `did:dkg:agent:${requestAgentAddress}`;
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let sourceFileLinkage: ReturnType<typeof extractFromMarkdown>['sourceFileLinkage'];
   let documentSubjectIri: string;
@@ -587,7 +598,7 @@ async function runImportFileOrchestration(params: {
   // call. See the daemon comment for the full rationale — short version:
   // every storage adapter's `insert` is a single N-Quads load / INSERT
   // DATA operation, so all-or-nothing applies across graphs.
-  const assertionGraph = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
+  const assertionGraph = contextGraphAssertionUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const startedAtLiteral = `"${startedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
   const markdownFormUri = mdIntermediateHash
@@ -950,6 +961,35 @@ describe('import-file orchestration — happy paths', () => {
     expect(record.fileHash).toBe(result.fileHash);
     expect(record.pipelineUsed).toBe('text/markdown');
     expect(record.tripleCount).toBe(result.extraction.tripleCount);
+  });
+
+  it('uses the requesting agent identity for file assertion URIs and extractedBy provenance', async () => {
+    const requestAgentAddress = '0xInvitedAgentAddress';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'research-cg' },
+      { kind: 'file', name: 'file', filename: 'delegated.md', contentType: 'text/markdown', content: Buffer.from('# Delegated\n\nImported through an invited agent.\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent,
+      fileStore,
+      extractionRegistry: registry,
+      extractionStatus: status,
+      multipartBody: body,
+      boundary: BOUNDARY,
+      assertionName: 'delegated-import',
+      requestAgentAddress,
+    });
+
+    expect(result.assertionUri).toBe(
+      contextGraphAssertionUri('research-cg', requestAgentAddress, 'delegated-import'),
+    );
+
+    const extractedByQuad = agent.insertedQuads.find(q =>
+      q.graph === result.assertionUri
+      && q.predicate === 'http://dkg.io/ontology/extractedBy',
+    );
+    expect(extractedByQuad?.object).toBe(`did:dkg:agent:${requestAgentAddress}`);
   });
 
   it('text/markdown upload uses filePart content type when contentType field is not provided', async () => {

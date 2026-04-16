@@ -1048,7 +1048,7 @@ export class DashboardDB {
     const tx = this.db.transaction((ts: number, error: string) => {
       const rows = this.db.prepare(`
         SELECT * FROM semantic_enrichment_events
-        WHERE status = 'pending'
+        WHERE status IN ('pending', 'leased')
         ORDER BY created_at ASC, id ASC
       `).all() as SemanticEnrichmentEventRow[];
       if (rows.length === 0) return [] as SemanticEnrichmentEventRow[];
@@ -1056,18 +1056,18 @@ export class DashboardDB {
       this.db.prepare(`
         UPDATE semantic_enrichment_events
         SET status = 'dead_letter',
-            lease_owner = NULL,
-            lease_expires_at = NULL,
+            lease_owner = CASE WHEN status = 'pending' THEN NULL ELSE lease_owner END,
+            lease_expires_at = CASE WHEN status = 'pending' THEN NULL ELSE lease_expires_at END,
             last_error = ?,
             updated_at = ?
-        WHERE status = 'pending'
+        WHERE status IN ('pending', 'leased')
       `).run(error, ts);
 
       return rows.map((row) => ({
         ...row,
         status: 'dead_letter' as const,
-        lease_owner: null,
-        lease_expires_at: null,
+        lease_owner: row.status === 'pending' ? null : row.lease_owner,
+        lease_expires_at: row.status === 'pending' ? null : row.lease_expires_at,
         last_error: error,
         updated_at: ts,
       }));
@@ -1140,7 +1140,7 @@ export class DashboardDB {
           lease_expires_at = NULL,
           updated_at = ?,
           last_error = NULL
-      WHERE id = ? AND status = 'leased' AND lease_owner = ?
+      WHERE id = ? AND status IN ('leased', 'dead_letter') AND lease_owner = ?
     `).run(semanticTripleCount ?? null, updatedAt, id, leaseOwner);
     return result.changes > 0;
   }

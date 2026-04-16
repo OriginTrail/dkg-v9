@@ -18,6 +18,7 @@ import {
   canQueueLocalAgentSemanticEnrichment,
   queueLocalAgentSemanticEnrichmentBestEffort,
   fileImportSourceIdentityMatchesCurrentState,
+  normalizeQueriedLiteralValue,
   normalizeOntologyQuadObjectInput,
   parseRequiredSignatures,
   pipeOpenClawStream,
@@ -703,6 +704,15 @@ describe('file import semantic source identity matching', () => {
       mdIntermediateHash: 'sha256:md-1',
       importStartedAt: '2026-04-15T12:05:00.000Z',
     })).toBe(false);
+  });
+
+  it('decodes queried RDF literals back to plain string values before identity matching', () => {
+    expect(normalizeQueriedLiteralValue('"sha256:file-1"')).toBe('sha256:file-1');
+    expect(normalizeQueriedLiteralValue('"sha256:md-1"')).toBe('sha256:md-1');
+    expect(normalizeQueriedLiteralValue('"2026-04-15T12:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'))
+      .toBe('2026-04-15T12:00:00.000Z');
+    expect(normalizeQueriedLiteralValue('<did:dkg:context-graph:cg1/assertion/peer/roadmap>'))
+      .toBe('did:dkg:context-graph:cg1/assertion/peer/roadmap');
   });
 });
 

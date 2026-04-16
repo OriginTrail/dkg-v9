@@ -3556,10 +3556,37 @@ async function readCurrentSemanticTripleCount(
   return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
 }
 
-function normalizeQueriedLiteralValue(value: unknown): string | undefined {
+export function normalizeQueriedLiteralValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const trimmed = value.replace(/[<>]/g, '').trim();
-  return trimmed || undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    const iri = trimmed.slice(1, -1).trim();
+    return iri || undefined;
+  }
+  if (!trimmed.startsWith('"')) return trimmed;
+
+  let escaped = false;
+  for (let i = 1; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      try {
+        const parsed = JSON.parse(trimmed.slice(0, i + 1));
+        return typeof parsed === 'string' && parsed ? parsed : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
 }
 
 async function readCurrentFileImportSourceIdentity(
@@ -4765,7 +4792,9 @@ async function handleRequest(
     if (!eventPayload) {
       return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
     }
-    if (row.status !== 'leased' || row.lease_owner !== leaseOwner) {
+    const leaseStillOwned = (row.status === 'leased' || row.status === 'dead_letter')
+      && row.lease_owner === leaseOwner;
+    if (!leaseStillOwned) {
       if (row.status === 'completed') {
         const semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);
         return jsonResponse(res, 200, {

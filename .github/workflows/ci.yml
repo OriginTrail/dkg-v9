@@ -83,3 +83,5 @@ jobs:
       - name: Hardhat tests + Solidity coverage + ratchet check
         run: pnpm test:coverage
         working-directory: packages/evm-module
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192

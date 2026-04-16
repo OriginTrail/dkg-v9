@@ -677,7 +677,7 @@ describe('@unit ContextGraphStorage', () => {
       const agents = makeAgents(256);
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [10n], agents, 1, 0, 1, ethers.ZeroAddress, 0,
-        { gasLimit: 90_000_000 },
+        { gasLimit: 45_000_000 },
       );
       expect(await StorageContract.getParticipantAgents(1)).to.deep.equal(agents);
     });
@@ -706,7 +706,7 @@ describe('@unit ContextGraphStorage', () => {
       const agents = makeAgents(256);
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [10n], agents, 1, 0, 1, ethers.ZeroAddress, 0,
-        { gasLimit: 90_000_000 },
+        { gasLimit: 45_000_000 },
       );
       // One more push must revert (cap hit on the addParticipantAgent guard)
       const extra = ethers.getAddress('0x' + (257).toString(16).padStart(40, '0'));

@@ -350,8 +350,8 @@ afterEach(async () => {
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-describe('Integration: gossip ingestion verifies on-chain and promotes to confirmed', () => {
-  it('receiver gossip data starts tentative and promotes to confirmed via shared chain', async () => {
+describe('Integration: gossip ingestion verification states', () => {
+  it('shared chain alone keeps local-only context graph gossip data tentative until it is registered on-chain', async () => {
     const sharedChain = new MockChainAdapter('mock:31337', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
 
     const agentA = await DKGAgent.create({
@@ -395,10 +395,10 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const statuses = statusResult.bindings.map(b => b['status']);
     const hasConfirmed = statuses.some(s => s === '"confirmed"');
-    expect(hasConfirmed).toBe(true);
+    expect(hasConfirmed).toBe(false);
 
     const hasTentative = statuses.some(s => s === '"tentative"');
-    expect(hasTentative).toBe(false);
+    expect(hasTentative).toBe(true);
   }, 25000);
 
   it('receiver without shared chain leaves gossip data as tentative', async () => {

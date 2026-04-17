@@ -22,6 +22,14 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
+  /**
+   * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
+   * local store already has a trustworthy public announcement for this CG
+   * (system paranet, populated `_meta` graph, or `<cg> rdf:type dkg:Paranet`
+   * asserted in ontology). Used to open the metaSynced gate lazily when
+   * gossip arrives before `refreshMetaSyncedFlags` has had a chance to run.
+   */
+  hasConfirmedMetaState: (id: string) => Promise<boolean>;
   onPhase?: GossipPhaseCallback;
 }
 
@@ -184,28 +192,23 @@ export class GossipPublishHandler {
         // completes. A null allowlist with metaSynced=false could mean the CG
         // is curated but the allowlist hasn't arrived via authenticated sync.
         // System paranets (agents/ontology) are exempt — always open.
-        //
-        // BUT: open CGs publish their definition (including `dkg:accessPolicy
-        // "public"`) on the ONTOLOGY gossip topic — see
-        // `DKGAgent.createContextGraph` where `defGraph = ontologyGraph` for
-        // non-curated CGs (curated/private CGs keep their definition in the
-        // curator-local `_meta` and never broadcast it). Therefore if we
-        // already have `<cg> dkg:accessPolicy "public"` persisted in our
-        // ONTOLOGY graph from a prior ontology broadcast, the CG is open by
-        // design — there is no allowlist to wait for, and deferring would
-        // break data replication indefinitely. This is the gate that was
-        // silently dropping all gossip-replicated KAs on subscribers even
-        // though the CG was announced as public (bug surfaced by
-        // `e2e-network.test.ts`, `e2e-flows.test.ts`, `gossip-validation.test.ts`).
+        // Gossip race: `DKGAgent#refreshMetaSyncedFlags` flips `metaSynced`
+        // eagerly at the end of every sync cycle, but a gossip publish can
+        // arrive on a freshly subscribed node *before* the first sync has
+        // run. Ask the agent's own helper whether the CG is already
+        // confirmable from the local store (system paranet, populated
+        // `_meta`, or `<cg> rdf:type dkg:Paranet` in ontology — the same
+        // check Viktor introduced in `hasConfirmedMetaState`). If yes,
+        // flip the flag in place and proceed; if no, keep the strict
+        // deny behavior so curated CGs without a synced allowlist can't
+        // leak through.
         if (allowedPeers === null
           && request.paranetId !== SYSTEM_PARANETS.AGENTS
           && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
           const sub = this.subscribedContextGraphs.get(request.paranetId);
           if (sub && sub.metaSynced === false) {
-            const isPublic = await this.isPublicContextGraph(request.paranetId);
-            if (isPublic) {
-              // Open CG confirmed via ontology: flip the in-memory flag so
-              // subsequent gossip skips this ASK query on the hot path.
+            const confirmed = await this.callbacks.hasConfirmedMetaState(request.paranetId);
+            if (confirmed) {
               sub.metaSynced = true;
             } else {
               this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
@@ -537,28 +540,6 @@ export class GossipPublishHandler {
       .map(row => row['peer'])
       .filter((v): v is string => typeof v === 'string')
       .map(v => v.replace(/^"|"$/g, ''));
-  }
-
-  /**
-   * True when the local ONTOLOGY graph asserts this CG is public.
-   *
-   * Open CGs include `<cg> dkg:accessPolicy "public"` in the ontology
-   * broadcast (see `DKGAgent.createContextGraph`). Curated/private CGs keep
-   * their definition in the curator-local `_meta` graph and never reach the
-   * ontology topic, so an ontology assertion of accessPolicy="public" is a
-   * trustworthy (and the only) public-by-design signal available pre-sync.
-   */
-  private async isPublicContextGraph(contextGraphId: string): Promise<boolean> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgUri = paranetDataGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${ontologyGraph}> {
-          <${cgUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "public" .
-        }
-      }`,
-    );
-    return result.type === 'boolean' && result.value === true;
   }
 }
 

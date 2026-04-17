@@ -2741,6 +2741,7 @@ export class DKGAgent {
           contextGraphExists: (id) => this.contextGraphExists(id),
           getContextGraphOwner: (id) => this.getContextGraphOwner(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
+          hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
         },
       );
     }

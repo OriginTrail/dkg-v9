@@ -95,6 +95,7 @@ const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const SYNC_AUTH_MAX_AGE_MS = 30_000;
 const META_REFRESH_COOLDOWN_MS = 30_000;
+const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -1041,7 +1042,6 @@ export class DKGAgent {
     onPhase?: PhaseCallback,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     const summary: DurableSyncResult = {
       insertedTriples: 0,
       fetchedMetaTriples: 0,
@@ -1056,9 +1056,10 @@ export class DKGAgent {
     };
 
     try {
-      for (const pid of contextGraphIds) {
+      for (const [index, pid] of contextGraphIds.entries()) {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
+        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
 
         this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
@@ -1137,11 +1138,12 @@ export class DKGAgent {
   ): Promise<Quad[]> {
     const allQuads: Quad[] = [];
     let offset = 0;
+    let timedOut = false;
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
       if (Date.now() > deadline) {
-        this.log.warn(ctx, `Sync timeout (${allQuads.length} triples received so far for ${graphUri})`);
+        timedOut = true;
         break;
       }
 
@@ -1185,6 +1187,13 @@ export class DKGAgent {
       offset += quads.length;
       if (quads.length < SYNC_PAGE_SIZE) break;
     }
+    if (timedOut) {
+      const scope = includeSharedMemory ? 'shared-memory' : 'durable';
+      this.log.warn(
+        ctx,
+        `Sync timeout for ${scope} ${phase} phase of "${contextGraphId}" (${allQuads.length} triples received so far for ${graphUri})`,
+      );
+    }
     return allQuads;
   }
 
@@ -1207,7 +1216,6 @@ export class DKGAgent {
     contextGraphIds: string[],
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     const summary: SharedMemorySyncResult = {
       insertedTriples: 0,
       fetchedMetaTriples: 0,
@@ -1220,9 +1228,10 @@ export class DKGAgent {
     };
 
     try {
-      for (const pid of contextGraphIds) {
+      for (const [index, pid] of contextGraphIds.entries()) {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
 
         this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
@@ -1331,6 +1340,12 @@ export class DKGAgent {
       summary.failedPeers += 1;
     }
     return summary;
+  }
+
+  private createContextGraphSyncDeadline(remainingContextGraphs: number): number {
+    const divisor = Math.max(1, remainingContextGraphs);
+    const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
+    return Date.now() + budgetMs;
   }
 
   /**

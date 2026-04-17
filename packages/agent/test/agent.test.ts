@@ -1433,6 +1433,43 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('allocates a fresh sync deadline per context graph', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PerContextGraphDeadline',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+
+      const deadlines: number[] = [];
+      vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      (agent as any).fetchSyncPages = vi.fn(async (
+        _ctx: unknown,
+        _remotePeerId: string,
+        _contextGraphId: string,
+        _includeSharedMemory: boolean,
+        _phase: 'data' | 'meta',
+        _graphUri: string,
+        deadline: number,
+      ) => {
+        deadlines.push(deadline);
+        return [];
+      });
+
+      await agent.syncFromPeer('12D3KooWPerContextGraphDeadline111111111111111111111111', ['cg-a', 'cg-b']);
+
+      expect(deadlines).toHaveLength(4);
+      expect(deadlines[0]).toBe(1_060_000);
+      expect(deadlines[1]).toBe(1_060_000);
+      expect(deadlines[2]).toBe(1_120_000);
+      expect(deadlines[3]).toBe(1_120_000);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not mark metaSynced true from sync scope alone', async () => {
     const agent = await DKGAgent.create({
       name: 'MetaSyncedScopeOnly',

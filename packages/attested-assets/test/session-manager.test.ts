@@ -454,7 +454,14 @@ describe('SessionManager', () => {
       ).rejects.toThrow('round mismatch: requested 5 but current round is 2');
     });
 
-    it('startRound succeeds when requestedRound matches currentRound', async () => {
+    it('startRound succeeds when requestedRound matches currentRound and flips roundState into collecting_inputs', async () => {
+      // Previously this test only asserted `.resolves.not.toThrow()`,
+      // which would still "pass" if startRound silently became a no-op
+      // (nothing set, no round advancement, no gossip). Since the whole
+      // point of startRound is to move the round into collecting_inputs
+      // and publish a RoundStart event, assert both observable state
+      // changes explicitly. If either side regresses, this test fails
+      // at the specific missing state instead of silently passing.
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
@@ -464,7 +471,13 @@ describe('SessionManager', () => {
       const session = manager.getSession(config.sessionId)!;
       session.currentRound = 2;
 
-      await expect(manager.startRound(config.sessionId, 2)).resolves.not.toThrow();
+      await manager.startRound(config.sessionId, 2);
+
+      const roundState = session.roundStates.get(2);
+      expect(roundState, 'startRound should have created a RoundState for round 2').toBeDefined();
+      expect(roundState!.status).toBe('collecting_inputs');
+      expect(roundState!.startTime).toBeGreaterThan(0);
+      expect(roundState!.deadline).toBeGreaterThan(roundState!.startTime!);
     });
 
     it('submitInput rejects when requestedRound does not match currentRound', async () => {
@@ -483,7 +496,15 @@ describe('SessionManager', () => {
       ).rejects.toThrow('round mismatch: requested 7 but current round is 2');
     });
 
-    it('submitInput succeeds when requestedRound matches currentRound', async () => {
+    it('submitInput succeeds when requestedRound matches currentRound and actually publishes on the session topic', async () => {
+      // Previously this test only asserted `.resolves.not.toThrow()` —
+      // which would still "pass" if submitInput became a no-op (no
+      // gossip, no event, no payload). The observable outcome of a
+      // successful submitInput is one additional `publish(topic, bytes)`
+      // call on the underlying gossip transport, targeted at the
+      // session's topic. Snapshot the call count before and after to
+      // assert both that gossip was attempted and that the topic it
+      // hit contained the sessionId (the wire-level session ownership).
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
@@ -494,9 +515,23 @@ describe('SessionManager', () => {
       session.currentRound = 2;
       await manager.startRound(config.sessionId, 2);
 
-      await expect(
-        manager.submitInput(config.sessionId, new Uint8Array([1, 2, 3]), 2),
-      ).resolves.not.toThrow();
+      const beforeCount = trackingGossip._publishCalls.length;
+      await manager.submitInput(config.sessionId, new Uint8Array([1, 2, 3]), 2);
+      const afterCount = trackingGossip._publishCalls.length;
+
+      expect(
+        afterCount - beforeCount,
+        'submitInput must publish exactly one new gossip message',
+      ).toBe(1);
+
+      const lastCall = trackingGossip._publishCalls[afterCount - 1];
+      const topic = lastCall.args[0] as string;
+      expect(topic, 'InputSubmitted publish topic must reference the session').toContain(config.sessionId);
+      // Body is `encodeAKAEvent(...)` — assert it's a non-empty Uint8Array,
+      // not a thrown placeholder.
+      const body = lastCall.args[1] as Uint8Array;
+      expect(body).toBeInstanceOf(Uint8Array);
+      expect(body.length).toBeGreaterThan(0);
     });
   });
 

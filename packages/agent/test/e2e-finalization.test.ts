@@ -138,9 +138,14 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const ready = await waitForNode(RPC_URL, 30_000);
     if (!ready) {
+      // Vitest's `beforeAll` callback has no suite-level skip helper — the
+      // previous `ctx.skip()` here was a ReferenceError bug that masked the
+      // "hardhat never booted" path as a ReferenceError crash instead of a
+      // clean skip. Set the module-level flag and return; every `it()` in
+      // this suite already checks `skipSuite` first and does its own
+      // `ctx.skip()` with the per-test context that actually has that API.
       skipSuite = true;
       if (hardhatProcess) { hardhatProcess.kill('SIGTERM'); hardhatProcess = null; }
-      ctx.skip();
       return;
     }
     provider = new JsonRpcProvider(RPC_URL, undefined, { cacheTimeout: -1 });

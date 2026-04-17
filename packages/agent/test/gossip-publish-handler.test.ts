@@ -110,7 +110,7 @@ describe('GossipPublishHandler', () => {
     expect(countAfter).toBe(countBefore);
   });
 
-  it('handles duplicate gossip replay (same UAL) without breaking', async () => {
+  it('handles duplicate gossip replay (same UAL) without breaking and without double-inserting quads', async () => {
     const { store, handler } = createHandler();
 
     const entity = 'did:dkg:test:replay-entity';
@@ -126,14 +126,27 @@ describe('GossipPublishHandler', () => {
 
     await handler.handlePublishMessage(data, PARANET);
 
+    const graphUri = `did:dkg:context-graph:${PARANET}`;
     const firstResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s <http://schema.org/name> ?o } }`,
+      `SELECT ?s WHERE { GRAPH <${graphUri}> { ?s <http://schema.org/name> ?o } }`,
     );
     const firstBindings = firstResult.type === 'bindings' ? firstResult.bindings : [];
     expect(firstBindings.length).toBeGreaterThan(0);
 
-    // Second identical message should not throw (replay detected, early return)
+    // Snapshot the graph's quad count before the replay so we can assert
+    // the second delivery is *actually* a no-op on the store — not just
+    // that it returned without throwing. A regression where dedup stops
+    // firing (duplicate UAL still re-inserts) would otherwise slip past
+    // a `.resolves.not.toThrow()` assertion unnoticed.
+    const countBefore = await store.countQuads(graphUri);
+
     await expect(handler.handlePublishMessage(data, PARANET)).resolves.not.toThrow();
+
+    const countAfter = await store.countQuads(graphUri);
+    expect(
+      countAfter,
+      'replay of identical gossip UAL must not add any quads to the data graph',
+    ).toBe(countBefore);
   });
 
   it('inserts quads for UAL with empty kas (no structural validation)', async () => {

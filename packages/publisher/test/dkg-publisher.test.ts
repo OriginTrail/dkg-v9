@@ -352,13 +352,23 @@ describe('DKGPublisher', () => {
       // meaning (`core nodes verify against local SWM copy, no inline
       // staging quads`) is independent of the guard decision — it
       // continues to work as before.
-      await expect(
-        publisher.publish({
-          contextGraphId: PARANET,
-          quads: [q(ENTITY, 'http://schema.org/name', '"fromSharedMemory-with-legit-quads"')],
-          fromSharedMemory: true,
-        }),
-      ).resolves.toBeDefined();
+      //
+      // Previously this test only asserted `.resolves.toBeDefined()` —
+      // which would pass even if the publisher returned a failed/empty
+      // result. Tighten to check the actual PublishResult shape: status
+      // must be one of the valid terminal values, UAL must exist, and
+      // at least one KA manifest entry must be present for the single
+      // root entity in the input.
+      const result = await publisher.publish({
+        contextGraphId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"fromSharedMemory-with-legit-quads"')],
+        fromSharedMemory: true,
+      });
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.ual).toMatch(/^did:dkg:/);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
     });
 
     it('Round 12 Bug 34: internal promote→publish path (via publishFromSharedMemory) still bypasses the guard', async () => {
@@ -388,9 +398,18 @@ describe('DKGPublisher', () => {
         { publisherPeerId: 'peer-internal', localOnly: true },
       );
       await seedContextGraphRegistration(store, PARANET);
-      await expect(
-        publisher.publishFromSharedMemory(PARANET, 'all'),
-      ).resolves.toBeDefined();
+      // Tighten from `.resolves.toBeDefined()` (which would pass even on a
+      // silent-tentative result with zero manifest entries) to a real shape
+      // check: the internal publish must land in a valid terminal state AND
+      // surface the ENTITY we shared via at least one KA manifest entry.
+      // If the internal token bypass regresses, the reserved-namespace guard
+      // would reject publishFromSharedMemory and we'd get a throw here —
+      // still caught, but with an actual error instead of a silent pass.
+      const result = await publisher.publishFromSharedMemory(PARANET, 'all');
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest.some(ka => ka.rootEntity === ENTITY)).toBe(true);
     });
 
     it('Round 12 Bug 34: update() rejects reserved-prefix quads (Bucket A hole closed)', async () => {

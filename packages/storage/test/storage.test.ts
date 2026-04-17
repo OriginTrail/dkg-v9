@@ -178,15 +178,36 @@ if (blazeUrl) {
 // ---------------------------------------------------------------------------
 
 describe('createTripleStore factory', () => {
-  it('all built-in backends are registered', async () => {
+  it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
+    // The *registry* contract being tested here is: every built-in
+    // backend name is recognized. The construction itself may require
+    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`)
+    // or worker artifacts (oxigraph-worker needs the compiled worker
+    // impl). So a backend passes this test iff calling `createTripleStore`
+    // either succeeds OR throws a *non*-"Unknown TripleStore backend"
+    // error.
+    //
+    // The previous version of this test used `.resolves.not.toThrow()`
+    // inside a catch-that-returned-'registered', which made the test
+    // effectively assert "a promise settled" — noise. This version
+    // asserts the positive contract explicitly and points at the
+    // specific failing backend if the registry regresses.
     const backends = ['oxigraph', 'oxigraph-worker', 'blazegraph', 'sparql-http'];
     for (const backend of backends) {
-      await expect(
-        createTripleStore({ backend }).catch((err: Error) => {
-          if (err.message.includes('Unknown TripleStore backend')) throw err;
-          return 'registered';
-        }),
-      ).resolves.not.toThrow();
+      let outcome: 'constructed' | Error;
+      try {
+        const store = await createTripleStore({ backend });
+        outcome = 'constructed';
+        try { await store.close(); } catch { /* close failures not in scope here */ }
+      } catch (err) {
+        outcome = err as Error;
+      }
+      if (outcome instanceof Error) {
+        expect(
+          outcome.message,
+          `backend "${backend}" surfaced "Unknown TripleStore backend" — registry regressed`,
+        ).not.toMatch(/Unknown TripleStore backend/);
+      }
     }
   });
 

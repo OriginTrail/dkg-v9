@@ -120,6 +120,24 @@ describe('ensureContextGraphLocal', () => {
     const entry = paranets.find(p => p.id === 'special-chars');
     expect(entry?.description).toBe('Default paranet: special-chars (test)');
   }, 15000);
+
+  it('treats storage-backed shared-memory-only graphs as existing', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:test',
+        predicate: 'http://schema.org/name',
+        object: '"Workspace Only"',
+        graph: contextGraphSharedMemoryUri('workspace-only'),
+      },
+    ]);
+
+    await expect(agent.contextGraphExists('workspace-only')).resolves.toBe(true);
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromStore', () => {

@@ -367,6 +367,29 @@ interface CatchupJobResult {
   peersTried: number;
   dataSynced: number;
   sharedMemorySynced: number;
+  diagnostics?: {
+    noProtocolPeers: number;
+    durable: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      metaOnlyResponses: number;
+      dataRejectedMissingMeta: number;
+      rejectedKcs: number;
+      failedPeers: number;
+    };
+    sharedMemory: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      droppedDataTriples: number;
+      failedPeers: number;
+    };
+  };
 }
 
 interface CatchupJob {

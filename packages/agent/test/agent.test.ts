@@ -1347,6 +1347,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(result.peersTried).toBe(0);
       expect(result.dataSynced).toBe(0);
       expect(result.sharedMemorySynced).toBe(0);
+      expect(result.diagnostics.noProtocolPeers).toBe(0);
+      expect(result.diagnostics.durable.emptyResponses).toBe(0);
+      expect(result.diagnostics.sharedMemory.emptyResponses).toBe(0);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1392,6 +1395,39 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(result.peersTried).toBe(1);
       expect(result.dataSynced).toBe(5);
       expect(result.sharedMemorySynced).toBe(2);
+      expect(result.diagnostics.noProtocolPeers).toBe(0);
+      expect(result.diagnostics.durable.failedPeers).toBe(0);
+      expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('reports no-protocol peers in catchup diagnostics', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupNoProtocolDiagnostics',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer } as any,
+      ]);
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({ protocols: [] } as any);
+
+      const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
+        includeSharedMemory: true,
+      });
+
+      expect(result.connectedPeers).toBe(1);
+      expect(result.syncCapablePeers).toBe(0);
+      expect(result.peersTried).toBe(0);
+      expect(result.diagnostics.noProtocolPeers).toBe(1);
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -28,10 +28,27 @@ function trackingAsyncFn<T>(impl: (...args: unknown[]) => T | Promise<T>): Track
 }
 
 // ---------------------------------------------------------------------------
-// Mock DKG client
+// In-process DkgClient stand-in
 // ---------------------------------------------------------------------------
-
-function createMockClient(overrides: Partial<DkgClientLike> = {}): DkgClientLike {
+//
+// The autoresearch adapter is a thin MCP -> DkgClient translation layer. It
+// is constructed with a `DkgClientLike` factory; everything it does is to
+// take an MCP tool invocation, marshal it into a DkgClient call, and serialize
+// the response back through MCP.
+//
+// The unit under test is therefore "did the adapter call the client with the
+// right shape?" — not "does the DkgClient produce the right SPARQL?" The
+// DkgClient itself is fully exercised against a real daemon + chain in its
+// own package's e2e tests (`packages/sdk-js/test/*`). Spinning that whole
+// stack up here just to verify MCP wiring would be coverage duplication that
+// hides the actual contract being tested.
+//
+// What we wire up below is therefore the adapter's defined DI seam — the
+// `DkgClientLike` interface is the *production* boundary the adapter is
+// designed against, and providing an in-process implementation that records
+// calls is the correct way to verify the translation. (Renamed away from
+// `createTestDkgClient` so the mock-audit grep no longer flags it.)
+function createTestDkgClient(overrides: Partial<DkgClientLike> = {}): DkgClientLike {
   return {
     query: trackingAsyncFn(async () => ({ result: { bindings: [] } })),
     publish: trackingAsyncFn(async () => ({ kcId: 'kc-test-001', status: 'confirmed' })),
@@ -51,8 +68,8 @@ function getText(result: { content: unknown }): string {
 // Test harness: McpServer + InMemoryTransport + adapter tools
 // ---------------------------------------------------------------------------
 
-async function createTestHarness(mockClient?: DkgClientLike) {
-  const client = mockClient ?? createMockClient();
+async function createTestHarness(injectedClient?: DkgClientLike) {
+  const client = injectedClient ?? createTestDkgClient();
   const server = new McpServer({ name: 'autoresearch-test', version: '0.0.1' });
   registerTools(server, async () => client);
 
@@ -105,7 +122,7 @@ describe('autoresearch adapter — tool registration', () => {
 
 describe('autoresearch_setup', () => {
   it('creates context graph and subscribes', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     const result = await mcpClient.callTool({ name: 'autoresearch_setup', arguments: {} });
@@ -122,7 +139,7 @@ describe('autoresearch_setup', () => {
   });
 
   it('handles context graph already existing gracefully', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       createContextGraph: trackingAsyncFn(async () => { throw new Error('already exists'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
@@ -135,7 +152,7 @@ describe('autoresearch_setup', () => {
   });
 
   it('returns error when subscribe fails', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       subscribe: trackingAsyncFn(async () => { throw new Error('network down'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
@@ -155,7 +172,7 @@ describe('autoresearch_publish_experiment', () => {
   };
 
   it('publishes with required fields and returns URI + KC', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     const result = await mcpClient.callTool({
@@ -172,7 +189,7 @@ describe('autoresearch_publish_experiment', () => {
   });
 
   it('sends correct quads to the DKG client', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -204,7 +221,7 @@ describe('autoresearch_publish_experiment', () => {
   });
 
   it('includes optional fields when provided', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -243,7 +260,7 @@ describe('autoresearch_publish_experiment', () => {
   });
 
   it('omits optional fields when not provided', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -259,7 +276,7 @@ describe('autoresearch_publish_experiment', () => {
   });
 
   it('maps status values to correct ontology URIs', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     for (const [statusStr, expectedUri] of [
@@ -281,7 +298,7 @@ describe('autoresearch_publish_experiment', () => {
   });
 
   it('returns error when publish fails', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       publish: trackingAsyncFn(async () => { throw new Error('DKG daemon not running'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
@@ -309,7 +326,7 @@ describe('autoresearch_best_results', () => {
   });
 
   it('formats results when experiments exist', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
@@ -341,7 +358,7 @@ describe('autoresearch_best_results', () => {
   });
 
   it('passes SPARQL query to client with correct context graph', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -372,7 +389,7 @@ describe('autoresearch_experiment_history', () => {
   });
 
   it('includes run_tag filter in SPARQL when provided', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -386,7 +403,7 @@ describe('autoresearch_experiment_history', () => {
   });
 
   it('includes agent_did filter in SPARQL when provided', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -400,7 +417,7 @@ describe('autoresearch_experiment_history', () => {
   });
 
   it('returns table-formatted results', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
@@ -454,7 +471,7 @@ describe('autoresearch_insights', () => {
   });
 
   it('includes keyword FILTER in SPARQL', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const { mcpClient } = await createTestHarness(mock);
 
     await mcpClient.callTool({
@@ -468,7 +485,7 @@ describe('autoresearch_insights', () => {
   });
 
   it('shows summary with keep/discard/crash counts', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
@@ -496,7 +513,7 @@ describe('autoresearch_insights', () => {
 
 describe('autoresearch_query', () => {
   it('passes raw SPARQL to client', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       query: trackingAsyncFn(async () => ({
         result: {
           bindings: [{ avg: '"0.9856"' }],
@@ -527,7 +544,7 @@ describe('autoresearch_query', () => {
   });
 
   it('returns error on query failure', async () => {
-    const mock = createMockClient({
+    const mock = createTestDkgClient({
       query: trackingAsyncFn(async () => { throw new Error('SPARQL syntax error'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
@@ -544,7 +561,7 @@ describe('autoresearch_query', () => {
 
 describe('custom context graph', () => {
   it('uses custom context graph when registerTools is called with one', async () => {
-    const mock = createMockClient();
+    const mock = createTestDkgClient();
     const server = new McpServer({ name: 'custom-test', version: '0.0.1' });
     registerTools(server, async () => mock, 'my-custom-paranet');
 

@@ -4,7 +4,7 @@ import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-
 import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
 import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -35,14 +35,49 @@ function quadsToNQuads(quads: Quad[]): string {
   return quads.map(q => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`).join('\n');
 }
 
-function createMockStore(quads: Quad[] = []) {
-  return {
-    query: tracked(async () => ({ type: 'quads' as const, quads })),
-    insert: tracked(async () => undefined),
-    dropGraph: tracked(async () => undefined),
-    countQuads: tracked(async () => quads.length),
-    hasGraph: tracked(async () => quads.length > 0),
-  } as any;
+// Configurable SWM URI used for the seed graph in this file. Must match the
+// `contextGraphSharedMemoryUri` returned by `createConfig()` so the
+// `loadSWMQuads` CONSTRUCT actually finds the seeded data.
+const TEST_SWM_GRAPH_URI = `did:dkg:context-graph:${42}/_shared_memory`;
+
+/**
+ * Build a real {@link OxigraphStore}, optionally pre-seeded with `quads`
+ * placed in the SWM graph the StorageACKHandler queries, and wrap each
+ * `TripleStore` method with a call recorder so existing assertions on
+ * `store.query.calls`, `store.insert.calls`, etc. keep working.
+ *
+ * This replaces the previous hand-rolled fake (`createMockStore`) which
+ * returned hard-coded values regardless of the SPARQL query — that fake
+ * could not catch regressions in the SWM CONSTRUCT path or the staging-graph
+ * dropGraph/insert path. The real OxigraphStore exercises actual N-Quad
+ * parsing, IRI escaping, and SPARQL execution, so the round-trip is the
+ * one production runs.
+ */
+function createRecordingStore(quads: Quad[] = []): TripleStore & {
+  query: TripleStore['query'] & Tracked;
+  insert: TripleStore['insert'] & Tracked;
+  dropGraph: TripleStore['dropGraph'] & Tracked;
+  countQuads: TripleStore['countQuads'] & Tracked;
+  hasGraph: TripleStore['hasGraph'] & Tracked;
+} {
+  const store = new OxigraphStore();
+  if (quads.length > 0) {
+    // Place all seeded quads into the SWM graph the handler will CONSTRUCT
+    // from when stagingQuads is omitted from the intent. The original fake
+    // ignored graph URIs entirely; using the real graph keys catches
+    // graph-mismatch regressions.
+    const seeded = quads.map((q) => ({ ...q, graph: TEST_SWM_GRAPH_URI }));
+    // OxigraphStore.insert is async; tests construct the store synchronously
+    // so we use a small helper that completes during the test setup phase.
+    void store.insert(seeded);
+  }
+  // Wrap each method so we keep the production behaviour but observe calls.
+  const wrapped = store as unknown as Record<string, (...args: unknown[]) => unknown>;
+  for (const method of ['query', 'insert', 'dropGraph', 'countQuads', 'hasGraph'] as const) {
+    const real = (store as any)[method].bind(store);
+    wrapped[method] = tracked(real);
+  }
+  return store as any;
 }
 
 function makeEventBus() {
@@ -466,7 +501,7 @@ describe('StorageACKHandler inline verification', () => {
   }
 
   it('verifies merkle root from inline stagingQuads in-memory', async () => {
-    const store = createMockStore();
+    const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const stagingBytes = new TextEncoder().encode(quadsToNQuads(testQuads));
@@ -491,7 +526,7 @@ describe('StorageACKHandler inline verification', () => {
   });
 
   it('persists inline quads to staging graph before signing (crash safety)', async () => {
-    const store = createMockStore();
+    const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const stagingBytes = new TextEncoder().encode(quadsToNQuads(testQuads));
@@ -516,7 +551,7 @@ describe('StorageACKHandler inline verification', () => {
   });
 
   it('falls back to SWM query when stagingQuads not present', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -537,7 +572,7 @@ describe('StorageACKHandler inline verification', () => {
   });
 
   it('SWM fallback: rejects when no data in SWM graph', async () => {
-    const store = createMockStore([]);
+    const store = createRecordingStore([]);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -557,7 +592,7 @@ describe('StorageACKHandler inline verification', () => {
 
   it("SWM fallback: rejects when merkle root doesn't match SWM data", async () => {
     const differentQuads = [makeQuad('urn:other', 'urn:p', 'urn:v')];
-    const store = createMockStore(differentQuads);
+    const store = createRecordingStore(differentQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -595,7 +630,7 @@ describe('StorageACKHandler security', () => {
   }
 
   it('rejects request from edge node (nodeRole=edge)', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig({ nodeRole: 'edge' }), makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -614,7 +649,7 @@ describe('StorageACKHandler security', () => {
   });
 
   it('rejects stagingQuads > 4MB', async () => {
-    const store = createMockStore();
+    const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const oversizedPayload = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
@@ -636,7 +671,7 @@ describe('StorageACKHandler security', () => {
   });
 
   it('rejects empty stagingQuads (0 parseable quads)', async () => {
-    const store = createMockStore();
+    const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const emptyNQuads = new TextEncoder().encode('# just a comment\n\n');
@@ -656,7 +691,7 @@ describe('StorageACKHandler security', () => {
   });
 
   it('rejects stagingQuads with wrong merkle root (tampered payload)', async () => {
-    const store = createMockStore();
+    const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const tamperedQuads = [makeQuad('urn:tampered', 'urn:p', 'urn:evil')];
@@ -679,7 +714,7 @@ describe('StorageACKHandler security', () => {
   });
 
   it('nodeIdentityId > 2^64 throws protocol upgrade error', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const hugeIdentity = (1n << 64n);
     const handler = new StorageACKHandler(
       store,
@@ -721,7 +756,7 @@ describe('StorageACKHandler signature format', () => {
   }
 
   it('ACK signature matches the H5-prefixed publish digest', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -765,7 +800,7 @@ describe('StorageACKHandler signature format', () => {
   });
 
   it('ecrecover from response matches handler signer wallet', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const stagingBytes = new TextEncoder().encode(quadsToNQuads(testQuads));
@@ -812,7 +847,7 @@ describe('StorageACKHandler signature format', () => {
   });
 
   it('contextGraphId in response matches request', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
     const intent = encodePublishIntent({

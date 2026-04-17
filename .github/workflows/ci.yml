@@ -272,7 +272,7 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Attested assets, EPCIS, query, MCP, net-sim, graph-viz, adapters"
+      - name: "Attested assets, EPCIS, query, MCP, net-sim, graph-viz, adapters, origin-trail-game"
         run: |
           pnpm \
             --filter @origintrail-official/dkg-attested-assets \
@@ -285,6 +285,7 @@ jobs:
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
+            --filter @origintrail-official/dkg-app-origin-trail-game \
             run test
 
   # ------------------------------------------------------------------

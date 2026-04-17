@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeTripleHashV10,
@@ -719,32 +719,48 @@ describe('V10 StorageACKHandler round-trip', () => {
   ];
   const merkleRoot = computeFlatKCRoot(testQuads, []);
 
-  function createMockStore(quads: Quad[]) {
+  // SWM URI used to seed the recording store. Must match the URI returned by
+  // `createHandler`'s `contextGraphSharedMemoryUri` so the handler's
+  // `loadSWMQuads` CONSTRUCT actually finds the seeded data.
+  const SWM_GRAPH_URI = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+
+  /**
+   * Build a real {@link OxigraphStore}, seeded with `quads` placed in the
+   * SWM graph the handler queries, and wrap each TripleStore method we
+   * inspect in tests with a call recorder. The previous hand-rolled fake
+   * intercepted SPARQL via a regex (`FILTER(?s = <…>)`) and returned
+   * pre-filtered arrays — that bypassed the actual SPARQL engine and could
+   * not detect IRI-escaping or graph-keying regressions. With the real
+   * store, the handler's CONSTRUCT executes against parsed N-Quads, so the
+   * round-trip now exercises production code paths.
+   */
+  function createRecordingStore(quads: Quad[]) {
+    const store = new OxigraphStore();
+    if (quads.length > 0) {
+      void store.insert(quads.map((q) => ({ ...q, graph: SWM_GRAPH_URI })));
+    }
     const queryCalls: unknown[][] = [];
     const insertCalls: unknown[][] = [];
     const dropGraphCalls: unknown[][] = [];
-    return {
-      query: async (sparql: string) => {
-        queryCalls.push([sparql]);
-        const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
-        if (entityMatch) {
-          const entity = entityMatch[1];
-          const genidPrefix = `${entity}/.well-known/genid/`;
-          const filtered = quads.filter(q =>
-            q.subject === entity || q.subject.startsWith(genidPrefix),
-          );
-          return { type: 'quads' as const, quads: filtered };
-        }
-        return { type: 'quads' as const, quads };
-      },
-      insert: async (...args: unknown[]) => { insertCalls.push(args); },
-      delete: async () => {},
-      dropGraph: async (...args: unknown[]) => { dropGraphCalls.push(args); },
-      close: async () => {},
-      _queryCalls: queryCalls,
-      _insertCalls: insertCalls,
-      _dropGraphCalls: dropGraphCalls,
+    const realQuery = store.query.bind(store);
+    const realInsert = store.insert.bind(store);
+    const realDropGraph = store.dropGraph.bind(store);
+    (store as any).query = async (sparql: string) => {
+      queryCalls.push([sparql]);
+      return realQuery(sparql);
     };
+    (store as any).insert = async (qs: Quad[]) => {
+      insertCalls.push([qs]);
+      return realInsert(qs);
+    };
+    (store as any).dropGraph = async (uri: string) => {
+      dropGraphCalls.push([uri]);
+      return realDropGraph(uri);
+    };
+    (store as any)._queryCalls = queryCalls;
+    (store as any)._insertCalls = insertCalls;
+    (store as any)._dropGraphCalls = dropGraphCalls;
+    return store as any;
   }
 
   function createHandler(store: any, opts?: { role?: 'core' | 'edge'; identityId?: bigint }) {
@@ -764,7 +780,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     const ntriples = quadsToNTriples(testQuads);
     const stagingBytes = new TextEncoder().encode(ntriples);
 
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -805,7 +821,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('handler verifies data from SWM when no stagingQuads (enshrine path)', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = createHandler(store);
 
     const intent = encodePublishIntent({
@@ -825,7 +841,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('handler rejects non-core node role', async () => {
-    const handler = createHandler(createMockStore([]), { role: 'edge' });
+    const handler = createHandler(createRecordingStore([]), { role: 'edge' });
 
     const intent = encodePublishIntent({
       merkleRoot,
@@ -846,7 +862,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     const ntriples = quadsToNTriples(differentQuads);
     const stagingBytes = new TextEncoder().encode(ntriples);
 
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -863,7 +879,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('handler rejects empty stagingQuads', async () => {
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const emptyNTriples = '';
     const stagingBytes = new TextEncoder().encode(emptyNTriples);
 
@@ -885,7 +901,7 @@ describe('V10 StorageACKHandler round-trip', () => {
 
   it('handler rejects stagingQuads > 4MB', async () => {
     const oversized = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
 
     const intent = encodePublishIntent({
       merkleRoot,
@@ -903,7 +919,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('persists inline quads to staging graph before signing (crash safety)', async () => {
-    const store = createMockStore([]);
+    const store = createRecordingStore([]);
     const handler = createHandler(store);
 
     const ntriples = quadsToNTriples(testQuads);
@@ -940,7 +956,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
     };
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store as any, config, makeEventBus() as any);
 
     const intent = encodePublishIntent({

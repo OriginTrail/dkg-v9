@@ -25,6 +25,41 @@ function truncAddr(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+// Pick the most shareable multiaddr for an invite. Circuit-relay addresses are
+// preferred because they route through a public V10 relay and work from any
+// network (NAT, different LAN, remote). A public IPv4 is next best, then LAN,
+// then loopback (which is never useful to share).
+function pickShareableMultiaddr(addrs: string[]): string | null {
+  if (addrs.length === 0) return null;
+  const ranked = [...addrs].sort((a, b) => scoreMultiaddr(b) - scoreMultiaddr(a));
+  return ranked[0] ?? null;
+}
+
+function scoreMultiaddr(addr: string): number {
+  if (addr.includes('/p2p-circuit/')) return 100;
+  const ipv4 = addr.match(/\/ip4\/([^/]+)/)?.[1];
+  if (!ipv4) return 50;
+  if (isLoopbackIPv4(ipv4)) return 0;
+  if (isPrivateIPv4(ipv4)) return 10;
+  return 80;
+}
+
+function isLoopbackIPv4(ip: string): boolean {
+  return ip.startsWith('127.');
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  if (ip.startsWith('10.')) return true;
+  if (ip.startsWith('192.168.')) return true;
+  if (ip.startsWith('169.254.')) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m) {
+    const second = Number.parseInt(m[1]!, 10);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
 export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphName }: ShareProjectModalProps) {
   const [copied, setCopied] = useState<string | null>(null);
   const [peerMultiaddr, setPeerMultiaddr] = useState<string | null>(null);
@@ -43,8 +78,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
       .then(r => r.json())
       .then((data: any) => {
         const addrs: string[] = data.multiaddrs ?? [];
-        const publicAddr = addrs.find((a: string) => !a.includes('/127.0.0.1/')) ?? addrs[0] ?? null;
-        setPeerMultiaddr(publicAddr);
+        setPeerMultiaddr(pickShareableMultiaddr(addrs));
       })
       .catch(() => {});
 

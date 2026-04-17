@@ -5128,6 +5128,24 @@ export class DKGAgent {
       }
     }
 
+    const graphManager = new GraphManager(this.store);
+    const storedContextGraphs = await graphManager.listParanets();
+    for (const id of storedContextGraphs) {
+      const uri = `${prefix}${id}`;
+      if (seen.has(uri)) continue;
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+      const sub = this.subscribedContextGraphs.get(id);
+      seen.set(uri, {
+        id,
+        uri,
+        name: sub?.name ?? id,
+        isSystem: false,
+        subscribed: sub?.subscribed ?? false,
+        synced: sub?.synced ?? false,
+      });
+    }
+
     return Array.from(seen.values());
   }
 

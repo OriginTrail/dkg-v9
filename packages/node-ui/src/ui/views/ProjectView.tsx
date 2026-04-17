@@ -5,7 +5,21 @@ import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipan
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../hooks/useMemoryEntities.js';
+import { useProjectProfile, ProjectProfileContext, useProjectProfileContext } from '../hooks/useProjectProfile.js';
+import { SubGraphBar } from '../components/SubGraphBar.js';
+import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
+import { GenUIEntityPanel } from '../genui/index.js';
 import { useTabsStore } from '../stores/tabs.js';
+import {
+  useVerifiedMemoryAnchors,
+  VIZ_ANCHOR_TYPE,
+  VIZ_AGENT_TYPE,
+  VIZ_PRED_ANCHORED_IN,
+  VIZ_PRED_SIGNED_BY,
+  VIZ_PRED_CONSENSUS,
+  type PublishAnchor,
+} from '../hooks/useVerifiedMemoryAnchors.js';
+import { useSwmAttributions, type AgentPaletteEntry } from '../hooks/useSwmAttributions.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -15,7 +29,7 @@ interface ProjectViewProps {
   contextGraphId: string;
 }
 
-type LayerView = 'overview' | 'wm' | 'swm' | 'vm';
+type LayerView = 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm';
 type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 
 const TRUST_COLORS: Record<TrustLevel, string> = {
@@ -36,6 +50,14 @@ const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
   Product: { icon: '🪙', group: 'Products' },
   ConversationTurn: { icon: '💬', group: 'Conversations' },
   Thing: { icon: '◆', group: 'Other' },
+  Package: { icon: '📦', group: 'Packages' },
+  File: { icon: '📄', group: 'Files' },
+  Class: { icon: '🔷', group: 'Classes' },
+  Interface: { icon: '🔶', group: 'Interfaces' },
+  Function: { icon: 'ƒ', group: 'Functions' },
+  TypeAlias: { icon: '🏷️', group: 'Types' },
+  Enum: { icon: '🔢', group: 'Enums' },
+  ExternalModule: { icon: '🌐', group: 'External Modules' },
 };
 
 function shortType(uri: string): string {
@@ -53,10 +75,152 @@ function shortPred(uri: string): string {
   return raw.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 }
 
-function entityMeta(e: MemoryEntity) {
+function entityMeta(e: MemoryEntity, profile?: { forType: (iri: string) => { icon?: string; label?: string; color?: string } } | null) {
+  // Prefer a profile binding if one is declared for any of the entity's
+  // rdf:type IRIs — this is what makes the same UI render differently for
+  // code / github / decisions / tasks (or a book project) purely from data.
+  if (profile) {
+    for (const t of e.types) {
+      const b = profile.forType(t);
+      const fallbackLabel = shortType(t);
+      const primaryType = b.label ?? fallbackLabel;
+      if (b.icon || b.color || b.label) {
+        return {
+          icon: b.icon ?? (TYPE_LABELS[fallbackLabel]?.icon ?? TYPE_LABELS.Thing.icon),
+          group: b.label ?? (TYPE_LABELS[fallbackLabel]?.group ?? TYPE_LABELS.Thing.group),
+          color: b.color,
+          type: primaryType,
+        };
+      }
+    }
+  }
   const primaryType = e.types[0] ? shortType(e.types[0]) : 'Entity';
   const info = TYPE_LABELS[primaryType] ?? TYPE_LABELS.Thing;
   return { ...info, type: primaryType };
+}
+
+// ─── Shared layer configuration ─────────────────────────────
+// Single source of truth for the visual identity of WM / SWM / VM.
+const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
+  icon: string;
+  color: string;
+  title: string;
+  desc: string;
+  trustLabel: string;
+  trustLevel: TrustLevel;
+}> = {
+  wm: {
+    icon: '◇',
+    color: '#64748b',
+    title: 'Working Memory',
+    desc: 'Private agent scratchpad — ephemeral, fast local storage',
+    trustLabel: 'Working',
+    trustLevel: 'working',
+  },
+  swm: {
+    icon: '◈',
+    color: '#f59e0b',
+    title: 'Shared Working Memory',
+    desc: 'Team workspace — shared proposals, TTL-bounded',
+    trustLabel: 'Shared',
+    trustLevel: 'shared',
+  },
+  vm: {
+    icon: '◉',
+    color: '#22c55e',
+    title: 'Verified Memory',
+    desc: 'Endorsed, published, on-chain knowledge',
+    trustLabel: 'Verified',
+    trustLevel: 'verified',
+  },
+};
+
+// ─── Shared graph styling ────────────────────────────────────
+// Rich palette for known ontologies — applied in any RdfGraph rendered
+// from this view. Nodes without matching types fall back to the layer's
+// default color (WM gray / SWM amber / VM green).
+const CODE = 'http://dkg.io/ontology/code/';
+const CODE_CLASS_COLORS: Record<string, string> = {
+  [CODE + 'Package']: '#a855f7',        // purple
+  [CODE + 'File']: '#3b82f6',           // blue
+  [CODE + 'Class']: '#22c55e',          // green
+  [CODE + 'Interface']: '#06b6d4',      // cyan
+  [CODE + 'Function']: '#f59e0b',       // amber
+  [CODE + 'TypeAlias']: '#ec4899',      // pink
+  [CODE + 'Enum']: '#ef4444',           // red
+  [CODE + 'ExternalModule']: '#64748b', // slate
+  // Synthetic viz nodes — only appear in VM graph. Gold anchor + purple
+  // agent identity map 1:1 to the VM hero banner chips so the legend is
+  // consistent across the UI.
+  [VIZ_ANCHOR_TYPE]: '#f5a524',         // gold — on-chain anchor
+  [VIZ_AGENT_TYPE]: '#c084fc',          // lavender — agent DID
+};
+// Predicate edge colors match the vertex palette so the graph reads as a
+// single coherent visual — structural edges use the color of their target
+// node type (e.g. `contains` lives between Package→File, so it goes purple-
+// blue; `definedIn` points at Files, so it's blue; etc.).
+const CODE_PREDICATE_COLORS: Record<string, string> = {
+  [CODE + 'imports']: '#60a5fa',     // bright sky-blue (File → File/External)
+  [CODE + 'contains']: '#a855f7',    // purple (Package → File)
+  [CODE + 'definedIn']: '#3b82f6',   // blue (Declaration → File)
+  [CODE + 'exports']: '#f59e0b',     // amber (File → Declaration)
+  [CODE + 'extends']: '#22c55e',     // green (Class → Class)
+  [CODE + 'implements']: '#06b6d4',  // cyan (Class → Interface)
+  // VM provenance edges — pointed, bright and monochromatic so they stand
+  // out against the dense committed sub-graph behind them.
+  [VIZ_PRED_ANCHORED_IN]: '#f5a524',   // gold (entity → anchor)
+  [VIZ_PRED_SIGNED_BY]: '#c084fc',     // lavender (anchor → agent)
+  [VIZ_PRED_CONSENSUS]: '#22c55e',     // green (consensus literal edge)
+};
+
+function buildLayerGraphOptions(
+  layer: 'wm' | 'swm' | 'vm',
+  nodeColors?: Record<string, string>,
+) {
+  const { color } = LAYER_CONFIG[layer];
+  // VM ("Verified Memory") is the DKG hero view — we deliberately juice it:
+  // thicker & brighter edges, bigger hub/leaf spread, higher gradient so every
+  // node reads as a "trust gem". WM/SWM stay quieter so VM clearly wins the
+  // eye. This is the visual equivalent of "this knowledge is anchored on-chain".
+  const isVM = layer === 'vm';
+  return {
+    labelMode: 'humanized' as const,
+    renderer: '2d' as const,
+    labels: {
+      predicates: [
+        'http://schema.org/name',
+        'http://www.w3.org/2000/01/rdf-schema#label',
+        'http://purl.org/dc/terms/title',
+      ],
+      minZoomForLabels: isVM ? 0.2 : 0.3,
+    },
+    style: {
+      classColors: CODE_CLASS_COLORS,
+      predicateColors: CODE_PREDICATE_COLORS,
+      // Per-URI node tints (SWM attribution uses this to paint root KAs by
+      // their proposing agent). Omitted for layers that don't use it, so
+      // the style engine keeps falling back to classColors.
+      ...(nodeColors && Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
+      defaultNodeColor: color,
+      defaultEdgeColor: isVM ? '#4ade80' : '#64748b', // VM: vivid green edges
+      edgeWidth: isVM ? 1.8 : 1.2,
+      // Keep VM very slightly bolder than WM/SWM for hierarchy, but well
+      // below the previous 16/17 — those drowned dense layouts in text.
+      fontSize: isVM ? 12 : 11,
+      gradient: true,
+      gradientIntensity: isVM ? 0.65 : 0.4,
+    },
+    hexagon: {
+      baseSize: isVM ? 13 : 11,
+      minSize: isVM ? 8 : 7,
+      // VM max is deliberately larger than WM/SWM so anchor nodes, which
+      // accumulate one edge per KA in the batch, read as clear hubs. A
+      // typical anchor ties to 8–20 entities and pops out visually.
+      maxSize: isVM ? 42 : 28,
+      scaleWithDegree: true,
+    },
+    focus: { maxNodes: 3000, hops: 999 },
+  };
 }
 
 function getDescription(e: MemoryEntity): string | null {
@@ -128,6 +292,13 @@ function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh 
         onClick={() => onSwitch('overview')}
       >
         <span className="v10-layer-switch-icon">◎</span> Overview
+      </button>
+      <button
+        className={`v10-layer-switch-btn ${active === 'graph-overview' ? 'active' : ''}`}
+        data-layer="graph-overview"
+        onClick={() => onSwitch('graph-overview')}
+      >
+        <span className="v10-layer-switch-icon">⌬</span> Graph Overview
       </button>
       <button
         className={`v10-layer-switch-btn ${active === 'wm' ? 'active' : ''}`}
@@ -284,78 +455,193 @@ function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }: { con
   );
 }
 
-// ─── Memory Strip Graph (inline graph for expanded layer) ────
+// ─── Layer graph panel (used by LayerContent in both inline and full views) ──
 
-function MemoryStripGraph({ layerKey, memory }: {
-  layerKey: 'wm' | 'swm' | 'vm';
-  memory: ReturnType<typeof useMemoryEntities>;
+function LayerGraphPanel({
+  layer,
+  triples,
+  onNodeClick,
+  contextGraphId,
+}: {
+  layer: 'wm' | 'swm' | 'vm';
+  triples: Triple[];
+  onNodeClick?: (node: any) => void;
+  contextGraphId?: string;
 }) {
-  const targetLayer: TrustLevel = layerKey === 'vm' ? 'verified' : layerKey === 'swm' ? 'shared' : 'working';
-  const color = layerKey === 'vm' ? '#22c55e' : layerKey === 'swm' ? '#f59e0b' : '#64748b';
+  const { title } = LAYER_CONFIG[layer];
 
-  const triples = useMemo(() => {
+  // All URIs that already appear as subject or object in the base VM triples.
+  // We pass this into the anchor hook so synthetic anchor→entity edges only
+  // get emitted for entities that actually render, avoiding dangling anchors.
+  const visibleEntityUris = useMemo(() => {
+    if (layer !== 'vm') return undefined;
+    const s = new Set<string>();
+    for (const t of triples) {
+      s.add(t.subject);
+      // Literals (`"..."`) are never anchor roots; skip them.
+      if (!t.object.startsWith('"')) s.add(t.object);
+    }
+    return s;
+  }, [triples, layer]);
+
+  // VM-only provenance decorations — synthetic anchor + agent identity
+  // triples injected around every published KA root. Keeps the data on-disk
+  // untouched; the "halo" of trust lives purely in the viz.
+  const { anchors, decorationTriples } = useVerifiedMemoryAnchors(
+    layer === 'vm' && contextGraphId ? contextGraphId : undefined,
+    visibleEntityUris,
+  );
+
+  // SWM-only agent attribution — colours each root KA by the agent that
+  // promoted it, so the graph reads as "who proposed what". Also surfaces
+  // conflict nodes (multi-agent disagreement) and an agent palette for the
+  // legend. No-op on WM / VM.
+  const swmAttr = useSwmAttributions(layer === 'swm' && contextGraphId ? contextGraphId : undefined);
+
+  const uniqueTriples = useMemo(() => {
     const seen = new Set<string>();
-    return memory.allTriples
-      .filter(t => t.layer === targetLayer)
-      .filter(t => {
-        const key = `${t.subject}|${t.predicate}|${t.object}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .map(({ subject, predicate, object }) => ({ subject, predicate, object }));
-  }, [memory.allTriples, targetLayer]);
+    const out: Triple[] = [];
+    const push = (t: Triple) => {
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ subject: t.subject, predicate: t.predicate, object: t.object } as Triple);
+    };
+    for (const t of triples) push(t);
+    // Decoration triples are only produced for VM; for other layers the
+    // hook returns an empty array so this loop is a no-op.
+    for (const t of decorationTriples) push(t);
+    return out;
+  }, [triples, decorationTriples]);
 
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: {
-      predicates: ['http://schema.org/name', 'http://www.w3.org/2000/01/rdf-schema#label', 'http://purl.org/dc/terms/title'],
-      minZoomForLabels: 0.3,
-    },
-    style: {
-      defaultNodeColor: color,
-      defaultEdgeColor: '#334155',
-      edgeWidth: 0.7,
-      fontSize: 16,
-    },
-    hexagon: { baseSize: 7, minSize: 5, maxSize: 10, scaleWithDegree: true },
-    focus: { maxNodes: 2000, hops: 999 },
-  }), [color]);
+  // Only SWM layer uses per-URI node tints — for the rest, classColors rules
+  // so code graphs stay legible (Package purple / File blue / etc).
+  const graphOptions = useMemo(
+    () => buildLayerGraphOptions(layer, layer === 'swm' ? swmAttr.nodeColors : undefined),
+    [layer, swmAttr.nodeColors],
+  );
 
-  if (triples.length === 0) {
+  if (uniqueTriples.length === 0) {
     return (
-      <div className="v10-graph-view" style={{ height: 300 }}>
-        <span className="v10-graph-placeholder">No triples in this layer</span>
+      <div className="v10-graph-view v10-graph-view-fill">
+        <span className="v10-graph-placeholder">No triples in {title}</span>
       </div>
     );
   }
 
   return (
-    <div className="v10-graph-view" style={{ height: 300, position: 'relative' }}>
+    <div className="v10-graph-view v10-graph-view-fill" style={{ position: 'relative' }}>
       <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
         <RdfGraph
-          data={triples}
+          data={uniqueTriples}
           format="triples"
           options={graphOptions}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+          onNodeClick={onNodeClick}
           initialFit
         />
       </Suspense>
+      {layer === 'vm' && anchors.length > 0 && (
+        <VerifiedGraphLegend anchors={anchors} />
+      )}
+      {layer === 'swm' && swmAttr.palette.length > 0 && (
+        <SwmAttributionLegend palette={swmAttr.palette} conflicts={swmAttr.conflicts.length} />
+      )}
+    </div>
+  );
+}
+
+// ─── SWM attribution legend (floating overlay) ────────────
+// Pinned to the top-right of the Shared Working Memory graph, this swatch
+// maps each palette slot to the agent who promoted the corresponding KA
+// roots. Reads as "who said what" at a glance. When two or more agents
+// touch the same entity, a separate amber "review" badge appears listing
+// the conflict count — the mechanism works in the single-agent devnet
+// (shows 0) and lights up organically once a second agent joins.
+function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPaletteEntry[]; conflicts: number }) {
+  return (
+    <div className="v10-swm-legend" aria-label="SWM attribution legend">
+      <div className="v10-swm-legend-row v10-swm-legend-head">
+        <span>SWM attribution</span>
+        <span className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</span>
+      </div>
+      {palette.slice(0, 8).map(p => (
+        <div key={p.agent} className="v10-swm-legend-row" title={p.agent}>
+          <span className="v10-swm-legend-swatch" style={{ background: p.color }} />
+          <span className="v10-swm-legend-label">{p.label}</span>
+          <span className="v10-swm-legend-metric">{p.entityCount}</span>
+        </div>
+      ))}
+      {conflicts > 0 && (
+        <div className="v10-swm-legend-row v10-swm-legend-conflict">
+          <span className="v10-swm-legend-swatch" style={{ background: '#f59e0b' }}>!</span>
+          <span className="v10-swm-legend-label">In review</span>
+          <span className="v10-swm-legend-metric">{conflicts}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Verified Memory graph legend (floating overlay) ─────────
+// Lives in the top-right of the VM graph view. Explains the two new glyphs
+// (gold anchor, lavender agent) introduced by `useVerifiedMemoryAnchors`
+// so viewers can decode the graph at a glance. Also doubles as an anchor
+// ledger: total anchors + distinct signers + latest publish time. This is
+// where the "DKG secret sauce" gets called out explicitly.
+function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
+  const signerCount = useMemo(() => {
+    const s = new Set<string>();
+    for (const a of anchors) for (const g of a.agents) s.add(g);
+    return s.size;
+  }, [anchors]);
+  const latest = anchors[0]?.publishedAt;
+  const latestLabel = (() => {
+    if (!latest) return null;
+    try {
+      return new Date(latest).toLocaleString(undefined, {
+        month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      });
+    } catch { return null; }
+  })();
+
+  return (
+    <div className="v10-vm-legend" aria-label="Verified Memory legend">
+      <div className="v10-vm-legend-row v10-vm-legend-head">
+        <span>VM provenance layer</span>
+        <span className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</span>
+      </div>
+      <div className="v10-vm-legend-row">
+        <span className="v10-vm-legend-swatch" style={{ background: '#f5a524' }}>◉</span>
+        <span className="v10-vm-legend-label">On-chain anchor</span>
+      </div>
+      <div className="v10-vm-legend-row">
+        <span className="v10-vm-legend-swatch" style={{ background: '#c084fc' }}>◈</span>
+        <span className="v10-vm-legend-label">Agent identity ({signerCount})</span>
+      </div>
+      <div className="v10-vm-legend-row">
+        <span className="v10-vm-legend-swatch" style={{ background: '#4ade80' }}>—</span>
+        <span className="v10-vm-legend-label">Signed / anchored edge</span>
+      </div>
+      {latestLabel && (
+        <div className="v10-vm-legend-foot">Latest: {latestLabel}</div>
+      )}
     </div>
   );
 }
 
 // ─── Memory Strip (expandable layer rows) ────────────────────
 
-function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: {
+function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId, onNodeClick }: {
   memory: ReturnType<typeof useMemoryEntities>;
   onSwitchLayer: (layer: LayerView) => void;
   onSelectEntity: (uri: string) => void;
   contextGraphId: string;
+  onNodeClick?: (node: any) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [expandTab, setExpandTab] = useState<Record<string, string>>({ wm: 'items', swm: 'items', vm: 'items' });
+  const profile = useProjectProfileContext();
 
   const layerEntities = useMemo(() => {
     const wm: MemoryEntity[] = [];
@@ -393,7 +679,7 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: 
     viewLayer: LayerView;
   }> = [
     { key: 'wm', label: 'Working Memory', color: '#64748b', icon: '◇', entities: layerEntities.wm, promoteLabel: 'Promote All → Shared', viewLayer: 'wm' },
-    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, promoteLabel: 'Publish All → VM', viewLayer: 'swm' },
+    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, promoteLabel: 'Publish to Verified Memory', viewLayer: 'swm' },
     { key: 'vm', label: 'Verified Memory', color: '#22c55e', icon: '◉', entities: layerEntities.vm, promoteLabel: null, viewLayer: 'vm' },
   ];
 
@@ -418,7 +704,7 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: 
                   <span style={{ fontSize: 11, color: 'var(--text-ghost)', fontStyle: 'italic' }}>No assets yet</span>
                 )}
                 {layer.entities.slice(0, 6).map(e => {
-                  const { icon } = entityMeta(e);
+                  const { icon } = entityMeta(e, profile);
                   return (
                     <div key={e.uri} className="v10-layer-chip" style={{ borderColor: `${layer.color}40` }}>
                       <span className="v10-chip-dot" style={{ background: layer.color }} />
@@ -433,85 +719,81 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: 
               </div>
             </div>
             <div className={`v10-layer-expand-content ${isExpanded ? 'open' : ''}`}>
-              <div className="v10-split-pane" style={{ minHeight: 0 }}>
-                {/* Left: Canvas widgets */}
-                <CanvasPanel
-                  layer={layer.key as 'wm' | 'swm' | 'vm'}
+              {isExpanded && (
+                <MemoryStripExpanded
+                  layerKey={layer.key as 'wm' | 'swm' | 'vm'}
                   entities={layer.entities}
                   tripleCount={layerTripleCounts[layer.key as 'wm' | 'swm' | 'vm']}
                   contextGraphId={contextGraphId}
-                  onComplete={memory.refresh}
+                  memory={memory}
+                  activeTab={activeTab as LayerContentTab}
+                  onTabChange={tab =>
+                    setExpandTab(prev => ({ ...prev, [layer.key]: tab }))
+                  }
+                  onSelectEntity={onSelectEntity}
+                  onNodeClick={onNodeClick}
+                  onSwitchLayer={() => onSwitchLayer(layer.viewLayer)}
                 />
-
-                {/* Right: Content tabs */}
-                <div className="v10-split-content">
-                  <div className="v10-layer-expand-tabs">
-                    <button
-                      className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
-                      onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'items' })); }}
-                    >{layer.key === 'vm' ? 'Knowledge Assets' : 'Entities'}</button>
-                    {layer.key !== 'vm' && (
-                      <button
-                        className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
-                        onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'assertions' })); }}
-                      >Assertions</button>
-                    )}
-                    <button
-                      className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
-                      onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'graph' })); }}
-                    >Graph</button>
-                    <button
-                      className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
-                      onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'docs' })); }}
-                    >Documents</button>
-                  </div>
-                  {activeTab === 'assertions' && layer.key !== 'vm' && (
-                    <AssertionsList contextGraphId={contextGraphId} layer={layer.key as 'wm' | 'swm'} onComplete={memory.refresh} />
-                  )}
-                  {activeTab === 'items' && (
-                    <>
-                      <div className="v10-layer-expand-items">
-                        {layer.entities.slice(0, 10).map(e => {
-                          const { icon, type } = entityMeta(e);
-                          return (
-                            <div key={e.uri} className="v10-item-row" style={{ cursor: 'pointer' }} onClick={(ev) => { ev.stopPropagation(); onSelectEntity(e.uri); }}>
-                              <span className="v10-item-icon">{icon}</span>
-                              <div className="v10-item-info">
-                                <div className="v10-item-name">{e.label}</div>
-                                <div className="v10-item-meta-row">
-                                  <span className="v10-item-type">{type}</span>
-                                  <span className="v10-item-count">· {e.connections.length + e.properties.size} triples</span>
-                                </div>
-                              </div>
-                              <span className={`v10-trust-badge ${layer.key}`}>
-                                {layer.icon} {layer.key === 'vm' ? 'Verified' : layer.key === 'swm' ? 'Shared' : 'Working'}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div className="v10-layer-expand-footer">
-                        <button className="v10-layer-expand-footer-btn" onClick={e => { e.stopPropagation(); onSwitchLayer(layer.viewLayer); }}>
-                          View full layer →
-                        </button>
-                      </div>
-                    </>
-                  )}
-                  {activeTab === 'graph' && (
-                    <MemoryStripGraph layerKey={layer.key as 'wm' | 'swm' | 'vm'} memory={memory} />
-                  )}
-                  {activeTab === 'docs' && (
-                    <div style={{ maxHeight: 300, overflow: 'auto' }}>
-                      <DocumentsList entities={layer.entities} contextGraphId={contextGraphId} />
-                    </div>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </React.Fragment>
         );
       })}
     </div>
+  );
+}
+
+// Thin wrapper that computes the layer's triples once and renders LayerContent with a footer.
+function MemoryStripExpanded({
+  layerKey,
+  entities,
+  tripleCount,
+  contextGraphId,
+  memory,
+  activeTab,
+  onTabChange,
+  onSelectEntity,
+  onNodeClick,
+  onSwitchLayer,
+}: {
+  layerKey: 'wm' | 'swm' | 'vm';
+  entities: MemoryEntity[];
+  tripleCount: number;
+  contextGraphId: string;
+  memory: ReturnType<typeof useMemoryEntities>;
+  activeTab: LayerContentTab;
+  onTabChange: (tab: LayerContentTab) => void;
+  onSelectEntity: (uri: string) => void;
+  onNodeClick?: (node: any) => void;
+  onSwitchLayer: () => void;
+}) {
+  const layerTriples = useLayerTriples(memory, layerKey);
+  return (
+    <LayerContent
+      layer={layerKey}
+      entities={entities}
+      tripleCount={tripleCount}
+      layerTriples={layerTriples}
+      contextGraphId={contextGraphId}
+      memory={memory}
+      activeTab={activeTab}
+      onTabChange={onTabChange}
+      onSelectEntity={onSelectEntity}
+      onNodeClick={onNodeClick}
+      footer={
+        <div className="v10-layer-expand-footer">
+          <button
+            className="v10-layer-expand-footer-btn"
+            onClick={e => {
+              e.stopPropagation();
+              onSwitchLayer();
+            }}
+          >
+            View full layer →
+          </button>
+        </div>
+      }
+    />
   );
 }
 
@@ -548,16 +830,17 @@ function GenWidget({ title, agent, footnote, dismissed, onDismiss, children }: {
 }
 
 function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) {
+  const profile = useProjectProfileContext();
   const breakdown = useMemo(() => {
     const counts = new Map<string, { icon: string; count: number }>();
     for (const e of entities) {
-      const { icon, type } = entityMeta(e);
+      const { icon, type } = entityMeta(e, profile);
       const existing = counts.get(type);
       if (existing) existing.count++;
       else counts.set(type, { icon, count: 1 });
     }
     return [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
-  }, [entities]);
+  }, [entities, profile]);
 
   if (breakdown.length === 0) return null;
 
@@ -677,42 +960,307 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
       {error && <div style={{ fontSize: 11, color: 'var(--accent-red)', marginBottom: 8 }}>✕ {error}</div>}
       <div className="v10-decision-actions">
         <button
-          className="v10-decision-btn approve"
-          style={{ borderColor: `${color}50`, color, background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+          className={isWm ? 'v10-decision-btn approve' : 'v10-decision-btn primary-cta publish-vm'}
+          style={isWm
+            ? { borderColor: `${color}50`, color, background: `${color}15`, opacity: busy ? 0.5 : 1 }
+            : { opacity: busy ? 0.5 : 1 }}
           disabled={busy}
           onClick={handleAction}
         >
-          {busy ? '...' : `✓ ${isWm ? 'Promote All → Shared' : 'Publish All → VM'}`}
+          {busy ? '...' : (isWm ? '✓ Promote All → Shared' : '◉ Publish to Verified Memory')}
         </button>
       </div>
     </GenWidget>
   );
 }
 
-function CanvasPanel({ layer, entities, tripleCount, contextGraphId, onComplete }: {
+// ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
+
+function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   tripleCount: number;
   contextGraphId: string;
   onComplete: () => void;
 }) {
-  return (
-    <div className="v10-split-canvas">
-      <LayerStatsWidget entities={entities} triples={tripleCount} layer={layer} />
-      <TypeBreakdownWidget entities={entities} />
-      {(layer === 'wm' || layer === 'swm') && (
-        <LayerActionsWidget layer={layer} count={entities.length} contextGraphId={contextGraphId} onComplete={onComplete} />
-      )}
-      {entities.length === 0 && (
+  if (entities.length === 0) {
+    return (
+      <div className="v10-layer-widgets-strip empty">
         <div className="v10-canvas-empty">
           <div className="v10-canvas-empty-icon">⬡</div>
           <div className="v10-canvas-empty-text">
             Import data or chat with agents to populate this layer.
           </div>
         </div>
+      </div>
+    );
+  }
+  return (
+    <div className="v10-layer-widgets-strip">
+      <div className="v10-layer-widgets-strip-stats">
+        <LayerStatsWidget entities={entities} triples={tripleCount} layer={layer} />
+        <TypeBreakdownWidget entities={entities} />
+      </div>
+      {(layer === 'wm' || layer === 'swm') && (
+        <div className="v10-layer-widgets-strip-action">
+          <LayerActionsWidget layer={layer} count={entities.length} contextGraphId={contextGraphId} onComplete={onComplete} />
+        </div>
       )}
     </div>
   );
+}
+
+// ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
+
+function EntityList({ entities, layerKey, layerIcon, onSelectEntity }: {
+  entities: MemoryEntity[];
+  layerKey: 'wm' | 'swm' | 'vm';
+  layerIcon: string;
+  onSelectEntity: (uri: string) => void;
+}) {
+  const profile = useProjectProfileContext();
+  const sorted = useMemo(() => {
+    const copy = [...entities];
+    copy.sort((a, b) => {
+      const aCount = a.connections.length + a.properties.size;
+      const bCount = b.connections.length + b.properties.size;
+      return bCount - aCount;
+    });
+    return copy;
+  }, [entities]);
+
+  const trustLabel = layerKey === 'vm' ? 'Verified' : layerKey === 'swm' ? 'Shared' : 'Working';
+
+  if (entities.length === 0) {
+    return (
+      <div className="v10-entity-list empty">
+        <div className="v10-entity-list-empty">No entities in this layer yet.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="v10-entity-list">
+      <div className="v10-entity-list-header">
+        <span className="v10-entity-list-count">{sorted.length} entit{sorted.length === 1 ? 'y' : 'ies'}</span>
+        <span className="v10-entity-list-hint">sorted by triples · click to open</span>
+      </div>
+      {sorted.map(e => {
+        const { icon, type } = entityMeta(e, profile);
+        const tripleCount = e.connections.length + e.properties.size;
+        return (
+          <div
+            key={e.uri}
+            className="v10-entity-card"
+            onClick={(ev) => { ev.stopPropagation(); onSelectEntity(e.uri); }}
+          >
+            <span className="v10-entity-card-icon">{icon}</span>
+            <div className="v10-entity-card-main">
+              <div className="v10-entity-card-title">{e.label}</div>
+              <div className="v10-entity-card-meta">
+                {type && type !== 'Entity' && (
+                  <span className="v10-entity-type-pill">{icon} {type}</span>
+                )}
+                <span className="v10-entity-card-triples">{tripleCount} triples</span>
+              </div>
+            </div>
+            <span className={`v10-trust-badge ${layerKey}`}>
+              {layerIcon} {trustLabel}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Shared LayerContent (tabs + bodies, used by both inline strip and full page) ──
+
+type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
+
+function LayerContent({
+  layer,
+  entities,
+  tripleCount,
+  layerTriples,
+  contextGraphId,
+  memory,
+  activeTab,
+  onTabChange,
+  onSelectEntity,
+  onNodeClick,
+  footer,
+}: {
+  layer: 'wm' | 'swm' | 'vm';
+  entities: MemoryEntity[];
+  tripleCount: number;
+  layerTriples: Triple[];
+  contextGraphId: string;
+  memory: ReturnType<typeof useMemoryEntities>;
+  activeTab: LayerContentTab;
+  onTabChange: (tab: LayerContentTab) => void;
+  onSelectEntity: (uri: string) => void;
+  onNodeClick?: (node: any) => void;
+  footer?: React.ReactNode;
+}) {
+  const config = LAYER_CONFIG[layer];
+  const itemsLabel = layer === 'vm' ? 'Knowledge Assets' : 'Entities';
+
+  const handleTab = (tab: LayerContentTab) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onTabChange(tab);
+  };
+
+  return (
+    <>
+      <div className="v10-layer-expand-tabs">
+        <button
+          className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
+          onClick={handleTab('items')}
+        >{itemsLabel}</button>
+        {layer !== 'vm' && (
+          <button
+            className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
+            onClick={handleTab('assertions')}
+          >Assertions</button>
+        )}
+        <button
+          className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
+          onClick={handleTab('graph')}
+        >Graph</button>
+        <button
+          className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
+          onClick={handleTab('docs')}
+        >Documents</button>
+      </div>
+
+      {activeTab === 'items' && (
+        <div className="v10-layer-expand-body entities-tab">
+          {layer === 'vm' && (
+            <VerifiedMemoryHeroBanner
+              entities={entities}
+              tripleCount={tripleCount}
+              contextGraphId={contextGraphId}
+            />
+          )}
+          <LayerWidgetStrip
+            layer={layer}
+            entities={entities}
+            tripleCount={tripleCount}
+            contextGraphId={contextGraphId}
+            onComplete={memory.refresh}
+          />
+          <EntityList
+            entities={entities}
+            layerKey={layer}
+            layerIcon={config.icon}
+            onSelectEntity={onSelectEntity}
+          />
+          {footer}
+        </div>
+      )}
+
+      {activeTab === 'assertions' && layer !== 'vm' && (
+        <div className="v10-layer-expand-body full-width">
+          <AssertionsList contextGraphId={contextGraphId} layer={layer} onComplete={memory.refresh} />
+        </div>
+      )}
+
+      {activeTab === 'graph' && (
+        <div className="v10-layer-expand-body full-width">
+          <LayerGraphPanel
+            layer={layer}
+            triples={layerTriples}
+            onNodeClick={onNodeClick}
+            contextGraphId={contextGraphId}
+          />
+        </div>
+      )}
+
+      {activeTab === 'docs' && (
+        <div className="v10-layer-expand-body full-width">
+          <DocumentsList entities={entities} contextGraphId={contextGraphId} />
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Verified Memory Hero Banner ──────────────────────────────
+// Sits at the top of the VM tab's "Knowledge Assets" view. Pulls together
+// the DKG "secret sauce" into a compact visual: anchoring, consensus,
+// agent identity — the verifiability elements that justify the VM's cost.
+function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId }: {
+  entities: MemoryEntity[];
+  tripleCount: number;
+  contextGraphId: string;
+}) {
+  const totalAssets = entities.length;
+  const typeSet = new Set<string>();
+  for (const e of entities) for (const t of e.types) typeSet.add(t);
+  const typeCount = typeSet.size;
+
+  return (
+    <div className="v10-vm-hero">
+      <div className="v10-vm-hero-title">
+        <span className="v10-vm-hero-badge">◉ Verified</span>
+        <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
+      </div>
+      <div className="v10-vm-hero-stats">
+        <div className="v10-vm-hero-stat">
+          <div className="v10-vm-hero-stat-val">{totalAssets}</div>
+          <div className="v10-vm-hero-stat-lbl">Knowledge Assets</div>
+        </div>
+        <div className="v10-vm-hero-stat">
+          <div className="v10-vm-hero-stat-val">{tripleCount.toLocaleString()}</div>
+          <div className="v10-vm-hero-stat-lbl">Verified Triples</div>
+        </div>
+        <div className="v10-vm-hero-stat">
+          <div className="v10-vm-hero-stat-val">{typeCount}</div>
+          <div className="v10-vm-hero-stat-lbl">Entity Types</div>
+        </div>
+        <div className="v10-vm-hero-stat">
+          <div className="v10-vm-hero-stat-val" title={contextGraphId}>{contextGraphId.slice(0, 10)}…</div>
+          <div className="v10-vm-hero-stat-lbl">Context Graph</div>
+        </div>
+      </div>
+      <div className="v10-vm-hero-strip">
+        <div className="v10-vm-hero-chip" title="Multi-agent endorsement">
+          <span className="v10-vm-hero-chip-dot" style={{ background: '#22c55e' }} />
+          Consensus
+        </div>
+        <div className="v10-vm-hero-chip" title="Published to the DKG blockchain anchor">
+          <span className="v10-vm-hero-chip-dot" style={{ background: '#3b82f6' }} />
+          On-chain
+        </div>
+        <div className="v10-vm-hero-chip" title="Each contribution bound to a DID">
+          <span className="v10-vm-hero-chip-dot" style={{ background: '#a855f7' }} />
+          Agent Identity
+        </div>
+        <div className="v10-vm-hero-chip" title="Tamper-evident via content hashing">
+          <span className="v10-vm-hero-chip-dot" style={{ background: '#f59e0b' }} />
+          Content Hash
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Small helper: compute unique triples for a given layer slice of memory.
+function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
+  const targetLayer = LAYER_CONFIG[layer].trustLevel;
+  return useMemo(() => {
+    const seen = new Set<string>();
+    const out: Triple[] = [];
+    for (const t of memory.allTriples) {
+      if (t.layer !== targetLayer) continue;
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+    }
+    return out;
+  }, [memory.allTriples, targetLayer]);
 }
 
 // ─── Assertions List (WM/SWM named graphs) ──────────────────
@@ -786,8 +1334,8 @@ function AssertionsList({ contextGraphId, layer, onComplete }: {
     return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>No assertions in this layer</div>;
   }
 
-  const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish → VM';
-  const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish All → VM';
+  const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish to VM';
+  const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish all to Verified Memory';
 
   return (
     <div style={{ flex: 1, overflow: 'auto' }}>
@@ -829,155 +1377,45 @@ function AssertionsList({ contextGraphId, layer, onComplete }: {
 
 // ─── Full Layer Detail View (WM / SWM / VM) ─────────────────
 
-function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntity, contextGraphId }: {
+function LayerDetailView({ layer, memory, onNodeClick, onSelectEntity, contextGraphId }: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
-  nodeColors: Record<string, string>;
   onNodeClick: (node: any) => void;
   onSelectEntity: (uri: string) => void;
   contextGraphId: string;
 }) {
   const [contentTab, setContentTab] = useState<LayerContentTab>('items');
+  const config = LAYER_CONFIG[layer];
 
-  const config = {
-    wm: { icon: '◇', title: 'Working Memory', desc: 'Private agent scratchpad — ephemeral, fast local storage', color: '#64748b', actionLabel: 'Promote All → Shared', actionClass: 'promote' },
-    swm: { icon: '◈', title: 'Shared Working Memory', desc: 'Team workspace — shared proposals, TTL-bounded', color: '#f59e0b', actionLabel: 'Publish All → VM', actionClass: 'primary' },
-    vm: { icon: '◉', title: 'Verified Memory', desc: 'Endorsed, published, on-chain knowledge', color: '#22c55e', actionLabel: null, actionClass: '' },
-  }[layer];
-
-  const entities = useMemo(() => {
-    return memory.entityList.filter(e => {
-      if (layer === 'vm') return e.trustLevel === 'verified';
-      if (layer === 'swm') return e.trustLevel === 'shared';
-      return e.trustLevel === 'working';
-    });
-  }, [memory.entityList, layer]);
-
-  const layerTriples = useMemo(() => {
-    const targetLayer: TrustLevel = layer === 'vm' ? 'verified' : layer === 'swm' ? 'shared' : 'working';
-    const seen = new Set<string>();
-    return memory.allTriples
-      .filter(t => t.layer === targetLayer)
-      .filter(t => {
-        const key = `${t.subject}|${t.predicate}|${t.object}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .map(({ subject, predicate, object }) => ({ subject, predicate, object }));
-  }, [memory.allTriples, layer]);
-
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: {
-      predicates: ['http://schema.org/name', 'http://www.w3.org/2000/01/rdf-schema#label', 'http://purl.org/dc/terms/title'],
-      minZoomForLabels: 0.3,
-    },
-    style: {
-      nodeColors,
-      defaultNodeColor: config.color,
-      defaultEdgeColor: '#334155',
-      edgeWidth: 0.7,
-      fontSize: 16,
-    },
-    hexagon: { baseSize: 7, minSize: 5, maxSize: 10, scaleWithDegree: true },
-    focus: { maxNodes: 3000, hops: 999 },
-  }), [nodeColors, config.color]);
+  const entities = useMemo(
+    () => memory.entityList.filter(e => e.trustLevel === config.trustLevel),
+    [memory.entityList, config.trustLevel],
+  );
+  const layerTriples = useLayerTriples(memory, layer);
 
   return (
     <div className="v10-layer-detail">
-      <div className="v10-split-pane">
-        {/* Left: Generative Canvas */}
-        <CanvasPanel layer={layer} entities={entities} tripleCount={layerTriples.length} contextGraphId={contextGraphId} onComplete={memory.refresh} />
-
-        {/* Right: Content Tabs */}
-        <div className="v10-split-content">
-          <div className="v10-content-tabs">
-            <button className={`v10-content-tab ${contentTab === 'items' ? 'active' : ''}`} onClick={() => setContentTab('items')}>
-              <span className="v10-content-tab-icon">◈</span> {layer === 'vm' ? 'Knowledge Assets' : 'Entities'}
-            </button>
-            {layer !== 'vm' && (
-              <button className={`v10-content-tab ${contentTab === 'assertions' ? 'active' : ''}`} onClick={() => setContentTab('assertions')}>
-                <span className="v10-content-tab-icon">▤</span> Assertions
-              </button>
-            )}
-            <button className={`v10-content-tab ${contentTab === 'graph' ? 'active' : ''}`} onClick={() => setContentTab('graph')}>
-              <span className="v10-content-tab-icon">⬡</span> Graph
-            </button>
-            <button className={`v10-content-tab ${contentTab === 'docs' ? 'active' : ''}`} onClick={() => setContentTab('docs')}>
-              <span className="v10-content-tab-icon">📄</span> Documents
-            </button>
-          </div>
-
-          {contentTab === 'items' && (
-            <>
-              <div className="v10-layer-detail-header">
-                <span className="v10-layer-detail-icon" style={{ color: config.color }}>{config.icon}</span>
-                <div>
-                  <div className="v10-layer-detail-title">{config.title}</div>
-                  <div className="v10-layer-detail-desc">{config.desc}</div>
-                </div>
-                <div className="v10-layer-detail-actions" />
-              </div>
-              <div className="v10-layer-detail-content">
-                <div className="v10-items-list">
-                  {entities.map(e => {
-                    const { icon, type } = entityMeta(e);
-                    return (
-                      <div key={e.uri} className="v10-item-row" style={{ cursor: 'pointer' }} onClick={() => onSelectEntity(e.uri)}>
-                        <span className="v10-item-icon">{icon}</span>
-                        <div className="v10-item-info">
-                          <div className="v10-item-name">{e.label}</div>
-                          <div className="v10-item-ual">{e.uri}</div>
-                          <div className="v10-item-meta-row">
-                            <span className="v10-item-type">{type}</span>
-                            <span className="v10-item-count">· {e.connections.length + e.properties.size} triples</span>
-                          </div>
-                        </div>
-                        <span className={`v10-trust-badge ${layer}`}>
-                          {config.icon} {layer === 'vm' ? 'Verified' : layer === 'swm' ? 'Shared' : 'Working'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  {entities.length === 0 && (
-                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>
-                      No entities in {config.title}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
-          {contentTab === 'assertions' && layer !== 'vm' && (
-            <AssertionsList contextGraphId={contextGraphId} layer={layer} onComplete={memory.refresh} />
-          )}
-
-          {contentTab === 'graph' && (
-            <div className="v10-graph-view" style={{ flex: 1, position: 'relative' }}>
-              {layerTriples.length > 0 ? (
-                <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
-                  <RdfGraph
-                    data={layerTriples}
-                    format="triples"
-                    options={graphOptions}
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-                    onNodeClick={onNodeClick}
-                    initialFit
-                  />
-                </Suspense>
-              ) : (
-                <span className="v10-graph-placeholder">No data to graph in {config.title}</span>
-              )}
-            </div>
-          )}
-
-          {contentTab === 'docs' && (
-            <DocumentsList entities={entities} contextGraphId={contextGraphId} />
-          )}
+      <div className="v10-layer-detail-header">
+        <span className="v10-layer-detail-icon" style={{ color: config.color }}>{config.icon}</span>
+        <div>
+          <div className="v10-layer-detail-title">{config.title}</div>
+          <div className="v10-layer-detail-desc">{config.desc}</div>
         </div>
+        <div className="v10-layer-detail-actions" />
+      </div>
+      <div className="v10-layer-detail-body">
+        <LayerContent
+          layer={layer}
+          entities={entities}
+          tripleCount={layerTriples.length}
+          layerTriples={layerTriples}
+          contextGraphId={contextGraphId}
+          memory={memory}
+          activeTab={contentTab}
+          onTabChange={setContentTab}
+          onSelectEntity={onSelectEntity}
+          onNodeClick={onNodeClick}
+        />
       </div>
     </div>
   );
@@ -1074,7 +1512,8 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
   onClose: () => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
-  const { icon, type } = entityMeta(entity);
+  const profile = useProjectProfileContext();
+  const { icon, type } = entityMeta(entity, profile);
   const desc = getDescription(entity);
   const layerBadge = entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm';
   const layerLabel = entity.trustLevel === 'verified' ? 'Verified Memory' : entity.trustLevel === 'shared' ? 'Shared Working Memory' : 'Working Memory';
@@ -1112,7 +1551,7 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
       defaultNodeColor: TRUST_COLORS[entity.trustLevel],
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
-      fontSize: 16,
+      fontSize: 11,
     },
     hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
     focus: { maxNodes: 500, hops: 999 },
@@ -1145,6 +1584,22 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
 
           {pane === 'content' && (
             <>
+              {/* Profile-driven Generative UI — streamed from the DKG daemon's
+                  LLM-backed /api/genui/render for any rdf:type that declares a
+                  detailHint. Falls back to the generic detail below if the
+                  profile has no binding for this type. */}
+              {(() => {
+                const binding = entity.types.map(t => profile?.forType(t)).find(b => b?.detailHint);
+                if (!binding || !profile?.contextGraphId) return null;
+                return (
+                  <div className="v10-ka-section">
+                    <GenUIEntityPanel
+                      contextGraphId={profile.contextGraphId}
+                      entityUri={entity.uri}
+                    />
+                  </div>
+                );
+              })()}
               {desc && (
                 <div className="v10-ka-section">
                   <div className="v10-ka-desc"><p>{desc}</p></div>
@@ -1298,6 +1753,233 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
   );
 }
 
+// ─── Sub-graph Overview Grid ─────────────────────────────────
+// A bird's-eye "wall of graphs" — one miniature RdfGraph per registered
+// sub-graph, displayed side-by-side. Each card inherits its color/icon/label
+// from the project profile (SubGraphBinding), so the same component adapts
+// to a code project, a research project, a book project, etc. without
+// knowing anything about their ontologies.
+//
+// Data: the WM triples already carry a `subGraph` tag (see
+// `useMemoryEntities`). We simply bucket them by slug and hand each bucket
+// to a lightweight mini-graph. No extra network calls are made — the
+// daemon's /api/sub-graph/list only supplies counts for the card header.
+
+function SubGraphOverviewGrid({
+  contextGraphId,
+  memory,
+  onNodeClick,
+  onSelectSubGraph,
+}: {
+  contextGraphId: string;
+  memory: ReturnType<typeof useMemoryEntities>;
+  onNodeClick?: (node: any) => void;
+  onSelectSubGraph: (slug: string) => void;
+}) {
+  const profile = useProjectProfileContext();
+  const [subGraphs, setSubGraphs] = useState<SubGraphInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchSubGraphs(contextGraphId)
+      .then(r => { if (!cancelled) setSubGraphs(r.subGraphs ?? []); })
+      .catch(() => { /* silent */ })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [contextGraphId]);
+
+  // Bucket every triple by its origin sub-graph so each mini-graph renders
+  // just its slice. We dedupe on (s,p,o) and cap per-bucket to keep the
+  // mini-graph canvases snappy. Without the cap, sub-graphs like `code`
+  // (~25k triples) can lock up the tab while force-graph runs its layout.
+  //
+  // Sampling strategy: when a sub-graph exceeds MAX_PER_CARD, we keep
+  // every triple for the N heaviest root entities (highest degree) so
+  // the user sees a representative, connected slice rather than a
+  // random first-N truncation that breaks clusters apart.
+  const MAX_PER_CARD = 2500;
+  const triplesBySubGraph = useMemo(() => {
+    const bySg = new Map<string, Triple[]>();
+    const seen = new Map<string, Set<string>>();
+    for (const t of memory.allTriples) {
+      if (!t.subGraph) continue;
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      let s = seen.get(t.subGraph);
+      if (!s) { s = new Set(); seen.set(t.subGraph, s); }
+      if (s.has(key)) continue;
+      s.add(key);
+      let arr = bySg.get(t.subGraph);
+      if (!arr) { arr = []; bySg.set(t.subGraph, arr); }
+      arr.push({ subject: t.subject, predicate: t.predicate, object: t.object });
+    }
+    // If a bucket is over the cap, fall back to sampling the heaviest
+    // subjects and dropping the long tail. This preserves cluster
+    // topology far better than truncation.
+    for (const [sg, triples] of bySg) {
+      if (triples.length <= MAX_PER_CARD) continue;
+      const degree = new Map<string, number>();
+      for (const t of triples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
+      const order = [...degree.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([uri]) => uri);
+      const keep = new Set<string>();
+      let kept = 0;
+      for (const uri of order) {
+        if (kept >= MAX_PER_CARD) break;
+        keep.add(uri);
+        kept += degree.get(uri)!;
+      }
+      bySg.set(sg, triples.filter(t => keep.has(t.subject)));
+    }
+    return bySg;
+  }, [memory.allTriples]);
+
+  // Merge registered sub-graphs (minus `meta`) with profile bindings so
+  // icon/color/label/rank all flow from the single source of truth.
+  const cards = useMemo(() => {
+    return subGraphs
+      .filter(sg => sg.name !== 'meta')
+      .map(sg => {
+        const binding = profile?.forSubGraph(sg.name) ?? {};
+        return {
+          slug: sg.name,
+          icon: binding.icon ?? '•',
+          color: binding.color ?? '#64748b',
+          displayName: binding.displayName ?? sg.name,
+          description: binding.description,
+          rank: binding.rank ?? 99,
+          entityCount: sg.entityCount,
+          tripleCount: sg.tripleCount,
+          triples: triplesBySubGraph.get(sg.name) ?? [],
+        };
+      })
+      .sort((a, b) => a.rank - b.rank);
+  }, [subGraphs, profile, triplesBySubGraph]);
+
+  if (loading && cards.length === 0) {
+    return (
+      <div className="v10-sgov-loading">Loading sub-graphs…</div>
+    );
+  }
+  if (cards.length === 0) {
+    return (
+      <div className="v10-sgov-empty">
+        No sub-graphs registered on this project yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="v10-sgov">
+      <div className="v10-sgov-header">
+        <div className="v10-sgov-title">Sub-graph Overview</div>
+        <div className="v10-sgov-sub">
+          {cards.length} sub-graphs · {cards.reduce((a, b) => a + b.entityCount, 0)} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
+        </div>
+      </div>
+      <div className="v10-sgov-grid">
+        {cards.map(card => (
+          <SubGraphMiniCard
+            key={card.slug}
+            card={card}
+            onNodeClick={onNodeClick}
+            onOpen={() => onSelectSubGraph(card.slug)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SubGraphMiniCard({
+  card,
+  onNodeClick,
+  onOpen,
+}: {
+  card: {
+    slug: string; icon: string; color: string; displayName: string;
+    description?: string; entityCount: number; tripleCount: number;
+    triples: Triple[];
+  };
+  onNodeClick?: (node: any) => void;
+  onOpen: () => void;
+}) {
+  // A compact-mode graph options block — pared-down labels, smaller nodes,
+  // brighter default color (driven by the sub-graph's profile color) so each
+  // card reads as a distinct "island" at a glance.
+  const graphOptions = useMemo(() => ({
+    labelMode: 'humanized' as const,
+    renderer: '2d' as const,
+    labels: {
+      predicates: [
+        'http://schema.org/name',
+        'http://www.w3.org/2000/01/rdf-schema#label',
+        'http://purl.org/dc/terms/title',
+      ],
+      minZoomForLabels: 0.8, // Keep labels out of the way in the mini view.
+    },
+    style: {
+      classColors: CODE_CLASS_COLORS,
+      predicateColors: CODE_PREDICATE_COLORS,
+      defaultNodeColor: card.color,
+      defaultEdgeColor: '#475569',
+      edgeWidth: 1.0,
+      fontSize: 12,
+      gradient: true,
+      gradientIntensity: 0.35,
+    },
+    hexagon: { baseSize: 6, minSize: 3, maxSize: 16, scaleWithDegree: true },
+    focus: { maxNodes: 5000, hops: 999 },
+  }), [card.color]);
+
+  return (
+    <div
+      className="v10-sgov-card"
+      style={{
+        '--sg-color': card.color,
+        borderColor: card.color + '55',
+      } as React.CSSProperties}
+    >
+      <div className="v10-sgov-card-head">
+        <span className="v10-sgov-card-icon" style={{ color: card.color }}>{card.icon}</span>
+        <div className="v10-sgov-card-title-wrap">
+          <div className="v10-sgov-card-title">{card.displayName}</div>
+          {card.description && (
+            <div className="v10-sgov-card-desc" title={card.description}>{card.description}</div>
+          )}
+        </div>
+        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`}>
+          ↗
+        </button>
+      </div>
+      <div className="v10-sgov-card-stats">
+        <span className="v10-sgov-card-stat"><b>{card.entityCount}</b> entities</span>
+        <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
+      </div>
+      <div className="v10-sgov-card-graph">
+        {card.triples.length === 0 ? (
+          <div className="v10-sgov-card-empty">
+            {card.entityCount > 0 ? 'No WM triples · promoted data only' : 'No data yet'}
+          </div>
+        ) : (
+          <Suspense fallback={<div className="v10-sgov-card-empty">Loading…</div>}>
+            <RdfGraph
+              data={card.triples}
+              format="triples"
+              options={graphOptions}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              onNodeClick={onNodeClick}
+              initialFit
+            />
+          </Suspense>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main ProjectView ────────────────────────────────────────
 
 export function ProjectView({ contextGraphId }: ProjectViewProps) {
@@ -1307,13 +1989,49 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
+  const [selectedSubGraph, setSelectedSubGraph] = useState<string | null>(null);
+  const profile = useProjectProfile(contextGraphId);
 
   const cg = useMemo(
     () => cgData?.contextGraphs?.find((c: any) => c.id === contextGraphId),
     [cgData, contextGraphId]
   );
 
-  const memory = useMemoryEntities(contextGraphId);
+  const rawMemory = useMemoryEntities(contextGraphId);
+
+  // When the user picks a sub-graph chip we transparently downscope every
+  // downstream surface (Memory Strip, Layer tabs, graph panels, provenance
+  // bar) without having to thread the selection through each component.
+  // Entities are matched through their `subGraphs` bag collected from
+  // triple origin. SWM/VM triples don't carry sub-graph origin yet, so a
+  // sub-graph selection naturally narrows the visible memory to WM — which
+  // is the right behaviour for the current PoC data shape.
+  const memory = useMemo<typeof rawMemory>(() => {
+    if (!selectedSubGraph) return rawMemory;
+    const sg = selectedSubGraph;
+    const entityList = rawMemory.entityList.filter(e => e.subGraphs.has(sg));
+    const keep = new Set(entityList.map(e => e.uri));
+    const entities = new Map<string, MemoryEntity>();
+    for (const uri of keep) {
+      const e = rawMemory.entities.get(uri);
+      if (e) entities.set(uri, e);
+    }
+    const allTriples = rawMemory.allTriples.filter(
+      t => t.subGraph === sg || (keep.has(t.subject) && keep.has(t.object)),
+    );
+    const graphTriples = rawMemory.graphTriples.filter(
+      t => t.subGraph === sg || (keep.has(t.subject) && keep.has(t.object)),
+    );
+    const trustMap = new Map<string, TrustLevel>();
+    for (const [u, level] of rawMemory.trustMap) if (keep.has(u)) trustMap.set(u, level);
+    const counts = {
+      wm: new Set(allTriples.filter(t => t.layer === 'working').map(t => t.subject)).size,
+      swm: new Set(allTriples.filter(t => t.layer === 'shared').map(t => t.subject)).size,
+      vm: new Set(allTriples.filter(t => t.layer === 'verified').map(t => t.subject)).size,
+      total: entities.size,
+    };
+    return { ...rawMemory, entities, entityList, allTriples, graphTriples, trustMap, counts };
+  }, [rawMemory, selectedSubGraph]);
 
   const refreshParticipants = useCallback(() => {
     if (cg?.id) {
@@ -1330,14 +2048,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [selectedUri, memory.entities]
   );
 
-  const nodeColors = useMemo(() => {
-    const colors: Record<string, string> = {};
-    for (const [uri, entity] of memory.entities) {
-      colors[uri] = TRUST_COLORS[entity.trustLevel];
-    }
-    return colors;
-  }, [memory.entities]);
-
   const handleNavigate = useCallback((uri: string) => { setSelectedUri(uri); }, []);
   const handleNodeClick = useCallback((node: any) => { if (node?.id) setSelectedUri(node.id); }, []);
 
@@ -1350,6 +2060,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   }
 
   return (
+    <ProjectProfileContext.Provider value={profile}>
     <div className="v10-memory-explorer">
       {/* Layer Switcher */}
       <LayerSwitcher
@@ -1377,26 +2088,58 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         <>
           <ProjectOverviewCard cg={cg} memory={memory} participants={participants} />
           <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
+          <SubGraphBar
+            contextGraphId={contextGraphId}
+            profile={profile}
+            selected={selectedSubGraph}
+            onSelect={setSelectedSubGraph}
+          />
           {memory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}
           {memory.error && (
             <div className="v10-me-error">Error: {memory.error}</div>
           )}
-          <MemoryStrip memory={memory} onSwitchLayer={setActiveLayer} onSelectEntity={handleNavigate} contextGraphId={contextGraphId} />
+          <MemoryStrip
+            memory={memory}
+            onSwitchLayer={setActiveLayer}
+            onSelectEntity={handleNavigate}
+            contextGraphId={contextGraphId}
+            onNodeClick={handleNodeClick}
+          />
         </>
+      )}
+
+      {/* Graph Overview — one mini graph per sub-graph, side-by-side */}
+      {activeLayer === 'graph-overview' && !selectedEntity && (
+        <SubGraphOverviewGrid
+          contextGraphId={contextGraphId}
+          memory={rawMemory}
+          onNodeClick={handleNodeClick}
+          onSelectSubGraph={slug => {
+            setSelectedSubGraph(slug);
+            setActiveLayer('wm');
+          }}
+        />
       )}
 
       {/* Layer Detail Views */}
       {(activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') && !selectedEntity && (
-        <LayerDetailView
-          layer={activeLayer}
-          memory={memory}
-          nodeColors={nodeColors}
-          onNodeClick={handleNodeClick}
-          onSelectEntity={handleNavigate}
-          contextGraphId={contextGraphId}
-        />
+        <>
+          <SubGraphBar
+            contextGraphId={contextGraphId}
+            profile={profile}
+            selected={selectedSubGraph}
+            onSelect={setSelectedSubGraph}
+          />
+          <LayerDetailView
+            layer={activeLayer}
+            memory={memory}
+            onNodeClick={handleNodeClick}
+            onSelectEntity={handleNavigate}
+            contextGraphId={contextGraphId}
+          />
+        </>
       )}
 
       {/* Provenance Bar */}
@@ -1415,5 +2158,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         contextGraphName={cg.name}
       />
     </div>
+    </ProjectProfileContext.Provider>
   );
 }

@@ -2321,6 +2321,338 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
 /* ── Loading / Error / Empty ── */
 .v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
 .v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
+
+/* ── Sub-graph Bar ── */
+.v10-subgraph-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--surface-1, rgba(255,255,255,0.02));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 10px;
+}
+.v10-subgraph-bar-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #94a3b8);
+  padding-right: 4px;
+}
+.v10-subgraph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.v10-subgraph-chip:hover {
+  background: var(--surface-3, rgba(255,255,255,0.07));
+  transform: translateY(-1px);
+}
+.v10-subgraph-chip.active {
+  border-color: var(--sg-color, #a855f7);
+  background: color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  color: var(--text-primary, #f8fafc);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sg-color, #a855f7) 40%, transparent) inset;
+}
+.v10-subgraph-chip-icon { font-size: 13px; line-height: 1; }
+.v10-subgraph-chip-label { font-weight: 600; }
+.v10-subgraph-chip-count {
+  font-size: 11px;
+  opacity: 0.75;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+}
+
+/* ── Verified Memory Hero Banner ── */
+.v10-vm-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: linear-gradient(135deg,
+    rgba(34,197,94,0.14) 0%,
+    rgba(59,130,246,0.10) 50%,
+    rgba(168,85,247,0.10) 100%);
+  border: 1px solid rgba(34,197,94,0.35);
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(34,197,94,0.15) inset,
+              0 8px 30px -10px rgba(34,197,94,0.25);
+}
+.v10-vm-hero-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.v10-vm-hero-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(34,197,94,0.22);
+  color: #86efac;
+  border: 1px solid rgba(34,197,94,0.45);
+  letter-spacing: 0.05em;
+}
+.v10-vm-hero-headline {
+  font-size: 13px;
+  color: var(--text-secondary, #cbd5e1);
+  font-weight: 500;
+}
+.v10-vm-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.v10-vm-hero-stat {
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.22);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+}
+.v10-vm-hero-stat-val {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary, #f8fafc);
+  font-family: var(--font-mono, ui-monospace);
+  line-height: 1.1;
+}
+.v10-vm-hero-stat-lbl {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #94a3b8);
+  margin-top: 3px;
+}
+.v10-vm-hero-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.v10-vm-hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary, #cbd5e1);
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 999px;
+}
+.v10-vm-hero-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  box-shadow: 0 0 6px currentColor;
+}
+
+/* ── VM graph legend (floating overlay) ──
+   Pinned to the top-right of the Verified Memory graph, this panel is the
+   in-graph key for the two synthetic node glyphs (anchor ◉, agent identity
+   ◈) we inject to make provenance legible. It's also a lightweight ledger:
+   it reports the total anchor count, distinct signers, and latest publish
+   time without needing a detail pane. Kept small and lightly translucent so
+   it never fights the graph behind it. */
+.v10-vm-legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  min-width: 180px;
+  max-width: 240px;
+  background: color-mix(in srgb, var(--surface-0, #0b1020) 85%, transparent);
+  border: 1px solid rgba(34,197,94,0.3);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px -12px rgba(34,197,94,0.3),
+              0 0 0 1px rgba(34,197,94,0.12) inset;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 11px;
+  color: var(--text-secondary, #cbd5e1);
+  pointer-events: none;
+}
+.v10-vm-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.3;
+}
+.v10-vm-legend-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #4ade80;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(34,197,94,0.18);
+}
+.v10-vm-legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(34,197,94,0.12);
+  border: 1px solid rgba(34,197,94,0.3);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+}
+.v10-vm-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: #0b1020;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 0 10px -2px currentColor;
+}
+.v10-vm-legend-label {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 11px;
+}
+.v10-vm-legend-foot {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255,255,255,0.06);
+  font-size: 10px;
+  color: var(--text-tertiary, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── SWM attribution legend (floating overlay) ──
+   Visual analogue of .v10-vm-legend but for the Shared Working Memory
+   layer. Lists each promoting agent + colour slot + how many entities
+   they've proposed, plus a conflict pill when multiple agents touch the
+   same entity. Amber accent instead of VM's green to reinforce the
+   layer-palette convention (SWM = amber across the UI). */
+.v10-swm-legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  min-width: 200px;
+  max-width: 260px;
+  background: color-mix(in srgb, var(--surface-0, #0b1020) 85%, transparent);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px -12px rgba(245,158,11,0.3),
+              0 0 0 1px rgba(245,158,11,0.12) inset;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 11px;
+  color: var(--text-secondary, #cbd5e1);
+  pointer-events: none;
+}
+.v10-swm-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.3;
+}
+.v10-swm-legend-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #fbbf24;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(245,158,11,0.18);
+}
+.v10-swm-legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.3);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+}
+.v10-swm-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: #0b1020;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 0 8px -2px currentColor;
+}
+.v10-swm-legend-label {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v10-swm-legend-metric {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary, #94a3b8);
+  font-size: 10px;
+}
+.v10-swm-legend-conflict {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(245,158,11,0.22);
+  color: #fbbf24;
+}
+.v10-swm-legend-conflict .v10-swm-legend-label { color: #fbbf24; }
+
+/* ── GenUI Panel / Loading / Error ── */
+.v10-genui-panel { display: flex; flex-direction: column; gap: 8px; }
+.v10-genui-loading {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary, #94a3b8);
+  font-style: italic;
+}
+.v10-genui-error {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #f87171;
+  background: rgba(248,113,113,0.08);
+  border: 1px solid rgba(248,113,113,0.25);
+  border-radius: 8px;
+}
 .v10-me-error { padding: 12px 16px; font-size: 12px; color: var(--accent-red); background: rgba(239,68,68,0.06); }
 
 /* ── Graph View (full graph tab) ── */
@@ -2569,15 +2901,125 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-layer-expand-content {
   max-height: 0; overflow: hidden; transition: max-height 0.3s ease;
   background: var(--bg-root); border-bottom: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column;
 }
-.v10-layer-expand-content.open { max-height: 700px; overflow: hidden; }
-.v10-layer-expand-content > .v10-split-pane { flex: 1; height: 100%; }
-.v10-layer-expand-content > .v10-split-pane > .v10-split-canvas { padding: 12px; overflow-y: auto; }
-.v10-layer-expand-content > .v10-split-pane > .v10-split-content { overflow-y: auto; }
+.v10-layer-expand-content.open { max-height: 70vh; height: 70vh; }
+
+/* Tab body fills the remaining space below the tabs strip */
+.v10-layer-expand-body {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.v10-layer-expand-body.full-width > * {
+  flex: 1 1 auto; min-height: 0;
+  width: 100%;
+}
+
+/* Horizontal widget strip at the top of the Entities tab — sticky, not vertically scrollable */
+.v10-layer-widgets-strip {
+  flex-shrink: 0;
+  display: flex; gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  overflow-x: auto;
+  max-height: 40vh;
+}
+.v10-layer-widgets-strip.empty {
+  justify-content: center; align-items: center;
+  padding: 24px 16px;
+}
+.v10-layer-widgets-strip-stats {
+  flex: 1 1 auto; min-width: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.v10-layer-widgets-strip-action {
+  flex: 0 0 280px; max-width: 320px;
+  display: flex; align-items: stretch;
+}
+.v10-layer-widgets-strip-action > .v10-gen-widget {
+  flex: 1;
+}
+.v10-layer-widgets-strip .v10-gen-widget {
+  width: auto;
+  height: 100%;
+  display: flex; flex-direction: column;
+  animation: none;                    /* don't re-animate on every collapse/expand */
+}
+.v10-layer-widgets-strip .v10-gen-widget-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .v10-layer-widgets-strip { flex-direction: column; }
+  .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
+  .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
+}
+
+/* Enhanced entity list — sortable, scrollable, with type pill */
+.v10-entity-list {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+}
+.v10-entity-list.empty {
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px 16px;
+}
+.v10-entity-list-empty {
+  color: var(--text-ghost); font-size: 12px; font-style: italic;
+}
+.v10-entity-list-header {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--bg-root);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px; color: var(--text-ghost);
+}
+.v10-entity-list-count { font-weight: 600; color: var(--text-secondary); font-family: var(--font-mono); }
+.v10-entity-list-hint { font-style: italic; font-size: 10px; }
+.v10-entity-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer; transition: background 0.12s;
+}
+.v10-entity-card:last-child { border-bottom: none; }
+.v10-entity-card:hover { background: var(--bg-hover); }
+.v10-entity-card-icon {
+  width: 18px; flex-shrink: 0; text-align: center;
+  font-size: 14px; color: var(--text-tertiary);
+}
+.v10-entity-card-main {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.v10-entity-card-title {
+  font-size: 12px; font-weight: 500; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.v10-entity-card-meta {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 10px;
+}
+.v10-entity-type-pill {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 7px; border-radius: 9px;
+  font-size: 10px; font-weight: 500;
+  background: var(--bg-elevated); color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  line-height: 1.4;
+}
+.v10-entity-card-triples {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-ghost);
+}
 .v10-layer-expand-tabs {
   display: flex; align-items: center; gap: 2px;
   padding: 0 10px; border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel); height: 28px; min-height: 28px;
+  flex-shrink: 0;
 }
 .v10-layer-expand-tab {
   height: 100%; padding: 0 10px; font-size: 10px; font-weight: 500;
@@ -2588,11 +3030,18 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-layer-expand-tab:hover { color: var(--text-secondary); }
 .v10-layer-expand-tab.active { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
-.v10-layer-expand-items { padding: 0; }
+.v10-layer-expand-items {
+  padding: 0;
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+}
 .v10-layer-expand-items .v10-item-row { padding: 6px 16px; }
 .v10-layer-expand-items .v10-item-row:last-child { border-bottom: none; }
 .v10-layer-expand-footer {
   padding: 6px 16px 8px; display: flex; gap: 8px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-root);
 }
 .v10-layer-expand-footer-btn {
   font-size: 10px; font-weight: 600; color: var(--text-tertiary);
@@ -2646,6 +3095,11 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-layer-detail-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .v10-layer-detail-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 1px; }
 .v10-layer-detail-actions { margin-left: auto; display: flex; gap: 6px; }
+.v10-layer-detail-body {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
 .v10-layer-action-btn {
   padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 600;
   border: 1px solid var(--border-default); color: var(--text-secondary); transition: all 0.15s;
@@ -2746,6 +3200,39 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-decision-btn.discuss { background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border-default); }
 .v10-decision-btn.discuss:hover { background: var(--bg-hover); color: var(--text-primary); }
 
+/* Primary CTA variant — prominent solid button for the main publish-to-VM action */
+.v10-decision-btn.primary-cta.publish-vm {
+  height: 44px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+  color: #ffffff;
+  border: 1px solid #15803d;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.18),
+    0 2px 8px rgba(34,197,94,0.35);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.15);
+  gap: 6px;
+}
+.v10-decision-btn.primary-cta.publish-vm:hover:not(:disabled) {
+  background: linear-gradient(180deg, #2dd66b 0%, #16a34a 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.22),
+    0 3px 14px rgba(34,197,94,0.5);
+  transform: translateY(-1px);
+}
+.v10-decision-btn.primary-cta.publish-vm:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.1),
+    0 1px 4px rgba(34,197,94,0.35);
+}
+.v10-decision-btn.primary-cta.publish-vm:disabled {
+  background: linear-gradient(180deg, #86efac 0%, #65d98a 100%);
+  cursor: not-allowed;
+}
+
 /* Canvas empty state */
 .v10-canvas-empty {
   flex: 1; display: flex; flex-direction: column; align-items: center;
@@ -2767,6 +3254,11 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-graph-view {
   flex: 1; position: relative; background: var(--bg-surface);
   display: flex; align-items: center; justify-content: center; min-height: 300px;
+}
+/* Fills the parent completely — used when the graph tab is active inside a
+   flex-column body (both in the inline strip and the full LayerDetailView). */
+.v10-graph-view-fill {
+  flex: 1 1 auto; min-height: 0; width: 100%;
 }
 .v10-graph-placeholder {
   color: var(--text-ghost); font-size: 12px; font-family: var(--font-mono);
@@ -2843,3 +3335,94 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-ghost); }
 .v10-ka-event-desc { font-size: 10px; color: var(--text-tertiary); line-height: 1.5; }
+
+/* ── Sub-graph Overview (Graph Overview tab) ──
+   One "wall of graphs": a responsive grid of mini RdfGraph cards, one per
+   registered sub-graph. Each card is self-contained (title, stats, graph)
+   and styled by its profile color through the --sg-color custom prop. */
+.v10-sgov { display: flex; flex: 1; flex-direction: column; gap: 12px; min-height: 0; padding: 0 12px 12px; }
+.v10-sgov-header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 4px 2px;
+}
+.v10-sgov-title { font-size: 13px; font-weight: 600; color: var(--text-primary); letter-spacing: 0.02em; }
+.v10-sgov-sub { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.v10-sgov-loading, .v10-sgov-empty {
+  padding: 32px; text-align: center; font-size: 12px; color: var(--text-tertiary);
+  border: 1px dashed var(--border-default); border-radius: 12px;
+  background: var(--surface-1, rgba(255,255,255,0.02));
+}
+/* The grid auto-fills: 3-up on wide screens, 2-up around 1100px, single column
+   under 720px. Each cell has a stable minimum height so the mini graphs get
+   room to breathe regardless of triple density. */
+.v10-sgov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  align-content: start;
+  overflow: auto;
+  padding-bottom: 12px;
+}
+.v10-sgov-card {
+  display: flex; flex-direction: column;
+  min-height: 320px;
+  background: var(--surface-1, rgba(255,255,255,0.02));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.v10-sgov-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px -12px var(--sg-color, rgba(100,116,139,0.6));
+}
+.v10-sgov-card-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.v10-sgov-card-icon { font-size: 18px; line-height: 1; margin-top: 1px; }
+.v10-sgov-card-title-wrap { flex: 1; min-width: 0; }
+.v10-sgov-card-title {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.v10-sgov-card-desc {
+  font-size: 10px; color: var(--text-tertiary); line-height: 1.4;
+  margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.v10-sgov-card-open {
+  appearance: none; background: transparent; color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle); border-radius: 6px;
+  padding: 2px 6px; cursor: pointer; font-size: 12px; line-height: 1;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.v10-sgov-card-open:hover {
+  color: var(--sg-color, var(--text-primary));
+  border-color: var(--sg-color, var(--border-strong));
+  background: color-mix(in srgb, var(--sg-color, #64748b) 10%, transparent);
+}
+.v10-sgov-card-stats {
+  display: flex; gap: 12px; padding: 6px 12px;
+  font-size: 11px; color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.v10-sgov-card-stat b {
+  color: var(--text-primary); font-weight: 600; margin-right: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.v10-sgov-card-graph {
+  position: relative; flex: 1; min-height: 220px;
+  background:
+    radial-gradient(ellipse at center,
+      color-mix(in srgb, var(--sg-color, #64748b) 6%, transparent) 0%,
+      transparent 70%),
+    var(--surface-0, rgba(0,0,0,0.2));
+}
+.v10-sgov-card-empty {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--text-tertiary);
+}

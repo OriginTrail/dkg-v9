@@ -142,9 +142,14 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       }
     });
 
-    it('close is idempotent', async () => {
-      await store.close();
-      await store.close();
+    it('close is idempotent — a second close() resolves without throwing', async () => {
+      // Teardown paths (overlapping lifecycle events, double-unmount in UI
+      // hosts, shutdown signal racing with manual close) frequently call
+      // close() twice. This asserts the contract: the second call must
+      // resolve cleanly instead of throwing a "worker terminated" /
+      // "connection ended" error that would surface as a teardown failure.
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(store.close()).resolves.toBeUndefined();
     });
   });
 }
@@ -160,11 +165,13 @@ tripleStoreConformanceSuite('OxigraphStore (factory)', async () => createTripleS
 const blazeUrl = process.env.BLAZEGRAPH_URL;
 if (blazeUrl) {
   tripleStoreConformanceSuite('BlazegraphStore', async () => new BlazegraphStore(blazeUrl));
-} else {
-  describe('BlazegraphStore (skipped — set BLAZEGRAPH_URL to run)', () => {
-    it.skip('requires a running Blazegraph instance', () => {});
-  });
 }
+// NOTE: previously this branch ran `it.skip('requires a running Blazegraph …', () => {})`
+// as a placeholder to surface the skip in the reporter. That empty stub added
+// one "skipped" counter but carried no assertion, so it only existed to
+// decorate the output. The conformance suite above is what actually exercises
+// Blazegraph when `BLAZEGRAPH_URL` is set, so the placeholder was noise —
+// removed to keep the suite strictly assertion-backed.
 
 // ---------------------------------------------------------------------------
 // Adapter registry / factory tests
@@ -210,7 +217,21 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered', async () => {
+  it('oxigraph-worker adapter is registered', async (ctx) => {
+    // The worker adapter uses `new URL('./oxigraph-worker-impl.js', import.meta.url)`
+    // which resolves relative to the module actually loaded at runtime.
+    // When vitest runs against raw source (no prior `pnpm build`), that URL
+    // lands in `src/adapters/` where only the .ts files live, so the Worker
+    // constructor cannot find the `.js` sibling and throws.
+    //
+    // The previous test swallowed this error with `expect(true).toBe(true)` —
+    // visually "passing" while never exercising the worker. That's the
+    // opposite of what we want. Catch the exact same "module not found"
+    // condition but surface it as a **skipped** test (vitest `ctx.skip()`)
+    // so it shows up in the reporter, and re-throw anything else so real
+    // regressions still fail loudly. In CI the full adapter lane runs
+    // against the built artifact (see the dedicated worker E2E), which is
+    // where the round-trip contract is genuinely verified.
     try {
       const store = await createTripleStore({ backend: 'oxigraph-worker' });
       await store.insert([{
@@ -222,10 +243,9 @@ describe('createTripleStore factory', () => {
       expect(await store.countQuads()).toBe(1);
       await store.close();
     } catch (err: unknown) {
-      // Worker file may not exist when running tests against uncompiled source
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        expect(true).toBe(true);
+        ctx.skip();
         return;
       }
       throw err;

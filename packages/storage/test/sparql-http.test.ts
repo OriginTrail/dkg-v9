@@ -184,8 +184,19 @@ describe('SparqlHttpStore (test server)', () => {
     await expect(badStore.query('SELECT ?x WHERE { ?x ?y ?z }')).rejects.toThrow(/query failed/);
   });
 
-  it('close is a no-op', async () => {
-    await store.close();
+  it('close is a no-op and stays idempotent — follow-up ops still work against the same endpoint', async () => {
+    // SparqlHttpStore is stateless over HTTP, so close() is effectively a
+    // no-op. The contract this test locks in: (1) close never throws and
+    // resolves cleanly, (2) calling close multiple times is safe, (3) because
+    // close doesn't tear down any persistent resource, a follow-up query
+    // still succeeds against the same endpoint. This catches regressions
+    // where someone accidentally wires close() to tear down a shared agent
+    // or to set a disposed flag that would break reuse of the same instance.
+    await expect(store.close()).resolves.toBeUndefined();
+    await expect(store.close()).resolves.toBeUndefined();
+
+    const result = await store.query('SELECT ?x WHERE { ?x ?y ?z } LIMIT 1');
+    expect(result.type).toBe('bindings');
   });
 });
 
@@ -221,8 +232,10 @@ if (liveQueryUrl && liveUpdateUrl) {
       await store.close();
     });
   });
-} else {
-  describe('SparqlHttpStore live (skipped — set SPARQL_HTTP_TEST_QUERY_URL to run)', () => {
-    it.skip('requires a running SPARQL 1.1 endpoint', () => {});
-  });
 }
+// NOTE: previously this else branch registered an empty
+// `it.skip('requires a running SPARQL 1.1 endpoint', () => {})` just to
+// surface a skip line in the reporter. That stub had no assertion and
+// wasn't exercising anything — removed. The live-endpoint `describe` above
+// only runs when `SPARQL_HTTP_TEST_QUERY_URL` is set; otherwise the mock
+// server tests above give full coverage of the adapter's HTTP contract.

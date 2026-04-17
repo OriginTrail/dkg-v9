@@ -1118,12 +1118,20 @@ describe('DkgChannelPlugin', () => {
     }));
   });
 
-  it('stop should be safe to call multiple times', async () => {
+  it('stop should be safe to call multiple times and stay in the stopping state', async () => {
     const api = makeApi();
     plugin.register(api);
 
-    await plugin.stop();
-    await plugin.stop();
+    // stop() sets an internal `stopping` flag and drains pending work.
+    // Calling it twice must not throw (double-cleanup on shutdown signals
+    // is a real code path) AND the second call must leave the plugin in
+    // the same stopped state — not reset `stopping` back to false, which
+    // would let new in-flight dispatches start during teardown and leak.
+    await expect(plugin.stop()).resolves.toBeUndefined();
+    const internal = plugin as unknown as { stopping: boolean };
+    expect(internal.stopping).toBe(true);
+    await expect(plugin.stop()).resolves.toBeUndefined();
+    expect(internal.stopping).toBe(true);
   });
 
   it('stop should allow a late non-stream persistence failure to retry within the bounded shutdown window', async () => {

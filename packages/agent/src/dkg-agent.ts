@@ -88,16 +88,17 @@ const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */
-const SYNC_PAGE_TIMEOUT_MS = 30_000;
+const SYNC_PAGE_TIMEOUT_MS = 45_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
-const SYNC_AUTH_MAX_AGE_MS = 30_000;
+const SYNC_AUTH_MAX_AGE_MS = 90_000;
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
+const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
 
 interface SyncRequestEnvelope {
   contextGraphId: string;
@@ -662,7 +663,7 @@ export class DKGAgent {
 
       if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
         this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        return new TextEncoder().encode('');
+        return new TextEncoder().encode(SYNC_DENIED_RESPONSE);
       }
 
       if (isWorkspace) {
@@ -1173,6 +1174,9 @@ export class DKGAgent {
       );
 
       const nquadsText = new TextDecoder().decode(responseBytes).trim();
+      if (nquadsText === SYNC_DENIED_RESPONSE) {
+        throw new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
+      }
       if (!nquadsText) break;
 
       const quads = parseNQuads(nquadsText);
@@ -1368,6 +1372,7 @@ export class DKGAgent {
   }> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
+    const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
     this.trackSyncContextGraph(contextGraphId);
 
@@ -1403,11 +1408,12 @@ export class DKGAgent {
       // Discovery unavailable or dial failures are non-fatal
     }
 
-    const peers = this.orderCatchupPeers(
+    const peers = this.selectCatchupPeers(
       [...new Map(
         this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
       ).values()],
       preferredPeerId,
+      isPrivateContextGraph,
     );
     let syncCapablePeers = 0;
     let peersTried = 0;
@@ -1498,11 +1504,17 @@ export class DKGAgent {
     };
   }
 
-  private orderCatchupPeers(
+  private selectCatchupPeers(
     peers: Array<{ toString(): string }>,
     preferredPeerId?: string,
+    privateOnly = false,
   ): Array<{ toString(): string }> {
     if (!preferredPeerId) return peers;
+
+    if (privateOnly) {
+      const preferredPeer = peers.find((peer) => peer.toString() === preferredPeerId);
+      if (preferredPeer) return [preferredPeer];
+    }
 
     return [...peers].sort((a, b) => {
       if (a.toString() === preferredPeerId) return -1;
@@ -5008,11 +5020,6 @@ export class DKGAgent {
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
     if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
       return false;
-    }
-
-    const local = this.subscribedContextGraphs.get(contextGraphId);
-    if (local?.subscribed === false && local?.synced) {
-      return true;
     }
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);

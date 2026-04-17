@@ -2031,4 +2031,27 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       await agent.stop().catch(() => {});
     }
   });
+
+  it('buildSyncRequest stays unauthenticated for discovered public CGs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'BuildReqDiscoveredPublic',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('discovered-public-cg', {
+        name: 'discovered-public-cg',
+        subscribed: false,
+        synced: true,
+      });
+
+      const bytes = await (agent as any).buildSyncRequest('discovered-public-cg', 0, 50, false, 'peer-remote');
+      const text = new TextDecoder().decode(bytes);
+
+      expect(text).toBe('discovered-public-cg|0|50');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });

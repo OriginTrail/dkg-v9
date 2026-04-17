@@ -13,7 +13,22 @@
 set -u
 set -o pipefail
 
-TOKEN="${DEVNET_TOKEN:-5CnUoxJBhTnXOeOCi2fCZyZ3kdZzBfT4fKAwf8Uco}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve the devnet auth token the same way the other devnet test scripts do.
+# ./scripts/devnet.sh start generates a fresh shared token per run and writes
+# it to .devnet/node1/auth.token — the nodes all accept the same token.
+if [[ -n "${DEVNET_TOKEN:-}" ]]; then
+  TOKEN="$DEVNET_TOKEN"
+elif [[ -n "${DKG_AUTH:-}" ]]; then
+  TOKEN="$DKG_AUTH"
+elif [[ -f "$SCRIPT_DIR/../.devnet/node1/auth.token" ]]; then
+  TOKEN="$(grep -v '^#' "$SCRIPT_DIR/../.devnet/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
+else
+  echo "ERROR: No auth token found. Export DEVNET_TOKEN/DKG_AUTH or start a devnet with ./scripts/devnet.sh start" >&2
+  exit 2
+fi
+
 CG_ID="invite-test-$(date +%s)"
 N1=http://127.0.0.1:9201
 N2=http://127.0.0.1:9202
@@ -24,9 +39,12 @@ N1_ADDR=""
 N2_ADDR=""
 N3_ADDR=""
 
-hr() { printf '\n\033[1;34m── %s ──\033[0m\n' "$*"; }
+hr()   { printf '\n\033[1;34m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
-fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; }
+# fail halts the script so a failed assertion cannot fall through to a
+# later "Done." — the script does not run under set -e so each failure
+# path is responsible for exiting.
+fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; exit 1; }
 note() { printf '  \033[0;90m· %s\033[0m\n' "$*"; }
 
 api() {
@@ -257,7 +275,11 @@ hr "Step 7 — N2 re-subscribes (expect: done)"
 sleep 2  # allowlist write to settle + any SSE notification
 sub2_resp=$(api "$N2" POST /api/subscribe "$subscribe_body")
 note "subscribe response: $sub2_resp"
-poll_catchup "$N2" "$CG_ID" done 90 || fail "N2 did not complete catch-up after approval"
+# Post-approval catch-up does a full multi-peer fan-out (data + meta +
+# shared-memory) for every CG the node knows about, which in devnet
+# can take ~1–2 minutes under retries. We don't want this assertion to
+# race pre-existing SWM sync cost, so poll for 180s.
+poll_catchup "$N2" "$CG_ID" done 180 || fail "N2 did not complete catch-up after approval"
 
 hr "Step 7b — verify N2 now sees the CG legitimately"
 n2_state_after=$(list_cg_state "$N2" "$CG_ID")

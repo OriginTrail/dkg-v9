@@ -15,7 +15,22 @@
 set -u
 set -o pipefail
 
-TOKEN="${DEVNET_TOKEN:-zDq9MBJ8jjduCu1X7iv9EGMZWtQeZ5pSSxuX9kofAk}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve the devnet auth token the same way the other devnet test scripts do.
+# ./scripts/devnet.sh start generates a fresh shared token per run and writes
+# it to .devnet/node1/auth.token — all nodes accept the same token.
+if [[ -n "${DEVNET_TOKEN:-}" ]]; then
+  TOKEN="$DEVNET_TOKEN"
+elif [[ -n "${DKG_AUTH:-}" ]]; then
+  TOKEN="$DKG_AUTH"
+elif [[ -f "$SCRIPT_DIR/../.devnet/node1/auth.token" ]]; then
+  TOKEN="$(grep -v '^#' "$SCRIPT_DIR/../.devnet/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
+else
+  echo "ERROR: No auth token found. Export DEVNET_TOKEN/DKG_AUTH or start a devnet with ./scripts/devnet.sh start" >&2
+  exit 2
+fi
+
 CG_ID="reject-test-$(date +%s)"
 N1=http://127.0.0.1:9201
 N2=http://127.0.0.1:9202
@@ -25,7 +40,10 @@ N2_ADDR=""
 
 hr()   { printf '\n\033[1;34m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
-fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; }
+# fail halts the script so a failed assertion cannot fall through to a
+# later "Done." — the script does not run under set -e so each failure
+# path is responsible for exiting.
+fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; exit 1; }
 note() { printf '  \033[0;90m· %s\033[0m\n' "$*"; }
 
 api() {

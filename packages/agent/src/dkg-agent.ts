@@ -5498,9 +5498,10 @@ export class DKGAgent {
   }
 
   /**
-   * Scan the local ONTOLOGY graph for context graph definitions and auto-subscribe
-   * to any that aren't yet in the subscription registry. Called after
-   * syncFromPeer to catch context graphs discovered via ONTOLOGY sync.
+   * Scan the local ONTOLOGY graph and curated/private _meta graphs for context
+   * graph definitions and auto-subscribe to any that aren't yet in the
+   * subscription registry. Called after syncFromPeer to catch context graphs
+   * discovered via ONTOLOGY sync or authenticated _meta sync.
    */
   async discoverContextGraphsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
@@ -5508,7 +5509,28 @@ export class DKGAgent {
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
-    const result = await this.store.query(`
+    const discoveredEntries = new Map<string, { id: string; name: string; source: 'ontology' | 'meta' }>();
+
+    const collectEntries = (
+      rows: Record<string, string>[],
+      source: 'ontology' | 'meta',
+    ) => {
+      for (const row of rows) {
+        const uri = row['ctxGraph'] ?? '';
+        const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
+        if (!id) continue;
+        if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+        const existing = discoveredEntries.get(id);
+        const name = row['name'] ? stripLiteral(row['name']) : existing?.name ?? id;
+
+        if (!existing || (existing.source === 'meta' && source === 'ontology')) {
+          discoveredEntries.set(id, { id, name, source });
+        }
+      }
+    };
+
+    const ontologyResult = await this.store.query(`
       SELECT ?ctxGraph ?name WHERE {
         GRAPH <${ontologyGraph}> {
           ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
@@ -5516,25 +5538,32 @@ export class DKGAgent {
         }
       }
     `);
+    if (ontologyResult.type === 'bindings') {
+      collectEntries(ontologyResult.bindings as Record<string, string>[], 'ontology');
+    }
 
-    if (result.type !== 'bindings') return 0;
+    const metaResult = await this.store.query(`
+      SELECT ?ctxGraph ?name WHERE {
+        GRAPH ?metaGraph {
+          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          FILTER(STRENDS(STR(?metaGraph), "/_meta"))
+        }
+      }
+    `);
+    if (metaResult.type === 'bindings') {
+      collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
+    }
 
-    for (const row of result.bindings as Record<string, string>[]) {
-      const uri = row['ctxGraph'] ?? '';
-      const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
-      if (!id) continue;
-
-      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
-
+    for (const { id, name, source } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
       if (existing?.subscribed && existing?.synced) continue;
 
-      const name = row['name'] ? stripLiteral(row['name']) : id;
       this.subscribedContextGraphs.set(id, {
         name,
         subscribed: true,
         synced: true,
-        metaSynced: false,
+        metaSynced: source === 'meta' ? true : existing?.metaSynced ?? false,
         onChainId: existing?.onChainId,
       });
 
@@ -5542,7 +5571,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed (metaSynced pending)`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — auto-subscribed`);
       discovered++;
     }
 

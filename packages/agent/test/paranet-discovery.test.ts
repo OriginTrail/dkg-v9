@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent, type ContextGraphSub } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, contextGraphSharedMemoryUri, paranetMetaGraphUri } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -358,6 +358,38 @@ describe('discoverContextGraphsFromChain', () => {
 
     const discovered = await agent.discoverContextGraphsFromChain();
     expect(discovered).toBe(0);
+  }, 15000);
+});
+
+describe('discoverContextGraphsFromStore', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('discovers curated context graphs from _meta definitions', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const curatedId = 'curated-meta-only';
+    const paranetUri = paranetDataGraphUri(curatedId);
+    await store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: paranetMetaGraphUri(curatedId) },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Curated Meta Only"', graph: paranetMetaGraphUri(curatedId) },
+    ]);
+
+    const discovered = await agent.discoverContextGraphsFromStore();
+    expect(discovered).toBe(1);
+
+    const entry = agent.getSubscribedContextGraphs().get(curatedId);
+    expect(entry).toBeDefined();
+    expect(entry!.name).toBe('Curated Meta Only');
+    expect(entry!.subscribed).toBe(true);
+    expect(entry!.synced).toBe(true);
+    expect(entry!.metaSynced).toBe(true);
   }, 15000);
 });
 

@@ -818,6 +818,33 @@ export class DKGAgent {
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
 
+        // Handle "join-rejected" notifications from curator → requester.
+        // Symmetric to join-approved: filter by localAgents, emit an event
+        // so the UI can surface a notification instead of leaving the
+        // invitee's Join modal stuck on "Join request sent…" forever.
+        if (payload.type === 'join-rejected') {
+          const { contextGraphId, agentAddress: rejectedAddr } = payload;
+          if (contextGraphId) {
+            const isLocalAgent = rejectedAddr && [...this.localAgents.keys()].some(
+              (addr) => addr.toLowerCase() === rejectedAddr.toLowerCase(),
+            );
+            if (rejectedAddr && !isLocalAgent) {
+              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+            }
+            this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
+            // Drop any auto-discovery subscription left over from the
+            // initial denied subscribe; symmetric to the cleanup the
+            // catch-up handler does on "denied". Don't remove any
+            // _meta or data that was locally created.
+            (this as any).subscribedContextGraphs?.delete(contextGraphId);
+            this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
+              contextGraphId,
+              agentAddress: rejectedAddr,
+            });
+          }
+          return new TextEncoder().encode(JSON.stringify({ ok: true }));
+        }
+
         const { contextGraphId, agentAddress, signature, timestamp, agentName } = payload;
         if (!contextGraphId || !agentAddress || !signature || !timestamp) {
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
@@ -3425,6 +3452,48 @@ export class DKGAgent {
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Rejected join request from ${agentAddress} for "${contextGraphId}"`);
+
+    // Notify the requester via P2P so their UI can flip from the stale
+    // "Join request sent, awaiting approval" state to a clear denied
+    // state. Non-fatal: if the invitee is unreachable they'll just
+    // re-learn on their next subscribe attempt.
+    this.notifyJoinRejection(contextGraphId, agentAddress).catch((err) => {
+      this.log.warn(ctx, `Failed to notify ${agentAddress} of rejection: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  /**
+   * Send a P2P notification to the rejected agent. Mirror of
+   * notifyJoinApproval — broadcast the rejection to all connected peers
+   * so the invitee's node (wherever it is) can surface a notification
+   * and clean up its stale "pending" state.
+   */
+  private async notifyJoinRejection(contextGraphId: string, agentAddress: string): Promise<void> {
+    const payload = JSON.stringify({
+      type: 'join-rejected',
+      contextGraphId,
+      agentAddress,
+    });
+    const payloadBytes = new TextEncoder().encode(payload);
+    const ctx = createOperationContext('system');
+
+    const peers = this.node.libp2p.getPeers();
+    let delivered = 0;
+    for (const pid of peers) {
+      const remotePeerId = pid.toString();
+      if (remotePeerId === this.peerId) continue;
+      try {
+        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+        delivered++;
+      } catch {
+        // Peer doesn't support protocol or timed out — skip
+      }
+    }
+    if (delivered === 0) {
+      this.log.warn(ctx, `Could not deliver join-rejection notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
+    } else {
+      this.log.info(ctx, `Broadcasted join-rejection for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
+    }
   }
 
   /**

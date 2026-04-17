@@ -1113,6 +1113,28 @@ async function runDaemonInner(
     }
   });
 
+  agent.eventBus.on(DKGEvent.JOIN_REJECTED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: "join_rejected",
+        title: "Join request rejected",
+        message: `Your request to join project ${shortId(data.contextGraphId)} was declined by the curator.`,
+        source: "access-control",
+        meta: JSON.stringify({
+          contextGraphId: data.contextGraphId,
+          agentAddress: data.agentAddress,
+        }),
+      });
+      sseBroadcast("join_rejected", {
+        contextGraphId: data.contextGraphId,
+        agentAddress: data.agentAddress,
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
   agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
     try {
       sseBroadcast("project_synced", {

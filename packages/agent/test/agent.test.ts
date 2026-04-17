@@ -1706,10 +1706,18 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
+    // `autoRegisterDefaultAgent` only runs when the chain adapter exposes
+    // `getOperationalPrivateKey`. MockChainAdapter doesn't, so on that
+    // adapter `localAgents` is empty and `getDefaultAgentAddress()` returns
+    // undefined — the test would fail at the `toBeDefined()` precondition
+    // before exercising `buildSyncRequest`. The adjacent "denies private
+    // sync requests" test uses the same real-chain pattern for the same
+    // reason.
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthMissingKey',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: chain,
     });
     try {
       await agent.start();
@@ -1719,6 +1727,20 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: false,
         onChainId: '1',
       });
+      // Force `needsAuth = true` in buildSyncRequest — the precondition
+      // check Viktor added (see dkg-agent.ts #4880) only fires on the
+      // authenticated-sync path. Without this stub, MockChainAdapter /
+      // a clean Hardhat both report the CG as non-private and the
+      // unsigned path succeeds.
+      (agent as any).isPrivateContextGraph = async () => true;
+      // Force the fallback signing path in buildSyncRequest — when the
+      // chain identity is non-zero (EVMChainAdapter post-ensureProfile),
+      // it signs via `chain.signMessage` and the default-agent key is
+      // never touched, so deleting it has no effect. Stubbing
+      // identityId → 0 drives the code into the
+      // `defaultAgentAddress && agent.privateKey` branch we actually
+      // want to assert on.
+      (chain as any).getIdentityId = async () => 0n;
 
       const defaultAgentAddress = agent.getDefaultAgentAddress();
       expect(defaultAgentAddress).toBeDefined();

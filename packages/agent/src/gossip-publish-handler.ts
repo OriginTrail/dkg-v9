@@ -28,8 +28,13 @@ export interface GossipPublishHandlerCallbacks {
    * (system paranet, populated `_meta` graph, or `<cg> rdf:type dkg:Paranet`
    * asserted in ontology). Used to open the metaSynced gate lazily when
    * gossip arrives before `refreshMetaSyncedFlags` has had a chance to run.
+   *
+   * Optional — callers (notably the standalone gossip-handler tests) may
+   * omit this without breaking the callback contract. When absent, the
+   * strict deny behavior for unsynced curated CGs is preserved (as if the
+   * callback returned `false`).
    */
-  hasConfirmedMetaState: (id: string) => Promise<boolean>;
+  hasConfirmedMetaState?: (id: string) => Promise<boolean>;
   onPhase?: GossipPhaseCallback;
 }
 
@@ -207,7 +212,9 @@ export class GossipPublishHandler {
           && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
           const sub = this.subscribedContextGraphs.get(request.paranetId);
           if (sub && sub.metaSynced === false) {
-            const confirmed = await this.callbacks.hasConfirmedMetaState(request.paranetId);
+            const confirmed = this.callbacks.hasConfirmedMetaState
+              ? await this.callbacks.hasConfirmedMetaState(request.paranetId)
+              : false;
             if (confirmed) {
               sub.metaSynced = true;
             } else {

@@ -5867,12 +5867,27 @@ export class DKGAgent {
       const isCurated = await this.isPrivateContextGraph(id);
 
       if (isCurated) {
+        // Seed the subscription entry BEFORE calling subscribeToContextGraph
+        // so the `...existing` spread in `subscribeToContextGraph` preserves
+        // the discovered human-readable `name` (otherwise the UI/listing
+        // APIs fall back to the raw CG id).
+        //
+        // Intentionally leave `metaSynced` FALSE here. The gossip handler's
+        // "deny until _meta is synced" guard must stay armed until the
+        // authenticated allowlist (`_meta` graph) has actually arrived —
+        // discovery alone can land with just the ontology/access-policy
+        // triples while `allowedPeers` is still null. The follow-up
+        // `refreshMetaSyncedFlags(newlyDiscovered)` call from
+        // `trySyncFromPeer` (see ~#1012) will flip the flag once the
+        // allowlist has been fetched via the authenticated sync path.
+        this.subscribedContextGraphs.set(id, {
+          name,
+          subscribed: false,
+          synced: true,
+          metaSynced: false,
+          onChainId: undefined,
+        });
         this.subscribeToContextGraph(id);
-        const sub = this.subscribedContextGraphs.get(id);
-        if (sub) {
-          sub.metaSynced = true;
-          sub.synced = true;
-        }
         this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
       } else {
         this.subscribedContextGraphs.set(id, {

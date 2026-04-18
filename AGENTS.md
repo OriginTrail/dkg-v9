@@ -15,10 +15,13 @@ For Cursor-specific session-start guidance the same content lives in [`.cursor/r
 
 After **every substantive turn** (anything that reasoned, proposed, examined, or referenced something — basically every turn that wasn't a one-line acknowledgement), call **`dkg_annotate_turn`** exactly once. The shared chat sub-graph is project memory, not a "DKG-relevant search index" — over-eagerness is not a failure mode; under-coverage is.
 
+**Always pass `forSession`.** The session ID is in the `additionalContext` injected at session start ("Your current session ID: `<id>`"). The tool queues the annotation as a pending entity; the capture hook applies it to your actual turn URI when it writes the next `chat:Turn` for the session. Race-free regardless of timing — works whether you call it during your response composition (before the hook fires) or after. Don't try to predict your own turn URI; it doesn't exist yet at the moment you call this tool.
+
 Minimum viable annotation:
 
 ```jsonc
 dkg_annotate_turn({
+  forSession: "<session id from additionalContext>",
   topics:   [<2-3 short topic strings>],   // chat:topic literals
   mentions: [<URIs found via dkg_search>], // chat:mentions edges
 })

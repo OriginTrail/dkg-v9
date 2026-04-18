@@ -436,6 +436,147 @@ async function selfRegisterAgent(cfg, state) {
   }
 }
 
+// ── Pending-annotation rendezvous ─────────────────────────────
+//
+// Phase 7 race-fix: agents call `dkg_annotate_turn` with `forSession`
+// during their response composition. The MCP tool writes annotation
+// triples to a `urn:dkg:pending-annotation:<session>:…` URI tagged with
+// `chat:pendingForSession <sessionId>`. After we write the actual turn
+// triples here, scan for matching pending annotations and rewrite their
+// triples onto the just-written turn URI. This lets the agent annotate
+// "the turn I'm about to produce" race-free — no need to predict a turn
+// URI that doesn't exist yet.
+async function applyPendingAnnotations(cfg, sessionKey, turnUri) {
+  if (!cfg.project) return 0;
+  const sparql = `SELECT ?pending ?p ?o WHERE {
+  GRAPH ?g {
+    ?pending <http://dkg.io/ontology/chat/pendingForSession> "${sessionKey}" ;
+             ?p ?o .
+    FILTER NOT EXISTS { ?pending <http://dkg.io/ontology/chat/appliedToTurn> ?_t }
+  }
+}`;
+  let bindings = [];
+  try {
+    const r = await postJson(cfg.api, '/api/query', cfg.token, {
+      sparql,
+      contextGraphId: cfg.project,
+      subGraphName: cfg.subGraph,
+      includeSharedMemory: true,
+    });
+    bindings = r?.result?.bindings ?? [];
+  } catch (err) {
+    log(`pending-annotations query: ${err?.message ?? err}`);
+    return 0;
+  }
+  if (!bindings.length) return 0;
+
+  // Collect all triples per pending URI so we can rewrite the subject.
+  const byPending = new Map();
+  for (const row of bindings) {
+    const pending = (row.pending?.value ?? row.pending ?? '').toString().replace(/^<|>$/g, '');
+    const p = (row.p?.value ?? row.p ?? '').toString().replace(/^<|>$/g, '');
+    const oRaw = (row.o?.value ?? row.o ?? '').toString();
+    if (!pending || !p) continue;
+    if (!byPending.has(pending)) byPending.set(pending, []);
+    byPending.get(pending).push({ predicate: p, object: oRaw });
+  }
+  if (!byPending.size) return 0;
+
+  // For each pending, rewrite triples whose subject is the pending URI
+  // onto the real turnUri. Triples whose subject is a co-minted entity
+  // (Finding/Question/Decision/Task/Comment/etc.) reference the pending
+  // URI as object via chat:proposes/concludes/etc. — those object refs
+  // also need rewriting. We do a generic pass: anywhere the pending
+  // URI appears in the triples we just queried, swap to turnUri.
+  //
+  // Simpler approach: query the FULL set of triples involving each
+  // pending (as subject OR object) and rewrite. The first query gave
+  // us only subject-side triples, so do a second pass for object-side.
+  let applied = 0;
+  for (const pending of byPending.keys()) {
+    let allTriples = byPending.get(pending);
+    try {
+      const objSparql = `SELECT ?s ?p WHERE { GRAPH ?g { ?s ?p <${pending}> } }`;
+      const r2 = await postJson(cfg.api, '/api/query', cfg.token, {
+        sparql: objSparql,
+        contextGraphId: cfg.project,
+        subGraphName: cfg.subGraph,
+        includeSharedMemory: true,
+      });
+      for (const row of r2?.result?.bindings ?? []) {
+        const s = (row.s?.value ?? row.s ?? '').toString().replace(/^<|>$/g, '');
+        const p = (row.p?.value ?? row.p ?? '').toString().replace(/^<|>$/g, '');
+        if (s && p) allTriples.push({ subject: s, predicate: p, object: `<${turnUri}>` });
+      }
+    } catch (err) {
+      log(`pending object-pass query for ${pending}: ${err?.message ?? err}`);
+    }
+    // Build the rewritten triple set. Skip the pending-marker triples
+    // (pendingForSession, type=PendingAnnotation) — they'd just clutter.
+    const rewritten = [];
+    for (const t of allTriples) {
+      const subject = (t.subject ?? pending) === pending ? turnUri : t.subject;
+      const predicate = t.predicate;
+      // Drop bookkeeping triples that don't belong on the real turn.
+      if (predicate === 'http://dkg.io/ontology/chat/pendingForSession') continue;
+      if (predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+          && (t.object === '<http://dkg.io/ontology/chat/PendingAnnotation>'
+              || t.object === 'http://dkg.io/ontology/chat/PendingAnnotation')) continue;
+      // Object: if it's the pending URI in any wrapping form, swap.
+      let object = t.object;
+      const bareObj = String(object).replace(/^<|>$/g, '');
+      if (bareObj === pending) object = `<${turnUri}>`;
+      rewritten.push({ subject, predicate, object });
+    }
+    if (!rewritten.length) continue;
+    // Mark the pending as applied so we don't re-apply on subsequent
+    // turn writes for the same session. Use a separate single-triple
+    // assertion so the original pending assertion stays untouched
+    // (it's a valid historical record of what the agent intended).
+    rewritten.push({
+      subject: pending,
+      predicate: 'http://dkg.io/ontology/chat/appliedToTurn',
+      object: `<${turnUri}>`,
+    });
+    const applyAssertion = `agent-annotate-applied-${pending.replace(/[^A-Za-z0-9]+/g, '-').slice(-30)}`;
+    try {
+      await postJson(cfg.api, `/api/assertion/${encodeURIComponent(applyAssertion)}/write`, cfg.token, {
+        contextGraphId: cfg.project,
+        subGraphName: cfg.subGraph,
+        quads: rewritten,
+      });
+      if (cfg.autoShare) {
+        await postJson(cfg.api, `/api/assertion/${encodeURIComponent(applyAssertion)}/promote`, cfg.token, {
+          contextGraphId: cfg.project,
+          subGraphName: cfg.subGraph,
+          entities: [turnUri],
+        }).catch(() => { /* non-fatal */ });
+      }
+      applied++;
+      log(`applied pending annotation ${pending} → ${turnUri} (${rewritten.length} triples)`);
+    } catch (err) {
+      log(`apply pending ${pending}: ${err?.message ?? err}`);
+    }
+  }
+  return applied;
+}
+
+// ── Per-turn annotation reminder (Phase 7B) ───────────────────
+//
+// Session-start additionalContext gets ~5KB of protocol once, but
+// LLMs weight recency and a 3-section directive at the top of context
+// loses the war by turn 2. This is a tight (~400 char) per-turn
+// reminder injected via beforeSubmitPrompt / UserPromptSubmit so it
+// rides along with EVERY user turn. Empirically: turn-1 of a fresh
+// chat skipped annotation despite alwaysApply: true on the rule, and
+// the agent later self-annotated a chat:concludes Finding admitting
+// the skip ("agent-skipped-dkg-annotate-turn-prior-reply-despite-..."
+// — preserved at urn:dkg:finding:agent-skipped-...). This per-turn
+// nudge closes that gap without bloating context.
+function buildPerTurnReminder(sessionKey) {
+  return `**DKG annotation reminder (this turn):** after your reply, call \`dkg_annotate_turn\` with \`forSession: "${sessionKey}"\` and at minimum 2-3 \`topics\` plus \`mentions\` URIs from \`dkg_search\`. Required for every substantive turn (definition is broad — anything that reasoned, examined, proposed, or referenced something counts). Skipping is the failure mode. Full protocol: see session-start context + \`.cursor/rules/dkg-annotate.mdc\`.`;
+}
+
 // ── Mention-regex backstop ────────────────────────────────────
 //
 // Defensive: even if the agent forgets to call dkg_annotate_turn, any
@@ -606,6 +747,16 @@ async function handleAfterAgentResponse(cfg, payload) {
       await promoteEntities(cfg, [turn, state.sessionUri]).catch((e) => log(`promote turn: ${e.message}`));
     }
     log(`wrote turn #${idx} for session ${sessionKey}${bootstrapSession ? ' (bootstrapped session)' : ''}`);
+    // Phase 7 race-fix: apply any pending annotations queued by
+    // dkg_annotate_turn(forSession=...) during this response. Best-
+    // effort, non-blocking on error — pendings can also be applied
+    // later by re-running this hook on the next turn.
+    try {
+      const n = await applyPendingAnnotations(cfg, sessionKey, turn);
+      if (n > 0) log(`applied ${n} pending annotation${n === 1 ? '' : 's'} to ${turn}`);
+    } catch (err) {
+      log(`pending-annotation apply failed: ${err?.message ?? err}`);
+    }
   } catch (err) {
     log(`turn write: ${err?.message ?? err}`);
   }
@@ -643,7 +794,7 @@ async function handleSessionEnd(cfg, payload) {
 // candidates to match against without needing a separate dkg_search.
 //
 // Budget: ~600-800 tokens. Cheap relative to any modern context window.
-async function buildSessionStartContext(cfg) {
+async function buildSessionStartContext(cfg, sessionKey) {
   if (!cfg.project) return null;
 
   const RECENT_LIMIT = 30;
@@ -698,6 +849,10 @@ about — topics, mentions, examines, proposes, concludes, asks. The
 chat sub-graph then becomes a navigable knowledge graph rather than
 just a text log.
 
+**Your current session ID:** \`${sessionKey}\`
+
+When calling \`dkg_annotate_turn\`, ALWAYS pass \`forSession: "${sessionKey}"\`. The tool then queues your annotation as a "pending-annotation" entity, and the capture hook applies it to the actual turn URI when it writes the next chat:Turn for this session. **Race-free**: works whether you call annotate during your response composition (before the hook fires) or after. Do NOT try to predict your own turn URI — it doesn't exist yet at the moment you call this tool.
+
 **Look-before-mint protocol** (the convergence rule):
 1. Before minting any new \`urn:dkg:<type>:<slug>\` URI, call \`dkg_search\` with the unnormalised label.
 2. If a result has the same normalised slug, REUSE its URI.
@@ -741,13 +896,19 @@ ${recentLines.length ? `**Recent entities in this graph** (look here first befor
         // Cursor and Claude Code honour `additionalContext` in the
         // sessionStart hook response (top-level field, markdown body).
         try {
-          const ctxMd = await buildSessionStartContext(cfg);
+          const sessionKey = extractSessionKey(payload);
+          const ctxMd = await buildSessionStartContext(cfg, sessionKey);
           if (ctxMd) {
-            // Claude Code expects `hookSpecificOutput.additionalContext`
-            // (per docs.claude.com/en/docs/claude-code/hooks). Cursor
-            // accepts either shape; we emit both for portability.
-            response.additionalContext = ctxMd;
-            response.hookSpecificOutput = {
+            // Cursor and Claude Code disagree on the field name; emit
+            // all three shapes so neither tool drops the injection.
+            //   - Cursor:      `additional_context` (snake_case) per
+            //                  cursor.com/docs/agent/third-party-hooks
+            //   - Claude Code: `hookSpecificOutput.additionalContext`
+            //                  (canonical) + top-level `additionalContext`
+            //                  fallback per docs.claude.com/en/docs/claude-code/hooks
+            response.additional_context = ctxMd;          // Cursor
+            response.additionalContext = ctxMd;            // Claude Code top-level
+            response.hookSpecificOutput = {                // Claude Code canonical
               hookEventName: 'SessionStart',
               additionalContext: ctxMd,
             };
@@ -760,6 +921,33 @@ ${recentLines.length ? `**Recent entities in this graph** (look here first befor
       case 'beforeSubmitPrompt':
       case 'UserPromptSubmit':
         await handleBeforeSubmitPrompt(cfg, payload);
+        // Phase 7B: per-turn annotation reminder. The two tools
+        // disagree on the field name(!):
+        //   - Cursor's beforeSubmitPrompt expects `additional_context`
+        //     (snake_case), per https://cursor.com/docs/agent/third-party-hooks
+        //   - Claude Code's UserPromptSubmit expects `additionalContext`
+        //     inside `hookSpecificOutput`, plus accepts top-level
+        //     `additionalContext` per docs.claude.com/en/docs/claude-code/hooks
+        // Emit all three shapes defensively so neither tool drops the
+        // injection. The markdown is prepended to the conversation's
+        // system context for the upcoming user message — recency-
+        // weighted nudge that survives across turns (session-start
+        // injection alone wasn't enough; the agent skipped annotation
+        // on early turns despite alwaysApply: true on the rule).
+        if (cfg.project) {
+          try {
+            const sessionKey = extractSessionKey(payload);
+            const reminder = buildPerTurnReminder(sessionKey);
+            response.additional_context = reminder;     // Cursor
+            response.additionalContext = reminder;       // Claude Code (top-level fallback)
+            response.hookSpecificOutput = {              // Claude Code (canonical)
+              hookEventName: EVENT === 'UserPromptSubmit' ? 'UserPromptSubmit' : 'beforeSubmitPrompt',
+              additionalContext: reminder,
+            };
+          } catch (err) {
+            log(`per-turn reminder injection: ${err?.message ?? err}`);
+          }
+        }
         break;
       case 'afterAgentResponse':
       case 'Stop':

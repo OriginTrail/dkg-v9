@@ -11,10 +11,13 @@ This workspace is bound to a DKG context graph. Use the `dkg` MCP server to keep
 
 Call **`dkg_annotate_turn`** exactly once. A turn is "substantive" if it reasoned, proposed, examined, or referenced something — basically every turn that wasn't a one-line acknowledgement. Over-eagerness is not a failure mode; under-coverage is.
 
+**Always pass `forSession`.** The session ID is in the session-start `additionalContext` ("Your current session ID: `<id>`"). Race-free deferred rendezvous: the tool queues the annotation, the capture hook applies it to your actual turn URI when it writes the next `chat:Turn` for the session. Never try to predict your own turn URI — it doesn't exist yet.
+
 Minimum payload:
 
 ```jsonc
 dkg_annotate_turn({
+  forSession: "<session id from additionalContext>",
   topics:   [<2-3 short topic strings>],
   mentions: [<URIs found via dkg_search; mint fresh ones if no match>]
 })

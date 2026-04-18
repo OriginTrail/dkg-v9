@@ -251,7 +251,8 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
         'the look-before-mint protocol (call dkg_search first) before ' +
         'minting any new URI.',
       inputSchema: {
-        turnUri: z.string().optional().describe('Full URI of the chat:Turn to annotate. If omitted, the latest turn authored by your agent in this project is used.'),
+        turnUri: z.string().optional().describe('Full URI of the chat:Turn to annotate. Use ONLY for retroactively annotating a specific past turn. For the turn you are CURRENTLY producing, use `forSession` instead — your turn URI does not exist yet at the moment you call this tool.'),
+        forSession: z.string().optional().describe('Session ID of the chat you are currently in (visible in the session-start additionalContext as "your current session ID"). Pass this so the annotation lands on the turn the capture hook is ABOUT to write — race-free deferred rendezvous, no need to predict your turn URI.'),
         topics: z.array(z.string()).optional().describe('chat:topic literals — short topical buckets ("Python parsing", "performance"). Emit liberally.'),
         mentions: z.array(z.string()).optional().describe('chat:mentions URIs — entities the turn referenced. Apply look-before-mint first. Bare strings are wrapped as urn:dkg:concept:<slug>.'),
         examines: z.array(z.string()).optional().describe('chat:examines URIs — entities the turn analysed in detail (vs just citing).'),
@@ -287,14 +288,36 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       if (!pid) return projectErr();
       if (!config.agentUri) return agentErr();
 
-      // Resolve the turn URI (caller-supplied or latest).
-      let turnUri = args.turnUri;
-      if (!turnUri) {
+      // ── Decide annotation target ──────────────────────────────
+      //
+      // Three modes, in priority order:
+      //
+      //   1. `turnUri` explicit → annotate that exact turn (back-fill mode).
+      //   2. `forSession` provided → deferred rendezvous: write to a
+      //      `urn:dkg:pending-annotation:…` URI tagged for that session.
+      //      The capture-chat hook applies it to the real turn URI when
+      //      it next writes a turn for that session. RACE-FREE: works
+      //      regardless of whether you call this BEFORE or AFTER the
+      //      hook fires for your current response.
+      //   3. Neither → fall back to "latest turn authored by my agent"
+      //      (legacy mode, can land on the wrong turn if the hook
+      //      hasn't yet written your in-progress turn).
+      let turnUri: string;
+      let deferredForSession: string | null = null;
+      if (args.turnUri) {
+        turnUri = args.turnUri;
+      } else if (args.forSession) {
+        deferredForSession = args.forSession;
+        // Pending URI namespaced by session so the hook's lookup is cheap
+        // and so multiple agents working in different sessions don't
+        // accidentally cross-pollinate.
+        turnUri = `urn:dkg:pending-annotation:${args.forSession}:${rand(10)}-${Date.now()}`;
+      } else {
         const latest = await resolveLatestTurn(client, pid, config.agentUri);
         if (!latest) {
           return errResult(
             `No chat:Turn found for agent ${config.agentUri} in project ${pid}. ` +
-            'Pass `turnUri` explicitly, or wait for at least one turn to be captured first.',
+            'Pass `forSession` (your current session ID) so the annotation lands on the turn currently being written, or `turnUri` for a specific past turn.',
           );
         }
         turnUri = latest;
@@ -420,10 +443,22 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
         );
       }
 
+      // For deferred (forSession) mode, tag the pending entity so the
+      // capture-chat hook can find + apply it on the next turn write.
+      if (deferredForSession) {
+        emit(triples, U(turnUri), U(TypeP), U('http://dkg.io/ontology/chat/PendingAnnotation'));
+        emit(triples, U(turnUri), U(NS.chat + 'pendingForSession'), L(deferredForSession));
+        emit(triples, U(turnUri), U(CreatedP), L(nowIso, XSD_DATETIME));
+        emit(triples, U(turnUri), U(AttrP), U(config.agentUri));
+      }
+
       // Stable assertion name keyed off the turn so re-annotations of the
-      // same turn replace cleanly.
+      // same turn replace cleanly. For pending annotations, scope by
+      // session so multiple in-flight pendings coexist cleanly.
       const turnSuffix = turnUri.replace(/[^A-Za-z0-9]+/g, '-').slice(-40);
-      const assertion = `agent-annotate-${turnSuffix}-${rand(4)}`;
+      const assertion = deferredForSession
+        ? `agent-annotate-pending-${turnSuffix}`
+        : `agent-annotate-${turnSuffix}-${rand(4)}`;
       try {
         await client.ensureSubGraph(pid, 'chat');
         await client.writeAssertion({
@@ -444,10 +479,10 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
             shared = true;
           } catch (e) {
             // Promote failure on annotation is non-fatal.
-            return ok(buildSummary(turnUri, args, newEntityUris, triples.length, false, formatError(e)));
+            return ok(buildSummary(turnUri, args, newEntityUris, triples.length, false, formatError(e), deferredForSession));
           }
         }
-        return ok(buildSummary(turnUri, args, newEntityUris, triples.length, shared));
+        return ok(buildSummary(turnUri, args, newEntityUris, triples.length, shared, undefined, deferredForSession));
       } catch (e) {
         return errResult(`Failed to annotate turn: ${formatError(e)}`);
       }
@@ -462,6 +497,7 @@ function buildSummary(
   tripleCount: number,
   shared: boolean,
   promoteError?: string,
+  deferredForSession?: string | null,
 ): string {
   const counts = {
     topics: args.topics?.length ?? 0,
@@ -474,8 +510,12 @@ function buildSummary(
     comments: args.comments?.length ?? 0,
     vmPublishRequests: args.vmPublishRequests?.length ?? 0,
   };
+  const isDeferred = !!deferredForSession;
+  const headline = isDeferred
+    ? `${shared ? '✔' : promoteError ? '⚠' : '✔'} Annotation **queued** for next turn in session \`${deferredForSession}\` (URI \`${turnUri}\`)${shared ? ', auto-promoted to SWM' : promoteError ? `, WM only — promote failed: ${promoteError}` : ', WM only'}. The capture-chat hook will apply it to the actual turn URI when it writes the next chat:Turn for this session.`
+    : `${shared ? '✔' : promoteError ? '⚠' : '✔'} Annotated turn \`${turnUri}\`${shared ? ' (auto-promoted to SWM)' : promoteError ? ` (WM only — promote failed: ${promoteError})` : ' (WM only)'}.`;
   const lines = [
-    `${shared ? '✔' : promoteError ? '⚠' : '✔'} Annotated turn \`${turnUri}\`${shared ? ' (auto-promoted to SWM)' : promoteError ? ` (WM only — promote failed: ${promoteError})` : ' (WM only)'}.`,
+    headline,
     '',
     `**Triples emitted:** ${tripleCount}`,
     '',

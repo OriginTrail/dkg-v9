@@ -30,6 +30,12 @@ export interface SubGraphBinding {
   rank: number;
   /** Predicate IRI (date-valued) that opts this sub-graph into the Timeline tab. */
   timelinePredicate?: string;
+  /**
+   * Name of the WM assertion this sub-graph's importer writes into.
+   * Needed by the verify-on-DKG flow to promote a single entity WM -> SWM
+   * (the promote API takes an assertion name, not just a URI).
+   */
+  sourceAssertion?: string;
 }
 
 export interface EntityTypeBinding {
@@ -38,6 +44,18 @@ export interface EntityTypeBinding {
   icon?: string;
   color?: string;
   detailHint?: string;
+  /**
+   * Domain-aware copy for the Verify-on-DKG CTA. When all four are unset
+   * the UI hides the CTA for this type (correct for derived artifacts
+   * like files/commits that shouldn't be manually progressed).
+   *
+   *   promoteLabel / promoteHint — WM -> SWM (the "share with team" step)
+   *   publishLabel / publishHint — SWM -> VM  (the "anchor on-chain" step)
+   */
+  promoteLabel?: string;
+  promoteHint?: string;
+  publishLabel?: string;
+  publishHint?: string;
 }
 
 export interface ViewConfig {
@@ -163,7 +181,7 @@ WHERE {
 function buildSubGraphBindingsQuery(contextGraphId: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
-SELECT ?slug ?displayName ?description ?icon ?color ?rank ?timelinePredicate
+SELECT ?slug ?displayName ?description ?icon ?color ?rank ?timelinePredicate ?sourceAssertion
 WHERE {
   GRAPH ?g {
     ?b a prof:SubGraphBinding ;
@@ -174,6 +192,7 @@ WHERE {
     OPTIONAL { ?b prof:color ?color }
     OPTIONAL { ?b prof:rank ?rank }
     OPTIONAL { ?b prof:timelinePredicate ?timelinePredicate }
+    OPTIONAL { ?b prof:sourceAssertion ?sourceAssertion }
   }
   ${metaGraphFilter(contextGraphId)}
 }`;
@@ -217,6 +236,7 @@ WHERE {
 function buildTypeBindingsQuery(contextGraphId: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 SELECT ?type ?label ?icon ?color ?detailHint
+       ?promoteLabel ?promoteHint ?publishLabel ?publishHint
 WHERE {
   GRAPH ?g {
     ?b a prof:EntityTypeBinding ;
@@ -225,6 +245,10 @@ WHERE {
     OPTIONAL { ?b prof:icon ?icon }
     OPTIONAL { ?b prof:color ?color }
     OPTIONAL { ?b prof:detailHint ?detailHint }
+    OPTIONAL { ?b prof:promoteLabel ?promoteLabel }
+    OPTIONAL { ?b prof:promoteHint  ?promoteHint }
+    OPTIONAL { ?b prof:publishLabel ?publishLabel }
+    OPTIONAL { ?b prof:publishHint  ?publishHint }
   }
   ${metaGraphFilter(contextGraphId)}
 }`;
@@ -313,6 +337,7 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
             color: stripLiteral(row.color) || undefined,
             rank: parseInt10(row.rank) || 99,
             timelinePredicate: stripIri(row.timelinePredicate) || undefined,
+            sourceAssertion: stripLiteral(row.sourceAssertion) || undefined,
           }))
           .filter(s => s.slug)
           .sort((a, b) => a.rank - b.rank);
@@ -326,6 +351,10 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
             icon: stripLiteral(row.icon) || undefined,
             color: stripLiteral(row.color) || undefined,
             detailHint: stripLiteral(row.detailHint) || undefined,
+            promoteLabel: stripLiteral(row.promoteLabel) || undefined,
+            promoteHint:  stripLiteral(row.promoteHint)  || undefined,
+            publishLabel: stripLiteral(row.publishLabel) || undefined,
+            publishHint:  stripLiteral(row.publishHint)  || undefined,
           }))
           .filter(t => t.typeIri);
         setTypeBindings(tbs);

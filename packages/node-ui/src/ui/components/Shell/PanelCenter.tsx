@@ -27,6 +27,10 @@ const SettingsView = React.lazy(() =>
   import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
 );
 
+const AgentProfilePage = React.lazy(() =>
+  import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
+);
+
 function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
 
@@ -237,6 +241,24 @@ function ViewContainer() {
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
     return <ProjectView contextGraphId={cgId} />;
+  }
+
+  if (activeTabId.startsWith('agent:')) {
+    // Tab id shape: `agent:<projectId>|<agentSlug>`. The project part
+    // scopes the profile to a single context graph's data; a future
+    // "global agent profile" view could drop the prefix.
+    const raw = activeTabId.slice('agent:'.length);
+    const pipeIdx = raw.indexOf('|');
+    if (pipeIdx > 0) {
+      const cgId = raw.slice(0, pipeIdx);
+      const agentSlug = raw.slice(pipeIdx + 1);
+      const agentUri = agentSlug.includes(':') ? agentSlug : `urn:dkg:agent:${agentSlug}`;
+      return (
+        <Suspense fallback={<div className="lazy-spinner">Loading agent…</div>}>
+          <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />
+        </Suspense>
+      );
+    }
   }
 
   if (activeTabId.startsWith('doc:')) {

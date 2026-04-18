@@ -30,12 +30,16 @@ export const NS = {
   decisions: 'http://dkg.io/ontology/decisions/',
   tasks: 'http://dkg.io/ontology/tasks/',
   profile: 'http://dkg.io/ontology/profile/',
+  agent: 'http://dkg.io/ontology/agent/',
   rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
   rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
   xsd: 'http://www.w3.org/2001/XMLSchema#',
   schema: 'http://schema.org/',
   dcterms: 'http://purl.org/dc/terms/',
   foaf: 'http://xmlns.com/foaf/0.1/',
+  // Standard PROV-O — used for cross-cutting attribution that any
+  // DKG-aware UI can rely on without knowing domain ontologies.
+  prov: 'http://www.w3.org/ns/prov#',
 };
 
 export const XSD = {
@@ -186,6 +190,71 @@ export const Tasks = {
   },
 };
 
+// ── Agent ─────────────────────────────────────────────────────
+/**
+ * First-class agent identity. In a multi-agent DKG project, every
+ * decision / task / commit is authored by *someone* — human or AI,
+ * driven by some framework — and users need to see who wrote what at
+ * a glance. Agents are entities in the project's `meta` sub-graph,
+ * referenced from domain triples via `prov:wasAttributedTo`.
+ *
+ * URI scheme: `urn:dkg:agent:{slug}` — slug is usually
+ * `{framework}-{operator}` for AI agents ("claude-code-branarakic")
+ * or just the operator handle for humans ("branarakic").
+ */
+export const Agent = {
+  T: {
+    Agent: NS.agent + 'Agent',
+    HumanAgent: NS.agent + 'HumanAgent',
+    AIAgent: NS.agent + 'AIAgent',
+  },
+  P: {
+    // Which framework the agent runs on — "claude-code", "openclaw",
+    // "hermes", "gemini", "human". UIs use this to pick a glyph/color.
+    framework: NS.agent + 'framework',
+    // For AI agents: the human operator who runs them. Agent -> Agent URI.
+    operator:  NS.agent + 'operator',
+    // Wallet public key (EVM-style 0x… address) — the canonical identity
+    // on the DKG. Signatures, reputation, TRAC stake, all hang off this.
+    // Humans have a wallet they control; AI agents run with a delegated
+    // wallet from the operator.
+    walletAddress: NS.agent + 'walletAddress',
+    // Stable peer-id from the agent's libp2p identity, when known.
+    peerId:    NS.agent + 'peerId',
+    // Avatar URL or data: URI.
+    avatar:    NS.agent + 'avatar',
+    // When the agent first participated in this project.
+    joinedAt:  NS.agent + 'joinedAt',
+    // Optional free-form reputation / trust notes for UI surfacing.
+    reputation: NS.agent + 'reputation',
+  },
+  // PROV-O attribution predicates any domain triple can use:
+  //   decisions:Decision prov:wasAttributedTo <agent>
+  //   tasks:Task         prov:wasAttributedTo <agent>
+  //   github:Commit      prov:wasAttributedTo <agent>
+  Prov: {
+    wasAttributedTo:   NS.prov + 'wasAttributedTo',
+    wasGeneratedBy:    NS.prov + 'wasGeneratedBy',
+    wasInvalidatedBy:  NS.prov + 'wasInvalidatedBy',
+  },
+  // Per-layer transition attribution. These sit on the *entity* and
+  // record who actually fired each promote/publish step. The UI reads
+  // these to render the Provenance Trail as "Created by X · Promoted by
+  // Y · Published by Z". When a value isn't set yet (e.g. the seed
+  // script did a bulk promote) the UI falls back to `wasAttributedTo`.
+  Transition: {
+    createdBy:   NS.agent + 'createdBy',   // WM: first draft author
+    promotedBy:  NS.agent + 'promotedBy',  // WM -> SWM actor
+    publishedBy: NS.agent + 'publishedBy', // SWM -> VM actor
+    createdAt:   NS.agent + 'createdAt',
+    promotedAt:  NS.agent + 'promotedAt',
+    publishedAt: NS.agent + 'publishedAt',
+  },
+  uri: {
+    agent: (slug) => `urn:dkg:agent:${encodeURIComponent(slug)}`,
+  },
+};
+
 // ── Profile ───────────────────────────────────────────────────
 /**
  * The profile ontology is how a project declares to any DKG-aware UI how
@@ -243,6 +312,30 @@ export const Profile = {
     // and displays the result set as the filtered entity list.
     sparqlQuery: NS.profile + 'sparqlQuery',     // SavedQuery -> literal SPARQL text
     resultColumn: NS.profile + 'resultColumn',   // SavedQuery -> literal column name yielding ?uri
+    // ── Layer-transition UX (EntityTypeBinding + SubGraphBinding) ──
+    // Domain-aware copy for the Verify-on-DKG CTA. The same button
+    // behaves differently across ontologies: a Decision "proposes to
+    // team" → "ratifies on-chain", a Task "shares with team" →
+    // "anchors"; a Character in a book project might "submit for
+    // editorial review" → "publish as canon". Declaring the copy in
+    // the profile means the UI needs zero changes per domain.
+    //
+    //   promoteLabel / promoteHint  — WM → SWM step (button + tooltip)
+    //   publishLabel / publishHint  — SWM → VM  step (button + tooltip)
+    //
+    // Leaving all four unset on an EntityTypeBinding hides the CTA for
+    // that type, which is correct for derived artifacts (code:File,
+    // github:Commit) that shouldn't be manually progressed.
+    promoteLabel: NS.profile + 'promoteLabel',       // EntityTypeBinding -> literal
+    promoteHint:  NS.profile + 'promoteHint',        // EntityTypeBinding -> literal
+    publishLabel: NS.profile + 'publishLabel',       // EntityTypeBinding -> literal
+    publishHint:  NS.profile + 'publishHint',        // EntityTypeBinding -> literal
+    // `sourceAssertion` names the WM assertion that a sub-graph's
+    // importer writes into. The UI needs this to promote a single
+    // entity from WM -> SWM (the promote API takes an assertion name
+    // + a selection). Declaring it on the SubGraphBinding lets any
+    // future importer wire itself up without touching UI code.
+    sourceAssertion: NS.profile + 'sourceAssertion', // SubGraphBinding -> literal assertion name
   },
   uri: {
     profile: (projectId) => `urn:dkg:profile:${encodeURIComponent(projectId)}`,

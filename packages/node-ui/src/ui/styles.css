@@ -434,6 +434,47 @@ button:focus:not(:focus-visible) { outline: none; }
   min-width: 18px;
   text-align: right;
 }
+
+/* Hover-revealed "hide" affordance on each project row. Keeps the tree
+   quiet by default and lets the user dismiss any leftover project from
+   their sidebar without a daemon-side delete. */
+.v10-tree-hide-btn {
+  flex-shrink: 0;
+  margin-left: 6px;
+  width: 18px; height: 18px;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none;
+  color: var(--text-ghost);
+  font-size: 14px; line-height: 1;
+  cursor: pointer; border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
+.v10-tree-hide-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red, #ef4444);
+}
+
+.v10-tree-show-hidden {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 10px 8px 4px;
+  padding: 6px 10px;
+  background: none;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  font-size: 11px; font-family: var(--font-sans);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.v10-tree-show-hidden:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
 .v10-tree-items { padding-left: 0; }
 .v10-tree-item {
   display: flex;
@@ -810,6 +851,8 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-tertiary);
+  display: inline-block;
+  text-align: center;
 }
 .v10-local-agent-badge.chat_ready,
 .v10-local-agent-status-pill.chat_ready {
@@ -3773,34 +3816,63 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-subgraph-badge-label { text-transform: capitalize; }
 
 /* ── Verify on DKG CTA (in KA detail right pane) ── */
+/* Two variants: .promote (WM -> SWM, amber) and .publish (SWM -> VM, green).
+   The layer-transition icon (◈ / ◉) matches LAYER_CONFIG so the CTA
+   visually anticipates the destination layer. */
 .v10-ka-verify {
   margin-top: 16px;
-  padding: 12px;
+  padding: 14px;
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.v10-ka-verify-promote {
   background: linear-gradient(135deg,
-    rgba(34,197,94,0.08) 0%,
+    rgba(245,158,11,0.10) 0%,
+    rgba(168,85,247,0.05) 100%);
+  border: 1px solid rgba(245,158,11,0.30);
+}
+.v10-ka-verify-publish {
+  background: linear-gradient(135deg,
+    rgba(34,197,94,0.10) 0%,
     rgba(168,85,247,0.06) 100%);
-  border: 1px solid rgba(34,197,94,0.25);
+  border: 1px solid rgba(34,197,94,0.30);
+}
+.v10-ka-verify-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.v10-ka-verify-arrow {
+  font-size: 18px;
+  line-height: 1;
+}
+.v10-ka-verify-promote .v10-ka-verify-arrow { color: #f59e0b; }
+.v10-ka-verify-publish .v10-ka-verify-arrow { color: #22c55e; }
+.v10-ka-verify-title {
+  font-size: 13px; font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
 }
 .v10-ka-verify-btn {
   display: block; width: 100%;
   padding: 8px 12px;
-  background: #22c55e;
-  color: #0a0a0a;
   border: none; border-radius: 6px;
   font-size: 12px; font-weight: 700;
   letter-spacing: 0.02em;
   cursor: pointer;
   font-family: var(--font-sans);
-  transition: filter 0.15s;
+  transition: filter 0.15s, background 0.15s;
+}
+.v10-ka-verify-btn.promote {
+  background: #f59e0b;
+  color: #0a0a0a;
+}
+.v10-ka-verify-btn.publish {
+  background: #22c55e;
+  color: #0a0a0a;
 }
 .v10-ka-verify-btn:hover:not(:disabled) { filter: brightness(1.12); }
-.v10-ka-verify-btn:disabled { opacity: 0.5; cursor: default; }
-.v10-ka-verify-btn.gated {
-  background: rgba(245,158,11,0.18);
-  color: #f59e0b;
-  border: 1px solid rgba(245,158,11,0.4);
-}
+.v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }
 .v10-ka-verify-hint {
   margin-top: 8px;
   font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
@@ -3826,4 +3898,379 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-ka-verify-ok-val { color: var(--text-primary); font-weight: 600; }
 .v10-ka-verify-ok-val.mono {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+
+/* ── AgentChip (attribution pill) ── */
+.v10-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 2px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  vertical-align: middle;
+  max-width: 100%;
+  user-select: none;
+}
+.v10-agent-chip.interactive { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.v10-agent-chip.interactive:hover {
+  background: color-mix(in srgb, var(--agent-color, #64748b) 14%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+}
+.v10-agent-chip-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--agent-color, #64748b);
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+}
+.v10-agent-chip-initials {
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.v10-agent-chip-glyph {
+  position: absolute;
+  bottom: -2px;
+  right: -4px;
+  background: var(--bg-surface, #1a1d23);
+  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--agent-color, #64748b);
+  line-height: 1;
+}
+.v10-agent-chip-body {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+  max-width: 100%;
+}
+.v10-agent-chip-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-agent-chip-sub {
+  display: inline-flex;
+  gap: 4px;
+  font-size: 9px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, #64748b); }
+.v10-agent-chip-sep { opacity: 0.5; }
+.v10-agent-chip-op { opacity: 0.85; }
+
+/* Size variants */
+.v10-agent-chip-sm { font-size: 10px; padding: 1px 7px 1px 1px; }
+.v10-agent-chip-sm .v10-agent-chip-avatar { width: 16px; height: 16px; font-size: 8px; }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 9px; height: 9px; font-size: 7px; bottom: -1px; right: -2px; }
+
+.v10-agent-chip-md { font-size: 11px; padding: 2px 9px 2px 2px; }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: 9px; }
+.v10-agent-chip-md .v10-agent-chip-glyph  { width: 11px; height: 11px; font-size: 8px; }
+
+.v10-agent-chip-lg { font-size: 13px; padding: 4px 12px 4px 4px; }
+.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: 11px; }
+.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: 10px; bottom: -2px; right: -4px; }
+
+/* ── Activity feed ── */
+.v10-activity-feed {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.015);
+}
+.v10-activity-feed-title {
+  font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.v10-activity-feed-empty-body {
+  font-size: 12px; color: var(--text-tertiary); font-style: italic;
+  padding: 8px 0;
+}
+.v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
+.v10-activity-feed-bucket-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 2px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.v10-activity-feed-bucket-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.v10-activity-feed-bucket-count {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-ghost);
+}
+.v10-activity-feed-items { display: flex; flex-direction: column; }
+
+.v10-activity-feed-row {
+  display: grid;
+  grid-template-columns: 16px auto 1fr auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  transition: background 0.12s;
+}
+.v10-activity-feed-row:hover { background: rgba(255,255,255,0.04); }
+.v10-activity-feed-row + .v10-activity-feed-row {
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+}
+.v10-activity-feed-layer {
+  font-size: 14px; line-height: 1;
+  justify-self: center;
+}
+.v10-activity-feed-type {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--type-color, #a855f7);
+  background: color-mix(in srgb, var(--type-color, #a855f7) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--type-color, #a855f7) 30%, var(--border-subtle));
+  white-space: nowrap;
+}
+.v10-activity-feed-type-icon { font-size: 11px; }
+.v10-activity-feed-title-text {
+  font-size: 12px; font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.v10-activity-feed-status {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+}
+.v10-activity-feed-status.status-good  { color: #22c55e; border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
+.v10-activity-feed-status.status-warn  { color: #f59e0b; border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
+.v10-activity-feed-status.status-bad   { color: #ef4444; border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+.v10-activity-feed-author { display: inline-flex; }
+.v10-activity-feed-time {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--text-ghost);
+  white-space: nowrap;
+  min-width: 54px; text-align: right;
+}
+
+/* ── Agent profile page ── */
+.v10-agent-profile {
+  display: flex; flex-direction: column;
+  overflow: auto;
+  padding: 12px 0;
+}
+.v10-agent-profile-header {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 12px 20px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(
+    180deg,
+    rgba(255,255,255,0.04) 0%,
+    transparent 100%
+  );
+}
+.v10-agent-profile-head {
+  display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
+}
+.v10-agent-profile-reputation {
+  font-size: 13px; color: var(--text-secondary);
+  line-height: 1.55;
+  max-width: 640px;
+  flex: 1 1 260px;
+}
+.v10-agent-profile-meta {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-top: 4px;
+}
+.v10-agent-profile-meta-row {
+  display: flex; gap: 10px; align-items: center;
+  font-size: 11px;
+}
+.v10-agent-profile-meta-lbl {
+  text-transform: uppercase;
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  min-width: 80px;
+}
+.v10-agent-profile-meta-val { color: var(--text-secondary); }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: 11px; }
+.v10-agent-profile-wallet {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-primary);
+}
+.v10-agent-profile-copy {
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-ghost);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s;
+}
+.v10-agent-profile-copy:hover { border-color: var(--border-strong); color: var(--text-primary); }
+
+.v10-agent-profile-stats {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-agent-profile-stat {
+  display: inline-flex; flex-direction: column; gap: 2px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-elevated, rgba(255,255,255,0.03));
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.v10-agent-profile-stat:hover {
+  border-color: var(--stat-color, var(--border-strong));
+  color: var(--text-primary);
+}
+.v10-agent-profile-stat.active {
+  border-color: var(--stat-color, var(--accent-green));
+  background: color-mix(in srgb, var(--stat-color, var(--accent-green)) 12%, transparent);
+  color: var(--text-primary);
+}
+.v10-agent-profile-stat-val {
+  font-size: 17px; font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1;
+  color: var(--stat-color, var(--text-primary));
+}
+.v10-agent-profile-stat-lbl {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.v10-agent-profile-feed-sub {
+  font-weight: 400;
+  color: var(--text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Inline attribution inside each Provenance Trail event
+   ("Created by <agent>", "Promoted by <agent>", "Published by <agent>") */
+.v10-ka-event-attribution {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 18px;  /* line up under the title, past the dot */
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.v10-ka-event-attribution-prefix {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: var(--text-ghost);
+}
+.v10-ka-event-attribution-when {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-ghost);
+}
+
+/* Author block in the KA detail header (prominent "Proposed by …" card) */
+.v10-ka-header-author {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 4px; margin-left: auto;
+  padding-left: 16px;
+  flex-shrink: 0;
+}
+.v10-ka-header-author-label {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-ghost);
+}
+
+/* ── Persistent project header strip ── */
+.v10-project-strip {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--sg-color, #a855f7) 8%, transparent) 0%,
+    transparent 40%
+  );
+  min-height: 34px;
+}
+.v10-project-strip-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  flex-shrink: 0;
+}
+.v10-project-strip-name {
+  font-size: 13px; font-weight: 600;
+  color: var(--text-primary);
+  background: none; border: none; padding: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: color 0.15s;
+}
+.v10-project-strip-name:disabled {
+  cursor: default; opacity: 1;
+}
+.v10-project-strip-name:not(:disabled):hover {
+  color: var(--sg-color, #a855f7);
+}
+.v10-project-strip-sep {
+  color: var(--text-ghost);
+  font-size: 14px;
+  font-weight: 400;
+}
+.v10-project-strip-sg {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 600;
+}
+.v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
+.v10-project-strip-desc {
+  font-size: 11px; color: var(--text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-left: auto;
+  max-width: 560px;
+  padding-left: 12px;
 }

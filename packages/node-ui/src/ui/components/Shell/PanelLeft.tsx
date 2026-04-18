@@ -14,14 +14,64 @@ const COLLAPSE_ICON = '◂';
 
 type TreeMode = 'explorer' | 'oracle';
 
+// ─── Hidden projects (local-only dismissal) ─────────────────────
+// The daemon doesn't ship a "delete context graph" endpoint yet, so
+// leftover projects from old tests / demo runs accumulate in the
+// sidebar. We let the user locally dismiss them via a tiny "×"
+// action on each row. State lives in localStorage (no daemon call),
+// so it's per-browser and instantly reversible via "Show hidden".
+const HIDDEN_KEY = 'v10:hiddenProjectIds';
+const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
+
+function loadHiddenIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(HIDDEN_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch { return new Set(); }
+}
+
+function saveHiddenIds(ids: Set<string>): void {
+  try {
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify([...ids]));
+    window.dispatchEvent(new Event(HIDDEN_CHANGE_EVENT));
+  } catch { /* non-critical */ }
+}
+
+function useHiddenProjectIds(): {
+  hidden: Set<string>;
+  hide: (id: string) => void;
+  unhideAll: () => void;
+} {
+  const [hidden, setHidden] = useState<Set<string>>(() => loadHiddenIds());
+  useEffect(() => {
+    const sync = () => setHidden(loadHiddenIds());
+    window.addEventListener(HIDDEN_CHANGE_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(HIDDEN_CHANGE_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  const hide = useCallback((id: string) => {
+    const next = new Set(loadHiddenIds());
+    next.add(id);
+    saveHiddenIds(next);
+  }, []);
+  const unhideAll = useCallback(() => { saveHiddenIds(new Set()); }, []);
+  return { hidden, hide, unhideAll };
+}
+
 interface ProjectTreeItemProps {
   cg: ContextGraph;
   isActive: boolean;
   onSelect: () => void;
   onImport: () => void;
+  onHide: () => void;
 }
 
-function ProjectTreeItem({ cg, isActive, onSelect, onImport }: ProjectTreeItemProps) {
+function ProjectTreeItem({ cg, isActive, onSelect, onImport, onHide }: ProjectTreeItemProps) {
   const [open, setOpen] = useState(false);
   const { openTab } = useTabsStore();
   const assetCount = cg.assetCount ?? cg.assets ?? 0;
@@ -36,6 +86,14 @@ function ProjectTreeItem({ cg, isActive, onSelect, onImport }: ProjectTreeItemPr
         <span className="v10-tree-project-dot" />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <span className="v10-tree-section-badge">{assetCount}</span>
+        <button
+          type="button"
+          className="v10-tree-hide-btn"
+          title="Hide this project from the sidebar (reversible)"
+          onClick={(e) => { e.stopPropagation(); onHide(); }}
+        >
+          ×
+        </button>
       </div>
       {open && (
         <div className="v10-tree-items">
@@ -112,6 +170,10 @@ export function PanelLeft() {
   const { contextGraphs, setContextGraphs, setLoading, activeProjectId, setActiveProject } = useProjectsStore();
   const stage = useJourneyStore((s) => s.stage);
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
+
+  const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
+  const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
+  const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
@@ -198,7 +260,7 @@ export function PanelLeft() {
             </div>
           )}
 
-          {contextGraphs.map((cg) => (
+          {visibleContextGraphs.map((cg) => (
             <ProjectTreeItem
               key={cg.id}
               cg={cg}
@@ -208,8 +270,23 @@ export function PanelLeft() {
                 openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
               }}
               onImport={() => setImportTarget(cg)}
+              onHide={() => {
+                hideProject(cg.id);
+                if (activeProjectId === cg.id) setActiveProject(null);
+              }}
             />
           ))}
+
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="v10-tree-show-hidden"
+              onClick={unhideAll}
+              title="Restore all projects dismissed from the sidebar"
+            >
+              ↺ Show {hiddenCount} hidden project{hiddenCount !== 1 ? 's' : ''}
+            </button>
+          )}
 
           {stage >= 1 && <IntegrationsSection />}
         </div>

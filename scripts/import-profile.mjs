@@ -58,15 +58,20 @@ emit(uri(profileId), uri(Profile.P.primaryColor), lit('#a855f7'));
 emit(uri(profileId), uri(Profile.P.accentColor), lit('#22c55e'));
 
 // ── SubGraph bindings ─────────────────────────────────────────
-// `timeline` — when set, opts this sub-graph into a Timeline tab. The UI
-// reads `profile:timelinePredicate` from the binding and renders a
-// horizontal ribbon of the sub-graph's entities sorted by that literal.
+// Per-sub-graph display metadata. Two extension fields beyond the
+// basics:
+//   - `timeline`        — opts the sub-graph into a Timeline tab, with
+//                         the declared date predicate driving order.
+//   - `sourceAssertion` — names the WM assertion each importer writes
+//                         into. The UI needs this to promote a single
+//                         entity from WM → SWM (the promote API takes
+//                         an assertion name, not just a URI).
 const subGraphs = [
-  { slug: 'code',      icon: '⟨⟩', color: '#3b82f6', displayName: 'Code',      description: 'Packages, files, classes, and functions extracted from AST.', rank: 1 },
-  { slug: 'github',    icon: '⎇',  color: '#f59e0b', displayName: 'GitHub',    description: 'Pull requests, issues, commits, and reviews.',               rank: 2, timeline: Github.P.mergedAt },
-  { slug: 'decisions', icon: '◆',  color: '#ef4444', displayName: 'Decisions', description: 'Architectural decisions with context and consequences.',     rank: 3, timeline: Decisions.P.date },
-  { slug: 'tasks',     icon: '✓',  color: '#06b6d4', displayName: 'Tasks',     description: 'Planned and in-flight work, cross-linked to decisions + PRs.', rank: 4, timeline: Tasks.P.dueDate },
-  { slug: 'meta',      icon: 'ⓘ',  color: '#64748b', displayName: 'Meta',      description: 'Project self-description (the profile you are reading now).', rank: 5 },
+  { slug: 'code',      icon: '⟨⟩', color: '#3b82f6', displayName: 'Code',      description: 'Packages, files, classes, and functions extracted from AST.', rank: 1, sourceAssertion: 'code-structure' },
+  { slug: 'github',    icon: '⎇',  color: '#f59e0b', displayName: 'GitHub',    description: 'Pull requests, issues, commits, and reviews.',               rank: 2, timeline: Github.P.mergedAt, sourceAssertion: 'github-activity' },
+  { slug: 'decisions', icon: '◆',  color: '#ef4444', displayName: 'Decisions', description: 'Architectural decisions with context and consequences.',     rank: 3, timeline: Decisions.P.date,  sourceAssertion: 'decision-log' },
+  { slug: 'tasks',     icon: '✓',  color: '#06b6d4', displayName: 'Tasks',     description: 'Planned and in-flight work, cross-linked to decisions + PRs.', rank: 4, timeline: Tasks.P.dueDate,   sourceAssertion: 'task-board' },
+  { slug: 'meta',      icon: 'ⓘ',  color: '#64748b', displayName: 'Meta',      description: 'Project self-description (the profile you are reading now).', rank: 5, sourceAssertion: 'project-profile' },
 ];
 for (const sg of subGraphs) {
   const id = Profile.uri.binding(PROJECT_ID, `sg-${sg.slug}`);
@@ -79,6 +84,7 @@ for (const sg of subGraphs) {
   emit(uri(id), uri(Common.description), lit(sg.description));
   emit(uri(id), uri(Profile.P.rank), lit(sg.rank, XSD.int));
   if (sg.timeline) emit(uri(id), uri(Profile.P.timelinePredicate), uri(sg.timeline));
+  if (sg.sourceAssertion) emit(uri(id), uri(Profile.P.sourceAssertion), lit(sg.sourceAssertion));
 }
 
 // ── Entity type bindings (icon/color/label + GenUI prompt hint) ────
@@ -145,12 +151,24 @@ const bindings = [
     slug: 'decision', type: Decisions.T.Decision,
     icon: '◆', color: '#ef4444', label: 'Decision',
     hint: 'Render a DecisionCard with title, status, date. Include context and outcome sections as quoted text. Add a CrossRefList of decisions:affects showing files/packages touched by this decision, and a link-out to the recording PR via decisions:recordedIn.',
+    promoteLabel: 'Propose decision to team',
+    promoteHint:
+      'Shares this decision in Shared Memory so project participants can review, discuss, and endorse it before it gets ratified.',
+    publishLabel: 'Ratify decision on-chain',
+    publishHint:
+      'Anchors the ratified decision on-chain as a verifiable Knowledge Asset — its context, outcome, and consequences become tamper-evident.',
   },
   // Tasks
   {
     slug: 'task', type: Tasks.T.Task,
     icon: '✓', color: '#06b6d4', label: 'Task',
     hint: 'TaskCard with title, status, priority, assignee. Show tasks:dependsOn as a chain of related tasks and tasks:touches as a list of files.',
+    promoteLabel: 'Share task with team',
+    promoteHint:
+      'Moves this task to Shared Memory so the team can pick it up, reprioritize, or build on it. Tasks in SWM show up on every participant\'s board.',
+    publishLabel: 'Anchor task on-chain',
+    publishHint:
+      'Records a canonical, verifiable reference to this task. Use when the task represents a commitment or a completion you want to prove.',
   },
 ];
 for (const b of bindings) {
@@ -162,6 +180,10 @@ for (const b of bindings) {
   emit(uri(id), uri(Profile.P.color), lit(b.color));
   emit(uri(id), uri(Profile.P.label), lit(b.label));
   emit(uri(id), uri(Profile.P.detailHint), lit(b.hint));
+  if (b.promoteLabel) emit(uri(id), uri(Profile.P.promoteLabel), lit(b.promoteLabel));
+  if (b.promoteHint)  emit(uri(id), uri(Profile.P.promoteHint),  lit(b.promoteHint));
+  if (b.publishLabel) emit(uri(id), uri(Profile.P.publishLabel), lit(b.publishLabel));
+  if (b.publishHint)  emit(uri(id), uri(Profile.P.publishHint),  lit(b.publishHint));
 }
 
 // ── ViewConfigs ───────────────────────────────────────────────

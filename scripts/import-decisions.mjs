@@ -30,6 +30,7 @@ import {
   Decisions,
   Code,
   Github,
+  Agent,
   Common,
   XSD,
   createTripleSink,
@@ -62,6 +63,41 @@ const file = (p, relToPkg) => Code.uri.file(p.name, relToPkg);
 const pkgU = (p) => Code.uri.package(p.name);
 const prU = (num) => Github.uri.pr(OWNER, REPO_NAME, num);
 const userU = (login) => Github.uri.user(login);
+const agentU = (slug) => Agent.uri.agent(slug);
+
+// Attribution: who actually drafted each decision. This drives the
+// AgentChip in the UI so the curator can see at a glance "this batch
+// was claude-code-branarakic's, that one was bojan". Decisions without
+// an explicit entry fall back to 'claude-code-branarakic' which is the
+// dominant author in this seed.
+const DECISION_AUTHOR = {
+  // Infra / operational — humans still drive these:
+  'curated-cg-approval-rehydration':   'branarakic',
+  'listcontextgraphs-chain-attested':  'branarakic',
+  'ephemeral-pending-map':             'branarakic',
+  'ci-shard-and-parallelize':          'bojan',
+  'demock-product-tests':              'bojan',
+  'reduce-randomsampling-draws':       'bojan',
+  'publisher-epoch-snapshot-fast':     'bojan',
+  // UI / architecture — mostly claude-code-branarakic:
+  'rejection-notifications':           'claude-code-branarakic',
+  'unified-layer-content':             'claude-code-branarakic',
+  'vibrant-graph-predicates':          'claude-code-branarakic',
+  'ast-code-ontology':                 'claude-code-branarakic',
+  'project-profile-in-meta-subgraph':  'claude-code-branarakic',
+  'live-genui-over-static-templates':  'claude-code-branarakic',
+  'verified-memory-hero-view':         'claude-code-branarakic',
+  'subgraphs-as-first-class':          'claude-code-branarakic',
+  // Cross-package integration work — claude-code-bojan leads here:
+  'chat-assertion-owner-alignment':    'claude-code-bojan',
+  // Self-reported (OpenClaw writing about itself):
+  'openclaw-cross-channel-account':    'openclaw-branarakic',
+  // Still up for discussion — the more exploratory agents propose these:
+  'shacl-on-vm-promotion':             'openclaw-branarakic',
+  'ontology-as-published-knowledge':   'claude-code-branarakic',
+  // Rejected proposals — hermes tends to push unconventional ideas early:
+  'publish-via-adapter-openclaw':      'hermes-bojan',
+};
 
 const DECISIONS = [
   {
@@ -438,6 +474,10 @@ for (const d of DECISIONS) {
   emit(uri(id), uri(Common.title), lit(d.title));
   emit(uri(id), uri(Decisions.P.status), lit(d.status));
   emit(uri(id), uri(Decisions.P.date), lit(d.date, 'http://www.w3.org/2001/XMLSchema#date'));
+  // Mirror the decision date as dcterms:created so the activity feed
+  // can order decisions with the same temporal cue as tasks / PRs.
+  emit(uri(id), '<http://purl.org/dc/terms/created>',
+    lit(`${d.date}T12:00:00Z`, XSD.dateTime));
   emit(uri(id), uri(Decisions.P.context), lit(d.context));
   emit(uri(id), uri(Decisions.P.outcome), lit(d.outcome));
   emit(uri(id), uri(Decisions.P.consequences), lit(d.consequences));
@@ -447,6 +487,11 @@ for (const d of DECISIONS) {
   for (const olderSlug of d.supersedes ?? [])
     emit(uri(id), uri(Decisions.P.supersedes), uri(Decisions.uri.decision(olderSlug)));
   if (d.proposedBy) emit(uri(id), uri(Decisions.P.proposedBy), uri(userU(d.proposedBy)));
+  // Agent attribution — points at an entity in the `meta` sub-graph.
+  // This is what drives the AgentChip in the UI, independent of the
+  // github-user pointer above (which is for cross-linking into GitHub).
+  const authorSlug = DECISION_AUTHOR[d.slug] ?? 'claude-code-branarakic';
+  emit(uri(id), uri(Agent.Prov.wasAttributedTo), uri(agentU(authorSlug)));
 }
 
 console.log(`[decisions] Produced ${sink.size()} triples from ${DECISIONS.length} decisions.`);

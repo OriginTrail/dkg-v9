@@ -6,6 +6,9 @@ import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext, useProjectProfileContext } from '../hooks/useProjectProfile.js';
+import { useAgents, AgentsContext, useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
+import { AgentChip } from '../components/AgentChip.js';
+import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import { GenUIEntityPanel } from '../genui/index.js';
@@ -59,6 +62,62 @@ const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
   Enum: { icon: '🔢', group: 'Enums' },
   ExternalModule: { icon: '🌐', group: 'External Modules' },
 };
+
+const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
+const AGENT_NS = 'http://dkg.io/ontology/agent/';
+const AGENT_CREATED_BY   = AGENT_NS + 'createdBy';
+const AGENT_PROMOTED_BY  = AGENT_NS + 'promotedBy';
+const AGENT_PUBLISHED_BY = AGENT_NS + 'publishedBy';
+const AGENT_CREATED_AT   = AGENT_NS + 'createdAt';
+const AGENT_PROMOTED_AT  = AGENT_NS + 'promotedAt';
+const AGENT_PUBLISHED_AT = AGENT_NS + 'publishedAt';
+
+/** Pick the primary `prov:wasAttributedTo` agent URI off a MemoryEntity. */
+function entityAuthorUri(e: MemoryEntity): string | null {
+  for (const c of e.connections) {
+    if (c.predicate === PROV_WAS_ATTRIBUTED_TO) return c.targetUri;
+  }
+  return null;
+}
+
+/**
+ * Resolve who performed a specific layer transition on an entity.
+ * Prefers the per-transition predicate (`:createdBy` / `:promotedBy` /
+ * `:publishedBy`) and falls back to the authoritative
+ * `prov:wasAttributedTo` when the transition agent isn't set — which is
+ * the case for entities promoted in bulk by a seed script.
+ */
+function transitionAgentUri(
+  e: MemoryEntity,
+  step: 'created' | 'promoted' | 'published',
+): string | null {
+  const stepPred = step === 'created'
+    ? AGENT_CREATED_BY
+    : step === 'promoted'
+      ? AGENT_PROMOTED_BY
+      : AGENT_PUBLISHED_BY;
+  for (const c of e.connections) {
+    if (c.predicate === stepPred) return c.targetUri;
+  }
+  // Fallback: whoever authored the entity is the best guess for this
+  // transition's actor until the live promote/publish flow starts
+  // writing its own attribution triples.
+  return entityAuthorUri(e);
+}
+
+/** Parse the matching timestamp if set; otherwise return null. */
+function transitionAtISO(
+  e: MemoryEntity,
+  step: 'created' | 'promoted' | 'published',
+): string | null {
+  const stepPred = step === 'created'
+    ? AGENT_CREATED_AT
+    : step === 'promoted'
+      ? AGENT_PROMOTED_AT
+      : AGENT_PUBLISHED_AT;
+  const vals = e.properties.get(stepPred);
+  return vals?.[0] ?? null;
+}
 
 function shortType(uri: string): string {
   const hash = uri.lastIndexOf('#');
@@ -330,6 +389,72 @@ function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh 
         <button className="v10-layer-action-btn" onClick={onImport}>↑ Import</button>
         <button className="v10-layer-action-btn" onClick={onRefresh}>↻</button>
       </div>
+    </div>
+  );
+}
+
+// ─── Project Header Strip ────────────────────────────────────
+// Persistent project chrome that stays visible across every route
+// (overview / layer / sub-graph). Fixes the "I lost the project header
+// when I drilled into decisions" problem by surfacing project identity +
+// the current sub-graph breadcrumb from a single place. Compact enough
+// that it doesn't compete with the big ProjectOverviewCard on the
+// overview route itself.
+function ProjectHeaderStrip({
+  cg,
+  profile,
+  activeSubGraph,
+  onClearSubGraph,
+}: {
+  cg: { id: string; name?: string; description?: string };
+  profile: ReturnType<typeof useProjectProfile>;
+  activeSubGraph: ReturnType<typeof useProjectProfile>['forSubGraph'] extends (s: string) => infer R ? R | null : null;
+  onClearSubGraph: () => void;
+}) {
+  const name = cg.name || profile.displayName || cg.id;
+  return (
+    <div
+      className="v10-project-strip"
+      style={{
+        '--sg-color': activeSubGraph?.color ?? profile.primaryColor,
+      } as React.CSSProperties}
+    >
+      <span
+        className="v10-project-strip-dot"
+        style={{ background: profile.primaryColor }}
+      />
+      <button
+        type="button"
+        className="v10-project-strip-name"
+        onClick={activeSubGraph ? onClearSubGraph : undefined}
+        disabled={!activeSubGraph}
+        title={activeSubGraph ? 'Back to project overview' : cg.id}
+      >
+        {name}
+      </button>
+      {activeSubGraph ? (
+        <>
+          <span className="v10-project-strip-sep">›</span>
+          <span
+            className="v10-project-strip-sg"
+            style={{ color: activeSubGraph.color }}
+          >
+            <span className="v10-project-strip-sg-icon">{activeSubGraph.icon ?? '•'}</span>
+            {activeSubGraph.displayName ?? activeSubGraph.slug}
+          </span>
+          {activeSubGraph.description && (
+            <span className="v10-project-strip-desc" title={activeSubGraph.description}>
+              {activeSubGraph.description}
+            </span>
+          )}
+        </>
+      ) : (
+        cg.description && (
+          <span className="v10-project-strip-desc" title={cg.description}>
+            {cg.description}
+          </span>
+        )
+      )}
     </div>
   );
 }
@@ -1012,13 +1137,15 @@ function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId, onComp
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-function EntityList({ entities, layerKey, layerIcon, onSelectEntity }: {
+function EntityList({ entities, layerKey, layerIcon, onSelectEntity, onOpenAgent }: {
   entities: MemoryEntity[];
   layerKey: 'wm' | 'swm' | 'vm';
   layerIcon: string;
   onSelectEntity: (uri: string) => void;
+  onOpenAgent?: (uri: string) => void;
 }) {
   const profile = useProjectProfileContext();
+  const agents = useAgentsContext();
   const sorted = useMemo(() => {
     const copy = [...entities];
     copy.sort((a, b) => {
@@ -1048,6 +1175,8 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity }: {
       {sorted.map(e => {
         const { icon, type } = entityMeta(e, profile);
         const tripleCount = e.connections.length + e.properties.size;
+        const authorUri = entityAuthorUri(e);
+        const author = authorUri ? agents?.get(authorUri) : null;
         return (
           <div
             key={e.uri}
@@ -1058,6 +1187,14 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity }: {
             <div className="v10-entity-card-main">
               <div className="v10-entity-card-title">{e.label}</div>
               <div className="v10-entity-card-meta">
+                {(author || authorUri) && (
+                  <AgentChip
+                    agent={author ?? undefined}
+                    fallbackUri={authorUri ?? undefined}
+                    size="sm"
+                    onOpenAgent={onOpenAgent}
+                  />
+                )}
                 {type && type !== 'Entity' && (
                   <span className="v10-entity-type-pill">{icon} {type}</span>
                 )}
@@ -1539,10 +1676,19 @@ function SubGraphBadge({
 }
 
 // ─── Verify on DKG CTA ───────────────────────────────────────
-// Publishes a single entity through the SWM publish endpoint. For WM-only
-// entities the daemon will surface a useful error ("not in SWM") which we
-// display verbatim — a follow-up can add a one-shot promote+publish
-// endpoint, but for the PoC this is honest and fast.
+// Two-step progression driven by the profile:
+//   WM  -> SWM  : promoteAssertion(sourceAssertion, [uri])  ("Propose…")
+//   SWM -> VM   : publishSharedMemory([uri])                ("Ratify…")
+// Labels, hints and the promote-path assertion name all come from the
+// profile ontology (EntityTypeBinding + SubGraphBinding). A book-research
+// project that imports into "character-sheet" / "topic-index" assertions
+// and declares "Submit for editorial review" / "Publish as canon" on its
+// character binding gets the exact same button with the right copy — no
+// UI code changes.
+//
+// Returns null when no binding declares a promoteLabel / publishLabel
+// for the entity's type (correct for derived artifacts like code:File
+// or github:Commit that shouldn't be manually progressed).
 function VerifyOnDkgButton({
   entity,
   contextGraphId,
@@ -1552,53 +1698,125 @@ function VerifyOnDkgButton({
   contextGraphId: string;
   onVerified: () => void;
 }) {
+  const profile = useProjectProfileContext();
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<PublishResult | null>(null);
+  const [result, setResult] = useState<PublishResult | { promotedCount: number } | null>(null);
+  const [resultKind, setResultKind] = useState<'promote' | 'publish' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const layer = entity.trustLevel;
+
+  // Resolve the first profile binding whose rdf:type matches the entity
+  // AND that declares the copy for this layer's transition. If nothing
+  // matches, the CTA is suppressed entirely.
+  const binding = useMemo(() => {
+    if (!profile) return null;
+    for (const t of entity.types) {
+      const b = profile.forType(t);
+      if (!b) continue;
+      if (layer === 'working'  && (b.promoteLabel || b.promoteHint)) return b;
+      if (layer === 'shared'   && (b.publishLabel || b.publishHint)) return b;
+    }
+    return null;
+  }, [entity.types, profile, layer]);
+
+  const sgBinding = useMemo(() => {
+    if (!profile) return null;
+    for (const s of entity.subGraphs) {
+      if (s === 'meta') continue;
+      const b = profile.forSubGraph(s);
+      if (b?.sourceAssertion) return b;
+    }
+    return null;
+  }, [entity.subGraphs, profile]);
+
   if (layer === 'verified') return null;
+  if (!binding) return null;
+
+  const action = layer === 'working'
+    ? {
+        kind: 'promote' as const,
+        label:    binding.promoteLabel ?? 'Promote to Shared Memory',
+        hint:     binding.promoteHint  ?? 'Shares this entity with the team.',
+        busyCopy: 'Sharing…',
+        disabled: !sgBinding?.sourceAssertion,
+        disabledReason: !sgBinding?.sourceAssertion
+          ? `No sourceAssertion declared on the sub-graph profile — add profile:sourceAssertion to the SubGraphBinding for "${[...entity.subGraphs].filter(s => s !== 'meta')[0] ?? '?'}".`
+          : null,
+      }
+    : {
+        kind: 'publish' as const,
+        label:    binding.publishLabel ?? 'Verify on DKG',
+        hint:     binding.publishHint  ?? 'Anchors this entity on-chain.',
+        busyCopy: 'Anchoring…',
+        disabled: false,
+        disabledReason: null,
+      };
 
   const handle = async () => {
+    if (action.disabled) return;
     setBusy(true);
     setError(null);
     setResult(null);
+    setResultKind(action.kind);
     try {
-      const r = await publishSharedMemory(contextGraphId, [entity.uri]);
-      setResult(r);
+      if (action.kind === 'promote') {
+        const r = await promoteAssertion(
+          contextGraphId,
+          sgBinding!.sourceAssertion!,
+          [entity.uri],
+        );
+        setResult(r);
+      } else {
+        const r = await publishSharedMemory(contextGraphId, [entity.uri]);
+        setResult(r);
+      }
       onVerified();
     } catch (err: any) {
-      setError(err?.message ?? 'Publish failed');
+      setError(err?.message ?? 'Action failed');
     } finally {
       setBusy(false);
     }
   };
 
-  const needsPromote = layer === 'working';
-  const cta = needsPromote ? 'Verify on DKG (requires SWM promote)' : 'Verify on DKG →';
+  const isPublishResult = (r: typeof result): r is PublishResult => !!r && 'status' in r;
 
   return (
-    <div className="v10-ka-verify">
+    <div className={`v10-ka-verify v10-ka-verify-${action.kind}`}>
+      <div className="v10-ka-verify-head">
+        <span className="v10-ka-verify-arrow">
+          {action.kind === 'promote' ? '◈' : '◉'}
+        </span>
+        <span className="v10-ka-verify-title">{action.label}</span>
+      </div>
+      <div className="v10-ka-verify-hint">{action.hint}</div>
+      {action.disabledReason && (
+        <div className="v10-ka-verify-err">! {action.disabledReason}</div>
+      )}
       {!result && (
-        <>
-          <button
-            className={`v10-ka-verify-btn ${needsPromote ? 'gated' : ''}`}
-            onClick={handle}
-            disabled={busy}
-          >
-            {busy ? 'Publishing…' : cta}
-          </button>
-          <div className="v10-ka-verify-hint">
-            {needsPromote
-              ? 'Entity is still in Working Memory. Promote it to Shared Memory via the Assertions tab first, then come back here.'
-              : 'Anchors this entity on-chain with a TRAC-locked Knowledge Asset. Consensus signers and TX hash appear below on success.'}
+        <button
+          className={`v10-ka-verify-btn ${action.kind}`}
+          onClick={handle}
+          disabled={busy || action.disabled}
+        >
+          {busy ? action.busyCopy : action.label}
+        </button>
+      )}
+      {error && <div className="v10-ka-verify-err">✕ {error}</div>}
+      {result && resultKind === 'promote' && !isPublishResult(result) && (
+        <div className="v10-ka-verify-ok">
+          <div className="v10-ka-verify-ok-row">
+            <span className="v10-ka-verify-ok-lbl">Promoted</span>
+            <span className="v10-ka-verify-ok-val">
+              ✓ {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
+            </span>
           </div>
-        </>
+          <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
+            Refresh the entity to see the next step appear.
+          </div>
+        </div>
       )}
-      {error && (
-        <div className="v10-ka-verify-err">✕ {error}</div>
-      )}
-      {result && (
+      {result && resultKind === 'publish' && isPublishResult(result) && (
         <div className="v10-ka-verify-ok">
           <div className="v10-ka-verify-ok-row">
             <span className="v10-ka-verify-ok-lbl">Status</span>
@@ -1630,7 +1848,7 @@ function VerifyOnDkgButton({
   );
 }
 
-function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, contextGraphId, onRefresh }: {
+function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, contextGraphId, onRefresh, onOpenAgent }: {
   entity: MemoryEntity;
   allEntities: Map<string, MemoryEntity>;
   allTriples: Triple[];
@@ -1638,11 +1856,15 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
   onClose: () => void;
   contextGraphId: string;
   onRefresh: () => void;
+  onOpenAgent?: (uri: string) => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
   const profile = useProjectProfileContext();
+  const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
   const desc = getDescription(entity);
+  const authorUri = entityAuthorUri(entity);
+  const author = authorUri ? agents?.get(authorUri) ?? null : null;
   const layerBadge = entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm';
   const layerLabel = entity.trustLevel === 'verified' ? 'Verified Memory' : entity.trustLevel === 'shared' ? 'Shared Working Memory' : 'Working Memory';
 
@@ -1699,6 +1921,18 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
           </div>
           <div className="v10-ka-ual">{entity.uri} · {type} · {tripleCount} triples</div>
         </div>
+        {(author || authorUri) && (
+          <div className="v10-ka-header-author">
+            <div className="v10-ka-header-author-label">Proposed by</div>
+            <AgentChip
+              agent={author ?? undefined}
+              fallbackUri={authorUri ?? undefined}
+              size="lg"
+              showOperator
+              onOpenAgent={onOpenAgent}
+            />
+          </div>
+        )}
       </div>
 
       <div className="v10-ka-split">
@@ -1830,33 +2064,7 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
         {/* Right pane: Provenance Trail */}
         <div className="v10-ka-right">
           <div className="v10-ka-section-title">Provenance Trail</div>
-          <div className="v10-ka-timeline">
-            {entity.trustLevel === 'verified' && (
-              <div className="v10-ka-event">
-                <div className="v10-ka-event-dot verified" />
-                <div className="v10-ka-event-header">
-                  <span className="v10-ka-event-title">Published to Verified Memory</span>
-                </div>
-                <div className="v10-ka-event-desc">Knowledge asset endorsed and published on-chain</div>
-              </div>
-            )}
-            {(entity.trustLevel === 'shared' || entity.trustLevel === 'verified') && (
-              <div className="v10-ka-event">
-                <div className="v10-ka-event-dot shared" />
-                <div className="v10-ka-event-header">
-                  <span className="v10-ka-event-title">Promoted to Shared Working Memory</span>
-                </div>
-                <div className="v10-ka-event-desc">Shared with project participants for review</div>
-              </div>
-            )}
-            <div className="v10-ka-event">
-              <div className="v10-ka-event-dot created" />
-              <div className="v10-ka-event-header">
-                <span className="v10-ka-event-title">Created in Working Memory</span>
-              </div>
-              <div className="v10-ka-event-desc">Extracted from imported data or agent conversation</div>
-            </div>
-          </div>
+          <ProvenanceTrail entity={entity} />
 
           {/* Verify on DKG — prominent CTA for WM/SWM entities */}
           <VerifyOnDkgButton
@@ -1891,6 +2099,107 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
       </div>
     </div>
   );
+}
+
+// ─── Provenance Trail ───────────────────────────────────────
+// Layer-by-layer history with per-step agent attribution. Each step
+// shows which agent fired the transition plus (when present) the
+// timestamp. In the absence of per-transition predicates the step
+// falls back to the entity's `prov:wasAttributedTo` so the trail
+// always names *someone* — the demo data relies on this fallback
+// because our seed scripts promote / publish in bulk without writing
+// per-step attribution. When live agents start calling the write
+// path they'll emit agent:promotedBy / agent:publishedBy and the
+// fallback stops firing.
+function ProvenanceTrail({ entity }: { entity: MemoryEntity }) {
+  const agents = useAgentsContext();
+
+  const step = (kind: 'created' | 'promoted' | 'published') => {
+    const uri = transitionAgentUri(entity, kind);
+    const at  = transitionAtISO(entity, kind);
+    const agent = uri ? agents?.get(uri) : null;
+    return { uri, at, agent };
+  };
+
+  const created   = step('created');
+  const promoted  = step('promoted');
+  const published = step('published');
+
+  return (
+    <div className="v10-ka-timeline">
+      {entity.trustLevel === 'verified' && (
+        <TrailEvent
+          toneClass="verified"
+          title="Published to Verified Memory"
+          actionWord="Published"
+          agent={published.agent}
+          agentUri={published.uri}
+          at={published.at}
+        />
+      )}
+      {(entity.trustLevel === 'shared' || entity.trustLevel === 'verified') && (
+        <TrailEvent
+          toneClass="shared"
+          title="Promoted to Shared Working Memory"
+          actionWord="Promoted"
+          agent={promoted.agent}
+          agentUri={promoted.uri}
+          at={promoted.at}
+        />
+      )}
+      <TrailEvent
+        toneClass="created"
+        title="Created in Working Memory"
+        actionWord="Created"
+        agent={created.agent}
+        agentUri={created.uri}
+        at={created.at}
+      />
+    </div>
+  );
+}
+
+function TrailEvent({
+  toneClass,
+  title,
+  actionWord,
+  agent,
+  agentUri,
+  at,
+}: {
+  toneClass: 'verified' | 'shared' | 'created';
+  title: string;
+  actionWord: string;
+  agent: AgentSummary | null | undefined;
+  agentUri: string | null;
+  at: string | null;
+}) {
+  const when = at ? formatTrailTimestamp(at) : null;
+  return (
+    <div className="v10-ka-event">
+      <div className={`v10-ka-event-dot ${toneClass}`} />
+      <div className="v10-ka-event-header">
+        <span className="v10-ka-event-title">{title}</span>
+      </div>
+      {(agent || agentUri) && (
+        <div className="v10-ka-event-attribution">
+          <span className="v10-ka-event-attribution-prefix">{actionWord} by</span>
+          <AgentChip agent={agent ?? undefined} fallbackUri={agentUri ?? undefined} size="sm" />
+          {when && <span className="v10-ka-event-attribution-when">{when}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatTrailTimestamp(raw: string): string {
+  const s = raw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return s;
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
 }
 
 // ─── Sub-graph Overview Grid ─────────────────────────────────
@@ -2223,6 +2532,7 @@ function SubGraphTimeline({
   onSelectEntity: (uri: string) => void;
 }) {
   const profile = useProjectProfileContext();
+  const agents = useAgentsContext();
   const grouped = useMemo(() => {
     const out = new Map<string, Array<{ entity: MemoryEntity; date: Date }>>();
     for (const it of items) {
@@ -2254,6 +2564,8 @@ function SubGraphTimeline({
           <div className="v10-subgraph-timeline-items">
             {rows.map(({ entity, date }) => {
               const { icon } = entityMeta(entity, profile);
+              const authorUri = entityAuthorUri(entity);
+              const author = authorUri ? agents?.get(authorUri) : null;
               return (
                 <button
                   key={entity.uri}
@@ -2263,6 +2575,13 @@ function SubGraphTimeline({
                 >
                   <span className="v10-subgraph-timeline-item-icon">{icon}</span>
                   <span className="v10-subgraph-timeline-item-label">{entity.label}</span>
+                  {(author || authorUri) && (
+                    <AgentChip
+                      agent={author ?? undefined}
+                      fallbackUri={authorUri ?? undefined}
+                      size="sm"
+                    />
+                  )}
                   <span className="v10-subgraph-timeline-item-date">{date.toISOString().slice(0, 10)}</span>
                 </button>
               );
@@ -2659,6 +2978,44 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // axis to layers, and each axis gets its own first-class page.
   const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
   const profile = useProjectProfile(contextGraphId);
+  const agentsData = useAgents(contextGraphId);
+  const openTab = useTabsStore((s) => s.openTab);
+
+  // Cross-tab entity open — e.g. the agent profile page in another tab
+  // fires a CustomEvent("v10:open-entity", { contextGraphId, entityUri })
+  // when the user clicks an activity row. We honour it when it's scoped
+  // to *this* project.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail;
+      if (!detail) return;
+      if (detail.contextGraphId !== contextGraphId) return;
+      if (typeof detail.entityUri !== 'string') return;
+      setSelectedUri(detail.entityUri);
+    };
+    window.addEventListener('v10:open-entity', handler);
+    return () => window.removeEventListener('v10:open-entity', handler);
+  }, [contextGraphId]);
+
+  const openAgent = useCallback((uri: string) => {
+    const slug = uri.startsWith('urn:dkg:agent:')
+      ? uri.slice('urn:dkg:agent:'.length)
+      : uri;
+    const name = agentsData.get(uri)?.name ?? slug;
+    openTab({
+      id: `agent:${contextGraphId}|${slug}`,
+      label: `@ ${name}`,
+      closable: true,
+    });
+  }, [agentsData, contextGraphId, openTab]);
+
+  // Inject the project-aware `openAgent` into the context so every
+  // AgentChip under this ProjectView click-opens an agent profile tab
+  // without having to thread callbacks through wrapper components.
+  const agentsContextValue = useMemo(
+    () => ({ ...agentsData, openAgent }),
+    [agentsData, openAgent],
+  );
 
   const cg = useMemo(
     () => cgData?.contextGraphs?.find((c: any) => c.id === contextGraphId),
@@ -2719,21 +3076,37 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     );
   }
 
+  // Active sub-graph binding (for the breadcrumb strip) — stays in scope
+  // across sub-graph / layer / overview routes.
+  const activeSubGraphBinding = activeSubGraph ? profile.forSubGraph(activeSubGraph) : null;
+
   return (
     <ProjectProfileContext.Provider value={profile}>
+    <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
-      {/* Layer Switcher — hidden while a sub-graph page is active because the
-          sub-graph page has its own layer filter (the mini pyramid). */}
-      {!activeSubGraph && (
-        <LayerSwitcher
-          active={activeLayer}
-          counts={rawMemory.counts}
-          onSwitch={v => { setActiveLayer(v); setSelectedUri(null); }}
-          onShare={() => setShowShare(true)}
-          onImport={() => setShowImport(true)}
-          onRefresh={rawMemory.refresh}
-        />
-      )}
+      {/* Persistent project chrome — always visible so the user never
+          loses "which project am I in" context when drilling into a
+          sub-graph, a layer, or an entity detail. */}
+      <ProjectHeaderStrip
+        cg={cg}
+        profile={profile}
+        activeSubGraph={activeSubGraphBinding}
+        onClearSubGraph={() => handleSelectSubGraph(null)}
+      />
+
+      {/* Layer Switcher — always visible now. Clicking a layer from within
+          a sub-graph page exits back to that layer's top-level view, which
+          is the least surprising thing a persistent top-nav can do. */}
+      <LayerSwitcher
+        active={activeLayer}
+        counts={rawMemory.counts}
+        onSwitch={v => { setActiveLayer(v); setSelectedUri(null); setActiveSubGraph(null); }}
+        onShare={() => setShowShare(true)}
+        onImport={() => setShowImport(true)}
+        onRefresh={rawMemory.refresh}
+      />
+
+
 
       {/* Drilldown overlay */}
       {selectedEntity && (
@@ -2786,6 +3159,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>
           )}
+          <ActivityFeed
+            entities={rawMemory.entityList}
+            onSelectEntity={handleNavigate}
+            title="Recent activity"
+            limit={40}
+            includeUndated={false}
+            emptyHint="Once agents start proposing decisions or tasks they'll show up here as a live feed."
+          />
           <MemoryStrip
             memory={rawMemory}
             onSwitchLayer={setActiveLayer}
@@ -2842,6 +3223,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         contextGraphName={cg.name}
       />
     </div>
+    </AgentsContext.Provider>
     </ProjectProfileContext.Provider>
   );
 }

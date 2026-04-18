@@ -20,6 +20,7 @@ import {
   Decisions,
   Code,
   Github,
+  Agent,
   Common,
   XSD,
   createTripleSink,
@@ -51,7 +52,65 @@ const pkg = (name) => Code.uri.package(name);
 const prU = (n) => Github.uri.pr(OWNER, REPO_NAME, n);
 const issueU = (n) => Github.uri.issue(OWNER, REPO_NAME, n);
 const userU = (login) => Github.uri.user(login);
+const agentU = (slug) => Agent.uri.agent(slug);
 const decU = (slug) => Decisions.uri.decision(slug);
+
+// Synthesize a plausible `dcterms:created` per task. Real creation time
+// will come from the live agent-write path later; for the seed we spread
+// the tasks across the past few weeks deterministically so the activity
+// feed reads as a believable sequence of work.
+const SEED_CREATED_AT_BASE = Date.parse('2026-04-04T09:00:00Z');
+function seedCreatedFor(slug) {
+  // Tiny hash of the slug → 0..N hours offset, spread over ~14 days.
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) | 0;
+  const hoursOffset = Math.abs(h) % (14 * 24);
+  return new Date(SEED_CREATED_AT_BASE + hoursOffset * 60 * 60 * 1000).toISOString();
+}
+
+// Task attribution. Mix it so the curation view shows real variety —
+// AI-authored tickets, human-filed ops work, plus a couple from the
+// teammate's agents so you see "N from bojan's team" in the feed.
+const TASK_AUTHOR = {
+  // Current in-flight UI work — claude-code-branarakic's lane:
+  'subgraph-bar-ui':                   'claude-code-branarakic',
+  'genui-endpoint-daemon':             'claude-code-branarakic',
+  'useprojectprofile-hook':            'claude-code-branarakic',
+  'register-openui-components':        'claude-code-branarakic',
+  'vm-hero-panel':                     'claude-code-branarakic',
+  'vm-graph-styling':                  'claude-code-branarakic',
+  'subgraph-list-endpoint':            'claude-code-branarakic',
+  'book-research-stub':                'claude-code-branarakic',
+  'relations-tab':                     'claude-code-branarakic',
+  'predicate-filter-chips':            'claude-code-branarakic',
+  'graph-viz-font-tuning':             'claude-code-branarakic',
+  'label-truncation-smarter':          'claude-code-branarakic',
+  'genui-fallback-unbound-types':      'claude-code-branarakic',
+  'genui-streaming-progress':          'claude-code-branarakic',
+  'sparql-cross-subgraph-queries':     'claude-code-branarakic',
+  'profile-ontology-publish':          'claude-code-branarakic',
+  // Longer-term R&D:
+  'ast-multi-lang':                    'openclaw-branarakic',
+  'sessions-subgraph':                 'openclaw-branarakic',
+  'shacl-on-vm-promotion':             'openclaw-branarakic',
+  'agent-coordinated-writes':          'openclaw-branarakic',
+  'agent-proposes-decision-live':      'openclaw-branarakic',
+  // Ops / CI / test — bojan's crew:
+  'ci-shard-and-parallelize':          'bojan',
+  'demock-ui-oracle-tests':            'bojan',
+  'evm-randomsampling-draws':          'bojan',
+  'publisher-epoch-snapshot-fast':     'bojan',
+  // Integration / cross-package — claude-code-bojan:
+  'wake-transport-reconciliation-v2':  'claude-code-bojan',
+  'shacl-runtime-integration':         'claude-code-bojan',
+  'chat-assertion-owner-align':        'claude-code-bojan',
+  'openclaw-cross-channel-accountid':  'claude-code-bojan',
+  'chain-analysis-dashboard':          'claude-code-bojan',
+  // Hermes explores unconventional directions — this one got cancelled:
+  'migrate-cg-format-v1':              'hermes-bojan',
+  // Housekeeping:
+  'retire-dkg-code-project':           'branarakic',
+};
 
 const TASKS = [
   { slug: 'subgraph-bar-ui', title: 'Build SubGraphBar above MemoryStrip',
@@ -219,11 +278,21 @@ for (const t of TASKS) {
   if (typeof t.estimate === 'number') emit(uri(id), uri(Tasks.P.estimate), lit(t.estimate, XSD.int));
   if (t.assignee) emit(uri(id), uri(Tasks.P.assignee), uri(userU(t.assignee)));
   if (t.dueDate) emit(uri(id), uri(Tasks.P.dueDate), lit(t.dueDate, 'http://www.w3.org/2001/XMLSchema#date'));
+  // Every task gets a `dcterms:created` so the activity feed can
+  // order it. Overridden by t.createdAt if the seed provides one.
+  emit(
+    uri(id),
+    '<http://purl.org/dc/terms/created>',
+    lit(t.createdAt ?? seedCreatedFor(t.slug), XSD.dateTime),
+  );
   for (const dep of t.dependsOn ?? []) emit(uri(id), uri(Tasks.P.dependsOn), uri(Tasks.uri.task(dep)));
   for (const dec of t.relatedDecision ?? []) emit(uri(id), uri(Tasks.P.relatedDecision), uri(decU(dec)));
   for (const pr of t.relatedPR ?? []) emit(uri(id), uri(Tasks.P.relatedPR), uri(pr));
   for (const issue of t.relatedIssue ?? []) emit(uri(id), uri(Tasks.P.relatedIssue), uri(issue));
   for (const touch of t.touches ?? []) emit(uri(id), uri(Tasks.P.touches), uri(touch));
+  // Agent attribution — same contract as decisions.
+  const authorSlug = TASK_AUTHOR[t.slug] ?? 'claude-code-branarakic';
+  emit(uri(id), uri(Agent.Prov.wasAttributedTo), uri(agentU(authorSlug)));
 }
 
 console.log(`[tasks] Produced ${sink.size()} triples from ${TASKS.length} tasks.`);

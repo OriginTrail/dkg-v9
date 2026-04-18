@@ -1603,6 +1603,20 @@ export class DKGAgent {
       return true;
     }
 
+    // Ontology-only fallback: a CG declared `rdf:type dkg:Paranet` can be
+    // treated as confirmably-public for the gossip race-opener ONLY when
+    // no local evidence of a restriction exists. Raw paranet declaration
+    // is not enough on its own — `inviteToContextGraph` writes
+    // `dkg:allowedPeer` straight to `_meta` without updating ontology, so
+    // a CG that was announced publicly and later allowlisted would look
+    // "just a paranet" here even though the curator expects the allowlist
+    // to gate gossip. Require `isPrivateContextGraph()` (now also reads
+    // `DKG_ALLOWED_PEER`) to explicitly return false before honoring the
+    // bypass.
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      return false;
+    }
+
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const contextGraphUri = paranetDataGraphUri(contextGraphId);
     const ontologyResult = await this.store.query(
@@ -5071,13 +5085,20 @@ export class DKGAgent {
       return true;
     }
 
-    // Also treat CGs with an allowlist as private, even if no explicit
-    // access_policy triple exists (e.g. allowedAgents were set without
-    // accessPolicy=1).
+    // Also treat CGs with any allowlist predicate as private, even when no
+    // explicit `accessPolicy` triple exists (e.g. `inviteToContextGraph`
+    // writes `DKG_ALLOWED_PEER` straight into `_meta` without touching the
+    // ontology's access_policy; `inviteAgentToContextGraph` does the same
+    // with `DKG_ALLOWED_AGENT`). Both the V10 agent model AND the legacy
+    // peer-ID model need to be recognized here, otherwise the store-
+    // discovery path would misclassify a freshly-invited CG as "open /
+    // discoverable only" and skip the same-connect catchup.
     const allowlistResult = await this.store.query(
       `ASK WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+          UNION
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer }
         }
       }`,
     );

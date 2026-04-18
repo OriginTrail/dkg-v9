@@ -79,6 +79,12 @@ const P = {
   aboutEntity: NS.chat + 'aboutEntity',
   summary:   NS.chat + 'summary',
   rawPayload: NS.chat + 'rawPayload',
+  // Optional metadata predicates — best-effort enrichment from tool payload.
+  model:         NS.chat + 'model',
+  composerMode:  NS.chat + 'composerMode',
+  generationId:  NS.chat + 'generationId',
+  toolVersion:   NS.chat + 'toolVersion',
+  transcriptPath: NS.chat + 'transcriptPath',
 };
 
 // Cap any single literal to keep assertions reasonable; coding-agent
@@ -256,21 +262,58 @@ function pick(obj, candidates, depth = 0) {
 }
 
 function extractText(payload) {
-  // Prefer standalone "prompt" / "response" fields; fall back to deep
-  // content / text. If all else fails, JSON-stringify the payload so
-  // we capture *something*.
-  const t =
-    pick(payload, ['prompt', 'userPrompt', 'request', 'message', 'content', 'text', 'input', 'response', 'reply', 'completion', 'output', 'answer']);
+  // Field names confirmed from Cursor 3.1.15 payloads (2026-04-18):
+  //   beforeSubmitPrompt → { prompt, conversation_id, … }
+  //   afterAgentResponse → { text, conversation_id, model, … }
+  // We keep snake_case and camelCase variants in the list so the hook
+  // also works with Claude Code / Aider / future tools without edits.
+  const t = pick(payload, [
+    // User prompts
+    'prompt', 'userPrompt', 'user_prompt', 'request', 'input',
+    // Assistant responses (Cursor uses `text`; others vary)
+    'text', 'response', 'reply', 'completion', 'output', 'answer',
+    // Generic envelopes some frameworks wrap in
+    'message', 'content',
+  ]);
   return t ?? '';
 }
 
 function extractSessionKey(payload) {
   const id =
-    pick(payload, ['conversationId', 'chatId', 'sessionId', 'threadId', 'convId', 'id']) ??
-    // No id from Cursor? Use the wall-clock hour, so we at least group
+    pick(payload, [
+      // Cursor 3.1.15 uses snake_case at top level
+      'conversation_id', 'session_id', 'thread_id', 'chat_id',
+      // camelCase + short aliases for other frameworks
+      'conversationId', 'sessionId', 'threadId', 'chatId', 'convId', 'id',
+    ]) ??
+    // No id from the tool? Use the wall-clock hour so we at least group
     // turns within the same hour into one session.
     `anon-${new Date().toISOString().slice(0, 13)}`;
   return sanitiseSlug(id);
+}
+
+/** Pull optional metadata Cursor sends that enriches a Session/Turn
+ *  without being strictly required. Missing values return undefined so
+ *  we can skip emitting the predicate rather than write empty strings. */
+function extractMeta(payload) {
+  return {
+    // The model that produced the response — valuable for auditability.
+    // Cursor: "claude-opus-4-7", Claude Code likely similar.
+    model: pick(payload, ['model', 'modelId', 'model_id']),
+    // Mode context (Cursor: "agent" / "ask"). Useful for filtering out
+    // quick-question turns from deep agentic sessions.
+    mode: pick(payload, ['composer_mode', 'mode']),
+    // Short generation id; lets us dedupe retried turns on the same
+    // conversation even before contentHash fires.
+    generationId: pick(payload, ['generation_id', 'generationId']),
+    // The tool's own version string (Cursor: "3.1.15"). Handy if a
+    // future payload shape change breaks capture — we know exactly
+    // which client version is in play.
+    toolVersion: pick(payload, ['cursor_version', 'client_version', 'tool_version']),
+    // Transcript file on disk (Cursor persists a jsonl). Stored so
+    // downstream jobs can fetch the full raw transcript if needed.
+    transcriptPath: pick(payload, ['transcript_path', 'transcriptPath']),
+  };
 }
 
 function sanitiseSlug(s) {
@@ -344,6 +387,27 @@ async function ensureSubGraph(cfg) {
 }
 
 // ── Event handlers ────────────────────────────────────────────
+/**
+ * Build the standard set of `chat:Session` triples for a sessionKey.
+ * Factored out so sessionStart AND the afterAgentResponse safety net
+ * can emit identical metadata. Relying on triple-store dedup for
+ * idempotency — two writes with identical (s,p,o) are collapsed.
+ */
+function sessionTriples(cfg, state, payload) {
+  const triples = [
+    { subject: state.sessionUri, predicate: P.type, object: URI(T.Session) },
+    { subject: state.sessionUri, predicate: P.name, object: LIT(`${cfg.tool} session ${state.sessionKey}`) },
+    { subject: state.sessionUri, predicate: P.created, object: LIT(state.startedAt, NS.xsd + 'dateTime') },
+    { subject: state.sessionUri, predicate: P.speakerTool, object: LIT(cfg.tool) },
+    { subject: state.sessionUri, predicate: P.privacy, object: LIT(cfg.privacy) },
+  ];
+  if (cfg.agent) triples.push({ subject: state.sessionUri, predicate: P.attributed, object: URI(cfg.agent) });
+  const meta = extractMeta(payload);
+  if (meta.model)       triples.push({ subject: state.sessionUri, predicate: P.model,       object: LIT(meta.model) });
+  if (meta.toolVersion) triples.push({ subject: state.sessionUri, predicate: P.toolVersion, object: LIT(meta.toolVersion) });
+  return triples;
+}
+
 async function handleSessionStart(cfg, payload) {
   const sessionKey = extractSessionKey(payload);
   const existing = loadSessionState(sessionKey);
@@ -354,29 +418,26 @@ async function handleSessionStart(cfg, payload) {
     startedAt: now,
     turnIndex: 0,
     pendingPrompt: null,
+    sessionWritten: false,
   };
   state.lastEventAt = now;
-  saveSessionState(sessionKey, state);
 
-  if (!cfg.project) { log('no project configured — skipping session write'); return; }
+  if (!cfg.project) {
+    log('no project configured — skipping session write');
+    saveSessionState(sessionKey, state);
+    return;
+  }
   await ensureSubGraph(cfg);
-
-  const triples = [
-    { subject: state.sessionUri, predicate: P.type, object: URI(T.Session) },
-    { subject: state.sessionUri, predicate: P.name, object: LIT(`${cfg.tool} session ${sessionKey}`) },
-    { subject: state.sessionUri, predicate: P.created, object: LIT(state.startedAt, NS.xsd + 'dateTime') },
-    { subject: state.sessionUri, predicate: P.speakerTool, object: LIT(cfg.tool) },
-    { subject: state.sessionUri, predicate: P.privacy, object: LIT(cfg.privacy) },
-  ];
-  if (cfg.agent) triples.push({ subject: state.sessionUri, predicate: P.attributed, object: URI(cfg.agent) });
   try {
-    await writeTriples(cfg, triples);
+    await writeTriples(cfg, sessionTriples(cfg, state, payload));
+    state.sessionWritten = true;
     if (cfg.autoShare) {
       await promoteEntities(cfg, [state.sessionUri]).catch((e) => log(`promote session: ${e.message}`));
     }
   } catch (err) {
     log(`session start write: ${err?.message ?? err}`);
   }
+  saveSessionState(sessionKey, state);
 }
 
 async function handleBeforeSubmitPrompt(cfg, payload) {
@@ -409,11 +470,18 @@ async function handleAfterAgentResponse(cfg, payload) {
   const now = new Date().toISOString();
   const userText = state.pendingPrompt ?? '';
   const asstText = extractText(payload) ?? '';
+  const meta = extractMeta(payload);
   const hash = crypto.createHash('sha256').update(userText + '\0' + asstText).digest('hex').slice(0, 32);
 
   if (!cfg.project) { log('no project configured — skipping turn write'); return; }
   await ensureSubGraph(cfg);
 
+  // Safety net: Cursor doesn't always fire sessionStart (e.g. when the
+  // hook config is added mid-session, or on resumed threads). On the
+  // first turn of a session whose Session triples haven't been written
+  // yet, emit them alongside the turn so the UI / MCP always sees a
+  // proper `chat:Session` entity pointing to `chat:Turn`s.
+  const bootstrapSession = idx === 1 && !state.sessionWritten;
   const triples = [
     { subject: turn, predicate: P.type, object: URI(T.Turn) },
     { subject: turn, predicate: P.inSession, object: URI(state.sessionUri) },
@@ -425,6 +493,11 @@ async function handleAfterAgentResponse(cfg, payload) {
   if (userText) triples.push({ subject: turn, predicate: P.userPrompt, object: LIT(userText) });
   if (asstText) triples.push({ subject: turn, predicate: P.assistantResponse, object: LIT(asstText) });
   if (cfg.agent) triples.push({ subject: turn, predicate: P.attributed, object: URI(cfg.agent) });
+  if (meta.model)          triples.push({ subject: turn, predicate: P.model,          object: LIT(meta.model) });
+  if (meta.mode)           triples.push({ subject: turn, predicate: P.composerMode,   object: LIT(meta.mode) });
+  if (meta.generationId)   triples.push({ subject: turn, predicate: P.generationId,   object: LIT(meta.generationId) });
+  if (meta.toolVersion)    triples.push({ subject: turn, predicate: P.toolVersion,    object: LIT(meta.toolVersion) });
+  if (meta.transcriptPath) triples.push({ subject: turn, predicate: P.transcriptPath, object: LIT(meta.transcriptPath) });
   // When nothing could be extracted (unfamiliar payload shape) stash
   // the raw JSON so we can post-hoc reconstruct turns once we see real
   // data. This is what unblocks us on day 0 before the spike tells us
@@ -439,16 +512,20 @@ async function handleAfterAgentResponse(cfg, payload) {
 
   // Also keep session `modified` fresh so timelines sort correctly.
   triples.push({ subject: state.sessionUri, predicate: P.modified, object: LIT(now, NS.xsd + 'dateTime') });
+  if (bootstrapSession) {
+    triples.push(...sessionTriples(cfg, state, payload));
+  }
 
   try {
     await writeTriples(cfg, triples);
+    if (bootstrapSession) state.sessionWritten = true;
     if (cfg.autoShare) {
       // Promote both the session and the individual turn so the team
       // sees the turn immediately and the aggregate Session is kept
       // in SWM.
       await promoteEntities(cfg, [turn, state.sessionUri]).catch((e) => log(`promote turn: ${e.message}`));
     }
-    log(`wrote turn #${idx} for session ${sessionKey}`);
+    log(`wrote turn #${idx} for session ${sessionKey}${bootstrapSession ? ' (bootstrapped session)' : ''}`);
   } catch (err) {
     log(`turn write: ${err?.message ?? err}`);
   }

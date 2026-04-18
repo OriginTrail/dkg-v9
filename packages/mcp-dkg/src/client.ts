@@ -166,6 +166,78 @@ export class DkgClient {
     const r = await this.request<{ agents?: unknown[] }>('GET', '/api/agents');
     return r.agents ?? [];
   }
+
+  // ── Writes ─────────────────────────────────────────────────────
+  /**
+   * Ensure a sub-graph exists on a project. Idempotent — a pre-existing
+   * sub-graph is silently reused.
+   */
+  async ensureSubGraph(
+    contextGraphId: string,
+    subGraphName: string,
+  ): Promise<void> {
+    try {
+      await this.request('POST', '/api/sub-graph/create', {
+        contextGraphId,
+        subGraphName,
+      });
+    } catch (err) {
+      if (err instanceof DkgHttpError && /already exists/.test(String(err.message))) {
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Write a set of triples to `assertionName` under `contextGraphId`. The
+   * daemon replaces the full assertion contents atomically — callers that
+   * want to merge with existing data MUST choose unique assertion names
+   * per write (the canonical pattern in `scripts/import-*`.mjs).
+   */
+  async writeAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+    triples: Array<{ subject: string; predicate: string; object: string }>;
+  }): Promise<void> {
+    const strip = (t: string): string =>
+      t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t;
+    const quads = args.triples.map((t) => ({
+      subject: strip(t.subject),
+      predicate: strip(t.predicate),
+      object: t.object,
+    }));
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+      quads,
+    };
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    await this.request(
+      'POST',
+      `/api/assertion/${encodeURIComponent(args.assertionName)}/write`,
+      body,
+    );
+  }
+
+  /** Promote specific entity URIs from WM → SWM. */
+  async promoteAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+    entities: string[];
+  }): Promise<void> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+      entities: args.entities,
+    };
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    await this.request(
+      'POST',
+      `/api/assertion/${encodeURIComponent(args.assertionName)}/promote`,
+      body,
+    );
+  }
 }
 
 /**

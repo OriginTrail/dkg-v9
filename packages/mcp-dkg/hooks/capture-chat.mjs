@@ -270,8 +270,10 @@ function extractText(payload) {
   const t = pick(payload, [
     // User prompts
     'prompt', 'userPrompt', 'user_prompt', 'request', 'input',
-    // Assistant responses (Cursor uses `text`; others vary)
+    // Assistant responses (Cursor uses `text`; Claude Code's Stop event
+    // uses `last_assistant_message`; others vary)
     'text', 'response', 'reply', 'completion', 'output', 'answer',
+    'last_assistant_message', 'lastAssistantMessage',
     // Generic envelopes some frameworks wrap in
     'message', 'content',
   ]);
@@ -559,16 +561,25 @@ async function handleSessionEnd(cfg, payload) {
   log(`cfg: api=${cfg.api} project=${cfg.project} agent=${cfg.agent} token=${cfg.token ? '[set]' : '[empty]'} autoShare=${cfg.autoShare}`);
   try {
     switch (EVENT) {
+      // Cursor native events + Claude Code equivalents:
+      //   sessionStart        ≡ SessionStart       (session begins/resumes)
+      //   beforeSubmitPrompt  ≡ UserPromptSubmit   (prompt stashed for turn)
+      //   afterAgentResponse  ≡ Stop               (assistant finished responding)
+      //   sessionEnd          ≡ SessionEnd         (session closes)
       case 'sessionStart':
+      case 'SessionStart':
         await handleSessionStart(cfg, payload);
         break;
       case 'beforeSubmitPrompt':
+      case 'UserPromptSubmit':
         await handleBeforeSubmitPrompt(cfg, payload);
         break;
       case 'afterAgentResponse':
+      case 'Stop':
         await handleAfterAgentResponse(cfg, payload);
         break;
       case 'sessionEnd':
+      case 'SessionEnd':
         await handleSessionEnd(cfg, payload);
         break;
       default:

@@ -91,8 +91,8 @@ tweaks.
 
 ## Wire it into Claude Code
 
-Either edit `~/.claude/mcp.json` with the same block as above, or
-run:
+Either edit `~/.claude.json` / workspace `.claude/mcp.json` with the same
+block as above, or run:
 
 ```bash
 claude mcp add dkg node /absolute/path/to/packages/mcp-dkg/dist/index.js
@@ -107,29 +107,65 @@ Inside a Claude Code session you can then do:
 
 ## Capture hook
 
-The package also ships a Cursor / Claude Code hook script at
+The package ships a tool-agnostic hook script at
 `hooks/capture-chat.mjs` that turns every conversation turn into
-`chat:Turn` triples on the project's `chat` sub-graph, and auto-promotes
-them to SWM so teammates see them immediately.
+`chat:Turn` triples on the project's `chat` sub-graph and auto-promotes
+them to SWM so teammates see them immediately. The same script works
+for Cursor and Claude Code — only the event wiring differs.
 
-Wiring (already committed at the repo root under `.cursor/hooks.json`):
+### Cursor — `.cursor/hooks.json`
 
 ```json
 {
   "version": 1,
   "hooks": {
-    "sessionStart":       [{ "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionStart",       "failClosed": false }],
-    "beforeSubmitPrompt": [{ "command": "node packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt", "failClosed": false }],
-    "afterAgentResponse": [{ "command": "node packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse", "failClosed": false }],
-    "sessionEnd":         [{ "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionEnd",         "failClosed": false }]
+    "sessionStart":       [{ "command": "DKG_WORKSPACE=/path/to/repo node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs sessionStart",       "failClosed": false }],
+    "beforeSubmitPrompt": [{ "command": "DKG_WORKSPACE=/path/to/repo node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt", "failClosed": false }],
+    "afterAgentResponse": [{ "command": "DKG_WORKSPACE=/path/to/repo node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse", "failClosed": false }],
+    "sessionEnd":         [{ "command": "DKG_WORKSPACE=/path/to/repo node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs sessionEnd",         "failClosed": false }]
   }
 }
 ```
 
-`failClosed: false` is deliberate — the hook exists to enrich the DKG,
-never to block the user's conversation. Any error is logged to
-`/tmp/dkg-capture.log` (override via `DKG_CAPTURE_LOG`) and the hook
-still exits `0`.
+`DKG_WORKSPACE` tells the hook where to walk upward from when looking
+for `.dkg/config.yaml` — useful when Cursor's cwd is different from the
+repo root (e.g. a multi-folder workspace). `failClosed: false` is
+deliberate — the hook exists to enrich the DKG, never to block the
+user's conversation. Any error is logged to `/tmp/dkg-capture.log`
+(override via `DKG_CAPTURE_LOG`) and the hook still exits `0`.
+
+### Claude Code — `~/.claude/settings.json`
+
+Merge the following `hooks` block into your existing `~/.claude/settings.json`
+(the capture-chat script handles the native Claude Code event names
+`SessionStart` / `UserPromptSubmit` / `Stop` / `SessionEnd` as aliases):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "DKG_WORKSPACE=/path/to/repo DKG_CAPTURE_TOOL=claude-code DKG_AGENT_URI=urn:dkg:agent:claude-code-<op> node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs SessionStart" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "DKG_WORKSPACE=/path/to/repo DKG_CAPTURE_TOOL=claude-code DKG_AGENT_URI=urn:dkg:agent:claude-code-<op> node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs UserPromptSubmit" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "DKG_WORKSPACE=/path/to/repo DKG_CAPTURE_TOOL=claude-code DKG_AGENT_URI=urn:dkg:agent:claude-code-<op> node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs Stop" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "DKG_WORKSPACE=/path/to/repo DKG_CAPTURE_TOOL=claude-code DKG_AGENT_URI=urn:dkg:agent:claude-code-<op> node /path/to/packages/mcp-dkg/hooks/capture-chat.mjs SessionEnd" }] }
+    ]
+  }
+}
+```
+
+`DKG_CAPTURE_TOOL=claude-code` ensures turns carry `chat:speakerTool
+"claude-code"` in the graph so the UI chips them correctly.
+`DKG_AGENT_URI` lets you attribute Claude Code sessions to a distinct
+agent entity from your Cursor sessions (recommended — this is the
+"one human, two tools" shape in spec §4 of `22_AGENT_ONBOARDING`).
+
+### Shared state
 
 Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to
 delete at any time.

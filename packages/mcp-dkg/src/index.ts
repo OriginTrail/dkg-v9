@@ -12,6 +12,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { loadConfig, describeConfig } from './config.js';
 import { DkgClient } from './client.js';
 import { registerReadTools } from './tools.js';
+import { registerWriteTools } from './tools/writes.js';
 
 const VERSION = '0.1.0';
 
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
   const server = new McpServer({ name: 'dkg', version: VERSION });
 
   registerReadTools(server, client, config);
+  registerWriteTools(server, client, config);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

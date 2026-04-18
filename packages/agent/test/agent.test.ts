@@ -1683,6 +1683,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
+      // Ensure buildSyncRequest takes the authenticated private-CG path.
+      (agent as any).isPrivateContextGraph = async () => true;
 
       const chain = (agent as any).chain as EVMChainAdapter;
       const identityId = await chain.ensureProfile();

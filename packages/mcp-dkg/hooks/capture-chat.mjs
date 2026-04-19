@@ -829,15 +829,44 @@ LIMIT ${RECENT_LIMIT}`;
     log(`buildSessionStartContext: recent-entities query failed: ${err.message}`);
   }
 
-  const recentLines = recentRows
-    .map((row) => {
-      const s = (row.s?.value ?? row.s ?? '').toString();
-      const t = (row.type?.value ?? row.type ?? '').toString().replace(/^http:\/\/[^/]+\/[^#]+[#/]/, '');
-      const l = (row.label?.value ?? row.label ?? '').toString().replace(/^"|"$/g, '');
-      return `- \`${s}\`${l ? ` — ${l.slice(0, 60)}` : ''}${t ? ` (${t})` : ''}`;
-    })
-    .slice(0, RECENT_LIMIT)
-    .join('\n');
+  // Phase 8: bucket recent entities by type so the agent's first-prompt
+  // context reads as a project plan ("Open tasks: ...", "Decisions on
+  // record: ...") rather than one flat list. Tasks come first because
+  // they're what most coding sessions act on; decisions and concepts
+  // give surrounding context. This is what makes the joiner's "agent
+  // immediately knows what to do" moment land — the curator publishes
+  // tasks via dkg_add_task, joiner's session start surfaces them by
+  // bucket, agent picks one.
+  const TYPE_BUCKETS = [
+    { label: 'Open tasks',         match: /Task$/ },
+    { label: 'Decisions on record', match: /Decision$/ },
+    { label: 'Concepts in scope',   match: /(Concept|Topic)$/ },
+    { label: 'Findings',            match: /Finding$/ },
+    { label: 'Open questions',      match: /Question$/ },
+    { label: 'Agents in this graph', match: /Agent$/ },
+    { label: 'Recent chat sessions', match: /Session$/ },
+  ];
+  const buckets = new Map(TYPE_BUCKETS.map((b) => [b.label, []]));
+  const otherBucket = [];
+  for (const row of recentRows.slice(0, RECENT_LIMIT)) {
+    const s = (row.s?.value ?? row.s ?? '').toString();
+    const t = (row.type?.value ?? row.type ?? '').toString().replace(/^http:\/\/[^/]+\/[^#]+[#/]/, '');
+    const l = (row.label?.value ?? row.label ?? '').toString().replace(/^"|"$/g, '');
+    const line = `- \`${s}\`${l ? ` — ${l.slice(0, 100)}` : ''}`;
+    const matched = TYPE_BUCKETS.find((b) => b.match.test(t));
+    if (matched) buckets.get(matched.label).push(line);
+    else otherBucket.push(`${line}${t ? ` _(${t})_` : ''}`);
+  }
+  const bucketSections = [];
+  for (const { label } of TYPE_BUCKETS) {
+    const lines = buckets.get(label);
+    if (!lines.length) continue;
+    bucketSections.push(`**${label}:**\n${lines.join('\n')}`);
+  }
+  if (otherBucket.length) {
+    bucketSections.push(`**Other recent entities:**\n${otherBucket.join('\n')}`);
+  }
+  const recentLines = bucketSections.join('\n\n');
 
   const md = `## DKG project context — \`${cfg.project}\`
 

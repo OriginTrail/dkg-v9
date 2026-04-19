@@ -4,6 +4,32 @@
   "description": "MCP server that exposes the local DKG daemon (projects, sub-graphs, activity, chat) to Cursor, Claude Code, and any other MCP-aware coding assistant.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./manifest/publish": {
+      "types": "./dist/manifest/publish.d.ts",
+      "import": "./dist/manifest/publish.js"
+    },
+    "./manifest/fetch": {
+      "types": "./dist/manifest/fetch.d.ts",
+      "import": "./dist/manifest/fetch.js"
+    },
+    "./manifest/install": {
+      "types": "./dist/manifest/install.d.ts",
+      "import": "./dist/manifest/install.js"
+    },
+    "./manifest/schema": {
+      "types": "./dist/manifest/schema.d.ts",
+      "import": "./dist/manifest/schema.js"
+    }
+  },
   "bin": {
     "dkg-mcp": "./dist/index.js"
   },

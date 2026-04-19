@@ -5,6 +5,7 @@ import {
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -47,6 +48,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [requestSent, setRequestSent] = useState(false);
   const [sendingRequest, setSendingRequest] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
+  // Phase 8: after subscribe + catchup completes we transition into a
+  // wire-workspace step so the joiner can populate a local Cursor
+  // workspace from the project's manifest. `wiredCgId` flips the modal
+  // into the WireWorkspacePanel; the operator can also click Skip if
+  // they only want to subscribe (e.g. running a passive observer node).
+  const [wiredCgId, setWiredCgId] = useState<string | null>(null);
+  const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { setContextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
@@ -125,7 +133,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setSuccess(true);
       setProgress('');
-      setTimeout(() => onClose(), 1500);
+      // Phase 8: transition into wire-workspace step instead of
+      // auto-closing. The joiner can either install workspace files
+      // for Cursor or click Skip if they're only subscribing.
+      setWiredProjectName(joined?.name ?? cgId);
+      setWiredCgId(cgId);
     } catch (err: any) {
       const msg = err?.message || 'Failed to join project';
       if (msg.includes('already subscribed') || msg.includes('409')) {
@@ -180,6 +192,35 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       setSendingRequest(false);
     }
   };
+
+  function handleWireDone() {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    onClose();
+  }
+
+  if (wiredCgId) {
+    return (
+      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
+        <div className="v10-modal-box">
+          <div className="v10-modal-header">
+            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div className="v10-modal-subtitle">
+              Subscribed and synced. Now wire a local workspace so this Cursor can collaborate on the project.
+            </div>
+          </div>
+          <div className="v10-modal-body">
+            <WireWorkspacePanel
+              contextGraphId={wiredCgId}
+              projectName={wiredProjectName}
+              variant="join"
+              onDone={handleWireDone}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>

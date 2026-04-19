@@ -4,6 +4,8 @@ import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
+import { publishProjectManifest } from '../../lib/projectManifest.js';
+import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 
 function slugify(str: string): string {
   return str
@@ -35,6 +37,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
+  // Phase 8: after CG + ontology + manifest publish, transition into a
+  // wire-workspace step so the curator can populate their own workspace
+  // (and thus use dkg_add_task etc. from their own Cursor agent)
+  // without dropping to the terminal. `wiredCgId` flips the modal body
+  // into the WireWorkspacePanel; `wiredProjectName` lets the panel
+  // suggest a default workspace path like `~/code/<projectSlug>`.
+  const [wiredCgId, setWiredCgId] = useState<string | null>(null);
+  const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { setContextGraphs, contextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
@@ -95,6 +105,18 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         }
       }
 
+      // Phase 8: publish the project manifest so any joiner can
+      // bootstrap their own Cursor wiring from the graph alone. Same
+      // fail-open posture as ontology install — a missing manifest
+      // doesn't invalidate the CG; the curator can re-publish later.
+      try {
+        setProgress('Publishing project manifest…');
+        await publishProjectManifest(result.created, {});
+      } catch (manifestErr: any) {
+        console.warn('[CreateProjectModal] manifest publish failed:', manifestErr);
+        setProgress(`Project created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
+      }
+
       setProgress('Refreshing project list…');
       const { contextGraphs: freshList } = await fetchContextGraphs();
       setContextGraphs(freshList ?? []);
@@ -103,10 +125,13 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       openTab({ id: `project:${result.created}`, label: trimmedName, closable: true });
       if (stage < 2) setStage(2);
 
-      setName('');
-      setDescription('');
+      // Transition into the wire-workspace step instead of closing.
+      // Curator can either install into their own workspace and start
+      // populating the project plan, or click "Skip for now" if they
+      // only want the CG registered without a local Cursor wiring.
+      setWiredProjectName(trimmedName);
+      setWiredCgId(result.created);
       setProgress('');
-      onClose();
     } catch (err: any) {
       const msg = err?.message || 'Failed to create project';
       if (msg.includes('already exists') || msg.includes('409')) {
@@ -123,6 +148,40 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   };
 
   const isFirstProject = contextGraphs.length === 0;
+
+  // Phase 8: after CG creation succeeds we drop the create form and
+  // render the WireWorkspacePanel inline. The modal stays open and
+  // remains "the create flow" until the operator clicks Done or Skip.
+  function handleWireDone() {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    setName('');
+    setDescription('');
+    onClose();
+  }
+
+  if (wiredCgId) {
+    return (
+      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
+        <div className="v10-modal-box">
+          <div className="v10-modal-header">
+            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div className="v10-modal-subtitle">
+              Project created. Now wire a local workspace so you can plan it from your own Cursor.
+            </div>
+          </div>
+          <div className="v10-modal-body">
+            <WireWorkspacePanel
+              contextGraphId={wiredCgId}
+              projectName={wiredProjectName}
+              variant="create"
+              onDone={handleWireDone}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>

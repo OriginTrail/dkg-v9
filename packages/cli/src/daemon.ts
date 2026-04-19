@@ -92,6 +92,22 @@ import { FileStore } from './file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from './vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
+// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
+// format stays identical between curator/joiner/CLI paths.
+import {
+  publishManifest as publishManifestImpl,
+  assembleStandardTemplates,
+} from '@origintrail-official/dkg-mcp/manifest/publish';
+import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
+import {
+  planInstall as planInstallImpl,
+  writeInstall as writeInstallImpl,
+  buildReviewMarkdown as buildReviewMarkdownImpl,
+  type InstallContext,
+} from '@origintrail-official/dkg-mcp/manifest/install';
+import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
 type MarkItDownTarget = {
   platform: string;
@@ -99,6 +115,123 @@ type MarkItDownTarget = {
   assetName: string;
   runner?: string;
 };
+
+// ── Phase 8 manifest helpers (used by /api/context-graph/{id}/manifest/* routes) ──
+//
+// These are deliberately small and pure so the route handlers stay
+// readable. They live at module scope (not inside handleRequest) so
+// they don't get re-created on every request.
+
+/**
+ * Resolve the dkg-v9 repo root from the daemon's compiled location.
+ * The daemon ships at packages/cli/dist/daemon.js, so the repo root
+ * is three levels up. For npm-installed builds the resolved path
+ * won't contain `.cursor/` or `AGENTS.md`, so the templates assembler
+ * will throw a clear error — which is correct behaviour today (the
+ * manifest publish flow requires a checkout). When npm distribution
+ * lands, this resolver gains a fallback to bundled templates.
+ */
+function manifestRepoRoot(): string {
+  const daemonDir = dirname(fileURLToPath(import.meta.url));
+  return resolve(daemonDir, '..', '..', '..');
+}
+
+/**
+ * Map the loaded `network.networkName` to the canonical label used
+ * in the manifest schema. Anything that doesn't smell like testnet
+ * or mainnet falls through to devnet.
+ */
+function manifestNetworkLabel(networkName: string | undefined | null): 'testnet' | 'mainnet' | 'devnet' {
+  const n = (networkName ?? '').toLowerCase();
+  if (n.includes('testnet')) return 'testnet';
+  if (n.includes('mainnet')) return 'mainnet';
+  return 'devnet';
+}
+
+/**
+ * Construct a self-pointing DkgClient for the manifest helpers to
+ * round-trip through. We use req.headers.host so this works
+ * regardless of which port the daemon bound to (apiPort=0 picks
+ * a free one). The bearer token is forwarded as-is so audit logs
+ * still attribute writes to the calling agent.
+ */
+function manifestSelfClient(req: IncomingMessage, requestToken: string | null | undefined): DkgClient {
+  const host = req.headers.host ?? `localhost:9200`;
+  const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
+  return new DkgClient({
+    config: {
+      api: `${proto}://${host}`,
+      token: requestToken ?? '',
+      defaultProject: null,
+      agentUri: null,
+      capture: { autoShare: true, defaultPrivacy: 'team', subGraph: 'chat', assertion: 'chat-log' },
+      sourcePath: null,
+    },
+  });
+}
+
+/**
+ * Map the requesting agent's resolved ETH address into the
+ * `urn:dkg:agent:<address>` URI form used for prov:wasAttributedTo
+ * on every manifest entity.
+ */
+function manifestPublisherUri(requestAgentAddress: string | undefined | null): string {
+  if (requestAgentAddress) return `urn:dkg:agent:${requestAgentAddress.toLowerCase()}`;
+  return 'urn:dkg:agent:unknown';
+}
+
+/**
+ * Build an InstallContext from the request body. The body shape:
+ *   { workspaceRoot, agentSlug, agentLabel?, skipClaude? }
+ * The InstallContext is consumed by planInstall() — it's everything
+ * the planner needs apart from the manifest itself (which we fetch
+ * from the graph in the handler).
+ */
+function buildManifestInstallContext(
+  req: IncomingMessage,
+  body: Record<string, unknown>,
+  _contextGraphId: string,
+  _requestToken: string | null | undefined,
+):
+  | { ok: true; context: Omit<InstallContext, 'manifest'> & { skipClaude: boolean } }
+  | { ok: false; error: string } {
+  const workspaceRoot = typeof body.workspaceRoot === 'string' ? body.workspaceRoot.trim() : '';
+  const agentSlug = typeof body.agentSlug === 'string' ? body.agentSlug.trim() : '';
+  if (!workspaceRoot) return { ok: false, error: 'workspaceRoot is required (absolute path)' };
+  if (!workspaceRoot.startsWith('/') && !workspaceRoot.match(/^[A-Za-z]:[\\/]/)) {
+    return { ok: false, error: 'workspaceRoot must be an absolute path' };
+  }
+  if (!agentSlug || !agentSlug.match(/^[a-z0-9][a-z0-9-]{0,62}$/i)) {
+    return { ok: false, error: 'agentSlug must be a kebab-case identifier (a-z, 0-9, -; max 63 chars)' };
+  }
+  const skipClaude = body.skipClaude === true;
+  const repoRoot = manifestRepoRoot();
+  const host = req.headers.host ?? `localhost:9200`;
+  const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
+  return {
+    ok: true,
+    context: {
+      workspaceAbsPath: workspaceRoot,
+      agentSlug,
+      daemonApiUrl: `${proto}://${host}`,
+      // `.dkg/config.yaml` references the auth token by relative path
+      // from inside the workspace. Daemon's auth token lives in the
+      // operator's ~/.dkg checkout — not under the workspace — so
+      // the config template uses an absolute path here. The default
+      // is intentionally generic; operators with a non-default ~/.dkg
+      // location can override via body.daemonTokenFile if needed.
+      daemonTokenFile: typeof body.daemonTokenFile === 'string'
+        ? body.daemonTokenFile
+        : '~/.dkg/auth.token',
+      mcpDkgDistAbsPath: resolve(repoRoot, 'packages/mcp-dkg/dist/index.js'),
+      captureScriptPath: resolve(repoRoot, 'packages/mcp-dkg/hooks/capture-chat.mjs'),
+      // Honour skipClaude by stripping claude-code from supportedTools
+      // before planInstall gets the manifest — same effect as the CLI
+      // --skip-claude flag.
+      ...(skipClaude ? { skipClaude: true } : { skipClaude: false }),
+    } as Omit<InstallContext, 'manifest'> & { skipClaude: boolean },
+  };
+}
 
 export const _autoUpdateIo = {
   readFile,
@@ -6382,6 +6515,159 @@ async function handleRequest(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // ── Phase 8: project-manifest publish + install (UI-driven) ───────
+  //
+  // These three routes power the CreateProjectModal (curator side,
+  // /publish) and JoinProjectModal (joiner side, /plan-install +
+  // /install) wire-workspace flow. They reuse the same publish /
+  // fetch / plan / write helpers that scripts/import-manifest.mjs
+  // and `dkg-mcp join` use, by constructing a self-pointing DkgClient
+  // that talks back to this same daemon over HTTP.
+  //
+  // Why a self-client and not direct internal calls? Two reasons:
+  // (1) keeps the manifest helpers framework-agnostic (one wire
+  // format whether they're called from CLI, browser-via-daemon, or
+  // anywhere else), (2) honours the same auth/rate-limit/audit path
+  // any other client would go through.
+
+  const manifestPublishMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/publish$/);
+  if (req.method === 'POST' && manifestPublishMatch) {
+    const contextGraphId = decodeURIComponent(manifestPublishMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const requestedNetwork = typeof body.networkLabel === 'string' ? body.networkLabel : null;
+      const networkLabel: 'testnet' | 'mainnet' | 'devnet' =
+        requestedNetwork === 'testnet' || requestedNetwork === 'mainnet' || requestedNetwork === 'devnet'
+          ? requestedNetwork
+          : manifestNetworkLabel(network?.networkName);
+      const supportedTools: ('cursor' | 'claude-code')[] = Array.isArray(body.supportedTools) && body.supportedTools.length
+        ? body.supportedTools.filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code')
+        : ['cursor', 'claude-code'];
+      const publisherAgentUri = (body.publisherAgentUri as string) ?? manifestPublisherUri(requestAgentAddress);
+      const requiresMcpDkgVersion = (body.requiresMcpDkgVersion as string) ?? '>=0.1.0';
+
+      const repoRoot = manifestRepoRoot();
+      let templates;
+      try {
+        templates = assembleStandardTemplates(repoRoot);
+      } catch (assembleErr: unknown) {
+        const msg = assembleErr instanceof Error ? assembleErr.message : String(assembleErr);
+        return jsonResponse(res, 500, {
+          error: `Could not assemble templates from repo root ${repoRoot}: ${msg}. ` +
+            `The daemon must be started from a dkg-v9 checkout for manifest publish to work today.`,
+        });
+      }
+
+      const ontologyUri = body.ontologyUri ?? `urn:dkg:project:${contextGraphId}:ontology`;
+      const client = manifestSelfClient(req, requestToken);
+      const result = await publishManifestImpl({
+        contextGraphId,
+        network: networkLabel,
+        supportedTools,
+        publisherAgentUri,
+        ontologyUri,
+        requiresMcpDkgVersion,
+        templates,
+        client,
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifestUri: result.manifestUri,
+        templateUris: result.templateUris,
+        tripleCount: result.tripleCount,
+        network: networkLabel,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest publish failed: ${msg}` });
+    }
+  }
+
+  const manifestPlanInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/plan-install$/);
+  if (req.method === 'POST' && manifestPlanInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestPlanInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
+      const manifest = ctx.context.skipClaude
+        ? { ...fetched, supportedTools: fetched.supportedTools.filter((t) => t !== 'claude-code') }
+        : fetched;
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const markdown = buildReviewMarkdownImpl(manifest, plan);
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifest: {
+          uri: manifest.uri,
+          contextGraphId: manifest.contextGraphId,
+          network: manifest.network,
+          publishedBy: manifest.publishedBy,
+          publishedAt: manifest.publishedAt,
+          supportedTools: manifest.supportedTools,
+          ontologyUri: manifest.ontologyUri,
+        },
+        plan: {
+          files: plan.files.map((f) => ({
+            field: f.field,
+            absPath: f.absPath,
+            exists: f.exists,
+            merges: f.merges,
+            bytes: f.bytes,
+            encodingFormat: f.encodingFormat,
+          })),
+          warnings: plan.warnings,
+          substitutionValues: plan.substitutionValues,
+        },
+        markdown,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest plan-install failed: ${msg}` });
+    }
+  }
+
+  const manifestInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/install$/);
+  if (req.method === 'POST' && manifestInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
+      const manifest = ctx.context.skipClaude
+        ? { ...fetched, supportedTools: fetched.supportedTools.filter((t) => t !== 'claude-code') }
+        : fetched;
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const written = await writeInstallImpl(plan);
+      return jsonResponse(res, 200, {
+        ok: true,
+        written: written.map((w) => ({
+          field: w.field,
+          absPath: w.absPath,
+          bytesWritten: w.bytesWritten,
+          action: w.action,
+        })),
+        warnings: plan.warnings,
+        skipped: ctx.context.skipClaude
+          ? ['claudeHooksTemplate (skipped via skipClaude=true)']
+          : [],
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
     }
   }
 

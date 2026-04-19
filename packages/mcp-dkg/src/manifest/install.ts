@@ -36,8 +36,25 @@ export interface InstallContext {
   manifest: ProjectManifest;
   /** Absolute path to operator's workspace (the dir that gets `.cursor/`, `.dkg/`, `AGENTS.md`). */
   workspaceAbsPath: string;
-  /** Operator's chosen agent slug for this machine — drives all `urn:dkg:agent:<slug>` URIs. */
+  /**
+   * Slug-shape of the nickname — kept for back-compat with templates that
+   * still reference `{{agentSlug}}`. New templates should prefer
+   * `{{agentNickname}}` (free-form) and `{{agentUri}}` (wallet-derived).
+   */
   agentSlug: string;
+  /**
+   * Human-readable label for this agent on this machine, e.g. "Brana laptop 1".
+   * Lands as `rdfs:label` / `schema:name` on the agent entity, not used as a URI.
+   */
+  agentNickname?: string;
+  /**
+   * Cryptographic agent URI — `urn:dkg:agent:<lowercase-wallet-address>`.
+   * If omitted, falls back to `urn:dkg:agent:<agentSlug>` for back-compat
+   * with the legacy slug-only flow.
+   */
+  agentUri?: string;
+  /** Raw lowercase wallet address (0x-prefixed). */
+  agentAddress?: string;
   /** Local daemon API URL the agent will talk to. */
   daemonApiUrl: string;
   /** Relative path (from `<workspace>/.dkg/config.yaml`) to the daemon's auth.token. */
@@ -101,9 +118,16 @@ function resolveTargetPath(
 function buildSubstitutionValues(
   ctx: InstallContext,
 ): Partial<Record<ManifestPlaceholder, string>> {
+  // Wallet-derived URI when present (the canonical Phase 8 form);
+  // fall back to slug-derived for callers that haven't migrated yet.
+  const agentUri = ctx.agentUri ?? `urn:dkg:agent:${ctx.agentSlug}`;
+  const agentNickname = ctx.agentNickname ?? ctx.agentSlug;
+  const agentAddress = ctx.agentAddress ?? '';
   return {
+    agentUri,
+    agentNickname,
+    agentAddress,
     agentSlug: ctx.agentSlug,
-    agentUri: `urn:dkg:agent:${ctx.agentSlug}`,
     contextGraphId: ctx.manifest.contextGraphId,
     daemonApiUrl: ctx.daemonApiUrl,
     daemonTokenFile: ctx.daemonTokenFile,

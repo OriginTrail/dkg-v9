@@ -6,15 +6,26 @@
  * + catchup). Both produce the same outcome: a workspace directory
  * containing the manifest's templated files (`.cursor/`, `.dkg/`,
  * `AGENTS.md`, optional `~/.claude/settings.json`) so the operator
- * can open the directory in Cursor and start collaborating.
+ * can open the directory in their chosen coding tool and start
+ * collaborating.
  *
  * Three states: input → previewed → installed. The operator must
  * preview before installing — this is the trust-building step that
  * shows exactly which files will land where, and surfaces the
- * installer's safety guards (e.g. "this will overwrite an existing
- * .cursor/mcp.json" warnings).
+ * installer's safety guards.
+ *
+ * Phase-8 polish (this file's recent rewrite):
+ *   - Workspace path defaults are absolute (fetched from /api/host/info,
+ *     never `~`-prefixed which the daemon rejects).
+ *   - Agent URI is derived from the operator's wallet address (read-only
+ *     in the panel) — `urn:dkg:agent:<wallet>`. The "nickname" field is
+ *     a free-form human label that lands as rdfs:label / schema:name on
+ *     the agent entity.
+ *   - Environment dropdown picks among Cursor / Claude Code / Both
+ *     today; Codex is listed as "coming soon" (visible but disabled).
  */
 import React, { useState, useEffect, useMemo } from 'react';
+import { authHeaders, fetchCurrentAgent } from '../../api.js';
 import {
   planProjectManifestInstall,
   installProjectManifest,
@@ -25,10 +36,10 @@ import {
 interface WireWorkspacePanelProps {
   /** Context graph ID — used to call /api/context-graph/{id}/manifest/* . */
   contextGraphId: string;
-  /** Display name for the project — drives the default workspace path. */
+  /** Display name for the project — drives the default workspace dir name. */
   projectName?: string;
-  /** Default agent slug (e.g. "cursor-laptop"). Operator can override. */
-  defaultAgentSlug?: string;
+  /** Default agent nickname (e.g. "Brana laptop 1"). Operator can override. */
+  defaultAgentNickname?: string;
   /** Called when the operator finishes installing or skips. */
   onDone: () => void;
   /** Called when the operator clicks Cancel before doing anything. */
@@ -38,21 +49,60 @@ interface WireWorkspacePanelProps {
 }
 
 const WORKSPACE_PARENT_KEY = 'dkg.wireWorkspace.parentDir';
+const NICKNAME_KEY = 'dkg.wireWorkspace.nickname';
+const TOOLS_KEY = 'dkg.wireWorkspace.tools';
 
-function defaultParentDir(): string {
-  // localStorage remembers the operator's preferred parent dir from
-  // the previous wire flow. First run defaults to ~/code (a common
-  // convention; operator can edit before installing).
-  if (typeof window !== 'undefined') {
-    const stored = window.localStorage.getItem(WORKSPACE_PARENT_KEY);
-    if (stored) return stored;
-  }
-  return '~/code';
+interface HostInfo {
+  homedir: string;
+  hostname: string;
+  username: string;
+  platform: string;
+  defaultWorkspaceParent: string;
 }
 
-function projectSlug(name: string | undefined, contextGraphId: string): string {
-  // The CG ID is `<address>/<slug>`; pick the slug part for a
-  // human-friendly directory name. Fall back to a slugified project name.
+interface AgentIdentity {
+  agentAddress: string;
+  agentDid: string;
+  name: string;
+}
+
+type ToolSelection = 'cursor' | 'claude-code' | 'both';
+
+interface ToolOption {
+  value: ToolSelection;
+  label: string;
+  description: string;
+  disabled?: boolean;
+  comingSoon?: boolean;
+}
+
+const TOOL_OPTIONS: ToolOption[] = [
+  {
+    value: 'cursor',
+    label: 'Cursor',
+    description: 'Wires .cursor/mcp.json + hooks + rules into the workspace.',
+  },
+  {
+    value: 'claude-code',
+    label: 'Claude Code',
+    description: 'Merges hooks into ~/.claude/settings.json. Requires Claude Code installed.',
+  },
+  {
+    value: 'both',
+    label: 'Both Cursor and Claude Code',
+    description: 'Wires both tools so either can operate on this project.',
+  },
+  {
+    value: 'cursor', // dummy, disabled
+    label: 'Codex (coming soon)',
+    description: "Codex CLI integration isn't shipped yet — pick another tool for now.",
+    disabled: true,
+    comingSoon: true,
+  },
+];
+
+function projectDirSlug(name: string | undefined, contextGraphId: string): string {
+  // The CG ID is `<address>/<slug>`; pick the slug for a friendlier dir name.
   const parts = contextGraphId.split('/');
   const tail = parts[parts.length - 1] ?? '';
   if (tail) return tail;
@@ -62,65 +112,97 @@ function projectSlug(name: string | undefined, contextGraphId: string): string {
     .replace(/^-|-$/g, '');
 }
 
-function expandTilde(p: string): string {
-  // The browser can't expand ~ at the OS level, but the daemon will
-  // refuse a path that doesn't start with / or a drive letter. We do
-  // a best-effort expansion using HOME-equivalent placeholder text;
-  // operators on macOS / Linux nearly always have $HOME = /Users/<name>
-  // or /home/<name>, but the only safe assumption is that the user
-  // edits the path themselves. We replace ~ with a literal `~/...`
-  // and mark a warning if the path still starts with ~ when the
-  // operator tries to install.
-  return p;
+function defaultNicknameFromHost(host: HostInfo | null): string {
+  if (!host) return '';
+  // Pleasant default: "<username>@<hostname-stripped>" e.g. "alice@MacBook-Pro".
+  // Operators almost always edit this to something like "Alice on laptop 1".
+  const host_short = host.hostname
+    .replace(/\.local$/, '')
+    .replace(/-/g, ' ');
+  return `${host.username} @ ${host_short}`;
+}
+
+function selectedTools(sel: ToolSelection): ('cursor' | 'claude-code')[] {
+  if (sel === 'both') return ['cursor', 'claude-code'];
+  return [sel];
 }
 
 export function WireWorkspacePanel({
   contextGraphId,
   projectName,
-  defaultAgentSlug,
+  defaultAgentNickname,
   onDone,
   onCancel,
   variant,
 }: WireWorkspacePanelProps) {
-  const slug = useMemo(() => projectSlug(projectName, contextGraphId), [projectName, contextGraphId]);
-  const [workspaceRoot, setWorkspaceRoot] = useState(`${defaultParentDir()}/${slug}`);
-  const [agentSlug, setAgentSlug] = useState(defaultAgentSlug ?? 'cursor-laptop');
-  const [skipClaude, setSkipClaude] = useState(true);
+  const slug = useMemo(() => projectDirSlug(projectName, contextGraphId), [projectName, contextGraphId]);
+  const [host, setHost] = useState<HostInfo | null>(null);
+  const [agent, setAgent] = useState<AgentIdentity | null>(null);
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
+  const [nickname, setNickname] = useState('');
+  const [toolSelection, setToolSelection] = useState<ToolSelection>('cursor');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [planResult, setPlanResult] = useState<PlanInstallResult | null>(null);
   const [installResult, setInstallResult] = useState<InstallResult | null>(null);
 
+  // Fetch host info + identity on mount so the defaults land sensibly.
   useEffect(() => {
-    setWorkspaceRoot(`${defaultParentDir()}/${slug}`);
-  }, [slug]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [hostRes, agentRes] = await Promise.all([
+          fetch('/api/host/info', { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
+          fetchCurrentAgent().catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (hostRes) {
+          setHost(hostRes);
+          const parent = (typeof window !== 'undefined' && window.localStorage.getItem(WORKSPACE_PARENT_KEY))
+            || hostRes.defaultWorkspaceParent;
+          setWorkspaceRoot(`${parent}/${slug}`);
+        }
+        if (agentRes) setAgent(agentRes as AgentIdentity);
+        // Restore nickname / tool choice from prior wire if available.
+        const savedNick = typeof window !== 'undefined' && window.localStorage.getItem(NICKNAME_KEY);
+        if (defaultAgentNickname) setNickname(defaultAgentNickname);
+        else if (savedNick) setNickname(savedNick);
+        else if (hostRes) setNickname(defaultNicknameFromHost(hostRes));
+        const savedTools = typeof window !== 'undefined' && window.localStorage.getItem(TOOLS_KEY) as ToolSelection | null;
+        if (savedTools && (savedTools === 'cursor' || savedTools === 'claude-code' || savedTools === 'both')) {
+          setToolSelection(savedTools);
+        }
+      } catch (err) {
+        // Non-fatal — operator just has to fill the path themselves.
+        if (!cancelled) console.warn('[WireWorkspacePanel] host info / identity fetch failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [slug, defaultAgentNickname]);
 
-  function rememberParentDir(p: string) {
-    const trimmed = p.trim();
-    const lastSlash = trimmed.lastIndexOf('/');
-    if (lastSlash > 0 && typeof window !== 'undefined') {
-      window.localStorage.setItem(WORKSPACE_PARENT_KEY, trimmed.slice(0, lastSlash));
-    }
+  function rememberPrefs(parentDir: string) {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(WORKSPACE_PARENT_KEY, parentDir);
+    if (nickname) window.localStorage.setItem(NICKNAME_KEY, nickname);
+    window.localStorage.setItem(TOOLS_KEY, toolSelection);
   }
 
   async function handlePreview() {
     setBusy(true);
     setError(null);
     try {
-      const expanded = expandTilde(workspaceRoot.trim());
-      if (expanded.startsWith('~')) {
-        throw new Error(
-          'Workspace path starts with `~` — the daemon needs an absolute path. ' +
-          'Replace `~` with your home directory (e.g. /Users/you/code/' + slug + ').',
-        );
+      const expanded = workspaceRoot.trim();
+      if (!expanded || expanded.startsWith('~')) {
+        throw new Error('Workspace path must be an absolute path (start with `/`). The daemon will create the directory if it does not exist.');
       }
       const result = await planProjectManifestInstall(contextGraphId, {
         workspaceRoot: expanded,
-        agentSlug: agentSlug.trim(),
-        skipClaude,
-      });
+        agentNickname: nickname.trim(),
+        tools: selectedTools(toolSelection),
+      } as any);
       setPlanResult(result);
-      rememberParentDir(expanded);
+      const lastSlash = expanded.lastIndexOf('/');
+      if (lastSlash > 0) rememberPrefs(expanded.slice(0, lastSlash));
     } catch (err: any) {
       setError(err?.message || 'Preview failed');
     } finally {
@@ -132,12 +214,12 @@ export function WireWorkspacePanel({
     setBusy(true);
     setError(null);
     try {
-      const expanded = expandTilde(workspaceRoot.trim());
+      const expanded = workspaceRoot.trim();
       const result = await installProjectManifest(contextGraphId, {
         workspaceRoot: expanded,
-        agentSlug: agentSlug.trim(),
-        skipClaude,
-      });
+        agentNickname: nickname.trim(),
+        tools: selectedTools(toolSelection),
+      } as any);
       setInstallResult(result);
     } catch (err: any) {
       setError(err?.message || 'Install failed');
@@ -156,8 +238,8 @@ export function WireWorkspacePanel({
           color: 'var(--accent-green)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
-          Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in Cursor.
-          On the first chat turn, your agent will see the project ontology
+          Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
+          On the first chat, your agent will see the project ontology
           {variant === 'join' ? ', tasks, and decisions' : ' you publish via dkg_add_task'}.
         </div>
 
@@ -170,6 +252,7 @@ export function WireWorkspacePanel({
           border: '1px solid var(--border-primary)', margin: 0,
         }}>
           {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
+          {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
           {installResult.warnings.length ? '\n\nWarnings:\n' + installResult.warnings.map((w) => `  - ${w}`).join('\n') : ''}
         </pre>
 
@@ -187,7 +270,7 @@ export function WireWorkspacePanel({
         {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
-          Review the install plan below. Files are written only when you click Install.
+          Review the install plan. Files are only written when you click Install.
         </div>
 
         <pre style={{
@@ -221,7 +304,10 @@ export function WireWorkspacePanel({
     );
   }
 
-  // ── Input state — collect workspace path / agent slug / skip-claude ──
+  // ── Input state ──
+  const toolDescription = TOOL_OPTIONS.find(t => t.value === toolSelection && !t.disabled)?.description
+    ?? TOOL_OPTIONS[0].description;
+
   return (
     <div>
       <div style={{
@@ -233,8 +319,8 @@ export function WireWorkspacePanel({
           {variant === 'create' ? 'Wire your local workspace' : 'Wire this project locally'}
         </div>
         {variant === 'create'
-          ? 'Choose a directory for the new project. The daemon will populate it with the Cursor wiring (rule, hooks, AGENTS.md, .dkg/config.yaml) so you can open it in Cursor and start populating the plan.'
-          : 'Choose a local directory for this project. The daemon will populate it with everything Cursor needs to participate. You will then open the folder in Cursor on this machine to collaborate.'}
+          ? 'Choose a directory for the new project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can join the project from turn one.'
+          : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
       </div>
 
       {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
@@ -246,49 +332,70 @@ export function WireWorkspacePanel({
           type="text"
           value={workspaceRoot}
           onChange={(e) => setWorkspaceRoot(e.target.value)}
-          placeholder="/Users/you/code/tic-tac-toe"
+          placeholder={host ? `${host.defaultWorkspaceParent}/${slug}` : '/Users/you/code/project'}
           spellCheck={false}
           style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
         />
         <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Absolute path. Created if it doesn't exist. The daemon writes only inside this dir
-          (plus optionally <code>~/.claude/settings.json</code> if you opt in below).
+          Absolute path. Created if it doesn't exist. Daemon writes only inside this dir
+          (plus optionally <code>~/.claude/settings.json</code> if Claude Code is selected).
+          {host && <> Defaulted from your <code>$HOME</code> = <code>{host.homedir}</code>.</>}
         </div>
       </div>
 
       <div className="v10-form-group">
-        <label className="v10-form-label">Agent slug for this machine</label>
+        <label className="v10-form-label">Coding tool to wire</label>
+        <select
+          className="v10-form-select"
+          value={toolSelection}
+          onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
+        >
+          {TOOL_OPTIONS.map((opt, i) => (
+            <option
+              key={`${opt.label}-${i}`}
+              value={opt.disabled ? '__disabled__' : opt.value}
+              disabled={opt.disabled}
+            >
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+          {toolDescription}
+        </div>
+      </div>
+
+      <div className="v10-form-group">
+        <label className="v10-form-label">Your agent identity</label>
         <input
           className="v10-form-input"
           type="text"
-          value={agentSlug}
-          onChange={(e) => setAgentSlug(e.target.value)}
-          placeholder="cursor-laptop"
+          value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
+          disabled
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.75 }}
         />
         <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Drives <code>urn:dkg:agent:&lt;slug&gt;</code> attribution on every chat turn from this Cursor.
-          Pick something descriptive like <code>cursor-branarakic-laptop1</code>.
+          Cryptographic URI derived from this node's wallet address. Same on every project on this machine. Attribution
+          (<code>prov:wasAttributedTo</code>) on every chat turn uses this URI.
         </div>
       </div>
 
       <div className="v10-form-group">
-        <label className="v10-form-radio" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={skipClaude}
-            onChange={(e) => setSkipClaude(e.target.checked)}
-            style={{ marginTop: 2 }}
-          />
-          <span>
-            Skip Claude Code wiring
-            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 2 }}>
-              Recommended unless you actively use Claude Code. Leaving this checked means
-              the install won't touch <code>~/.claude/settings.json</code>.
-            </div>
-          </span>
-        </label>
+        <label className="v10-form-label">Nickname for this agent</label>
+        <input
+          className="v10-form-input"
+          type="text"
+          value={nickname}
+          onChange={(e) => setNickname(e.target.value)}
+          placeholder="e.g. Alice on laptop 1"
+          spellCheck={false}
+          maxLength={80}
+        />
+        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+          Free-form human label rendered as the agent's name in chips, lists, and rdfs:label triples.
+          Doesn't affect attribution — only changes how you appear to others.
+        </div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
@@ -298,7 +405,7 @@ export function WireWorkspacePanel({
         <button
           className="v10-modal-btn primary"
           onClick={handlePreview}
-          disabled={busy || !workspaceRoot.trim() || !agentSlug.trim()}
+          disabled={busy || !workspaceRoot.trim() || !nickname.trim() || !agent}
         >
           {busy ? 'Loading preview…' : 'Preview install'}
         </button>

@@ -19,6 +19,7 @@
  * tool argument beats both.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
@@ -47,6 +48,19 @@ export interface DkgConfig {
 }
 
 const DEFAULT_API = 'http://localhost:9201';
+
+/**
+ * Expand a leading `~/` (or bare `~`) to the user's home directory.
+ * Anything else is returned unchanged. Mirrors what most shells do —
+ * we need it because YAML config files commonly use `~/...` paths but
+ * `path.resolve` and `path.isAbsolute` treat `~` as a regular char.
+ */
+function expandHome(p: string): string {
+  if (!p) return p;
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
 
 function readIfExists(filePath: string): string | null {
   try {
@@ -135,13 +149,22 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
 
   // Token resolution priority:
   //   env DKG_TOKEN → .dkg/config.yaml node.tokenFile → fail-open (null)
+  //
+  // tokenFile path expansion: `~/...` → `<homedir>/...`, then absolute paths
+  // are taken verbatim, then relative paths are resolved against the
+  // config file's directory. Without `~` expansion, a config that says
+  // `tokenFile: ~/.dkg/auth.token` ends up trying to read
+  // `<workspace>/.dkg/~/.dkg/auth.token` and silently fails (token=empty
+  // → every write 401s). The capture-chat hook had the same bug; fixed
+  // there too.
   let token = envToken ?? asString(node.token);
   if (!token) {
     const tokenFileRaw = asString(node.tokenFile);
     if (tokenFileRaw && sourcePath) {
-      const abs = path.isAbsolute(tokenFileRaw)
-        ? tokenFileRaw
-        : path.resolve(path.dirname(sourcePath), tokenFileRaw);
+      const expanded = expandHome(tokenFileRaw);
+      const abs = path.isAbsolute(expanded)
+        ? expanded
+        : path.resolve(path.dirname(sourcePath), expanded);
       token = resolveTokenFromFile(abs);
     }
   }

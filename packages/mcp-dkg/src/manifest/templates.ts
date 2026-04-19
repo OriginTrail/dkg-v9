@@ -12,9 +12,11 @@
  * machine; the manifest distributes a parameterised version).
  *
  * Substitutable placeholders (see schema.ts MANIFEST_PLACEHOLDERS):
- *   {{agentSlug}}          operator-chosen slug
- *   {{agentUri}}            urn:dkg:agent:<agentSlug>
- *   {{contextGraphId}}     CG id
+ *   {{agentUri}}            urn:dkg:agent:<lowercase-wallet-address> — cryptographic identity
+ *   {{agentNickname}}       human-readable label, e.g. "Brana laptop 1"
+ *   {{agentAddress}}        raw lowercase wallet address (0x-prefixed)
+ *   {{agentSlug}}           BACK-COMPAT alias for nickname (slug-shaped)
+ *   {{contextGraphId}}      CG id
  *   {{daemonApiUrl}}        local daemon API URL
  *   {{daemonTokenFile}}     relative path to auth.token
  *   {{workspaceAbsPath}}    absolute workspace path
@@ -155,7 +157,12 @@ node:
   tokenFile: {{daemonTokenFile}}
 
 agent:
+  # Cryptographic identity — derived from this machine's wallet address.
+  # Same agent (you on this machine) across every project => the same uri.
   uri: {{agentUri}}
+  # Human-readable label rendered in UIs / tools. Free-form, not used as
+  # a URI fragment.
+  nickname: {{agentNickname}}
 
 capture:
   subGraph: chat
@@ -184,6 +191,7 @@ export const CURSOR_MCP_JSON_TEMPLATE = JSON.stringify(
           DKG_API: '{{daemonApiUrl}}',
           DKG_PROJECT: '{{contextGraphId}}',
           DKG_AGENT_URI: '{{agentUri}}',
+          DKG_AGENT_NICKNAME: '{{agentNickname}}',
         },
       },
     },

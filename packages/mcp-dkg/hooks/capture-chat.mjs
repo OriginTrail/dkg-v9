@@ -163,6 +163,7 @@ function loadConfig() {
   const envToken = process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN;
   const envProject = process.env.DKG_PROJECT;
   const envAgent = process.env.DKG_AGENT_URI;
+  const envNickname = process.env.DKG_AGENT_NICKNAME;
 
   const cwd = process.env.DKG_WORKSPACE ?? process.cwd();
   const cfgPath = findConfigFile(cwd);
@@ -178,9 +179,19 @@ function loadConfig() {
   let token = envToken ?? fromFile.node?.token ?? '';
   if (!token && fromFile.node?.tokenFile && cfgPath) {
     try {
-      const abs = path.isAbsolute(fromFile.node.tokenFile)
-        ? fromFile.node.tokenFile
-        : path.resolve(path.dirname(cfgPath), fromFile.node.tokenFile);
+      // Expand a leading `~/` (or bare `~`) before deciding absolute-vs-relative.
+      // Without this the very common `~/.dkg/auth.token` config silently
+      // resolves to `<workspace>/.dkg/~/.dkg/auth.token` (gibberish), token
+      // stays empty, every write 401s. Mirrors the same fix in
+      // packages/mcp-dkg/src/config.ts.
+      const tokenFileExpanded = fromFile.node.tokenFile === '~'
+        ? os.homedir()
+        : (fromFile.node.tokenFile.startsWith('~/')
+            ? path.join(os.homedir(), fromFile.node.tokenFile.slice(2))
+            : fromFile.node.tokenFile);
+      const abs = path.isAbsolute(tokenFileExpanded)
+        ? tokenFileExpanded
+        : path.resolve(path.dirname(cfgPath), tokenFileExpanded);
       const raw = fs.readFileSync(abs, 'utf-8');
       const line = raw.split('\n').find((l) => l.trim() && !l.startsWith('#'));
       token = (line ?? '').trim();
@@ -194,6 +205,9 @@ function loadConfig() {
     token,
     project: envProject ?? fromFile.contextGraph ?? fromFile.project ?? null,
     agent: envAgent ?? fromFile.agent?.uri ?? null,
+    // Free-form human label rendered as rdfs:label / schema:name on the
+    // agent entity. Falls back to the URI tail for legacy slug-only configs.
+    nickname: envNickname ?? fromFile.agent?.nickname ?? null,
     subGraph: fromFile.capture?.subGraph ?? 'chat',
     assertion: fromFile.capture?.assertion ?? 'chat-log',
     privacy: fromFile.capture?.privacy ?? 'team',
@@ -403,17 +417,35 @@ async function ensureSubGraph(cfg, name) {
 async function selfRegisterAgent(cfg, state) {
   if (!cfg.agent) return;
   if (state.agentRegistered) return;
-  // Slug from the agent URI (everything after the last colon).
-  const slug = cfg.agent.split(':').pop() ?? 'unknown-agent';
-  const assertion = `agent-self-register-${slug}`;
+  // Phase 8 nickname/wallet split: cfg.agent is the canonical URI
+  // (typically `urn:dkg:agent:<wallet-address>` from the manifest install).
+  // The human-friendly label comes from cfg.nickname (set by config.yaml's
+  // `agent.nickname`); fall back to the URI tail for old slug-based configs.
+  const uriTail = cfg.agent.split(':').pop() ?? 'unknown-agent';
+  const nickname = cfg.nickname || uriTail;
+  // Assertion name needs to be filesystem/URL-safe, so use the URI tail
+  // (a wallet address — already safe — or a slug).
+  const assertion = `agent-self-register-${uriTail.replace(/[^a-z0-9-]/gi, '-')}`;
   const triples = [
     { subject: cfg.agent, predicate: P.type, object: URI(NS.agent + 'Agent') },
     { subject: cfg.agent, predicate: P.type, object: URI(NS.agent + 'AIAgent') },
-    { subject: cfg.agent, predicate: P.label, object: LIT(slug) },
-    { subject: cfg.agent, predicate: P.name, object: LIT(slug) },
+    { subject: cfg.agent, predicate: P.label, object: LIT(nickname) },
+    { subject: cfg.agent, predicate: P.name, object: LIT(nickname) },
     { subject: cfg.agent, predicate: NS.agent + 'framework', object: LIT(cfg.tool) },
     { subject: cfg.agent, predicate: NS.agent + 'joinedAt', object: LIT(state.startedAt, NS.xsd + 'dateTime') },
   ];
+  // Stamp the wallet address as a separate predicate when we have one.
+  // Heuristic: agent URIs of the shape urn:dkg:agent:0x[hex40] embed the
+  // wallet directly. Stash it as a first-class triple so SPARQL queries
+  // can correlate agents to wallets without parsing URI strings.
+  const walletMatch = cfg.agent.match(/urn:dkg:agent:(0x[a-fA-F0-9]{40})$/);
+  if (walletMatch) {
+    triples.push({
+      subject: cfg.agent,
+      predicate: NS.agent + 'walletAddress',
+      object: LIT(walletMatch[1].toLowerCase()),
+    });
+  }
   try {
     await ensureSubGraph(cfg, 'meta');
     await postJson(cfg.api, `/api/assertion/${encodeURIComponent(assertion)}/write`, cfg.token, {

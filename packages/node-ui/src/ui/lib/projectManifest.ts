@@ -68,14 +68,24 @@ export function publishProjectManifest(
 export interface InstallContextRequest {
   /** Absolute path to the operator's workspace directory. */
   workspaceRoot: string;
-  /** Operator-chosen agent slug (kebab-case). Drives all urn:dkg:agent:<slug> URIs. */
-  agentSlug: string;
-  /** Optional human-friendly label (rendered in UIs; not part of any URI). */
-  agentLabel?: string;
-  /** When true, claude-code is stripped from supportedTools so ~/.claude/settings.json is left alone. */
-  skipClaude?: boolean;
+  /**
+   * Free-form human label for this agent, e.g. "Alice on laptop 1".
+   * Lands as rdfs:label / schema:name on the agent entity. The cryptographic
+   * agent URI is derived server-side from the daemon's wallet address.
+   */
+  agentNickname: string;
+  /**
+   * Subset of supportedTools to actually wire on this machine.
+   * Defaults to ['cursor']. `claude-code` requires explicit opt-in to avoid
+   * touching ~/.claude/settings.json. `codex` is recognised but no-op today.
+   */
+  tools?: ('cursor' | 'claude-code' | 'codex')[];
   /** Override the daemon-token file path used in the templated config.yaml. */
   daemonTokenFile?: string;
+  /** @deprecated — pass nickname via agentNickname; kept for back-compat with old callers. */
+  agentSlug?: string;
+  /** @deprecated — set tools=['cursor'] to get the old skipClaude=true behaviour. */
+  skipClaude?: boolean;
 }
 
 export interface PlannedFileSummary {

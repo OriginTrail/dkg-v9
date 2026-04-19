@@ -75,8 +75,10 @@ export const ManifestP = {
 // not in this fixed set is left as literal text (so a template that
 // uses {{anything-else}} silently no-ops on it; safer than failing).
 export const MANIFEST_PLACEHOLDERS = [
-  'agentSlug',          // operator-chosen, e.g. "branarakic-laptop2"
-  'agentUri',           // urn:dkg:agent:<agentSlug>
+  'agentUri',           // urn:dkg:agent:<lowercase-wallet-address> (cryptographic identity)
+  'agentNickname',      // human-readable label, e.g. "Brana laptop 1" — lands as rdfs:label
+  'agentAddress',       // raw wallet address (lowercase, 0x-prefixed) — convenience for tools that prefer it
+  'agentSlug',          // BACK-COMPAT alias for agentNickname (slug-shaped, e.g. "brana-laptop-1")
   'contextGraphId',     // the project's CG ID (e.g. dkg-code-project)
   'daemonApiUrl',       // local daemon API (default http://localhost:9201)
   'daemonTokenFile',    // relative path to auth.token (e.g. ../.devnet/node1/auth.token)

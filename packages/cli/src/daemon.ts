@@ -20,6 +20,7 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import * as osModule from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 
@@ -181,55 +182,110 @@ function manifestPublisherUri(requestAgentAddress: string | undefined | null): s
 }
 
 /**
+ * Tools the install panel may target. `cursor` and `claude-code` map to
+ * actual template entities the manifest publisher ships today; `codex`
+ * is recognised so the UI can list it but no template wiring exists yet
+ * — selecting it is a no-op apart from logging.
+ */
+type SupportedTool = 'cursor' | 'claude-code' | 'codex';
+
+/**
+ * Slug-shape an arbitrary nickname so back-compat with anything that
+ * still expects a slug-form `agentSlug` keeps working. Same rule as
+ * `normaliseSlug` in mcp-dkg/src/tools/annotations.ts.
+ */
+function nicknameToSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'agent';
+}
+
+/**
  * Build an InstallContext from the request body. The body shape:
- *   { workspaceRoot, agentSlug, agentLabel?, skipClaude? }
- * The InstallContext is consumed by planInstall() — it's everything
- * the planner needs apart from the manifest itself (which we fetch
- * from the graph in the handler).
+ *   { workspaceRoot, agentNickname?, agentSlug? (legacy), tools?: string[] }
+ *
+ * The cryptographic agent URI is derived from the daemon's bearer-token
+ * wallet, NOT from anything in the body — that's the whole point of
+ * grounding attribution in the wallet.
+ *
+ * The `tools` field lists which template categories the operator wants
+ * installed (cursor / claude-code / codex). Anything not in the list is
+ * stripped from `manifest.supportedTools` before plan, so the planner
+ * naturally skips its templates (mirroring the legacy --skip-claude flag).
  */
 function buildManifestInstallContext(
   req: IncomingMessage,
   body: Record<string, unknown>,
   _contextGraphId: string,
   _requestToken: string | null | undefined,
+  requestAgentAddress: string | undefined | null,
 ):
-  | { ok: true; context: Omit<InstallContext, 'manifest'> & { skipClaude: boolean } }
+  | { ok: true; context: Omit<InstallContext, 'manifest'> & { tools: SupportedTool[]; agentNickname: string }; }
   | { ok: false; error: string } {
   const workspaceRoot = typeof body.workspaceRoot === 'string' ? body.workspaceRoot.trim() : '';
-  const agentSlug = typeof body.agentSlug === 'string' ? body.agentSlug.trim() : '';
+  const rawNickname = typeof body.agentNickname === 'string'
+    ? body.agentNickname.trim()
+    : (typeof body.agentSlug === 'string' ? body.agentSlug.trim() : '');
   if (!workspaceRoot) return { ok: false, error: 'workspaceRoot is required (absolute path)' };
   if (!workspaceRoot.startsWith('/') && !workspaceRoot.match(/^[A-Za-z]:[\\/]/)) {
-    return { ok: false, error: 'workspaceRoot must be an absolute path' };
+    return { ok: false, error: 'workspaceRoot must be an absolute path (must start with /)' };
   }
-  if (!agentSlug || !agentSlug.match(/^[a-z0-9][a-z0-9-]{0,62}$/i)) {
-    return { ok: false, error: 'agentSlug must be a kebab-case identifier (a-z, 0-9, -; max 63 chars)' };
+  if (!rawNickname) return { ok: false, error: 'agentNickname is required' };
+  if (rawNickname.length > 80) return { ok: false, error: 'agentNickname must be ≤ 80 characters' };
+  if (!requestAgentAddress) {
+    return { ok: false, error: 'cannot derive agent URI: no wallet address resolved from the bearer token' };
   }
-  const skipClaude = body.skipClaude === true;
+
+  // Tool selection. Default to ['cursor'] when nothing's specified — the
+  // single most common case. Claude Code requires explicit opt-in to avoid
+  // the ~/.claude/settings.json pollution we hit during day-2 testing.
+  let tools: SupportedTool[] = ['cursor'];
+  if (Array.isArray(body.tools)) {
+    tools = (body.tools as unknown[])
+      .filter((t): t is SupportedTool =>
+        t === 'cursor' || t === 'claude-code' || t === 'codex')
+      .filter((t, i, a) => a.indexOf(t) === i);
+    if (tools.length === 0) tools = ['cursor'];
+  }
+
   const repoRoot = manifestRepoRoot();
   const host = req.headers.host ?? `localhost:9200`;
   const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
+  const wallet = requestAgentAddress.toLowerCase();
+  const agentUri = `urn:dkg:agent:${wallet}`;
   return {
     ok: true,
     context: {
       workspaceAbsPath: workspaceRoot,
-      agentSlug,
+      // The schema's required `agentSlug` placeholder gets the slug-shape
+      // of the nickname so legacy templates that reference {{agentSlug}}
+      // still substitute sensibly. Everything new uses {{agentNickname}}
+      // (free-form) or {{agentUri}} (wallet-based).
+      agentSlug: nicknameToSlug(rawNickname),
       daemonApiUrl: `${proto}://${host}`,
-      // `.dkg/config.yaml` references the auth token by relative path
-      // from inside the workspace. Daemon's auth token lives in the
-      // operator's ~/.dkg checkout — not under the workspace — so
-      // the config template uses an absolute path here. The default
-      // is intentionally generic; operators with a non-default ~/.dkg
-      // location can override via body.daemonTokenFile if needed.
+      // Absolute default (the daemon's auth.token always lives at
+      // <homedir>/.dkg/auth.token unless overridden). Avoids the ~/...
+      // expansion-bug class entirely; still overridable by the operator.
       daemonTokenFile: typeof body.daemonTokenFile === 'string'
         ? body.daemonTokenFile
-        : '~/.dkg/auth.token',
+        : `${osModule.homedir()}/.dkg/auth.token`,
       mcpDkgDistAbsPath: resolve(repoRoot, 'packages/mcp-dkg/dist/index.js'),
       captureScriptPath: resolve(repoRoot, 'packages/mcp-dkg/hooks/capture-chat.mjs'),
-      // Honour skipClaude by stripping claude-code from supportedTools
-      // before planInstall gets the manifest — same effect as the CLI
-      // --skip-claude flag.
-      ...(skipClaude ? { skipClaude: true } : { skipClaude: false }),
-    } as Omit<InstallContext, 'manifest'> & { skipClaude: boolean },
+      tools,
+      agentNickname: rawNickname,
+      // Cryptographic agent URI derived from the daemon's wallet (the
+      // requestAgentAddress resolved from the bearer token). planInstall
+      // reads this directly from the context and feeds it into the
+      // {{agentUri}} substitution; if we left it null the planner would
+      // fall back to the legacy slug-based form, which is exactly what
+      // the Phase-8-day-3-plus polish was meant to fix.
+      agentUri,
+      agentAddress: wallet,
+    } as unknown as Omit<InstallContext, 'manifest'> & { tools: SupportedTool[]; agentNickname: string },
   };
 }
 
@@ -6597,12 +6653,17 @@ async function handleRequest(
     catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
 
     try {
-      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken);
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
       const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
-      const manifest = ctx.context.skipClaude
-        ? { ...fetched, supportedTools: fetched.supportedTools.filter((t) => t !== 'claude-code') }
-        : fetched;
+      // Strip supportedTools the operator didn't pick — planner uses
+      // supportedTools to gate claude-code wiring, and we want the same
+      // gating to apply for any tool the operator deselected.
+      const manifest = {
+        ...fetched,
+        supportedTools: fetched.supportedTools.filter((t) =>
+          (ctx.context.tools as readonly string[]).includes(t)),
+      };
       const plan = planInstallImpl({ ...ctx.context, manifest });
       const markdown = buildReviewMarkdownImpl(manifest, plan);
       return jsonResponse(res, 200, {
@@ -6644,14 +6705,23 @@ async function handleRequest(
     catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
 
     try {
-      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken);
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
       const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
-      const manifest = ctx.context.skipClaude
-        ? { ...fetched, supportedTools: fetched.supportedTools.filter((t) => t !== 'claude-code') }
-        : fetched;
+      const manifest = {
+        ...fetched,
+        supportedTools: fetched.supportedTools.filter((t) =>
+          (ctx.context.tools as readonly string[]).includes(t)),
+      };
       const plan = planInstallImpl({ ...ctx.context, manifest });
       const written = await writeInstallImpl(plan);
+      const skipped: string[] = [];
+      if (!(ctx.context.tools as readonly string[]).includes('claude-code')) {
+        skipped.push('claudeHooksTemplate (claude-code not selected)');
+      }
+      if ((ctx.context.tools as readonly string[]).includes('codex')) {
+        skipped.push('codex wiring is "coming soon" — no template entries shipped yet');
+      }
       return jsonResponse(res, 200, {
         ok: true,
         written: written.map((w) => ({
@@ -6661,13 +6731,44 @@ async function handleRequest(
           action: w.action,
         })),
         warnings: plan.warnings,
-        skipped: ctx.context.skipClaude
-          ? ['claudeHooksTemplate (skipped via skipClaude=true)']
-          : [],
+        skipped,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
+    }
+  }
+
+  // GET /api/host/info — surface enough host info for the WireWorkspacePanel
+  // to render real absolute defaults (no `~` paths). Auth-required because
+  // hostname/username can be considered identifying. Returns nothing
+  // sensitive — just $HOME, hostname, platform, and a sensible default
+  // workspace parent dir.
+  if (req.method === 'GET' && path === '/api/host/info') {
+    try {
+      const home = osModule.homedir();
+      const hostname = osModule.hostname();
+      const username = osModule.userInfo().username;
+      const platform = process.platform;
+      // Default workspace parent: ~/code if it exists, else ~/dev,
+      // else ~. Most operators put projects under ~/code in macOS / Linux.
+      const candidates = [`${home}/code`, `${home}/dev`, `${home}/projects`];
+      let defaultWorkspaceParent = home;
+      for (const c of candidates) {
+        try {
+          if (existsSync(c)) { defaultWorkspaceParent = c; break; }
+        } catch { /* ignore */ }
+      }
+      return jsonResponse(res, 200, {
+        homedir: home,
+        hostname,
+        username,
+        platform,
+        defaultWorkspaceParent,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `host info failed: ${msg}` });
     }
   }
 

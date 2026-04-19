@@ -215,9 +215,23 @@ export function planInstall(ctx: InstallContext): InstallPlan {
 
 /**
  * Merge a small additions object into an existing JSON file body.
- * For `mcpServers`: shallow-merge (new servers added; existing keys
- * preserved). For `hooks`: shallow-merge by event name; existing
- * events preserved (so the operator's other hooks survive).
+ *
+ * Top-level: object keys present only in `addition` are added; object
+ * keys present in both are deep-merged via `mergeNode` so we don't
+ * clobber the operator's existing entries.
+ *
+ * Nested merge rules (`mergeNode`):
+ *  - both arrays         → concat with structural-equality dedupe
+ *                          (critical for `claude/settings.json.hooks.<Event>`
+ *                          which is `[{ matcher, hooks: [...] }, ...]` — a
+ *                          plain replace would silently delete the
+ *                          operator's other hooks for the same event)
+ *  - both plain objects  → recurse (so e.g. `mcpServers` keeps existing
+ *                          server entries while adding our own)
+ *  - mismatched / scalar → addition wins (matches the previous behaviour)
+ *
+ * `_comment` keys in `addition` are skipped so generator metadata never
+ * lands in the operator's file.
  */
 function jsonMerge(existingBody: string, addition: object): string {
   let existing: Record<string, any> = {};
@@ -231,20 +245,40 @@ function jsonMerge(existingBody: string, addition: object): string {
   }
   for (const [key, value] of Object.entries(addition)) {
     if (key === '_comment') continue; // skip metadata keys when merging
-    if (
-      typeof value === 'object'
-      && value != null
-      && !Array.isArray(value)
-      && typeof existing[key] === 'object'
-      && existing[key] != null
-      && !Array.isArray(existing[key])
-    ) {
-      existing[key] = { ...existing[key], ...value };
-    } else {
-      existing[key] = value;
-    }
+    existing[key] = mergeNode(existing[key], value);
   }
   return JSON.stringify(existing, null, 2);
+}
+
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return typeof v === 'object' && v != null && !Array.isArray(v);
+}
+
+function mergeNode(existing: any, addition: any): any {
+  if (Array.isArray(existing) && Array.isArray(addition)) {
+    // Concat + structural-equality dedupe. Order: existing first, then
+    // any additions that aren't already present. JSON-stringify keeps
+    // dedupe deterministic and insensitive to surface formatting.
+    const seen = new Set(existing.map((e) => JSON.stringify(e)));
+    const merged = [...existing];
+    for (const item of addition) {
+      const key = JSON.stringify(item);
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+  if (isPlainObject(existing) && isPlainObject(addition)) {
+    const out: Record<string, any> = { ...existing };
+    for (const [k, v] of Object.entries(addition)) {
+      if (k === '_comment') continue;
+      out[k] = mergeNode(out[k], v);
+    }
+    return out;
+  }
+  return addition;
 }
 
 // ── Write ──────────────────────────────────────────────────────────

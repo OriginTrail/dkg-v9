@@ -42,6 +42,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 // ── Constants ─────────────────────────────────────────────────
 const EVENT = process.argv[2] ?? 'unknown';
@@ -709,8 +710,11 @@ async function handleAfterAgentResponse(cfg, payload) {
     turnIndex: 0,
     pendingPrompt: null,
   };
-  state.turnIndex += 1;
-  const idx = state.turnIndex;
+  // Compute the next index *without* committing it yet. We only advance
+  // state.turnIndex (and clear pendingPrompt) after writeTriples()
+  // succeeds — otherwise a transient daemon/network error would silently
+  // burn a turn slot and shift numbering for every subsequent turn.
+  const idx = state.turnIndex + 1;
   const turn = turnUri(sessionKey, idx);
   const now = new Date().toISOString();
   const userText = state.pendingPrompt ?? '';
@@ -769,8 +773,13 @@ async function handleAfterAgentResponse(cfg, payload) {
     triples.push({ subject: turn, predicate: P.mentions, object: URI(uri) });
   }
 
+  let writeOk = false;
   try {
     await writeTriples(cfg, triples);
+    writeOk = true;
+    // Commit progress only on success — see comment above the `idx` calc.
+    state.turnIndex = idx;
+    state.pendingPrompt = null;
     if (bootstrapSession) state.sessionWritten = true;
     if (cfg.autoShare) {
       // Promote both the session and the individual turn so the team
@@ -790,12 +799,14 @@ async function handleAfterAgentResponse(cfg, payload) {
       log(`pending-annotation apply failed: ${err?.message ?? err}`);
     }
   } catch (err) {
-    log(`turn write: ${err?.message ?? err}`);
+    // Leave state.turnIndex + state.pendingPrompt untouched so the next
+    // afterAgentResponse retries the same slot with the same prompt.
+    log(`turn write failed (turn #${idx} not committed; will retry next event): ${err?.message ?? err}`);
   }
 
-  state.pendingPrompt = null;
   state.lastEventAt = now;
   saveSessionState(sessionKey, state);
+  return writeOk;
 }
 
 async function handleSessionEnd(cfg, payload) {
@@ -937,7 +948,20 @@ ${recentLines.length ? `**Recent entities in this graph** (look here first befor
 }
 
 // ── Entry point ───────────────────────────────────────────────
-(async () => {
+// Only run when invoked as the main module — otherwise importing this
+// file from a test (or any other module) would execute the IIFE and
+// hit `process.exit(0)` before the importer can do anything. The
+// vitest suite in `test/capture-hook.test.ts` relies on this guard.
+const isMainModule = (() => {
+  try {
+    if (!process.argv[1]) return false;
+    return fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+  } catch {
+    return false;
+  }
+})();
+
+if (isMainModule) (async () => {
   const payload = await readStdinJson();
   const cfg = loadConfig();
   log(`cfg: api=${cfg.api} project=${cfg.project} agent=${cfg.agent} token=${cfg.token ? '[set]' : '[empty]'} autoShare=${cfg.autoShare}`);

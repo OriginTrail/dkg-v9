@@ -53,6 +53,9 @@
   },
   "files": [
     "dist",
+    "hooks",
+    "templates",
+    "config.yaml.example",
     "README.md",
     "LICENSE"
   ],

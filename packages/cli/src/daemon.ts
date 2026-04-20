@@ -19,7 +19,7 @@ import {
 import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 
@@ -102,13 +102,42 @@ import { FileStore } from './file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from './vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
-import { readFileSync } from 'node:fs';
 
 type MarkItDownTarget = {
   platform: string;
   arch: string;
   assetName: string;
   runner?: string;
+};
+
+export const _autoUpdateIo = {
+  readFile,
+  writeFile,
+  mkdir,
+  rm,
+  chmod,
+  copyFile,
+  stat,
+  rename,
+  unlink,
+  existsSync: existsSync as (...args: any[]) => boolean,
+  readFileSync: readFileSync as (...args: any[]) => any,
+  openSync: openSync as (...args: any[]) => number,
+  closeSync: closeSync as (...args: any[]) => void,
+  writeFileSync: fsWriteFileSync as (...args: any[]) => void,
+  unlinkSync: unlinkSync as (...args: any[]) => void,
+  exec: execAsync as (...args: any[]) => Promise<any>,
+  execFile: execFileAsync as (...args: any[]) => Promise<any>,
+  execSync: execSync as (...args: any[]) => any,
+  dkgDir,
+  releasesDir,
+  activeSlot: activeSlot as () => Promise<'a' | 'b'>,
+  inactiveSlot: inactiveSlot as () => Promise<'a' | 'b'>,
+  swapSlot: swapSlot as (slot: 'a' | 'b') => Promise<void>,
+  fetch: globalThis.fetch as typeof fetch,
+  hasVerifiedBundledMarkItDownBinary: hasVerifiedBundledMarkItDownBinary as (...args: any[]) => Promise<boolean>,
+  expectedBundledMarkItDownBuildMetadata: expectedBundledMarkItDownBuildMetadata as (...args: any[]) => any,
+  readCliPackageVersion: readCliPackageVersion as (...args: any[]) => string | null,
 };
 
 let cachedMarkItDownTargets: MarkItDownTarget[] | null = null;
@@ -271,6 +300,7 @@ async function carryForwardBundledMarkItDownBinary(opts: {
   context: string;
   expectedMetadata: BundledMarkItDownMetadata | null;
 }): Promise<boolean> {
+  const { existsSync, mkdir, copyFile, stat, chmod, rm, rename, hasVerifiedBundledMarkItDownBinary } = _autoUpdateIo;
   for (const sourceBinaryPath of opts.sourceCandidates) {
     if (!existsSync(sourceBinaryPath)) continue;
     if (!(await hasVerifiedBundledMarkItDownBinary(sourceBinaryPath))) {
@@ -348,6 +378,29 @@ interface CatchupJobResult {
   peersTried: number;
   dataSynced: number;
   sharedMemorySynced: number;
+  diagnostics?: {
+    noProtocolPeers: number;
+    durable: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      metaOnlyResponses: number;
+      dataRejectedMissingMeta: number;
+      rejectedKcs: number;
+      failedPeers: number;
+    };
+    sharedMemory: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      droppedDataTriples: number;
+      failedPeers: number;
+    };
+  };
 }
 
 interface CatchupJob {
@@ -7520,18 +7573,6 @@ async function handleRequest(
         );
         job.result = result;
         job.status = "done";
-
-        // If catchup synced zero data from all peers, the remote nodes
-        // likely denied access (curated CG, not on allowlist). Remove the
-        // subscription so the project doesn't appear in the UI as a ghost.
-        if (result.dataSynced === 0 && result.syncCapablePeers > 0) {
-          const exists = await agent.contextGraphExists(paranetId);
-          if (!exists) {
-            (agent as any).subscribedContextGraphs?.delete(paranetId);
-            job.status = "denied";
-            job.error = "Sync denied by all peers — you may not be on the allowlist for this curated project.";
-          }
-        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
@@ -9168,6 +9209,7 @@ async function resolveRemoteCommitSha(
   log: (msg: string) => void,
   gitEnv: NodeJS.ProcessEnv,
 ): Promise<string | null> {
+  const { fetch, execFile: execFileAsync } = _autoUpdateIo;
   let fetchUrl = "";
   try {
     fetchUrl = repoToFetchUrl(repoSpec);
@@ -9266,6 +9308,7 @@ export type CommitCheckStatus = {
 };
 
 async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
+  const { dkgDir, readFile } = _autoUpdateIo;
   const pendingFile = join(dkgDir(), ".update-pending.json");
   try {
     const raw = await readFile(pendingFile, "utf-8");
@@ -9280,6 +9323,7 @@ async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
 }
 
 async function clearPendingUpdateState(): Promise<void> {
+  const { dkgDir, unlink } = _autoUpdateIo;
   const pendingFile = join(dkgDir(), ".update-pending.json");
   try {
     await unlink(pendingFile);
@@ -9291,6 +9335,7 @@ async function clearPendingUpdateState(): Promise<void> {
 async function writePendingUpdateState(
   state: PendingUpdateState,
 ): Promise<void> {
+  const { dkgDir, writeFile } = _autoUpdateIo;
   const pendingFile = join(dkgDir(), ".update-pending.json");
   await writeFile(pendingFile, JSON.stringify(state, null, 2));
 }
@@ -9311,6 +9356,7 @@ async function resolveLatestNpmVersion(
   log: (msg: string) => void,
   allowPrerelease = true,
 ): Promise<NpmVersionResult> {
+  const { fetch } = _autoUpdateIo;
   const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
   try {
     const res = await fetch(url, {
@@ -9369,6 +9415,7 @@ export function compareSemver(a: string, b: string): number {
 }
 
 function getCurrentCliVersion(): string {
+  const { readFileSync } = _autoUpdateIo;
   try {
     const pkg = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -9388,6 +9435,7 @@ export async function checkForNpmVersionUpdate(
   log: (msg: string) => void,
   allowPrerelease = true,
 ): Promise<NpmVersionStatus> {
+  const { dkgDir, readFile } = _autoUpdateIo;
   const versionFile = join(dkgDir(), ".current-version");
   let currentVersion = "";
   try {
@@ -9421,6 +9469,7 @@ async function _performNpmUpdateInner(
   targetVersion: string,
   log: (msg: string) => void,
 ): Promise<UpdateStatus> {
+  const { readFile, writeFile, mkdir, rm, existsSync, exec: execAsync, dkgDir, releasesDir, activeSlot, swapSlot, readCliPackageVersion, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   await mkdir(rDir, { recursive: true });
 
@@ -9458,7 +9507,6 @@ async function _performNpmUpdateInner(
   try {
     // Clean the target slot to prevent stale artifacts (e.g. old git builds)
     // from being mistaken for a valid entry point after install.
-    const { rm } = await import("node:fs/promises");
     await rm(targetDir, {
       recursive: true,
       force: true,
@@ -9595,6 +9643,7 @@ export async function checkForNewCommitWithStatus(
   log: (msg: string) => void,
   refOverride?: string,
 ): Promise<CommitCheckStatus> {
+  const { dkgDir, readFile, activeSlot, releasesDir, execSync } = _autoUpdateIo;
   const commitFile = join(dkgDir(), ".current-commit");
   let currentCommit = "";
   try {
@@ -9645,10 +9694,10 @@ let _lockToken: string | null = null;
 export type UpdateStatus = "updated" | "up-to-date" | "failed";
 
 async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
+  const { releasesDir, mkdir, openSync, closeSync, writeFileSync, readFileSync, unlinkSync } = _autoUpdateIo;
   const lockPath = join(releasesDir(), ".update.lock");
   try {
     await mkdir(releasesDir(), { recursive: true });
-    const { openSync, closeSync, writeFileSync } = await import("node:fs");
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
     const fd = openSync(lockPath, "wx");
     writeFileSync(fd, token);
@@ -9658,7 +9707,6 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
   } catch (err: any) {
     if (err.code === "EEXIST") {
       try {
-        const { readFileSync, unlinkSync } = await import("node:fs");
         const raw = String(readFileSync(lockPath, "utf-8")).trim();
         const parts = raw.split(":");
         const pidStr = parts[0] ?? raw;
@@ -9701,10 +9749,10 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
 }
 
 async function releaseUpdateLock(): Promise<void> {
+  const { releasesDir, readFileSync, unlinkSync } = _autoUpdateIo;
   const lockPath = join(releasesDir(), ".update.lock");
   try {
     if (!_lockToken) return;
-    const { readFileSync, unlinkSync } = await import("node:fs");
     const raw = String(readFileSync(lockPath, "utf-8")).trim();
     if (raw !== _lockToken) return;
     unlinkSync(lockPath);
@@ -9768,6 +9816,7 @@ async function _performUpdateInner(
     verifyTagSignature?: boolean;
   },
 ): Promise<UpdateStatus> {
+  const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? "a");
   const target = await inactiveSlot();

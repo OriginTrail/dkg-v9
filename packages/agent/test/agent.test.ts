@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -18,7 +18,9 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
@@ -29,6 +31,18 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 function buildSnapshotFactQuads(opts: {
   paranetId: string;
@@ -68,9 +82,6 @@ function buildSnapshotFactQuads(opts: {
   });
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 describe('AgentWallet', () => {
   it('generates a wallet with keypair', async () => {
@@ -129,10 +140,10 @@ describe('AgentWallet', () => {
   it('DKGAgent.create() persists identity across restarts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-persist-'));
     try {
-      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
+      const agent1 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
       const peerId1 = agent1.wallet.keypair.publicKey;
 
-      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: new MockChainAdapter() });
+      const agent2 = await DKGAgent.create({ name: 'PersistBot', dataDir: dir, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
       const peerId2 = agent2.wallet.keypair.publicKey;
 
       expect(Buffer.from(peerId2).toString('hex')).toBe(
@@ -249,12 +260,11 @@ describe('Profile Builder', () => {
 describe('ProfileManager', () => {
   it('publishes a profile as a KC via the Publisher', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
     const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
     const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
-    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
+    const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
 
     const manager = new ProfileManager(publisher, store);
     const result = await manager.publishProfile({
@@ -271,12 +281,11 @@ describe('ProfileManager', () => {
 
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
     const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
     const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
-    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
+    const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
 
     const manager = new ProfileManager(publisher, store);
 
@@ -302,9 +311,6 @@ describe('ProfileManager', () => {
     });
 
     const newCount = await store.countQuads(graph);
-
-    // Data graph triple count should stay the same (old cleaned up, new inserted)
-    expect(newCount).toBe(oldCount);
 
     // Data graph triple count should stay the same (old cleaned up, new inserted)
     expect(newCount).toBe(oldCount);
@@ -526,7 +532,7 @@ describe('PeerId key extraction', () => {
       name: 'KeyTest',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -562,7 +568,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true, outputData: new Uint8Array([42]) }),
         },
       ],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     expect(agent.wallet).toBeDefined();
@@ -583,7 +589,7 @@ describe('DKGAgent (integration)', () => {
           handler: async () => ({ success: true }),
         },
       ],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await agent.start();
@@ -630,7 +636,7 @@ describe('Genesis Knowledge', () => {
     const agent = await DKGAgent.create({
       name: 'GenesisTest',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     const result = await store.query(
@@ -651,8 +657,8 @@ describe('Genesis Knowledge', () => {
 
   it('genesis loading is idempotent', async () => {
     const store = new OxigraphStore();
-    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store, chainAdapter: new MockChainAdapter() });
-    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store, chainAdapter: new MockChainAdapter() });
+    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
+    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
 
     const result = await store.query(
       `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v }`,
@@ -670,7 +676,7 @@ describe('Genesis Knowledge', () => {
     const agent = await DKGAgent.create({
       name: 'PolicyBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -744,7 +750,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'ContextPolicyBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -812,7 +818,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'RevokeDefaultBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -866,7 +872,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'RevokeContextBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
 
@@ -919,12 +925,12 @@ decisions: []
     const owner = await DKGAgent.create({
       name: 'OwnerBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const other = await DKGAgent.create({
       name: 'OtherBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await owner.start();
@@ -957,12 +963,12 @@ decisions: []
     const owner = await DKGAgent.create({
       name: 'OwnerRevokeBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const other = await DKGAgent.create({
       name: 'OtherRevokeBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await owner.start();
@@ -996,7 +1002,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'ValidateBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-validate', name: 'Ops Validate' });
@@ -1027,7 +1033,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'CollisionBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-collision', name: 'Ops Collision' });
@@ -1066,7 +1072,7 @@ decisions: []
     const agent = await DKGAgent.create({
       name: 'SnapshotBot',
       store,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     await agent.start();
     await agent.createContextGraph({ id: 'ops-snapshot', name: 'Ops Snapshot' });
@@ -1158,8 +1164,8 @@ decisions:
     await storeA.insert(quads);
     await storeB.insert(quads);
 
-    const agentA = await DKGAgent.create({ name: 'DeterministicA', store: storeA, chainAdapter: new MockChainAdapter() });
-    const agentB = await DKGAgent.create({ name: 'DeterministicB', store: storeB, chainAdapter: new MockChainAdapter() });
+    const agentA = await DKGAgent.create({ name: 'DeterministicA', store: storeA, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
+    const agentB = await DKGAgent.create({ name: 'DeterministicB', store: storeB, chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP) });
 
     const resolvedA = await agentA.resolveFactsFromSnapshot({
       paranetId: 'ops-deterministic',
@@ -1277,7 +1283,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   it('DKGAgentConfig accepts syncContextGraphs array', async () => {
     const agent = await DKGAgent.create({
       name: 'SyncConfigTest',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: ['my-custom-paranet', 'another-paranet'],
     });
     expect(agent).toBeDefined();
@@ -1288,7 +1294,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeSyncScope',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1307,7 +1313,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeSyncScopeNoTrack',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1326,7 +1332,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoPeers',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1341,6 +1347,273 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(result.peersTried).toBe(0);
       expect(result.dataSynced).toBe(0);
       expect(result.sharedMemorySynced).toBe(0);
+      expect(result.diagnostics.noProtocolPeers).toBe(0);
+      expect(result.diagnostics.durable.emptyResponses).toBe(0);
+      expect(result.diagnostics.sharedMemory.emptyResponses).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('syncContextGraphFromConnectedPeers retries until sync protocol is visible', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupProtocolRetry',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer } as any,
+      ]);
+
+      let peerStoreReads = 0;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockImplementation(async () => {
+        peerStoreReads += 1;
+        if (peerStoreReads < 3) {
+          return { protocols: [] } as any;
+        }
+        return { protocols: [PROTOCOL_SYNC] } as any;
+      });
+
+      // `syncContextGraphFromConnectedPeers` dispatches through the private
+      // `*Detailed` variants (see packages/agent/src/dkg-agent.ts #1441/1453)
+      // because it consumes the per-phase diagnostics, not just the plain
+      // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
+      // Mock those so we can assert both the call shape and the reported totals
+      // without spinning up a remote peer.
+      const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 5,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 5,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      });
+      const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 2,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 2,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      });
+
+      const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
+        includeSharedMemory: true,
+      });
+
+      expect(peerStoreReads).toBe(3);
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(result.connectedPeers).toBe(1);
+      expect(result.syncCapablePeers).toBe(1);
+      expect(result.peersTried).toBe(1);
+      expect(result.dataSynced).toBe(5);
+      expect(result.sharedMemorySynced).toBe(2);
+      expect(result.diagnostics.noProtocolPeers).toBe(0);
+      expect(result.diagnostics.durable.failedPeers).toBe(0);
+      expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('reports no-protocol peers in catchup diagnostics', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupNoProtocolDiagnostics',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer } as any,
+      ]);
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({ protocols: [] } as any);
+
+      const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
+        includeSharedMemory: true,
+      });
+
+      expect(result.connectedPeers).toBe(1);
+      expect(result.syncCapablePeers).toBe(0);
+      expect(result.peersTried).toBe(0);
+      expect(result.diagnostics.noProtocolPeers).toBe(1);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('prioritizes the preferred sync peer during catchup', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupPreferredPeer',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+      (agent as any).preferredSyncPeers.set('runtime-paranet', 'peer-preferred');
+
+      const peerOther = { toString: () => 'peer-other' };
+      const peerPreferred = { toString: () => 'peer-preferred' };
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer: peerOther } as any,
+        { remotePeer: peerPreferred } as any,
+      ]);
+      vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+      vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+      vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+      const triedPeers: string[] = [];
+      vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+        triedPeers.push(String(args[0]));
+        return {
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          emptyResponses: 1,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+        };
+      });
+
+      await agent.syncContextGraphFromConnectedPeers('runtime-paranet');
+
+      expect(triedPeers).toEqual(['peer-preferred', 'peer-other']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('allocates a fresh sync deadline per context graph', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PerContextGraphDeadline',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+
+      const deadlines: number[] = [];
+      vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      (agent as any).fetchSyncPages = vi.fn(async (
+        _ctx: unknown,
+        _remotePeerId: string,
+        _contextGraphId: string,
+        _includeSharedMemory: boolean,
+        _phase: 'data' | 'meta',
+        _graphUri: string,
+        deadline: number,
+      ) => {
+        deadlines.push(deadline);
+        return [];
+      });
+
+      await agent.syncFromPeer('12D3KooWPerContextGraphDeadline111111111111111111111111', ['cg-a', 'cg-b']);
+
+      expect(deadlines).toHaveLength(4);
+      expect(deadlines[0]).toBe(1_060_000);
+      expect(deadlines[1]).toBe(1_060_000);
+      expect(deadlines[2]).toBe(1_120_000);
+      expect(deadlines[3]).toBe(1_120_000);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not mark metaSynced true from sync scope alone', async () => {
+    const agent = await DKGAgent.create({
+      name: 'MetaSyncedScopeOnly',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('runtime-paranet', {
+        name: 'Runtime Paranet',
+        subscribed: true,
+        synced: false,
+        metaSynced: false,
+      });
+      agent.subscribeToContextGraph('runtime-paranet');
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        protocols: [PROTOCOL_SYNC],
+      } as any);
+      vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
+      vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
+      vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+
+      await (agent as any).trySyncFromPeer(remotePeer.toString());
+
+      expect((agent as any).subscribedContextGraphs.get('runtime-paranet')?.metaSynced).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('marks metaSynced true when ontology confirms the context graph', async () => {
+    const agent = await DKGAgent.create({
+      name: 'MetaSyncedOntologyConfirmed',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('runtime-paranet', {
+        name: 'Runtime Paranet',
+        subscribed: true,
+        synced: false,
+        metaSynced: false,
+      });
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      await (agent as any).store.insert([
+        {
+          subject: paranetDataGraphUri('runtime-paranet'),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_PARANET,
+          graph: paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY),
+        },
+      ]);
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        protocols: [PROTOCOL_SYNC],
+      } as any);
+      vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
+      vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
+      vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+
+      await (agent as any).trySyncFromPeer(remotePeer.toString());
+
+      expect((agent as any).subscribedContextGraphs.get('runtime-paranet')?.metaSynced).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1350,7 +1623,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'SyncDedupTest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1361,31 +1634,36 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         releaseSync = resolve;
       });
 
-      const syncFromPeer = vi.fn(async () => {
+      let syncCallCount = 0;
+      const syncFromPeer = async () => {
+        syncCallCount++;
         await syncGate;
         return 7;
-      });
+      };
 
-      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
-        protocols: [PROTOCOL_SYNC],
-      } as any);
+      const origGet = agent.node.libp2p.peerStore.get.bind(agent.node.libp2p.peerStore);
+      (agent.node.libp2p.peerStore as any).get = async (peerId: any) => {
+        try { return await origGet(peerId); } catch { return { protocols: [PROTOCOL_SYNC] }; }
+      };
       (agent as any).syncFromPeer = syncFromPeer;
-      (agent as any).discoverContextGraphsFromStore = vi.fn(async () => {});
-      (agent as any).syncSharedMemoryFromPeer = vi.fn(async () => 0);
+      (agent as any).discoverContextGraphsFromStore = async () => {};
+      (agent as any).syncSharedMemoryFromPeer = async () => 0;
 
       const first = (agent as any).trySyncFromPeer(remotePeer);
       const second = (agent as any).trySyncFromPeer(remotePeer);
 
-      await vi.waitFor(() => {
-        expect(syncFromPeer).toHaveBeenCalledTimes(1);
-      });
+      // Wait for first sync call to register
+      for (let i = 0; i < 50 && syncCallCount < 1; i++) {
+        await new Promise(r => setTimeout(r, 20));
+      }
+      expect(syncCallCount).toBe(1);
 
       releaseSync?.();
       await Promise.all([first, second]);
       expect((agent as any).syncingPeers.has(remotePeer)).toBe(false);
 
       await (agent as any).trySyncFromPeer(remotePeer);
-      expect(syncFromPeer).toHaveBeenCalledTimes(2);
+      expect(syncCallCount).toBe(2);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1395,7 +1673,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthRequest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1405,10 +1683,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
+      // Ensure buildSyncRequest takes the authenticated private-CG path.
+      (agent as any).isPrivateContextGraph = async () => true;
 
-      const chain = (agent as any).chain as MockChainAdapter;
+      const chain = (agent as any).chain as EVMChainAdapter;
       const identityId = await chain.ensureProfile();
-      vi.spyOn(chain, 'signMessage').mockResolvedValue({ r: new Uint8Array(32), vs: new Uint8Array(32) });
+      const origSignMessage = chain.signMessage.bind(chain);
+      (chain as any).signMessage = async (...args: unknown[]) => ({ r: new Uint8Array(32), vs: new Uint8Array(32) });
 
       const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote');
       const parsed = JSON.parse(new TextDecoder().decode(encoded));
@@ -1426,8 +1707,61 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
+    // `autoRegisterDefaultAgent` only runs when the chain adapter exposes
+    // `getOperationalPrivateKey`. MockChainAdapter doesn't, so on that
+    // adapter `localAgents` is empty and `getDefaultAgentAddress()` returns
+    // undefined — the test would fail at the `toBeDefined()` precondition
+    // before exercising `buildSyncRequest`. The adjacent "denies private
+    // sync requests" test uses the same real-chain pattern for the same
+    // reason.
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthMissingKey',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: false,
+        onChainId: '1',
+      });
+      // Force `needsAuth = true` in buildSyncRequest — the precondition
+      // check Viktor added (see dkg-agent.ts #4880) only fires on the
+      // authenticated-sync path. Without this stub, MockChainAdapter /
+      // a clean Hardhat both report the CG as non-private and the
+      // unsigned path succeeds.
+      (agent as any).isPrivateContextGraph = async () => true;
+      // Force the fallback signing path in buildSyncRequest — when the
+      // chain identity is non-zero (EVMChainAdapter post-ensureProfile),
+      // it signs via `chain.signMessage` and the default-agent key is
+      // never touched, so deleting it has no effect. Stubbing
+      // identityId → 0 drives the code into the
+      // `defaultAgentAddress && agent.privateKey` branch we actually
+      // want to assert on.
+      (chain as any).getIdentityId = async () => 0n;
+
+      const defaultAgentAddress = agent.getDefaultAgentAddress();
+      expect(defaultAgentAddress).toBeDefined();
+      const defaultAgent = (agent as any).localAgents.get(defaultAgentAddress);
+      expect(defaultAgent).toBeDefined();
+      delete defaultAgent.privateKey;
+
+      await expect(
+        (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote'),
+      ).rejects.toThrow(
+        `Cannot build authenticated sync request for "private-cg": missing signing key for default agent ${defaultAgentAddress}`,
+      );
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('denies private sync requests when requester is not an allowed participant', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthDeny',
       listenHost: '127.0.0.1',
@@ -1436,22 +1770,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     try {
       await agent.start();
       await chain.ensureProfile();
-      (chain as any).contextGraphs.set(1n, {
-        manager: chain.signerAddress,
-        participantIdentityIds: [999n],
-        requiredSignatures: 1,
-        metadataBatchId: 0n,
-        active: true,
-        batches: [],
-      });
       (agent as any).subscribedContextGraphs.set('private-cg', {
         name: 'private-cg',
         subscribed: false,
         synced: true,
         onChainId: '1',
       });
-
-      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => [999n];
+      (chain as any).verifyACKIdentity = async () => true;
 
       const allowed = await (agent as any).authorizeSyncRequest({
         contextGraphId: 'private-cg',
@@ -1474,7 +1801,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('rejects replayed private sync requests', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const wallet = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
       name: 'PrivateSyncReplay',
@@ -1489,9 +1816,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(chain, 'getContextGraphParticipants').mockResolvedValue([1n]);
-      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+      (agent as any).isPrivateContextGraph = async () => true;
+      (chain as any).getContextGraphParticipants = async () => [1n];
+      (chain as any).verifySyncIdentity = async () => true;
+      (chain as any).verifyACKIdentity = async () => true;
 
       const request = {
         contextGraphId: 'private-cg',
@@ -1530,7 +1858,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(second).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 
@@ -1544,7 +1871,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       agent = await DKGAgent.create({
         name: 'PublicWarnTest',
         listenHost: '127.0.0.1',
-        chainAdapter: new MockChainAdapter(),
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         queryAccess: { defaultPolicy: 'public' },
       });
       await agent.start();
@@ -1569,7 +1896,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       agent = await DKGAgent.create({
         name: 'DenyDefaultTest',
         listenHost: '127.0.0.1',
-        chainAdapter: new MockChainAdapter(),
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
       await agent.start();
 
@@ -1587,7 +1914,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseFallbackTest',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1609,7 +1936,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseMetaPhase',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1631,7 +1958,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'ParseWorkspace',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1648,8 +1975,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('canReadContextGraph allows locally subscribed private CGs when identityId is 0n', async () => {
-    const chain = new MockChainAdapter('mock:0');
-    vi.spyOn(chain, 'getIdentityId').mockResolvedValue(0n);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    (chain as any).getIdentityId = async () => 0n;
     const agent = await DKGAgent.create({
       name: 'CanReadLocal',
       listenHost: '127.0.0.1',
@@ -1662,8 +1989,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         subscribed: false,
         synced: true,
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(agent as any, 'getPrivateContextGraphParticipants').mockResolvedValue([1n]);
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => ['1'];
 
       const canRead = await (agent as any).canReadContextGraph('local-private-cg');
       expect(canRead).toBe(true);
@@ -1672,12 +1999,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(cannotRead).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 
   it('authorizeSyncRequest uses verifySyncIdentity when available', async () => {
-    const chain = new MockChainAdapter();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const wallet = ethers.Wallet.createRandom();
     const agent = await DKGAgent.create({
       name: 'SyncIdentityTest',
@@ -1693,12 +2019,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         onChainId: '1',
         participantIdentityIds: [1n],
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(agent as any, 'getPrivateContextGraphParticipants').mockResolvedValue([
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => [
         wallet.address, '1',
-      ]);
-      const syncSpy = vi.spyOn(chain, 'verifySyncIdentity').mockResolvedValue(true);
-      const ackSpy = vi.spyOn(chain, 'verifyACKIdentity');
+      ];
+      let syncIdentityCalled = false;
+      let ackIdentityCalled = false;
+      (chain as any).verifySyncIdentity = async () => { syncIdentityCalled = true; return true; };
+      const origVerifyACK = chain.verifyACKIdentity?.bind(chain);
+      (chain as any).verifyACKIdentity = async (...args: unknown[]) => { ackIdentityCalled = true; return origVerifyACK?.(...args); };
 
       const request = {
         contextGraphId: 'private-cg',
@@ -1727,11 +2056,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
       expect(result).toBe(true);
-      expect(syncSpy).toHaveBeenCalledOnce();
-      expect(ackSpy).not.toHaveBeenCalled();
+      expect(syncIdentityCalled).toBe(true);
+      expect(ackIdentityCalled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 
@@ -1739,7 +2067,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'BuildReqPublic',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     try {
       await agent.start();
@@ -1749,6 +2077,29 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
       const text = new TextDecoder().decode(bytes);
       expect(text).toBe('public-cg|5|100|meta');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('buildSyncRequest stays unauthenticated for discovered public CGs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'BuildReqDiscoveredPublic',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('discovered-public-cg', {
+        name: 'discovered-public-cg',
+        subscribed: false,
+        synced: true,
+      });
+
+      const bytes = await (agent as any).buildSyncRequest('discovered-public-cg', 0, 50, false, 'peer-remote');
+      const text = new TextDecoder().decode(bytes);
+
+      expect(text).toBe('discovered-public-cg|0|50');
     } finally {
       await agent.stop().catch(() => {});
     }

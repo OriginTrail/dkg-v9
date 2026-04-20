@@ -98,11 +98,14 @@ describe('DkgNodePlugin', () => {
 
   it('registers OpenClaw through the generic local-agent endpoint', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    });
-    globalThis.fetch = fakeFetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -123,10 +126,10 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fakeFetch.mock.calls.find((call) =>
+      const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       );
@@ -417,11 +420,14 @@ describe('DkgNodePlugin', () => {
 
   it('persists gatewayUrl on first registration when gateway routing is available', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    });
-    globalThis.fetch = fakeFetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -447,10 +453,10 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fakeFetch.mock.calls.find((call) =>
+      const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       );
@@ -485,7 +491,9 @@ describe('DkgNodePlugin', () => {
 
   it('drops a stale stored gatewayUrl when the current runtime is bridge-only', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -506,8 +514,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -528,10 +535,10 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fakeFetch.mock.calls.find((call) =>
+      const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       );
@@ -586,7 +593,9 @@ describe('DkgNodePlugin', () => {
 
   it('recomputes gatewayUrl from current gateway config even when the port stays at the default', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -607,8 +616,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -635,7 +643,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
@@ -656,7 +664,9 @@ describe('DkgNodePlugin', () => {
 
   it('derives the current local gatewayUrl when gateway routing is active and the current gateway object has no URL-affecting settings', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -677,8 +687,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -704,7 +713,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
@@ -725,7 +734,9 @@ describe('DkgNodePlugin', () => {
 
   it('derives the current local gatewayUrl when gateway tls config only sets enabled=false', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -745,8 +756,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -772,7 +782,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
       expect(connectCall).toBeTruthy();
@@ -792,11 +802,14 @@ describe('DkgNodePlugin', () => {
 
   it('formats IPv6 gateway hosts as valid URLs', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    });
-    globalThis.fetch = fakeFetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -823,7 +836,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
@@ -842,7 +855,11 @@ describe('DkgNodePlugin', () => {
 
   it('does not re-enable a stored OpenClaw integration when the user explicitly disconnected it', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const infoCalls: unknown[][] = [];
+    const info = (...args: unknown[]) => { infoCalls.push(args); };
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -861,8 +878,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -871,7 +887,6 @@ describe('DkgNodePlugin', () => {
         channel: { enabled: true, port: 0 },
         memory: { enabled: false },
       });
-      const info = vi.fn();
       const mockApi: OpenClawPluginApi = {
         config: {},
         registrationMode: 'full',
@@ -884,18 +899,18 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      expect(fakeFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/local-agent-integrations/openclaw'),
-        expect.objectContaining({ method: 'GET' }),
-      );
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some(call =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'GET',
+      )).toBe(true);
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(false);
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       )).toBe(false);
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+      expect(infoCalls.some(args => String(args[0]).includes('explicitly disconnected by the user'))).toBe(true);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -965,7 +980,11 @@ describe('DkgNodePlugin', () => {
 
   it('does not re-enable a legacy pre-flag disconnected OpenClaw integration on startup', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const infoCalls: unknown[][] = [];
+    const info = (...args: unknown[]) => { infoCalls.push(args); };
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -988,8 +1007,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -998,7 +1016,6 @@ describe('DkgNodePlugin', () => {
         channel: { enabled: true, port: 0 },
         memory: { enabled: false },
       });
-      const info = vi.fn();
       const mockApi: OpenClawPluginApi = {
         config: {},
         registrationMode: 'full',
@@ -1011,14 +1028,14 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(false);
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       )).toBe(false);
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+      expect(infoCalls.some(args => String(args[0]).includes('explicitly disconnected by the user'))).toBe(true);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1027,7 +1044,9 @@ describe('DkgNodePlugin', () => {
 
   it('re-registers a transport-only OpenClaw record on startup', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -1047,8 +1066,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -1069,7 +1087,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(true);
     } finally {
@@ -1080,7 +1098,9 @@ describe('DkgNodePlugin', () => {
 
   it('preserves a stored bridgeUrl and healthUrl when the current bridge has not bound a port yet', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         return {
@@ -1101,8 +1121,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -1123,7 +1142,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const connectCall = fakeFetch.mock.calls.find((call) =>
+      const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
@@ -1468,8 +1487,11 @@ describe('DkgNodePlugin', () => {
 
   it('aborts startup re-registration when stored OpenClaw integration state cannot be loaded', async () => {
     const originalFetch = globalThis.fetch;
-    const warn = vi.fn();
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const warnCalls: unknown[][] = [];
+    const warn = (...args: unknown[]) => { warnCalls.push(args); };
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
         throw new Error('temporary daemon outage');
@@ -1478,8 +1500,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -1500,25 +1521,19 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      expect(fakeFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/local-agent-integrations/openclaw'),
-        expect.objectContaining({ method: 'GET' }),
-      );
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some(call =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'GET',
+      )).toBe(true);
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(false);
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       )).toBe(false);
-      // Retry-backoff follow-up: the "aborting startup re-registration"
-      // warn now includes a "(reason: ...)" suffix pulled from the
-      // captured load error. The raw "Failed to load stored OpenClaw
-      // integration state" text that used to be a warn is now emitted
-      // at debug level to avoid flooding the log on cold daemons — so
-      // only the dedup warn is asserted here.
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason: temporary daemon outage'));
+      expect(warnCalls.some(args => String(args[0]).includes('aborting startup re-registration'))).toBe(true);
+      expect(warnCalls.some(args => String(args[0]).includes('reason: temporary daemon outage'))).toBe(true);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1580,11 +1595,14 @@ describe('DkgNodePlugin', () => {
   it('retries startup re-registration in-process after a transient stored-state load failure', async () => {
     vi.useFakeTimers();
     const originalFetch = globalThis.fetch;
-    const warn = vi.fn();
-    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const warnCalls: unknown[][] = [];
+    const warn = (...args: unknown[]) => { warnCalls.push(args); };
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
       const url = String(input);
       if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
-        if (fakeFetch.mock.calls.filter((call) =>
+        if (fetchCalls.filter((call) =>
           String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
         ).length === 1) {
           throw new Error('temporary daemon outage');
@@ -1598,8 +1616,7 @@ describe('DkgNodePlugin', () => {
         ok: true,
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
-    });
-    globalThis.fetch = fakeFetch;
+    }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -1620,11 +1637,11 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await Promise.resolve();
 
-      expect(fakeFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/local-agent-integrations/openclaw'),
-        expect.objectContaining({ method: 'GET' }),
-      );
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some(call =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'GET',
+      )).toBe(true);
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(false);
 
@@ -1633,17 +1650,14 @@ describe('DkgNodePlugin', () => {
       // fired.
       await vi.advanceTimersByTimeAsync(5_000);
 
-      expect(fakeFetch.mock.calls.filter((call) =>
+      expect(fetchCalls.filter((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
       )).toHaveLength(2);
-      expect(fakeFetch.mock.calls.some((call) =>
+      expect(fetchCalls.some((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       )).toBe(true);
-      // The dedup warn format now embeds the load-error reason; the
-      // raw "Failed to load..." text is emitted at debug level and is
-      // not asserted here.
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason: temporary daemon outage'));
+      expect(warnCalls.some(args => String(args[0]).includes('aborting startup re-registration'))).toBe(true);
+      expect(warnCalls.some(args => String(args[0]).includes('reason: temporary daemon outage'))).toBe(true);
     } finally {
       vi.useRealTimers();
       await plugin?.stop();
@@ -1939,7 +1953,8 @@ describe('DkgNodePlugin', () => {
       memory: { enabled: false },
       game: { enabled: true } as any,
     } as any);
-    const warn = vi.fn();
+    const warnCalls: unknown[][] = [];
+    const warn = (...args: unknown[]) => { warnCalls.push(args); };
     const mockApi: OpenClawPluginApi = {
       config: {},
       registrationMode: 'full',
@@ -1952,8 +1967,8 @@ describe('DkgNodePlugin', () => {
     plugin.register(mockApi);
     plugin.register(mockApi);
 
-    expect(warn).toHaveBeenCalledOnce();
-    expect(String(warn.mock.calls[0]?.[0])).toContain('dkg-node.game.enabled');
+    expect(warnCalls).toHaveLength(1);
+    expect(String(warnCalls[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
   it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {
@@ -2007,18 +2022,23 @@ describe('DkgNodePlugin', () => {
 
   it('does not re-register the OpenClaw channel routes when the same plugin instance upgrades to full runtime', async () => {
     const originalFetch = globalThis.fetch;
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    });
-    globalThis.fetch = fakeFetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       channel: { enabled: true, port: 0 },
       memory: { enabled: false },
     });
-    const registerChannel = vi.fn();
-    const registerHttpRoute = vi.fn();
+    const registerChannelCalls: unknown[][] = [];
+    const registerChannel = (...args: unknown[]) => { registerChannelCalls.push(args); };
+    const registerHttpRouteCalls: unknown[][] = [];
+    const registerHttpRoute = (...args: unknown[]) => { registerHttpRouteCalls.push(args); };
 
     try {
       const setupRuntimeApi = {
@@ -2051,8 +2071,8 @@ describe('DkgNodePlugin', () => {
       };
       plugin.register(fullRuntimeApi);
 
-      expect(registerChannel).toHaveBeenCalledTimes(1);
-      expect(registerHttpRoute).toHaveBeenCalledTimes(3);
+      expect(registerChannelCalls).toHaveLength(1);
+      expect(registerHttpRouteCalls).toHaveLength(3);
     } finally {
       await plugin.stop();
       globalThis.fetch = originalFetch;

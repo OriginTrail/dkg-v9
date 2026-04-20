@@ -199,6 +199,8 @@ describe('OpenClaw channel routing helpers', () => {
     };
     res.end = () => { res.writableEnded = true; };
 
+    let cancelCallCount = 0;
+    let releaseCallCount = 0;
     const reader = {
       read: async () => {
         if (writes.length === 0) {
@@ -207,18 +209,15 @@ describe('OpenClaw channel routing helpers', () => {
         }
         return { done: true, value: undefined };
       },
-      cancel: async () => undefined,
-      releaseLock: () => undefined,
+      cancel: async () => { cancelCallCount++; return undefined; },
+      releaseLock: () => { releaseCallCount++; },
     };
-
-    const cancelSpy = vi.spyOn(reader, 'cancel');
-    const releaseSpy = vi.spyOn(reader, 'releaseLock');
 
     await pipeOpenClawStream(req, res, reader);
 
-    expect(cancelSpy).not.toHaveBeenCalled();
+    expect(cancelCallCount).toBe(0);
     expect(writes).toEqual(['data: {"type":"text_delta","delta":"pong"}\n\n']);
-    expect(releaseSpy).toHaveBeenCalledOnce();
+    expect(releaseCallCount).toBe(1);
   });
 
   it('cancels the upstream stream when the downstream response closes before it finishes', async () => {
@@ -230,22 +229,21 @@ describe('OpenClaw channel routing helpers', () => {
     res.write = () => true;
     res.end = () => { res.writableEnded = true; };
 
+    let cancelCallCount = 0;
+    let releaseCallCount = 0;
     const reader = {
       read: () => new Promise<{ done: boolean; value?: Uint8Array }>((resolve) => { resolveRead = resolve; }),
-      cancel: async () => undefined,
-      releaseLock: () => undefined,
+      cancel: async () => { cancelCallCount++; return undefined; },
+      releaseLock: () => { releaseCallCount++; },
     };
-
-    const cancelSpy = vi.spyOn(reader, 'cancel');
-    const releaseSpy = vi.spyOn(reader, 'releaseLock');
 
     const proxyPromise = pipeOpenClawStream(req, res, reader);
     res.emit('close');
     resolveRead({ done: true });
     await proxyPromise;
 
-    expect(cancelSpy).toHaveBeenCalledOnce();
-    expect(releaseSpy).toHaveBeenCalledOnce();
+    expect(cancelCallCount).toBe(1);
+    expect(releaseCallCount).toBe(1);
   });
 
   it('waits for downstream drain before reading more stream data', async () => {
@@ -263,14 +261,14 @@ describe('OpenClaw channel routing helpers', () => {
     res.end = () => { res.writableEnded = true; };
 
     const reader = {
-      read: vi.fn(async () => {
+      read: async () => {
         readCount += 1;
         if (readCount === 1) {
           return { done: false, value: Buffer.from('data: first\n\n') };
         }
         secondReadCalled = true;
         return { done: true, value: undefined };
-      }),
+      },
       cancel: async () => undefined,
       releaseLock: () => undefined,
     };
@@ -1258,7 +1256,8 @@ describe('OpenClaw persist-turn validation', () => {
       tripleCount: 42,
       rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
     }];
-    const store = { query: vi.fn() };
+    const queryCalls: unknown[][] = [];
+    const store = { query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; } };
     const extractionStatus = new Map([
       ['did:dkg:context-graph:cg1/assertion/chat-doc', {
         status: 'completed',
@@ -1282,7 +1281,7 @@ describe('OpenClaw persist-turn validation', () => {
     await expect(
       verifyOpenClawAttachmentRefsProvenance({ store } as any, extractionStatus as any, attachmentRefs),
     ).resolves.toEqual(attachmentRefs);
-    expect(store.query).not.toHaveBeenCalled();
+    expect(queryCalls).toHaveLength(0);
   });
 
   it('accepts sub-graph attachment refs backed by extraction status records without querying the store', async () => {
@@ -1296,7 +1295,8 @@ describe('OpenClaw persist-turn validation', () => {
       fileName: 'chat-doc.pdf',
       extractionStatus: 'completed' as const,
     }];
-    const store = { query: vi.fn() };
+    const queryCalls: unknown[][] = [];
+    const store = { query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; } };
     const extractionStatus = new Map([
       ['did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc', {
         status: 'completed',
@@ -1314,7 +1314,7 @@ describe('OpenClaw persist-turn validation', () => {
     await expect(
       verifyOpenClawAttachmentRefsProvenance({ store } as any, extractionStatus as any, attachmentRefs),
     ).resolves.toEqual(attachmentRefs);
-    expect(store.query).not.toHaveBeenCalled();
+    expect(queryCalls).toHaveLength(0);
   });
 
   it('accepts sub-graph attachment refs and verifies them against the root meta graph', async () => {
@@ -1325,22 +1325,26 @@ describe('OpenClaw persist-turn validation', () => {
       fileName: 'chat-doc.pdf',
       extractionStatus: 'completed' as const,
     }];
+    const queryCalls: unknown[][] = [];
     const store = {
-      query: vi.fn().mockResolvedValue({
-        bindings: [{
-          fileHash: '"sha256:abc123"',
-          contentType: '"application/pdf"',
-          sourceFileName: '"chat-doc.pdf"',
-        }],
-      }),
+      query: async (...args: unknown[]) => {
+        queryCalls.push(args);
+        return {
+          bindings: [{
+            fileHash: '"sha256:abc123"',
+            contentType: '"application/pdf"',
+            sourceFileName: '"chat-doc.pdf"',
+          }],
+        };
+      },
     };
 
     await expect(
       verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
     ).resolves.toEqual(attachmentRefs);
-    expect(String(store.query.mock.calls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
-    expect(String(store.query.mock.calls[0][0])).not.toContain('did:dkg:context-graph:cg1/decisions/_meta');
-    expect(String(store.query.mock.calls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc>');
+    expect(String(queryCalls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
+    expect(String(queryCalls[0][0])).not.toContain('did:dkg:context-graph:cg1/decisions/_meta');
+    expect(String(queryCalls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc>');
   });
 
   it('unescapes RDF string literals before comparing stored source file names', async () => {
@@ -1352,7 +1356,7 @@ describe('OpenClaw persist-turn validation', () => {
       extractionStatus: 'completed' as const,
     }];
     const store = {
-      query: vi.fn().mockResolvedValue({
+      query: async () => ({
         bindings: [{
           fileHash: '"sha256:abc123"',
           sourceFileName: '"report \\"final\\".pdf"',
@@ -1374,7 +1378,7 @@ describe('OpenClaw persist-turn validation', () => {
       extractionStatus: 'completed' as const,
     }];
     const store = {
-      query: vi.fn().mockResolvedValue({
+      query: async () => ({
         bindings: [{
           fileHash: '"sha256:abc123"',
           contentType: '"application/pdf"',
@@ -1395,14 +1399,15 @@ describe('OpenClaw persist-turn validation', () => {
       fileName: 'chat-doc.pdf',
       extractionStatus: 'completed' as const,
     }];
+    const queryCalls: unknown[][] = [];
     const store = {
-      query: vi.fn().mockResolvedValue({ bindings: [] }),
+      query: async (...args: unknown[]) => { queryCalls.push(args); return { bindings: [] }; },
     };
 
     await expect(
       verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
     ).resolves.toBeUndefined();
-    expect(store.query).toHaveBeenCalledOnce();
+    expect(queryCalls).toHaveLength(1);
   });
 
   it('rejects attachment refs when the stored source file name does not match', async () => {
@@ -1414,7 +1419,7 @@ describe('OpenClaw persist-turn validation', () => {
       extractionStatus: 'completed' as const,
     }];
     const store = {
-      query: vi.fn().mockResolvedValue({
+      query: async () => ({
         bindings: [{
           fileHash: '"sha256:abc123"',
           sourceFileName: '"chat-doc.pdf"',
@@ -1436,7 +1441,7 @@ describe('OpenClaw persist-turn validation', () => {
       extractionStatus: 'completed' as const,
     }];
     const store = {
-      query: vi.fn().mockResolvedValue({
+      query: async () => ({
         bindings: [{
           fileHash: '"sha256:real"',
           contentType: '"application/pdf"',
@@ -1726,13 +1731,13 @@ describe('local agent integration registry helpers', () => {
         },
       },
     });
-    const runSetup = vi.fn();
-    const restartGateway = vi.fn();
-    const waitForReady = vi.fn();
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: true,
-      target: 'bridge',
-    });
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = (...args: unknown[]) => { waitForReadyCalls.push(args); };
+    const probeHealth = async () => ({ ok: true as const, target: 'bridge' });
 
     const result = await connectLocalAgentIntegrationFromUi(
       config,
@@ -1744,9 +1749,9 @@ describe('local agent integration registry helpers', () => {
       { runSetup, restartGateway, waitForReady, probeHealth },
     );
 
-    expect(runSetup).not.toHaveBeenCalled();
-    expect(restartGateway).not.toHaveBeenCalled();
-    expect(waitForReady).not.toHaveBeenCalled();
+    expect(runSetupCalls.length).toBe(0);
+    expect(restartGatewayCalls.length).toBe(0);
+    expect(waitForReadyCalls.length).toBe(0);
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
@@ -1775,13 +1780,13 @@ describe('local agent integration registry helpers', () => {
         },
       },
     });
-    const runSetup = vi.fn();
-    const restartGateway = vi.fn();
-    const waitForReady = vi.fn();
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: true,
-      target: 'bridge',
-    });
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = (...args: unknown[]) => { waitForReadyCalls.push(args); };
+    const probeHealth = async () => ({ ok: true as const, target: 'bridge' });
 
     const result = await connectLocalAgentIntegrationFromUi(
       config,
@@ -1793,9 +1798,9 @@ describe('local agent integration registry helpers', () => {
       { runSetup, restartGateway, waitForReady, probeHealth },
     );
 
-    expect(runSetup).not.toHaveBeenCalled();
-    expect(restartGateway).not.toHaveBeenCalled();
-    expect(waitForReady).not.toHaveBeenCalled();
+    expect(runSetupCalls.length).toBe(0);
+    expect(restartGatewayCalls.length).toBe(0);
+    expect(waitForReadyCalls.length).toBe(0);
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.metadata?.userDisabled).toBe(false);
@@ -1846,22 +1851,19 @@ describe('local agent integration registry helpers', () => {
 
   it('UI connect does not trust a healthy bridge fast-path for a first-time attach', async () => {
     const config = makeConfig();
-    const runSetup = vi.fn().mockResolvedValue(undefined);
-    const restartGateway = vi.fn().mockResolvedValue(undefined);
-    const waitForReady = vi.fn().mockResolvedValue({
-      ok: true,
-      target: 'bridge',
-    });
-    const probeHealth = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        target: 'bridge',
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge still starting',
-      });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = async (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
+    let probeIdx = 0;
+    const probeResults = [
+      { ok: true as const, target: 'bridge' },
+      { ok: false as const, error: 'bridge still starting' },
+    ];
+    const probeHealth = async () => probeResults[probeIdx++];
+    const saveConfigCalls: unknown[][] = [];
+    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -1882,10 +1884,10 @@ describe('local agent integration registry helpers', () => {
     );
 
     expect(result.integration.status).toBe('connecting');
-    expect(runSetup).toHaveBeenCalledTimes(1);
+    expect(runSetupCalls.length).toBe(1);
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
-    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(restartGatewayCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
@@ -1893,14 +1895,12 @@ describe('local agent integration registry helpers', () => {
 
   it('does not leave a failed first-time OpenClaw attach marked as connected', async () => {
     const config = makeConfig();
-    const runSetup = vi.fn().mockRejectedValue(new Error('setup failed'));
-    const restartGateway = vi.fn();
-    const waitForReady = vi.fn();
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: false,
-      error: 'bridge offline',
-    });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const runSetup = async () => { throw new Error('setup failed'); };
+    const restartGateway = () => {};
+    const waitForReady = () => {};
+    const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
+    const saveConfigCalls: unknown[][] = [];
+    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -1930,7 +1930,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
     expect(integration?.metadata?.userDisabled).not.toBe(true);
-    expect(saveConfig).toHaveBeenCalled();
+    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('keeps an already attached OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
@@ -1947,14 +1947,12 @@ describe('local agent integration registry helpers', () => {
         },
       },
     });
-    const runSetup = vi.fn().mockRejectedValue(new Error('setup failed'));
-    const restartGateway = vi.fn();
-    const waitForReady = vi.fn();
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: false,
-      error: 'bridge offline',
-    });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const runSetup = async () => { throw new Error('setup failed'); };
+    const restartGateway = () => {};
+    const waitForReady = () => {};
+    const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
+    const saveConfigCalls: unknown[][] = [];
+    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -1984,29 +1982,26 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
     expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
     expect(integration?.transport.wakeAuth).toBe('bridge-token');
-    expect(saveConfig).toHaveBeenCalled();
+    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
     const config = makeConfig();
-    const runSetup = vi.fn().mockResolvedValue(undefined);
-    const restartGateway = vi.fn().mockResolvedValue(undefined);
-    const waitForReady = vi
-      .fn()
-      .mockResolvedValue({
-        ok: false,
-        error: 'bridge still starting',
-      });
-    const probeHealth = vi.fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge offline',
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge still starting',
-      });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = async (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = async (...args: unknown[]) => { waitForReadyCalls.push(args); return { ok: false as const, error: 'bridge still starting' }; };
+    const probeHealthCalls: unknown[][] = [];
+    let probeIdx = 0;
+    const probeResults = [
+      { ok: false as const, error: 'bridge offline' },
+      { ok: false as const, error: 'bridge still starting' },
+    ];
+    const probeHealth = async (...args: unknown[]) => { probeHealthCalls.push(args); return probeResults[probeIdx++]; };
+    const saveConfigCalls: unknown[][] = [];
+    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -2032,37 +2027,33 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
-    expect(restartGateway).toHaveBeenCalledTimes(1);
-    expect(waitForReady).toHaveBeenCalledTimes(1);
-    expect(probeHealth).toHaveBeenCalledTimes(2);
+    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(restartGatewayCalls.length).toBe(1);
+    expect(waitForReadyCalls.length).toBe(1);
+    expect(probeHealthCalls.length).toBe(2);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.status).toBe('connecting');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('bridge still starting');
-    expect(saveConfig).toHaveBeenCalled();
+    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect retries OpenClaw readiness after a gateway restart and reports chat-ready when the bridge comes up', async () => {
     const config = makeConfig();
-    const runSetup = vi.fn().mockResolvedValue(undefined);
-    const restartGateway = vi.fn().mockResolvedValue(undefined);
-    const waitForReady = vi
-      .fn()
-      .mockResolvedValue({
-        ok: true,
-        target: 'bridge',
-      });
-    const probeHealth = vi.fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge offline',
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge still starting',
-      });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = async (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = async (...args: unknown[]) => { waitForReadyCalls.push(args); return { ok: true as const, target: 'bridge' }; };
+    let probeIdx = 0;
+    const probeResults = [
+      { ok: false as const, error: 'bridge offline' },
+      { ok: false as const, error: 'bridge still starting' },
+    ];
+    const probeHealth = async () => probeResults[probeIdx++];
+    const saveConfigCalls: unknown[][] = [];
+    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -2086,31 +2077,30 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
-    expect(restartGateway).toHaveBeenCalledTimes(1);
-    expect(waitForReady).toHaveBeenCalledTimes(1);
+    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(restartGatewayCalls.length).toBe(1);
+    expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
     expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
     expect(integration?.transport.wakeAuth).toBe('bridge-token');
-    expect(saveConfig).toHaveBeenCalled();
+    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('cancels a pending OpenClaw attach job when the integration is disconnected before attach finishes', async () => {
     const config = makeConfig();
     let releaseSetup!: () => void;
-    const runSetup = vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+    const runSetup = () => new Promise<void>((resolve) => {
       releaseSetup = resolve;
-    }));
-    const restartGateway = vi.fn().mockResolvedValue(undefined);
-    const waitForReady = vi.fn();
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: false,
-      error: 'bridge offline',
     });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = async (...args: unknown[]) => { restartGatewayCalls.push(args); };
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = (...args: unknown[]) => { waitForReadyCalls.push(args); };
+    const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
+    const saveConfig = async () => {};
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -2144,8 +2134,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(restartGateway).not.toHaveBeenCalled();
-    expect(waitForReady).not.toHaveBeenCalled();
+    expect(restartGatewayCalls.length).toBe(0);
+    expect(waitForReadyCalls.length).toBe(0);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.enabled).toBe(false);
     expect(integration?.status).toBe('disconnected');
@@ -2154,32 +2144,35 @@ describe('local agent integration registry helpers', () => {
 
   it('cancels readiness polling when the integration is disconnected mid-attach', async () => {
     const config = makeConfig();
-    const runSetup = vi.fn().mockResolvedValue(undefined);
-    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    const runSetupCalls: unknown[][] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupCalls.push(args); };
+    const restartGatewayCalls: unknown[][] = [];
+    const restartGateway = async (...args: unknown[]) => { restartGatewayCalls.push(args); };
     let markWaitForReadyStarted!: () => void;
     const waitForReadyStarted = new Promise<void>((resolve) => {
       markWaitForReadyStarted = resolve;
     });
-    const waitForReady = vi.fn().mockImplementation((_cfg, _token, signal?: AbortSignal) => new Promise<never>((_resolve, reject) => {
-      markWaitForReadyStarted();
-      const onAbort = () => reject(new Error('OpenClaw attach cancelled'));
-      if (!signal) return;
-      if (signal.aborted) {
-        reject(new Error('OpenClaw attach cancelled'));
-        return;
-      }
-      signal.addEventListener('abort', onAbort, { once: true });
-    }));
-    const probeHealth = vi.fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge offline',
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'still starting',
+    const waitForReadyCalls: unknown[][] = [];
+    const waitForReady = (_cfg: unknown, _token: unknown, signal?: AbortSignal) => {
+      waitForReadyCalls.push([_cfg, _token, signal]);
+      return new Promise<never>((_resolve, reject) => {
+        markWaitForReadyStarted();
+        const onAbort = () => reject(new Error('OpenClaw attach cancelled'));
+        if (!signal) return;
+        if (signal.aborted) {
+          reject(new Error('OpenClaw attach cancelled'));
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
       });
-    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    };
+    let probeIdx = 0;
+    const probeResults = [
+      { ok: false as const, error: 'bridge offline' },
+      { ok: false as const, error: 'still starting' },
+    ];
+    const probeHealth = async () => probeResults[probeIdx++];
+    const saveConfig = async () => {};
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -2213,9 +2206,9 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
-    expect(restartGateway).toHaveBeenCalledTimes(1);
-    expect(waitForReady).toHaveBeenCalledTimes(1);
+    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(restartGatewayCalls.length).toBe(1);
+    expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.enabled).toBe(false);
     expect(integration?.status).toBe('disconnected');
@@ -2225,15 +2218,19 @@ describe('local agent integration registry helpers', () => {
   it('rechecks OpenClaw bridge health quickly after a cached failure so recovery is not sticky', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-13T12:00:00.000Z'));
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(
+    const origFetch = globalThis.fetch;
+    let fetchCallCount = 0;
+    const fetchResponses = [
+      new Response(
         JSON.stringify({ ok: false, error: 'offline' }),
         { status: 503, headers: { 'Content-Type': 'application/json' } },
-      ))
-      .mockResolvedValueOnce(new Response(
+      ),
+      new Response(
         JSON.stringify({ ok: true, channel: 'dkg-ui' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ));
+      ),
+    ];
+    globalThis.fetch = (async () => fetchResponses[fetchCallCount++]) as typeof fetch;
 
     try {
       const config = makeConfig();
@@ -2244,9 +2241,9 @@ describe('local agent integration registry helpers', () => {
       const second = await probeOpenClawChannelHealth(config, 'bridge-token');
 
       expect(second.ok).toBe(true);
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchCallCount).toBe(2);
     } finally {
-      fetchSpy.mockRestore();
+      globalThis.fetch = origFetch;
       vi.useRealTimers();
     }
   });

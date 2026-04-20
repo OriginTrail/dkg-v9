@@ -241,9 +241,14 @@ export class DKGNode {
     const short = (id: string) => id.slice(-8);
     let allHealthy = true;
 
-    // Snapshot advertised self-multiaddrs once per tick so we can check which
-    // relays still have a live /p2p-circuit reservation advertised via us.
+    // Snapshot advertised self-multiaddrs once per tick. The presence of
+    // *any* /p2p-circuit self-address is the authoritative signal that
+    // libp2p has at least one live circuit reservation somewhere. Recent
+    // js-libp2p circuit-relay-v2 defaults to holding a single reservation
+    // at a time, so we treat the reservation set as a pool, not per-relay.
     const selfAddrs = node.getMultiaddrs().map(ma => ma.toString());
+    const circuitSelfAddrs = selfAddrs.filter(a => a.includes('/p2p-circuit'));
+    const haveAnyReservation = circuitSelfAddrs.length > 0;
     const now = Date.now();
 
     for (const { peerId, addr } of this.relayTargets) {
@@ -253,21 +258,23 @@ export class DKGNode {
       const conns = node.getConnections(peerId);
       const transportUp = conns.length > 0;
 
-      const hasReservation = selfAddrs.some(a =>
+      const thisRelayHasReservation = circuitSelfAddrs.some(a =>
         a.includes(`/p2p/${relayPidStr}/p2p-circuit`),
       );
 
-      // Happy path: transport connected AND we advertise a circuit address
-      // through this relay → reservation is live.
-      if (transportUp && hasReservation) {
+      // Happy path: transport is up AND either this relay is the one
+      // holding our reservation, OR we already have a reservation on some
+      // other relay (libp2p only requests one at a time by default, so
+      // "other relays are connected but idle" is the normal steady state).
+      if (transportUp && (thisRelayHasReservation || haveAnyReservation)) {
         this.relayReservationRedialAt.delete(relayPidStr);
         continue;
       }
 
-      // Transport is up but reservation is missing → either it has just been
-      // re-negotiated and we're in the grace window, or it has genuinely
-      // lapsed and we need to force a re-listen by dropping+redialing.
-      if (transportUp && !hasReservation) {
+      // Transport is up but we have ZERO reservations across all relays.
+      // Something has gone wrong in libp2p's reservation-pool management;
+      // force a re-listen on this relay by dropping + redialing.
+      if (transportUp && !haveAnyReservation) {
         const lastForcedRedial = this.relayReservationRedialAt.get(relayPidStr) ?? 0;
         if (now - lastForcedRedial < RELAY_RESERVATION_GRACE_MS) {
           // We just redialed; give libp2p time to finish negotiating a new
@@ -278,8 +285,8 @@ export class DKGNode {
 
         allHealthy = false;
         console.log(
-          `[${ts()}] Relay watchdog: reservation lapsed on ${short(relayPidStr)} ` +
-          `(connection up, no /p2p-circuit self-addr) — dropping + redialing to force reserve`,
+          `[${ts()}] Relay watchdog: no circuit reservation anywhere (0 /p2p-circuit self-addrs); ` +
+          `dropping + redialing ${short(relayPidStr)} to force reserve`,
         );
         this.relayReservationRedialAt.set(relayPidStr, now);
 

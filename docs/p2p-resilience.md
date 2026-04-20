@@ -39,19 +39,27 @@ In practice we were seeing one or more of the following failure modes:
 `packages/core/src/node.ts` — the `watchdogTick` now detects **lapsed
 reservations** in addition to **dropped TCP connections**.
 
-On each tick, for every configured relay peer:
+On each tick, the watchdog snapshots `libp2p.getMultiaddrs()` and treats
+the full set of circuit-relay reservations as a **pool**, not as
+per-relay slots. This matches how js-libp2p's circuit-relay-v2 transport
+behaves by default: it holds a single reservation at a time, rotating
+among the configured relays as needed. A per-relay "reservation missing"
+check would spuriously drop+redial idle relays forever; a pool-level
+check targets the condition that actually kills reachability.
 
-- Read `libp2p.getMultiaddrs()` to see whether we're currently advertising
-  a `/p2p-circuit` self-address routed through that relay. Presence of
-  such an address is the authoritative signal that we have a live
-  reservation.
-- If the TCP connection is up but no circuit self-address is advertised,
-  the reservation has lapsed. The watchdog closes the existing connection
-  and redials the relay; the circuit-relay transport re-listens on
-  `/p2p-circuit`, which re-requests a fresh reservation.
-- A short grace window (`RELAY_RESERVATION_GRACE_MS`, 15 s) suppresses a
-  false-positive re-fire while a freshly-negotiated reservation is still
-  on the wire.
+For every configured relay peer:
+
+- **Happy path.** TCP connection up AND (this relay holds our
+  reservation OR *any* relay does) → nothing to do.
+- **Reservation pool empty.** TCP connection up but the set of
+  `/p2p-circuit` self-addresses is empty → we are unreachable. The
+  watchdog closes the existing connection and redials the relay; the
+  circuit-relay transport re-listens on `/p2p-circuit`, which
+  re-requests a fresh reservation. A per-relay grace window
+  (`RELAY_RESERVATION_GRACE_MS`, 15 s) suppresses false-positive re-fires
+  while a freshly-negotiated reservation is still on the wire.
+- **Transport down.** No TCP connection → classic redial path
+  (pre-existing behaviour, unchanged).
 
 **Why this is the primary fix.** If our reservation on relay R has lapsed,
 no peer anywhere on the network can reach us via R until we re-reserve.

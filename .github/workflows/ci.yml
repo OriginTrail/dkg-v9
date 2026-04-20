@@ -216,21 +216,19 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/4
 
   # ------------------------------------------------------------------
-  # Product primary — cli and node-ui run on dedicated runners.
+  # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
+  # auth, keystore, migration, indexer) so it owns a runner. The other
+  # two BURA packages (`query`, `attested-assets`) fit on one runner.
+  #
+  # Tier: BURA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1. Packages
+  # on the critical path for users/operators; auth & quorum bugs here
+  # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
-  product-primary:
-    name: "Product: ${{ matrix.label }}"
+  bura-cli:
+    name: "Bura: cli"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: cli
-            pkg: "@origintrail-official/dkg"
-          - label: node-ui
-            pkg: "@origintrail-official/dkg-node-ui"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -246,14 +244,11 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Tests: ${{ matrix.label }}"
-        run: pnpm --filter ${{ matrix.pkg }} test
+      - name: "CLI tests"
+        run: pnpm --filter @origintrail-official/dkg test
 
-  # ------------------------------------------------------------------
-  # Product secondary — smaller packages grouped on a single runner.
-  # ------------------------------------------------------------------
-  product-secondary:
-    name: "Product: remaining packages"
+  bura-supporting:
+    name: "Bura: query + attested-assets"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -272,12 +267,69 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Attested assets, EPCIS, query, MCP, net-sim, graph-viz, adapters, origin-trail-game"
+      - name: "Query + attested-assets tests"
         run: |
           pnpm \
-            --filter @origintrail-official/dkg-attested-assets \
-            --filter @origintrail-official/dkg-epcis \
             --filter @origintrail-official/dkg-query \
+            --filter @origintrail-official/dkg-attested-assets \
+            run test
+
+  # ------------------------------------------------------------------
+  # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
+  # so it owns a runner. Adapters + demo app + smaller utility packages
+  # share one runner; they are fast and independent.
+  #
+  # Tier: KOSAVA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1.
+  # Supporting packages (UI, demos, adapters, EPCIS helpers, MCP bridge);
+  # bugs here affect UX/demos, not protocol correctness.
+  # ------------------------------------------------------------------
+  kosava-node-ui:
+    name: "Kosava: node-ui"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "node-ui tests"
+        run: pnpm --filter @origintrail-official/dkg-node-ui test
+
+  kosava-supporting:
+    name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim + origin-trail-game"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Supporting Kosava packages"
+        run: |
+          pnpm \
+            --filter @origintrail-official/dkg-epcis \
             --filter @origintrail-official/dkg-mcp-server \
             --filter @origintrail-official/dkg-network-sim \
             --filter @origintrail-official/dkg-graph-viz \
@@ -289,14 +341,72 @@ jobs:
             run test
 
   # ------------------------------------------------------------------
-  # Solidity lane:
+  # Kosava OriginTrail Game E2E lane — runs the 4 heavy integration
+  # tests in `packages/origin-trail-game/test/e2e/`. Each test spins
+  # up 3 DKG daemons + a local Hardhat chain, plays a full game, and
+  # asserts gossip / context-graph / CCL behavior end-to-end.
+  #
+  # These are gated behind a separate `vitest.e2e.config.ts` and not
+  # picked up by `pnpm test`. We give them their own runner so:
+  #   (a) tier labelling stays clean (they're KOSAVA demo-app tests),
+  #   (b) wall-clock impact is ~0 — they run in parallel with the
+  #       Tornado shards which remain the critical path.
+  # ------------------------------------------------------------------
+  kosava-game-e2e:
+    name: "Kosava: origin-trail-game E2E"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+
+      # The E2E suite spawns its own Hardhat node and runs
+      # `npx hardhat deploy --network localhost` — contracts must be
+      # compiled and typechain generated before the daemons boot.
+      - name: Cache Hardhat artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
+
+      - name: Compile contracts
+        run: npx hardhat compile --config hardhat.node.config.ts
+        working-directory: packages/evm-module
+
+      - name: "OriginTrail Game E2E (4 tests, 3-node cluster + Hardhat)"
+        run: pnpm --filter @origintrail-official/dkg-app-origin-trail-game run test:e2e
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+  # ------------------------------------------------------------------
+  # Tornado Solidity lane — `packages/evm-module` is TORNADO-tier
+  # (`dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1): bugs in the
+  # contracts mean financial loss or consensus divergence.
   #   - PR + no contract changes : no-op fast pass (keeps the required
   #     check green without spinning up Hardhat).
   #   - PR + contract changes    : hardhat test only, no coverage (~5-7m).
   #   - push (main / v10-rc / …) : full coverage + ratchet safety net.
   # ------------------------------------------------------------------
   solidity:
-    name: "Solidity"
+    name: "Tornado: Solidity (evm-module)"
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 45

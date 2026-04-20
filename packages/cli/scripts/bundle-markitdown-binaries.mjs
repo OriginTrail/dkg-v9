@@ -28,7 +28,16 @@ if (
 }
 export const MARKITDOWN_UPSTREAM_VERSION = MARKITDOWN_BUILD_INFO.markItDownUpstreamVersion;
 export const PYINSTALLER_VERSION = MARKITDOWN_BUILD_INFO.pyInstallerVersion;
-export const DEFAULT_RELEASE_REPO = 'OriginTrail/dkg-v9';
+function loadDefaultReleaseRepo() {
+  for (const base of [resolve(__dirname, '..'), resolve(__dirname, '..', '..', '..', '..')]) {
+    try {
+      const proj = JSON.parse(readFileSync(join(base, 'project.json'), 'utf-8'));
+      if (proj.repo) return proj.repo;
+    } catch { /* try next */ }
+  }
+  return 'OriginTrail/dkg-v9';
+}
+export const DEFAULT_RELEASE_REPO = loadDefaultReleaseRepo();
 export const RELEASE_BINARY_FETCH_TIMEOUT_MS = 15_000;
 export const RELEASE_CHECKSUM_FETCH_TIMEOUT_MS = 5_000;
 

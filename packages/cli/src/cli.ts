@@ -15,7 +15,7 @@ import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -549,12 +549,9 @@ program
       console.log(isTTY ? STARTUP_BANNER : '');
       console.log(`  Node:       ${config.name} (PID ${startedPid})`);
       console.log(`  Node UI:    ${cyan(`http://${hostDisplay}:${port}/ui`)}`);
-      console.log(`  GitHub:     ${cyan('https://github.com/OriginTrail/dkg-v9')}`);
+      console.log(`  GitHub:     ${cyan(loadProjectConfig().githubUrl)}`);
       console.log(`  Discord:    ${cyan('https://discord.com/invite/xCaY7hvNwD')}`);
       console.log(`  Logs:       ${logPath()}`);
-      console.log('');
-      console.log(`  ${yellow('This is an experimental testnet node. Things will break.')}`);
-      console.log(`  ${yellow('Not intended for production use.')}`);
       console.log('');
       return;
     }
@@ -2701,10 +2698,11 @@ program
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
     const net = await loadNetworkConfig();
+    const proj = loadProjectConfig();
     const au = config.autoUpdate ?? net?.autoUpdate ?? {
       enabled: true,
-      repo: 'OriginTrail/dkg-v9',
-      branch: 'main',
+      repo: proj.repo,
+      branch: proj.defaultBranch,
       allowPrerelease: true,
       checkIntervalMinutes: 30,
     };

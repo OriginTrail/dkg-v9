@@ -220,13 +220,74 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
 }
 
 let _networkConfig: NetworkConfig | null = null;
+let _networkConfigName: string | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
+  _networkConfigName = null;
+}
+
+export interface ProjectConfig {
+  repo: string;
+  defaultBranch: string;
+  githubUrl: string;
+  projectName: string;
+  syslogAppName: string;
+  defaultNetwork: string;
+}
+
+let _projectConfig: ProjectConfig | null = null;
+
+/**
+ * Resolve candidate directories where repo-root files (project.json,
+ * network/*.json) may live, in priority order.
+ */
+function candidateRoots(): string[] {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  return [
+    join(thisDir, '..', '..', '..'),         // monorepo from dist/
+    join(thisDir, '..', '..', '..', '..'),   // monorepo from src/ during dev
+    join(thisDir, '..'),                      // NPM package (files at package root)
+  ];
 }
 
 /**
- * Load the network config from network/testnet.json.
+ * Load project.json — the single source of truth for repo name,
+ * branch, GitHub URL, and default network. Values here drive the
+ * startup banner, auto-update fallbacks, and network selection.
+ *
+ * To rename the repo or change the default branch/network, edit
+ * project.json at the repo root — all runtime code follows.
+ */
+export function loadProjectConfig(): ProjectConfig {
+  if (_projectConfig) return _projectConfig;
+  for (const root of candidateRoots()) {
+    try {
+      const raw = readFileSync(join(root, 'project.json'), 'utf-8');
+      _projectConfig = JSON.parse(raw) as ProjectConfig;
+      return _projectConfig;
+    } catch { /* try next */ }
+  }
+  _projectConfig = {
+    repo: 'OriginTrail/dkg-v9',
+    defaultBranch: 'v10-rc',
+    githubUrl: 'https://github.com/OriginTrail/dkg-v9',
+    projectName: 'dkg',
+    syslogAppName: 'dkg',
+    defaultNetwork: 'testnet',
+  };
+  return _projectConfig;
+}
+
+export function _resetProjectConfigCache(): void {
+  _projectConfig = null;
+}
+
+/**
+ * Load a network config from network/<name>.json.
+ *
+ * @param network - Network name (e.g. 'testnet', 'mainnet'). Defaults to
+ *   the `defaultNetwork` value from project.json.
  *
  * Candidate paths (tried in order):
  *  1. Monorepo root when running from packages/cli/dist/
@@ -234,22 +295,20 @@ export function _resetNetworkConfigCache(): void {
  *  3. Bundled alongside dist/ in the published NPM package (dist/../network/)
  *
  * Monorepo paths are checked first so that edits to the repo-root
- * network/testnet.json are picked up immediately during development
+ * network/ files are picked up immediately during development
  * without requiring a rebuild of the CLI package.
  */
-export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
-  if (_networkConfig) return _networkConfig;
+export async function loadNetworkConfig(network?: string): Promise<NetworkConfig | null> {
+  const name = network ?? loadProjectConfig().defaultNetwork;
+  if (_networkConfig && _networkConfigName === name) return _networkConfig;
   try {
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-      join(thisDir, '..', '..', '..', 'network', 'testnet.json'),       // monorepo from dist/
-      join(thisDir, '..', '..', '..', '..', 'network', 'testnet.json'), // monorepo from src/ during dev
-      join(thisDir, '..', 'network', 'testnet.json'),                   // NPM package (network/ at package root)
-    ];
+    const file = `${name}.json`;
+    const candidates = candidateRoots().map(root => join(root, 'network', file));
     for (const path of candidates) {
       try {
         const raw = await readFile(path, 'utf-8');
         _networkConfig = JSON.parse(raw) as NetworkConfig;
+        _networkConfigName = name;
         return _networkConfig;
       } catch { /* try next */ }
     }
@@ -274,8 +333,7 @@ export function isDkgMonorepo(): boolean {
   const root = repoDir();
   if (!root) { _isDkgMonorepo = false; return false; }
   try {
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-    _isDkgMonorepo = pkg.name === 'dkg-v9';
+    _isDkgMonorepo = existsSync(join(root, 'project.json')) && existsSync(join(root, 'pnpm-workspace.yaml'));
   } catch {
     _isDkgMonorepo = false;
   }

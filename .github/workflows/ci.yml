@@ -356,7 +356,12 @@ jobs:
     name: "Kosava: origin-trail-game E2E"
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 4 e2e files × (≤ 600s beforeAll + ≤ 120s per test * a handful of
+    # tests) → worst case ~40 min on cold 2-core CI runners. 25 min was
+    # not enough room for the Hardhat-backed `context-graph.test.ts`
+    # file in particular; bump to 50 so we either get a clean pass or a
+    # diagnostic failure (instead of an opaque "Operation cancelled").
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

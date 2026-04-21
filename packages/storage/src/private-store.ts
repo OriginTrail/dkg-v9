@@ -1,5 +1,5 @@
 import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
 import type { TripleStore, Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
@@ -16,11 +16,23 @@ import type { ContextGraphManager } from './graph-manager.js';
 const ENC_PREFIX = 'enc:gcm:v1:';
 
 /** Encryption key resolution order:
- *   1. Explicit constructor `encryptionKey` (32 bytes, hex/base64/raw).
- *   2. `DKG_PRIVATE_STORE_KEY` env var.
- *   3. Auto-generated (process-local) — confidentiality at rest only;
- *      not reusable across restarts. Logged so operators notice.
+ *   1. Explicit constructor `encryptionKey` (32 bytes, hex/base64/raw or
+ *      shorter passphrase — short inputs are SHA-256-stretched so AES-256
+ *      always sees a full 256-bit key).
+ *   2. `DKG_PRIVATE_STORE_KEY` env var (same shape as #1).
+ *   3. A deterministic process-wide default derived from a constant
+ *      domain string. This is NOT secret — it serves three goals:
+ *        (a) on-disk N-Quads dumps no longer contain plaintext (ST-2);
+ *        (b) every PrivateContentStore in the same process produces
+ *            identical ciphertext for identical plaintext, which keeps
+ *            equality-based subtraction/dedup pipelines functional
+ *            (e.g. async-lift `subtractFinalizedExactQuads`); and
+ *        (c) a separate node operator who has not configured
+ *            DKG_PRIVATE_STORE_KEY can still round-trip private data.
+ *      Operators who require real confidentiality MUST set
+ *      DKG_PRIVATE_STORE_KEY to a per-deployment secret.
  */
+const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
 function resolveEncryptionKey(explicit?: Uint8Array | string): Buffer {
   const fromExplicit = explicit ?? process.env.DKG_PRIVATE_STORE_KEY;
   if (fromExplicit) {
@@ -31,14 +43,11 @@ function resolveEncryptionKey(explicit?: Uint8Array | string): Buffer {
           : Buffer.from(fromExplicit, 'base64')
         : Buffer.from(fromExplicit);
     if (buf.length !== 32) {
-      // Derive a deterministic 32-byte key when the operator supplied a
-      // shorter passphrase — keeps configuration ergonomic without
-      // weakening AES-256.
       return createHash('sha256').update(buf).digest();
     }
     return buf;
   }
-  return randomBytes(32);
+  return createHash('sha256').update(DEFAULT_KEY_DOMAIN).digest();
 }
 
 export class PrivateContentStore {
@@ -69,7 +78,19 @@ export class PrivateContentStore {
    */
   private encryptLiteral(serialized: string): string {
     if (!serialized.startsWith('"')) return serialized;
-    const iv = randomBytes(12);
+    // Deterministic IV: HMAC-SHA256(key, plaintext) truncated to 96 bits.
+    // This is the AES-GCM-SIV pattern — different plaintexts yield
+    // different IVs (collision probability negligible at 96 bits) so
+    // GCM's nonce-misuse hazard does not apply, while identical
+    // plaintexts produce identical ciphertexts. Equality-based
+    // dedup/subtraction (e.g. publisher async-lift
+    // `subtractFinalizedExactQuads`) therefore continues to work
+    // without a decryption pass and ST-2 at-rest confidentiality is
+    // preserved (the on-disk envelope never contains the plaintext).
+    const iv = createHmac('sha256', this.encryptionKey)
+      .update(serialized, 'utf8')
+      .digest()
+      .subarray(0, 12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
     const ct = Buffer.concat([
       cipher.update(serialized, 'utf8'),

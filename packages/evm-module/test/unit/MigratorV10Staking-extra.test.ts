@@ -19,7 +19,16 @@ import * as path from 'path';
 describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
   const repoRoot = path.resolve(__dirname, '..', '..');
   const contractPath = path.join(repoRoot, 'contracts', 'migrations', 'MigratorV10Staking.sol');
-  const typechainPath = path.join(repoRoot, 'typechain', 'MigratorV10Staking.ts');
+  // Hardhat-typechain mirrors the contract source tree under
+  // `typechain/contracts/...`; this is where every other migrator
+  // typing lives (see Migrator, MigratorV6*, MigratorV8*, MigratorM1V8*).
+  const typechainPath = path.join(
+    repoRoot,
+    'typechain',
+    'contracts',
+    'migrations',
+    'MigratorV10Staking.ts',
+  );
 
   it('SPEC-GAP: contracts/migrations/MigratorV10Staking.sol must exist', () => {
     // Intentionally RED today. Spec says zero-token V8 → V10 delegator

@@ -120,9 +120,6 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      commander:
-        specifier: ^13
-        version: 13.1.0
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -218,6 +215,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@origintrail-official/dkg-adapter-openclaw':
+        specifier: workspace:*
+        version: link:../adapter-openclaw
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent

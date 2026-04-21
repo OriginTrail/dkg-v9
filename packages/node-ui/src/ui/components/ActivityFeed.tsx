@@ -149,7 +149,7 @@ function ActivityRow({
       type="button"
       className="v10-activity-feed-row"
       onClick={() => onSelectEntity(item.entity.uri)}
-      title={`${item.entity.label}\n${item.at.toISOString()}`}
+      title={item.at ? `${item.entity.label}\n${item.at.toISOString()}` : item.entity.label}
     >
       <span
         className="v10-activity-feed-layer"
@@ -181,7 +181,7 @@ function ActivityRow({
           />
         </span>
       )}
-      <span className="v10-activity-feed-time" title={item.at.toLocaleString()}>
+      <span className="v10-activity-feed-time" title={item.at ? item.at.toLocaleString() : 'no timestamp'}>
         {relativeTime(item.at)}
       </span>
     </button>

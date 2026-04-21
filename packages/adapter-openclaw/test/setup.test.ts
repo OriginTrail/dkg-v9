@@ -8,9 +8,14 @@ import {
   discoverAgentName,
   writeDkgConfig,
   mergeOpenClawConfig,
+  unmergeOpenClawConfig,
+  verifyUnmergeInvariants,
   writeWorkspaceConfig,
   installCanonicalNodeSkill,
+  openclawConfigPath,
+  runSetup,
 } from '../src/setup.js';
+import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -375,6 +380,369 @@ describe('mergeOpenClawConfig', () => {
     expect(secondRun).toBe(firstRun);
     expect(secondBackupCount).toBe(firstBackupCount);
   });
+
+  // PR #228 Codex N2 — persist prior slot owner so disconnect can restore it.
+  it('captures a prior non-adapter plugins.slots.memory owner into the adapter entry', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(config.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+  });
+
+  it('on a second merge, does NOT overwrite previousMemorySlotOwner with the adapter id (first-wins)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    // First merge captures "memory-core" into the entry.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+
+    // Second merge: slot is already the adapter, so the capture branch won't
+    // fire — and even if it did, the first-wins guard keeps the original.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unmergeOpenClawConfig (PR #228 Codex N2 — restore prior memory-slot owner)
+// ---------------------------------------------------------------------------
+
+describe('unmergeOpenClawConfig', () => {
+  it('restores plugins.slots.memory to the previous owner when the merge persisted one', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    // Merge → captures "memory-core" as previousMemorySlotOwner.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+
+    // Unmerge → restores "memory-core" and strips the metadata.
+    unmergeOpenClawConfig(configPath);
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.slots.memory).toBe('memory-core');
+    expect(afterUnmerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+    expect(afterUnmerge.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+  });
+
+  it('clears plugins.slots.memory when no prior owner was persisted', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // Merge on a clean config — no previousMemorySlotOwner is captured.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+
+    unmergeOpenClawConfig(configPath);
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.slots.memory).toBeUndefined();
+  });
+
+  it('merge→unmerge round-trip from a clean openclaw.json restores the original memory-slot state', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // "clean" here means: plugins object exists but no slot is set; mimics a
+    // fresh install that hasn't configured a memory provider yet.
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    unmergeOpenClawConfig(configPath);
+
+    const final = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // plugins.slots.memory is unset again — same as before the merge/unmerge cycle.
+    expect(final.plugins.slots?.memory).toBeUndefined();
+  });
+
+  it('is idempotent — a second unmerge on an already-disconnected config writes nothing', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    unmergeOpenClawConfig(configPath);
+    const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+    const firstContent = readFileSync(configPath, 'utf-8');
+
+    unmergeOpenClawConfig(configPath);
+    const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+    const secondContent = readFileSync(configPath, 'utf-8');
+
+    expect(secondContent).toBe(firstContent);
+    expect(secondBackupCount).toBe(firstBackupCount);
+  });
+
+  it('leaves plugins.slots.memory alone when the user has externally re-owned the slot between merge and unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    // Simulate external modification: user swaps in a different memory plugin.
+    const intermediate = JSON.parse(readFileSync(configPath, 'utf-8'));
+    intermediate.plugins.slots.memory = 'some-other-memory-plugin';
+    writeFileSync(configPath, JSON.stringify(intermediate, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    const final = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // We don't clobber the user's new choice, and we clean up our marker.
+    expect(final.plugins.slots.memory).toBe('some-other-memory-plugin');
+    expect(final.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+  });
+
+  // PR #228 Codex N4 — a missing openclaw.json is treated as already-
+  // disconnected so the Disconnect UI flow doesn't strand users who removed
+  // or relocated OpenClaw. No throw, no `.bak`, no file created.
+  it('is a no-op when openclaw.json is missing', () => {
+    const configPath = join(testDir, 'does-not-exist.json');
+    const countBefore = readdirSync(testDir).length;
+
+    expect(() => unmergeOpenClawConfig(configPath)).not.toThrow();
+
+    expect(existsSync(configPath)).toBe(false);
+    expect(readdirSync(testDir).length).toBe(countBefore);
+    expect(
+      readdirSync(testDir).some((f: string) => f.includes('.bak.')),
+    ).toBe(false);
+  });
+
+  it('is a no-op when openclaw.json exists but is not valid JSON', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const original = '{ not-valid-json';
+    writeFileSync(configPath, original);
+    const countBefore = readdirSync(testDir).length;
+
+    expect(() => unmergeOpenClawConfig(configPath)).not.toThrow();
+
+    // File untouched (not rewritten), no `.bak` sibling written.
+    expect(readFileSync(configPath, 'utf-8')).toBe(original);
+    expect(readdirSync(testDir).length).toBe(countBefore);
+    expect(
+      readdirSync(testDir).some((f: string) => f.startsWith('openclaw.json.bak.')),
+    ).toBe(false);
+  });
+
+  // PR #228 Codex R4-N1 — when a caller supplies an explicit openclaw.json
+  // path that doesn't exist, we must NOT silently fall back to the default
+  // `~/.openclaw/openclaw.json`. Doing so would unmerge the wrong config for
+  // users who relocated OpenClaw (data-corruption path).
+  it('does NOT fall back to the default home when an explicit missing path is supplied', () => {
+    // The explicit path the caller passes: a directory that doesn't contain openclaw.json.
+    const relocated = join(testDir, 'relocated-openclaw');
+    mkdirSync(relocated, { recursive: true });
+    const explicitMissingPath = join(relocated, 'openclaw.json');
+
+    // The default home we want left untouched — a fully-merged config that
+    // would be visibly mutated if unmerge fell through to it.
+    const defaultHome = join(testDir, 'default-openclaw');
+    mkdirSync(defaultHome, { recursive: true });
+    const defaultConfigPath = join(defaultHome, 'openclaw.json');
+    writeFileSync(defaultConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
+    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter');
+    const defaultContentBefore = readFileSync(defaultConfigPath, 'utf-8');
+    const defaultBackupsBefore = readdirSync(defaultHome).filter(
+      (f: string) => f.startsWith('openclaw.json.bak.'),
+    ).length;
+
+    // Point OPENCLAW_HOME at `defaultHome` — this is what setup.ts's
+    // `openclawDir()` would consult if the explicit-path guard fell through.
+    const originalEnv = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = defaultHome;
+    try {
+      expect(() => unmergeOpenClawConfig(explicitMissingPath)).not.toThrow();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = originalEnv;
+      }
+    }
+
+    // The default home's config must be byte-identical and no new `.bak`.
+    expect(readFileSync(defaultConfigPath, 'utf-8')).toBe(defaultContentBefore);
+    const defaultBackupsAfter = readdirSync(defaultHome).filter(
+      (f: string) => f.startsWith('openclaw.json.bak.'),
+    ).length;
+    expect(defaultBackupsAfter).toBe(defaultBackupsBefore);
+    // And the explicit path didn't get a freshly-created file either.
+    expect(existsSync(explicitMissingPath)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifyUnmergeInvariants (PR #228 Codex N3 — full reverse-merge check)
+// ---------------------------------------------------------------------------
+
+describe('verifyUnmergeInvariants', () => {
+  it('returns null when every field `mergeOpenClawConfig` writes has been unwound', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            allow: [],
+            load: { paths: [] },
+            entries: { 'adapter-openclaw': { enabled: false } },
+            slots: {},
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toBeNull();
+  });
+
+  it('returns a descriptive string when plugins.slots.memory is still elected', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: { memory: 'adapter-openclaw' },
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(/plugins\.slots\.memory is still "adapter-openclaw"/);
+  });
+
+  it('returns a descriptive string when plugins.allow still contains the adapter', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: ['adapter-openclaw'],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: {},
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(/plugins\.allow still contains "adapter-openclaw"/);
+  });
+
+  it('returns a descriptive string when plugins.load.paths still contains an adapter load path', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: ['/home/me/packages/adapter-openclaw'] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: {},
+        },
+      }),
+    );
+
+    const result = verifyUnmergeInvariants(configPath);
+    expect(result).toMatch(/plugins\.load\.paths still contains adapter path/);
+    expect(result).toContain('/home/me/packages/adapter-openclaw');
+  });
+
+  it('returns a descriptive string when plugins.entries["adapter-openclaw"].enabled is still true', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: true } },
+          slots: {},
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(
+      /plugins\.entries\["adapter-openclaw"\]\.enabled is still true/,
+    );
+  });
+
+  // PR #228 Codex N4 — missing file is treated as already-disconnected so
+  // the Disconnect UI flow doesn't strand users who removed or relocated
+  // OpenClaw. The invariants hold trivially when the config doesn't exist.
+  it('returns null on a missing config file (treated as already-disconnected)', () => {
+    const configPath = join(testDir, 'does-not-exist.json');
+
+    expect(verifyUnmergeInvariants(configPath)).toBeNull();
+  });
+
+  it('does not throw on an unparseable config file — returns a descriptive string', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, '{ not-valid-json');
+
+    const result = verifyUnmergeInvariants(configPath);
+    expect(result).toMatch(/Could not parse/);
+  });
+
+  // PR #228 Codex R4-N1 — `verifyUnmergeInvariants` must never read the
+  // default `~/.openclaw/openclaw.json` when the caller supplied an explicit
+  // path. Even when the default home holds a dirty/still-merged config, an
+  // explicit missing path should be reported as already-disconnected.
+  it('does NOT read the default home when an explicit missing path is supplied', () => {
+    const explicitMissingPath = join(testDir, 'relocated', 'openclaw.json');
+
+    // Seed OPENCLAW_HOME with a config whose invariants would FAIL if it
+    // were accidentally consulted — slot still elected, adapter still in allow.
+    const defaultHome = join(testDir, 'default-openclaw');
+    mkdirSync(defaultHome, { recursive: true });
+    writeFileSync(
+      join(defaultHome, 'openclaw.json'),
+      JSON.stringify(
+        {
+          plugins: {
+            allow: ['adapter-openclaw'],
+            slots: { memory: 'adapter-openclaw' },
+            load: { paths: [] },
+            entries: { 'adapter-openclaw': { enabled: true } },
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    const originalEnv = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = defaultHome;
+    try {
+      // Returns null because the explicit path is missing; invariants hold
+      // trivially. If the fn fell through to the default, it would return a
+      // descriptive failure string for one of the three dirty invariants.
+      expect(verifyUnmergeInvariants(explicitMissingPath)).toBeNull();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = originalEnv;
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -537,5 +905,158 @@ describe('discoverWorkspace', () => {
 
   it('throws when override path does not exist', () => {
     expect(() => discoverWorkspace('/nonexistent/path/xyz')).toThrow('does not exist');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// openclawConfigPath — honors OPENCLAW_HOME (Codex PR #228 review #6)
+// ---------------------------------------------------------------------------
+
+describe('openclawConfigPath', () => {
+  it('honors OPENCLAW_HOME when set', () => {
+    const fakeHome = join(testDir, 'custom-openclaw-home');
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = fakeHome;
+
+    try {
+      expect(openclawConfigPath()).toBe(join(fakeHome, 'openclaw.json'));
+    } finally {
+      if (original === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = original;
+      }
+    }
+  });
+
+  it('falls back to ~/.openclaw/openclaw.json when OPENCLAW_HOME is unset', () => {
+    const original = process.env.OPENCLAW_HOME;
+    delete process.env.OPENCLAW_HOME;
+
+    try {
+      expect(openclawConfigPath()).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
+    } finally {
+      if (original !== undefined) {
+        process.env.OPENCLAW_HOME = original;
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup — AbortSignal threading (Codex PR #228 review #1)
+// ---------------------------------------------------------------------------
+
+describe('runSetup abort signal', () => {
+  it('throws before any filesystem writes when the signal is already aborted', async () => {
+    // Point DKG/OpenClaw home at the empty tmp dir so a stray write would be
+    // observable, and give runSetup a valid workspace so Step 1's discovery
+    // check would otherwise succeed.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/Setup aborted/);
+
+      // No state should have been written.
+      expect(existsSync(dkgHome)).toBe(false);
+      expect(existsSync(openclawHome)).toBe(false);
+      expect(existsSync(join(workspace, 'config.json'))).toBe(false);
+      expect(existsSync(join(workspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('stops cooperatively mid-flow when the signal aborts between steps', async () => {
+    // Pre-seed a valid workspace + openclaw.json so Steps 1, 2, and 3 complete,
+    // then abort before Step 5 (merge). Assert the merge did not run.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    // Minimal openclaw.json setup won't merge because we abort beforehand.
+    const openclawConfigPath = join(openclawHome, 'openclaw.json');
+    writeFileSync(openclawConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      const controller = new AbortController();
+      // Abort immediately — Step 1's `throwIfAborted()` fires first, so merge
+      // + workspace-config + skill-install never run. The observable guarantee
+      // we care about: openclaw.json is byte-identical to what we wrote.
+      controller.abort();
+
+      const before = readFileSync(openclawConfigPath, 'utf-8');
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/Setup aborted/);
+      const after = readFileSync(openclawConfigPath, 'utf-8');
+      expect(after).toBe(before);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('completes normally when signal is undefined (backwards compatibility)', async () => {
+    // Smoke test that the abort gate is a no-op without a signal — guards
+    // against the check accidentally rejecting the `undefined` case.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          // no signal
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
   });
 });

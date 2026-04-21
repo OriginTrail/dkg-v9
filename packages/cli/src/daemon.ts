@@ -20,7 +20,13 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+// Namespace import: our Phase-8 install-context builder (~line 290) calls
+// `osModule.homedir()`, and the later agent-identity probe (~line 6851)
+// uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
+const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 
@@ -28,7 +34,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -483,6 +489,21 @@ function currentBundledMarkItDownAssetName(): string | null {
         target.platform === process.platform && target.arch === process.arch,
     )?.assetName ?? null
   );
+}
+
+// SPARQL bindings returned by `agent.query()` / `/api/query` can arrive as
+// either bare strings (quadstore internal path) or SPARQL-JSON objects like
+// `{ value, type, datatype?, "xml:lang"? }` (the path that goes through the
+// query-result normaliser). Calling `.match()` / `.trim()` on the object
+// form throws at runtime, so every consumer must normalise the cell first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {
@@ -2501,113 +2522,33 @@ export async function probeOpenClawChannelHealth(
   return { ok: false, bridge, gateway, error: lastError };
 }
 
-type OpenClawUiSetupCommand = {
-  command: string;
-  args: string[];
-  source: 'workspace' | 'npx';
-};
+export async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('OpenClaw attach cancelled');
+  const { runSetup } = await import('@origintrail-official/dkg-adapter-openclaw');
+  await runSetup({ start: false, verify: false, signal });
+}
 
-type WorkspacePackageLookupDeps = {
-  fileExists?: (path: string) => boolean;
-  readFileText?: (path: string) => string;
-  readDirNames?: (path: string) => string[];
-};
+// KEEP IN SYNC with adapter's openclawConfigPath() — see packages/adapter-openclaw/src/setup.ts.
+// Intentionally duplicated to avoid a top-level static import of the adapter barrel, which would
+// break `dkg` startup in fresh workspace checkouts where the adapter's `dist/` has not been built
+// yet. The DI shape around `verifyMemorySlot` is synchronous, so a dynamic import is not an option
+// either — the fallback path has to be callable without awaiting.
+function localOpenclawConfigPath(): string {
+  return join(process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw'), 'openclaw.json');
+}
 
-function resolveWorkspacePackageBinCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  deps: WorkspacePackageLookupDeps = {},
-): OpenClawUiSetupCommand | null {
-  const fileExists = deps.fileExists ?? existsSync;
-  const readFileText = deps.readFileText ?? ((path: string) => readFileSync(path, 'utf8'));
-  const readDirNames = deps.readDirNames ?? ((path: string) => readdirSync(path, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name));
-
-  const repoRoot = fileURLToPath(new URL('../../../', runtimeModuleUrl));
-  const packagesDir = join(repoRoot, 'packages');
-  let packageDirs: string[];
+export function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
+  const configPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : localOpenclawConfigPath();
+  if (!existsSync(configPath)) return false;
   try {
-    packageDirs = readDirNames(packagesDir);
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed?.plugins?.slots?.memory === 'adapter-openclaw';
   } catch {
-    return null;
+    return false;
   }
-
-  for (const dirName of packageDirs) {
-    const packageDir = join(packagesDir, dirName);
-    const packageJsonPath = join(packageDir, 'package.json');
-    if (!fileExists(packageJsonPath)) continue;
-
-    try {
-      const packageJson = JSON.parse(readFileText(packageJsonPath)) as {
-        name?: unknown;
-        bin?: unknown;
-      };
-      if (packageJson.name !== packageName) continue;
-
-      const binField = packageJson.bin;
-      const binPath = typeof binField === 'string'
-        ? binField
-        : isPlainRecord(binField)
-          ? Object.values(binField).find((value): value is string => typeof value === 'string')
-          : undefined;
-      if (!binPath) continue;
-
-      const commandPath = join(packageDir, binPath);
-      if (!fileExists(commandPath)) continue;
-
-      return {
-        command: process.execPath,
-        args: [commandPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
-export function getOpenClawUiSetupCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  fileExists: (path: string) => boolean = existsSync,
-  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
-): OpenClawUiSetupCommand {
-  if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
-    const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
-    if (fileExists(localSetupCliPath)) {
-      return {
-        command: process.execPath,
-        args: [localSetupCliPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    }
-  }
-
-  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, {
-    ...deps,
-    fileExists,
-  });
-  if (workspaceCommand) {
-    return workspaceCommand;
-  }
-
-  return {
-    command: 'npx',
-    args: ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'],
-    source: 'npx',
-  };
-}
-
-async function runOpenClawUiSetup(packageName: string, signal?: AbortSignal): Promise<void> {
-  const setupCommand = getOpenClawUiSetupCommand(packageName);
-  await execFileAsync(setupCommand.command, setupCommand.args, {
-    shell: setupCommand.source === 'npx' && process.platform === 'win32',
-    signal,
-    timeout: 120_000,
-  });
 }
 
 async function restartOpenClawGateway(signal?: AbortSignal): Promise<void> {
@@ -2658,7 +2599,7 @@ async function waitForOpenClawChatReady(
 }
 
 type OpenClawUiAttachDeps = {
-  runSetup?: (packageName: string, signal?: AbortSignal) => Promise<void>;
+  runSetup?: (signal?: AbortSignal) => Promise<void>;
   restartGateway?: (signal?: AbortSignal) => Promise<void>;
   waitForReady?: (
     config: DkgConfig,
@@ -2672,6 +2613,7 @@ type OpenClawUiAttachDeps = {
   ) => Promise<OpenClawChannelHealthReport>;
   saveConfig?: (config: DkgConfig) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
+  verifyMemorySlot?: () => boolean;
 };
 
 function formatOpenClawUiAttachFailure(err: any): string {
@@ -2720,6 +2662,12 @@ function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
   return job.cancelled || job.controller.signal.aborted;
 }
 
+/**
+ * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
+ * where the OpenClaw gateway, on next restart, will load the adapter from the
+ * workspace build and elect it into plugins.slots.memory. The post-setup invariant
+ * check enforces this before transitioning to `ready`.
+ */
 export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
@@ -2737,7 +2685,6 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
-  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requested.id];
   if (requested.id !== 'openclaw') {
     return {
       integration: requested,
@@ -2749,6 +2696,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
   const runSetup = deps.runSetup ?? runOpenClawUiSetup;
   const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+  const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
@@ -2767,14 +2715,6 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  const packageName = definition?.manifest?.packageName;
-  if (!packageName) {
-    return {
-      integration: requested,
-      notice: `${requested.name} was registered, but this node does not yet know how to attach it automatically.`,
-    };
-  }
-
   const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
     const current = getLocalAgentIntegration(config, requested.id);
     if (current?.enabled === false && patch.enabled !== false) {
@@ -2790,9 +2730,20 @@ export async function connectLocalAgentIntegrationFromUi(
   const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
     try {
       bridgeHealthCache = null;
-      await runSetup(packageName, attachJob.controller.signal);
+      await runSetup(attachJob.controller.signal);
       if (isOpenClawUiAttachCancelled(attachJob)) return;
       bridgeHealthCache = null;
+
+      if (!verifyMemorySlot()) {
+        await persistIntegrationState({
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: 'OpenClaw memory slot election failed after setup — adapter-openclaw not elected to plugins.slots.memory',
+          },
+        });
+        return;
+      }
 
       let latest = await probeHealth(config, bridgeAuthToken, {
         ignoreBridgeCache: true,
@@ -2860,6 +2811,80 @@ export async function connectLocalAgentIntegrationFromUi(
       ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
       : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
   };
+}
+
+/**
+ * CONTRACT (issue #198 / D1 reverse-setup): This helper MUST leave
+ * ~/.openclaw/openclaw.json in a state where `plugins.slots.memory !==
+ * "adapter-openclaw"` and the adapter load path is no longer listed.
+ * If the reverse-merge completes but the invariant is still violated,
+ * callers must surface runtime.status='error' and NOT transition to
+ * 'disconnected'. The adapter's `unmergeOpenClawConfig` is symmetric to
+ * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
+ */
+export type ReverseLocalAgentSetupDeps = {
+  unmergeOpenClawConfig?: (configPath: string) => void;
+  verifyUnmergeInvariants?: (configPath: string) => string | null;
+};
+
+export async function reverseLocalAgentSetupForUi(
+  _config: DkgConfig,
+  openclawConfigPath?: string,
+  deps: ReverseLocalAgentSetupDeps = {},
+): Promise<void> {
+  const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : localOpenclawConfigPath();
+  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants)
+    ? { unmergeOpenClawConfig: deps.unmergeOpenClawConfig, verifyUnmergeInvariants: deps.verifyUnmergeInvariants }
+    : await import('@origintrail-official/dkg-adapter-openclaw');
+  const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
+  const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
+  unmergeOpenClawConfig(resolvedPath);
+  const failure = verifyUnmergeInvariants(resolvedPath);
+  if (failure) {
+    throw new Error(failure);
+  }
+}
+
+export async function refreshLocalAgentIntegrationFromUi(
+  config: DkgConfig,
+  id: string,
+  bridgeAuthToken: string | undefined,
+): Promise<LocalAgentIntegrationRecord> {
+  const normalizedId = normalizeIntegrationId(id);
+  const existing = getLocalAgentIntegration(config, normalizedId);
+  if (!existing) {
+    throw new Error(`Unknown integration: ${id}`);
+  }
+  if (normalizedId !== 'openclaw') {
+    return existing;
+  }
+
+  bridgeHealthCache = null;
+  const health = await probeOpenClawChannelHealth(config, bridgeAuthToken, {
+    ignoreBridgeCache: true,
+    timeoutMs: 3_000,
+  });
+
+  if (health.ok) {
+    return updateLocalAgentIntegration(config, normalizedId, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+  }
+
+  return updateLocalAgentIntegration(config, normalizedId, {
+    runtime: {
+      status: 'error',
+      ready: false,
+      lastError: health.error ?? 'OpenClaw bridge offline',
+    },
+  });
 }
 
 function shouldTryNextOpenClawTarget(status: number): boolean {
@@ -4671,7 +4696,7 @@ async function handleRequest(
     // registered later via POST /api/context-graph/register.
     if (register === true) {
       try {
-        const regResult = await agent.registerContextGraph(id);
+        const regResult = await agent.registerContextGraph(id, { callerAgentAddress: requestAgentAddress });
         return jsonResponse(res, 200, {
           created: id,
           uri: `did:dkg:context-graph:${id}`,
@@ -4708,7 +4733,7 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
     try {
-      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });
+      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy, callerAgentAddress: requestAgentAddress });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -4744,7 +4769,7 @@ async function handleRequest(
     }
     if (!isValidContextGraphId(contextGraphId)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
-      await agent.inviteToContextGraph(contextGraphId, targetPeerId);
+      await agent.inviteToContextGraph(contextGraphId, targetPeerId, requestAgentAddress);
       return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId });
     } catch (err: any) {
       const msg = err?.message ?? '';
@@ -6287,14 +6312,31 @@ async function handleRequest(
     let triples: Array<{ p: string; o: string }> = [];
     let entityRdfType: string | null = null;
     try {
+      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
+      // not sanitisation — a crafted input containing `>` or whitespace can
+      // still break out of the interpolated `<…>`. `sparqlIri` runs
+      // `assertSafeIri` before wrapping.
       const entityIri = entityUri.replace(/^<|>$/g, '');
+      let safeEntityIri: string;
+      try {
+        safeEntityIri = sparqlIri(entityIri);
+      } catch {
+        return jsonResponse(res, 400, {
+          error: `Unsafe entityUri: ${entityUri}`,
+        });
+      }
       const triplesResult = await agent.query(
-        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { <${entityIri}> ?p ?o } } LIMIT 200`,
+        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
         { contextGraphId },
       );
+      // `agent.query()` can return bindings as SPARQL-JSON objects
+      // (`{value, type, …}`) once the result has passed through the
+      // normaliser — stringifying them directly produces "[object Object]"
+      // and wrecks the downstream rdf:type lookup / LLM prompt. See
+      // `bindingValue` near the top of this file.
       triples = (triplesResult?.bindings ?? []).map((row: any) => ({
-        p: String(row.p ?? ''),
-        o: String(row.o ?? ''),
+        p: bindingValue(row.p),
+        o: bindingValue(row.o),
       }));
       const typeT = triples.find(
         (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
@@ -6318,26 +6360,41 @@ async function handleRequest(
     let detailHint: string | null = null;
     let entityTypeLabel: string | null = null;
     if (entityRdfType) {
+      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
+      // so it's normally a safe IRI — but crafted imported data could in
+      // principle smuggle unsafe chars through. Validate before interpolating.
+      let safeTypeIri: string | null = null;
       try {
-        const hintResult = await agent.query(
-          `
-            SELECT ?hint ?label WHERE {
-              GRAPH ?g {
-                ?binding <http://dkg.io/ontology/profile/forType> <${entityRdfType}> ;
-                         <http://dkg.io/ontology/profile/detailHint> ?hint .
-                OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
-              }
-            } LIMIT 1
-          `,
-          { contextGraphId, subGraphName: 'meta' },
-        );
-        const row = hintResult?.bindings?.[0];
-        if (row) {
-          detailHint = String(row.hint ?? '').replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-          if (row.label) entityTypeLabel = String(row.label).replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-        }
+        safeTypeIri = sparqlIri(entityRdfType);
       } catch {
-        // meta sub-graph may be missing — fall through, LLM still has triples.
+        safeTypeIri = null;
+      }
+      if (safeTypeIri) {
+        try {
+          const hintResult = await agent.query(
+            `
+              SELECT ?hint ?label WHERE {
+                GRAPH ?g {
+                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
+                           <http://dkg.io/ontology/profile/detailHint> ?hint .
+                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+                }
+              } LIMIT 1
+            `,
+            { contextGraphId, subGraphName: 'meta' },
+          );
+          const row = hintResult?.bindings?.[0];
+          if (row) {
+            const hintRaw = bindingValue(row.hint);
+            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            if (row.label) {
+              const labelRaw = bindingValue(row.label);
+              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            }
+          }
+        } catch {
+          // meta sub-graph may be missing — fall through, LLM still has triples.
+        }
       }
     }
 
@@ -6839,10 +6896,11 @@ async function handleRequest(
     // the sync protocol enforces access on the remote side regardless.
     const localAllowed = await agent.getContextGraphAllowedAgents(paranetId).catch(() => [] as string[]);
     if (localAllowed.length > 0) {
-      const myAddr = agent.getDefaultAgentAddress();
-      if (myAddr && !localAllowed.some((a: string) => a.toLowerCase() === myAddr.toLowerCase())) {
+      const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+      const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
+      if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
         return jsonResponse(res, 403, {
-          error: `Your agent (${myAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
+          error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
         });
       }
     }
@@ -7047,14 +7105,12 @@ async function handleRequest(
   // POST /api/context-graph/rename (or /api/paranet/rename)
   //
   // Updates the display name (schema:name) of an existing context graph
-  // without touching any of its data. Targets both possible definition
-  // graphs — the ONTOLOGY graph (open CGs) and the CG's _meta graph
-  // (curated CGs) — so callers don't need to know which one applies.
-  //
-  // We delete any pre-existing name triple on the CG URI in both graphs
-  // before inserting the new one, guaranteeing idempotent rename and
-  // avoiding the "two names in the store" failure mode that pure-insert
-  // semantics would produce.
+  // without touching any of its data. Delegates to `agent.renameContextGraph`
+  // which (a) enforces owner-only authorization via `assertCallerIsOwner`
+  // (same protection as add/remove-participant), (b) wipes old name triples
+  // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
+  // the new name into both so the rename is durable for open AND private
+  // CGs (private curated graphs read their definition from `_meta`).
   if (
     req.method === "POST" &&
     (path === "/api/context-graph/rename" || path === "/api/paranet/rename")
@@ -7064,37 +7120,19 @@ async function handleRequest(
     if (!id || !name) {
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     }
-    const cgUri = `did:dkg:context-graph:${id}`;
-    const ontologyGraph = 'did:dkg:context-graph:ontology';
-    const cgMetaGraph = `did:dkg:context-graph:${id}/_meta`;
-    const schemaName = 'https://schema.org/name';
     try {
-      // Wipe any existing name triples in both candidate graphs — either one
-      // will be a no-op for CGs that don't live there, which is the desired
-      // idempotence. We don't query-first because `deleteByPattern` is
-      // already a no-op on empty matches.
-      await agent.store.deleteByPattern({
-        subject: cgUri,
-        predicate: schemaName,
-        graph: ontologyGraph,
-      });
-      await agent.store.deleteByPattern({
-        subject: cgUri,
-        predicate: schemaName,
-        graph: cgMetaGraph,
-      });
-      // Insert the canonical name triple into whichever graph the CG was
-      // originally created in. We write to both deterministically — the
-      // ONTOLOGY graph is the primary source for `listContextGraphs`, and
-      // _meta doubles as a private curated-CG index. Harmless duplication
-      // in open CGs.
-      await agent.store.insert([
-        { subject: cgUri, predicate: schemaName, object: `"${String(name).replace(/"/g, '\\"')}"`, graph: ontologyGraph },
-      ]);
+      await agent.renameContextGraph(id, String(name), requestAgentAddress);
       return jsonResponse(res, 200, { renamed: id, name });
     } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/Only the context graph creator/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (/does not exist|has no known creator|non-empty string/.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
       return jsonResponse(res, 500, {
-        error: `Failed to rename context graph: ${err?.message ?? String(err)}`,
+        error: `Failed to rename context graph: ${msg}`,
       });
     }
   }
@@ -7147,6 +7185,31 @@ async function handleRequest(
     }
   }
 
+  // POST /api/local-agent-integrations/:id/refresh — re-probe bridge health (OpenClaw) or
+  // return the current record (other integrations that don't yet have a bridge).
+  if (
+    req.method === 'POST'
+    && path.startsWith('/api/local-agent-integrations/')
+    && path.endsWith('/refresh')
+  ) {
+    const segments = path.slice('/api/local-agent-integrations/'.length, -'/refresh'.length);
+    if (!segments || segments.includes('/')) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
+    const rawId = decodeURIComponent(segments);
+    const normalizedId = normalizeIntegrationId(rawId);
+    if (!LOCAL_AGENT_INTEGRATION_DEFINITIONS[normalizedId]) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
+    }
+  }
+
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
     const id = path.slice('/api/local-agent-integrations/'.length);
@@ -7156,12 +7219,31 @@ async function handleRequest(
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
       const normalizedId = normalizeIntegrationId(id);
-      const disconnectRequested = parsed.enabled === false
-        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
-      if (disconnectRequested && normalizedId) {
+      const normalizedPatch = normalizeExplicitLocalAgentDisconnectBody(parsed);
+      const explicitDisconnect = normalizedPatch.enabled === false
+        && isPlainRecord(normalizedPatch.runtime)
+        && normalizedPatch.runtime.status === 'disconnected';
+      if (explicitDisconnect && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
-      const integration = updateLocalAgentIntegration(config, id, parsed);
+
+      if (explicitDisconnect && normalizedId === 'openclaw') {
+        try {
+          await reverseLocalAgentSetupForUi(config);
+        } catch (err: any) {
+          const integration = updateLocalAgentIntegration(config, id, {
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
+            },
+          });
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, integration });
+        }
+      }
+
+      const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
@@ -7316,12 +7398,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.approveCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.approveCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // POST /api/ccl/policy/revoke
@@ -7333,12 +7424,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.revokeCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.revokeCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // GET /api/ccl/policy/list

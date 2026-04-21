@@ -1157,6 +1157,24 @@ export async function disconnectLocalAgentIntegration(id: string): Promise<void>
   });
 }
 
+export async function refreshLocalAgentIntegration(id: string): Promise<LocalAgentConnectResult> {
+  const normalizedId = id.trim().toLowerCase();
+  const response = await post<{ ok: boolean; notice?: string; integration?: LocalAgentIntegrationRecord }>(
+    `/api/local-agent-integrations/${encodeURIComponent(normalizedId)}/refresh`,
+    {},
+  );
+  const integration = response.integration
+    ? await mapLocalAgentIntegrationRecord(response.integration)
+    : (await fetchLocalAgentIntegrations()).integrations.find((item) => item.id === normalizedId);
+  if (!integration) {
+    throw new Error(`Missing local agent integration: ${normalizedId}`);
+  }
+  return {
+    integration,
+    notice: response.notice,
+  };
+}
+
 export async function fetchLocalAgentHealth(id: string) {
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   throw new Error(`${id} local health is not available yet.`);

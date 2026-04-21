@@ -15,7 +15,7 @@ import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -549,12 +549,9 @@ program
       console.log(isTTY ? STARTUP_BANNER : '');
       console.log(`  Node:       ${config.name} (PID ${startedPid})`);
       console.log(`  Node UI:    ${cyan(`http://${hostDisplay}:${port}/ui`)}`);
-      console.log(`  GitHub:     ${cyan('https://github.com/OriginTrail/dkg-v9')}`);
+      console.log(`  GitHub:     ${cyan(loadProjectConfig().githubUrl)}`);
       console.log(`  Discord:    ${cyan('https://discord.com/invite/xCaY7hvNwD')}`);
       console.log(`  Logs:       ${logPath()}`);
-      console.log('');
-      console.log(`  ${yellow('This is an experimental testnet node. Things will break.')}`);
-      console.log(`  ${yellow('Not intended for production use.')}`);
       console.log('');
       return;
     }
@@ -1583,29 +1580,39 @@ const openclawCmd = program
 
 openclawCmd
   .command('setup')
-  .description('Set up the DKG OpenClaw adapter (runs npx setup script)')
-  .allowUnknownOption(true)
-  .action(async () => {
-    const { execFileSync } = await import('node:child_process');
-    // Forward args after "openclaw setup" to the adapter setup script.
-    const oclawIdx = process.argv.indexOf('openclaw');
-    const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
-    const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
+  .description('Set up DKG node + OpenClaw adapter (non-interactive, idempotent)')
+  .option('--workspace <dir>', 'Override OpenClaw workspace directory')
+  .option('--name <name>', 'Override agent name')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--no-verify', 'Skip post-setup verification')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .option('--dry-run', 'Preview changes without writing anything')
+  // Deprecated flags kept for backwards compatibility with automation that
+  // shipped before faucet funding was removed from setup. Accepted as no-ops
+  // with a one-line warning so scripted `dkg openclaw setup --no-fund ...`
+  // invocations don't fail with `error: unknown option '--no-fund'`.
+  .option('--no-fund', 'Deprecated no-op — faucet funding has been removed')
+  .option('--fund', 'Deprecated no-op — faucet funding has been removed')
+  .action(async (opts, command) => {
+    // Dynamic import + process.exit plumbing stay here; the deprecation-flag
+    // bookkeeping and the actual `runSetup` call live in `openclawSetupAction`
+    // so they can be unit-tested without spawning the built CLI.
+    let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
-      // This is a thin convenience wrapper — the primary entry point is:
-      //   npx @origintrail-official/dkg-adapter-openclaw setup
-      // The adapter's own setup script warns if running from an ephemeral
-      // npx cache and advises users to install globally.
-      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
-        stdio: 'inherit',
-        shell: process.platform === 'win32',
-      });
+      ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));
     } catch (err: any) {
-      if (err.status) {
-        process.exit(err.status);
-      }
-      console.error('\nTo set up the OpenClaw adapter, run:');
-      console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+      console.error('\n[dkg openclaw setup] OpenClaw adapter is not available.');
+      console.error(`  Reason: ${err?.message ?? err}`);
+      console.error('  • In a monorepo dev checkout: run `pnpm build` at the repo root to build all workspaces.');
+      console.error('  • With a global install: reinstall with `npm install -g @origintrail-official/dkg`.\n');
+      process.exit(1);
+    }
+
+    const { openclawSetupAction } = await import('./openclaw-setup.js');
+    try {
+      await openclawSetupAction(opts, command, { runSetup });
+    } catch (err: any) {
+      console.error(`\n[setup] ERROR: ${err?.message ?? err}\n`);
       process.exit(1);
     }
   });
@@ -2701,10 +2708,11 @@ program
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
     const net = await loadNetworkConfig();
+    const proj = loadProjectConfig();
     const au = config.autoUpdate ?? net?.autoUpdate ?? {
       enabled: true,
-      repo: 'OriginTrail/dkg-v9',
-      branch: 'main',
+      repo: proj.repo,
+      branch: proj.defaultBranch,
       allowPrerelease: true,
       checkIntervalMinutes: 30,
     };

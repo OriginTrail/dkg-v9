@@ -6,6 +6,7 @@ import {
   dkgFindAgents,
   dkgSendMessage,
   dkgInvokeSkill,
+  dkgPersistChatTurn,
   dkgKnowledgeProvider,
   dkgService,
 } from '../src/index.js';
@@ -17,8 +18,8 @@ describe('dkgPlugin', () => {
     expect(dkgPlugin.description.length).toBeGreaterThan(0);
   });
 
-  it('exports 5 actions', () => {
-    expect(dkgPlugin.actions).toHaveLength(5);
+  it('exports 6 actions (incl. K-11 chat-persist)', () => {
+    expect(dkgPlugin.actions).toHaveLength(6);
   });
 
   it('exports at least 1 provider', () => {
@@ -31,7 +32,7 @@ describe('dkgPlugin', () => {
 });
 
 describe('actions', () => {
-  const actions = [dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill];
+  const actions = [dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill, dkgPersistChatTurn];
 
   it.each(actions.map(a => [a.name, a]))('%s has name, description, similes, and handler', (_name, action) => {
     expect(typeof action.name).toBe('string');

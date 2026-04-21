@@ -23,22 +23,38 @@ import {
   dkgFindAgents,
   dkgSendMessage,
   dkgInvokeSkill,
+  dkgPersistChatTurn,
 } from './actions.js';
 
-export const dkgPlugin: Plugin = {
+export const dkgPlugin: Plugin & {
+  hooks: { onChatTurn: (...args: any[]) => any; onAssistantReply: (...args: any[]) => any };
+  chatPersistenceHook: (...args: any[]) => any;
+} = {
   name: 'dkg',
   description:
     'Turns this ElizaOS agent into a DKG node — publish knowledge, ' +
     'query the graph, discover agents, and invoke remote skills over a ' +
     'decentralized P2P network.',
-  actions: [dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill],
+  actions: [dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill, dkgPersistChatTurn],
   providers: [dkgKnowledgeProvider],
   services: [dkgService],
+  hooks: {
+    onChatTurn: (...args) => (dkgService as any).persistChatTurn(...args),
+    onAssistantReply: (...args) => (dkgService as any).persistChatTurn(...args),
+  },
+  chatPersistenceHook: (...args) => (dkgService as any).persistChatTurn(...args),
 };
 
 export { dkgService, getAgent } from './service.js';
 export { dkgKnowledgeProvider } from './provider.js';
-export { dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill } from './actions.js';
+export {
+  dkgPublish,
+  dkgQuery,
+  dkgFindAgents,
+  dkgSendMessage,
+  dkgInvokeSkill,
+  dkgPersistChatTurn,
+} from './actions.js';
 export type {
   Plugin,
   Action,

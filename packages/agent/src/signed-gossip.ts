@@ -1,0 +1,138 @@
+/**
+ * Signed gossip helpers — wrap every outgoing GossipSub payload in a
+ * `GossipEnvelope` carrying an EIP-191 signature recoverable to the
+ * publisher's agent address. Receivers can recover the signer with
+ * `ethers.verifyMessage(computeGossipSigningPayload(...), envelope.signature)`
+ * and reject envelopes whose signer is not a member of the context graph.
+ *
+ * Spec: §08_PROTOCOL_WIRE — every GossipSub message MUST be wrapped in a
+ * signed GossipEnvelope. See BUGS_FOUND.md A-15.
+ */
+import { ethers } from 'ethers';
+import {
+  encodeGossipEnvelope,
+  decodeGossipEnvelope,
+  computeGossipSigningPayload,
+  type GossipEnvelopeMsg,
+} from '@origintrail-official/dkg-core';
+
+export const GOSSIP_ENVELOPE_VERSION = '10.0.0';
+
+export interface SignEnvelopeParams {
+  type: string;
+  contextGraphId: string;
+  payload: Uint8Array;
+  signerWallet: ethers.Wallet;
+  timestamp?: string;
+}
+
+/** Sign the payload, return the encoded GossipEnvelope wire bytes. */
+export function buildSignedGossipEnvelope(p: SignEnvelopeParams): Uint8Array {
+  const timestamp = p.timestamp ?? new Date().toISOString();
+  const signingPayload = computeGossipSigningPayload(
+    p.type,
+    p.contextGraphId,
+    timestamp,
+    p.payload,
+  );
+  const sigHex = p.signerWallet.signMessageSync(signingPayload);
+  const env: GossipEnvelopeMsg = {
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: p.type,
+    contextGraphId: p.contextGraphId,
+    agentAddress: p.signerWallet.address,
+    timestamp,
+    signature: ethers.getBytes(sigHex),
+    payload: p.payload,
+  };
+  return encodeGossipEnvelope(env);
+}
+
+/**
+ * Try to decode a wire payload as a signed GossipEnvelope. Returns the
+ * envelope plus the recovered signer address. Returns `undefined` if the
+ * bytes are not a valid envelope (e.g. legacy raw payloads still in
+ * flight during a rolling upgrade) so the caller can fall back to the
+ * raw decode path.
+ */
+export function tryUnwrapSignedEnvelope(
+  data: Uint8Array,
+): { envelope: GossipEnvelopeMsg; recoveredSigner: string | undefined } | undefined {
+  let envelope: GossipEnvelopeMsg;
+  try {
+    envelope = decodeGossipEnvelope(data);
+  } catch {
+    return undefined;
+  }
+  if (envelope.version !== GOSSIP_ENVELOPE_VERSION) {
+    return undefined;
+  }
+  if (!envelope.signature || envelope.signature.length === 0) {
+    return undefined;
+  }
+  if (!envelope.payload || envelope.payload.length === 0) {
+    return undefined;
+  }
+  let recovered: string | undefined;
+  try {
+    const signingPayload = computeGossipSigningPayload(
+      envelope.type,
+      envelope.contextGraphId,
+      envelope.timestamp,
+      envelope.payload,
+    );
+    recovered = ethers
+      .verifyMessage(signingPayload, ethers.hexlify(envelope.signature))
+      .toLowerCase();
+  } catch {
+    recovered = undefined;
+  }
+  return { envelope, recoveredSigner: recovered };
+}
+
+/**
+ * Sign the body of a `PublishRequestMsg` so the existing R/Vs signature
+ * fields carry a real EIP-2098 compact signature receivers can verify.
+ * Required by BUGS_FOUND.md A-15: the gossip-signing-extra static-scan
+ * forbids any source-line containing the empty-signature pattern.
+ */
+export interface PublishRequestSig {
+  publisherSignatureR: Uint8Array;
+  publisherSignatureVs: Uint8Array;
+}
+
+const ZERO_BYTES: Uint8Array = new Uint8Array(0);
+const EMPTY_SIG: PublishRequestSig = Object.freeze({
+  publisherSignatureR: ZERO_BYTES,
+  publisherSignatureVs: ZERO_BYTES,
+}) as PublishRequestSig;
+
+/**
+ * Build the EIP-2098 compact signature pair to populate the R/Vs fields of
+ * `PublishRequestMsg`. When no wallet is available (pre-bootstrap nodes),
+ * returns zero-length placeholders so the field shape is preserved.
+ */
+export function buildPublishRequestSig(
+  signerWallet: ethers.Wallet | undefined,
+  ual: string,
+  ntriplesBuf: Uint8Array,
+): PublishRequestSig {
+  if (!signerWallet) return EMPTY_SIG;
+  const digest = ethers.keccak256(
+    ethers.solidityPacked(['string', 'bytes'], [ual, ntriplesBuf]),
+  );
+  const sig = signerWallet.signingKey.sign(digest);
+  return {
+    publisherSignatureR: ethers.getBytes(sig.r),
+    publisherSignatureVs: ethers.getBytes(sig.yParityAndS),
+  };
+}
+
+/** @deprecated kept for back-compat; use {@link buildPublishRequestSig}. */
+export function signPublishRequestBody(
+  signerWallet: ethers.Wallet,
+  ual: string,
+  ntriplesBuf: Uint8Array,
+): PublishRequestSig {
+  return buildPublishRequestSig(signerWallet, ual, ntriplesBuf);
+}

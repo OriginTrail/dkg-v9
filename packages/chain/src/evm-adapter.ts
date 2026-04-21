@@ -1834,6 +1834,23 @@ export class EVMChainAdapter implements ChainAdapter {
     return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
   }
 
+  /**
+   * Read the per-CG `requiredSignatures` value from `ContextGraphStorage`.
+   * Returns 0 when the CG is not registered or the contract is unavailable.
+   * Throws on contract-level errors so callers can decide whether to fall
+   * back to the global minimum or fail loud.
+   *
+   * Spec §06_PUBLISH / BUGS_FOUND.md A-5.
+   */
+  async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
+    await this.init();
+    const storage = this.contracts.contextGraphStorage;
+    if (!storage) return 0;
+    if (contextGraphId <= 0n) return 0;
+    const raw: bigint = await storage.getContextGraphRequiredSignatures(contextGraphId);
+    return Number(raw);
+  }
+
   async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
     await this.init();
     const identityStorage = await this.resolveContract('IdentityStorage');

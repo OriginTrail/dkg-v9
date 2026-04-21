@@ -92,11 +92,12 @@ describe('[K-11] chat-persistence hook required by spec §09A_FRAMEWORK_ADAPTERS
     });
   });
 
-  it('positive control: plugin still exposes the five documented actions', () => {
+  it('positive control: plugin still exposes the documented actions (incl. K-11 chat-persist)', () => {
     const names = (dkgPlugin.actions ?? []).map((a) => a.name).sort();
     expect(names).toEqual([
       'DKG_FIND_AGENTS',
       'DKG_INVOKE_SKILL',
+      'DKG_PERSIST_CHAT_TURN',
       'DKG_PUBLISH',
       'DKG_QUERY',
       'DKG_SEND_MESSAGE',

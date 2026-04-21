@@ -271,6 +271,115 @@ export const dkgInvokeSkill: Action = {
   ],
 };
 
+/**
+ * DKG_PERSIST_CHAT_TURN — fulfils spec §09A_FRAMEWORK_ADAPTERS chat-turn
+ * persistence contract. Stores the user message + assistant reply (when
+ * present) into the agent's working-memory graph as RDF triples so that
+ * downstream queries can recover the chat history through the DKG node
+ * itself. See BUGS_FOUND.md K-11.
+ */
+export const dkgPersistChatTurn: Action = {
+  name: 'DKG_PERSIST_CHAT_TURN',
+  similes: ['STORE_CHAT_TURN', 'PERSIST_CHAT', 'STORE_CHAT', 'RECORD_TURN', 'SAVE_CHAT_TURN'],
+  description:
+    'Persist a chat turn (user message + assistant reply) into the DKG ' +
+    'working-memory graph so it can be retrieved later via SPARQL.',
+
+  validate: async () => true,
+
+  handler: async (
+    runtime: IAgentRuntime,
+    message: Memory,
+    state: State,
+    options: Record<string, unknown>,
+    callback: HandlerCallback,
+  ): Promise<boolean> => {
+    try {
+      const agent = requireAgent();
+      const result = await persistChatTurnImpl(agent, runtime, message, state, options);
+      callback({ text: `Chat turn persisted (${result.tripleCount} triples).` });
+      return true;
+    } catch (err: any) {
+      callback({ text: `Chat turn persist failed: ${err.message}` });
+      return false;
+    }
+  },
+
+  examples: [
+    [
+      { user: '{{user1}}', content: { text: 'remember this conversation', action: 'DKG_PERSIST_CHAT_TURN' } },
+      { user: '{{user2}}', content: { text: 'Chat turn persisted.' } },
+    ],
+  ],
+};
+
+/** Shared implementation used by the action AND the dkgService.persistChatTurn / hooks.onChatTurn surface. */
+export async function persistChatTurnImpl(
+  agent: { publish: (cgId: string, quads: any) => Promise<{ kcId: string }> },
+  runtime: IAgentRuntime,
+  message: Memory,
+  state: State,
+  options: Record<string, unknown>,
+): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
+  const optsAny = options as Record<string, unknown> & {
+    contextGraphId?: string;
+    assistantText?: string;
+    assistantReply?: { text?: string };
+  };
+
+  const userId = (message as any).userId ?? 'anonymous';
+  const roomId = (message as any).roomId ?? 'default';
+  const memId = (message as any).id ?? `mem-${Date.now()}`;
+  const userText = message.content?.text ?? '';
+  const assistantText =
+    optsAny.assistantText
+    ?? optsAny.assistantReply?.text
+    ?? (state as any)?.lastAssistantReply
+    ?? '';
+  const characterName = runtime.character?.name ?? runtime.getSetting('DKG_AGENT_NAME') ?? 'elizaos-agent';
+  const contextGraphId = optsAny.contextGraphId ?? runtime.getSetting('DKG_CHAT_CG') ?? 'chat';
+  const turnUri = `urn:dkg:elizaos:chat:${escapeIri(roomId)}:${escapeIri(memId)}`;
+  const ts = new Date().toISOString();
+
+  const quads: Array<{ subject: string; predicate: string; object: string }> = [
+    { subject: turnUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      object: '<https://schema.origintrail.io/dkg/v10/ChatTurn>' },
+    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userId',
+      object: rdfString(userId) },
+    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/roomId',
+      object: rdfString(roomId) },
+    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/agentName',
+      object: rdfString(characterName) },
+    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userMessage',
+      object: rdfString(userText) },
+    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/timestamp',
+      object: `${rdfString(ts)}^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+  ];
+  if (assistantText) {
+    quads.push({
+      subject: turnUri,
+      predicate: 'https://schema.origintrail.io/dkg/v10/assistantReply',
+      object: rdfString(assistantText),
+    });
+  }
+
+  const result = await agent.publish(contextGraphId, quads as any);
+  return { tripleCount: quads.length, turnUri, kcId: result.kcId };
+}
+
+function escapeIri(s: string): string {
+  return String(s).replace(/[^A-Za-z0-9_.-]/g, '_');
+}
+
+function rdfString(s: string): string {
+  const escaped = String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+  return `"${escaped}"`;
+}
+
 function parseNQuads(text: string): Array<{ subject: string; predicate: string; object: string; graph?: string }> {
   const quads: Array<{ subject: string; predicate: string; object: string; graph?: string }> = [];
   for (const line of text.split('\n')) {

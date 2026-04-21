@@ -558,6 +558,8 @@ export class DKGPublisher implements Publisher {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
       subGraphName?: string;
+      /** Per-CG quorum (spec §06 / A-5). */
+      perCgRequiredSignatures?: number;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -671,6 +673,7 @@ export class DKGPublisher implements Publisher {
       publishContextGraphId: chainCgId ?? undefined,
       fromSharedMemory: true,
       subGraphName: options?.subGraphName,
+      perCgRequiredSignatures: options?.perCgRequiredSignatures,
       [INTERNAL_ORIGIN_TOKEN]: true,
     };
     const publishResult = await this.publish(internalPublishOptions);
@@ -1201,12 +1204,31 @@ export class DKGPublisher implements Publisher {
       v10KavAddress = undefined;
     }
 
+    // Spec §06_PUBLISH / BUGS_FOUND.md A-5 — per-CG quorum gate. When the
+    // caller passed an explicit per-CG `requiredSignatures` (M-of-N) and we
+    // collected fewer ACKs than that floor, the publish MUST stay tentative.
+    // Self-signing here would silently bypass the per-CG quorum even when
+    // the global ParametersStorage minimum is 1, so we short-circuit
+    // BEFORE the self-sign fallback and BEFORE the on-chain tx is built.
+    const perCgRequired = options.perCgRequiredSignatures ?? 0;
+    const collectedAckCount = v10ACKs?.length ?? 0;
+    const perCgQuorumUnmet = perCgRequired > 1 && collectedAckCount < perCgRequired;
+    if (perCgQuorumUnmet) {
+      this.log.warn(
+        ctx,
+        `Per-CG quorum not met: collected ${collectedAckCount}/${perCgRequired} ACKs ` +
+        `for context graph ${v10CgDomain} — skipping on-chain tx, publish stays tentative ` +
+        `(spec §06_PUBLISH / BUGS_FOUND.md A-5)`,
+      );
+    }
+
     // Self-sign ACK as last resort: single-node mode (no provider), or when
     // ACK collection was skipped for private data, or when collection failed.
     // On networks requiring > 1 signature, a single self-signed ACK will be
     // rejected on-chain by minimumRequiredSignatures — this is intentional:
     // the contract is the ultimate gatekeeper.
     if (
+      !perCgQuorumUnmet &&
       (!v10ACKs || v10ACKs.length === 0) &&
       this.publisherWallet &&
       this.publisherNodeIdentityId > 0n &&
@@ -1250,6 +1272,8 @@ export class DKGPublisher implements Publisher {
       this.log.warn(ctx, `No EVM wallet configured — skipping on-chain publish`);
     } else if (identityId === 0n) {
       this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
+    } else if (perCgQuorumUnmet) {
+      this.log.info(ctx, `Per-CG quorum unmet — on-chain publish deferred (status remains tentative).`);
     } else {
       onPhase?.('chain:sign', 'start');
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);

@@ -32,6 +32,11 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import {
+  buildSignedGossipEnvelope,
+  tryUnwrapSignedEnvelope,
+  buildPublishRequestSig,
+} from './signed-gossip.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
@@ -1844,6 +1849,109 @@ export class DKGAgent {
   }
 
   /**
+   * Static challenge string used to authenticate a working-memory query.
+   * The caller signs `${WM_AUTH_CHALLENGE_PREFIX}${agentAddress}` with the
+   * agent's private key; the agent layer recovers the signer and compares
+   * against the requested address. Spec §04 / RFC-29.
+   */
+  static readonly WM_AUTH_CHALLENGE_PREFIX = 'dkg-wm-auth:';
+
+  /**
+   * Compute the canonical WM-auth message a caller must sign to query a
+   * given agent's working memory on a multi-agent node.
+   */
+  static wmAuthChallenge(agentAddress: string): string {
+    return `${DKGAgent.WM_AUTH_CHALLENGE_PREFIX}${agentAddress.toLowerCase()}`;
+  }
+
+  /**
+   * Sign the WM-auth challenge for a locally-registered agent, returning
+   * a signature accepted by `query({ view: 'working-memory', agentAuthSignature })`.
+   * Returns undefined if the agent is not registered locally (callers
+   * outside the node have to sign with their own private key).
+   */
+  signWmAuthChallenge(agentAddress: string): string | undefined {
+    const want = agentAddress.toLowerCase();
+    let rec: AgentKeyRecord | undefined;
+    for (const r of this.localAgents.values()) {
+      if (r.agentAddress.toLowerCase() === want) {
+        rec = r;
+        break;
+      }
+    }
+    if (!rec || !rec.privateKey) return undefined;
+    try {
+      const wallet = new ethers.Wallet(rec.privateKey);
+      return wallet.signMessageSync(DKGAgent.wmAuthChallenge(agentAddress));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private verifyWmAuthSignature(
+    agentAddress: string,
+    signature: string | undefined,
+  ): boolean {
+    if (!signature) return false;
+    try {
+      const recovered = ethers.verifyMessage(
+        DKGAgent.wmAuthChallenge(agentAddress),
+        signature,
+      );
+      return recovered.toLowerCase() === agentAddress.toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Return an `ethers.Wallet` for the default agent if its private key is
+   * available locally. Used to sign GossipEnvelopes (BUGS_FOUND.md A-15)
+   * and `PublishRequestMsg` bodies. Returns undefined for self-sovereign
+   * agents whose key material is held by the user.
+   */
+  getDefaultPublisherWallet(): ethers.Wallet | undefined {
+    const addr = this.defaultAgentAddress;
+    if (!addr) return undefined;
+    for (const r of this.localAgents.values()) {
+      if (r.agentAddress.toLowerCase() === addr.toLowerCase() && r.privateKey) {
+        try {
+          return new ethers.Wallet(r.privateKey);
+        } catch {
+          return undefined;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Wrap `payload` in a signed `GossipEnvelope` (spec §08_PROTOCOL_WIRE)
+   * and publish to `topic`. Falls back to raw publish when no signing key
+   * is available (e.g. pre-bootstrap node), so the on-the-wire format
+   * stays backward compatible during a rolling upgrade.
+   */
+  async signedGossipPublish(
+    topic: string,
+    type: string,
+    contextGraphId: string,
+    payload: Uint8Array,
+  ): Promise<void> {
+    const wallet = this.getDefaultPublisherWallet();
+    if (!wallet) {
+      await this.gossip.publish(topic, payload);
+      return;
+    }
+    const wire = buildSignedGossipEnvelope({
+      type,
+      contextGraphId,
+      payload,
+      signerWallet: wallet,
+    });
+    await this.gossip.publish(topic, wire);
+  }
+
+  /**
    * Resolve the agent address for a request: first try agent token, then fall
    * back to the default agent (for node-level tokens / backward compatibility).
    */
@@ -2337,7 +2445,7 @@ export class DKGAgent {
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
       try {
-        await this.gossip.publish(topic, message);
+        await this.signedGossipPublish(topic, 'SHARE', contextGraphId, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
@@ -2368,7 +2476,7 @@ export class DKGAgent {
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
       try {
-        await this.gossip.publish(topic, message);
+        await this.signedGossipPublish(topic, 'SHARE_CAS', contextGraphId, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
@@ -2402,6 +2510,24 @@ export class DKGAgent {
 
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
+    // Resolve per-CG quorum (spec §06_PUBLISH / BUGS_FOUND.md A-5). When the
+    // adapter exposes the lookup AND the CG has an on-chain id, plumb the
+    // per-CG `requiredSignatures` through to the publisher so the on-chain
+    // tx is gated on collected ACK count even when the global
+    // ParametersStorage minimum is 1.
+    let perCgRequiredSignatures: number | undefined;
+    if (onChainId && typeof this.chain.getContextGraphRequiredSignatures === 'function') {
+      try {
+        const id = BigInt(onChainId);
+        if (id > 0n) {
+          const n = await this.chain.getContextGraphRequiredSignatures(id);
+          if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
+        }
+      } catch {
+        // non-numeric on-chain id (e.g. mock-only graph) → skip per-CG gate.
+      }
+    }
+
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
     const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
@@ -2412,6 +2538,7 @@ export class DKGAgent {
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
       subGraphName: options?.subGraphName,
+      perCgRequiredSignatures,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -2540,6 +2667,13 @@ export class DKGAgent {
       operationCtx?: OperationContext;
       view?: GetView;
       agentAddress?: string;
+      /**
+       * Proof that the caller controls the private key matching `agentAddress`.
+       * Computed by signing `dkg-wm-auth:<agentAddress>` with `eth_signMessage`.
+       * REQUIRED for `view: 'working-memory'` queries on multi-agent nodes
+       * to prevent cross-agent WM impersonation (BUGS_FOUND.md A-1).
+       */
+      agentAuthSignature?: string;
       verifiedGraph?: string;
       assertionName?: string;
       subGraphName?: string;
@@ -2559,6 +2693,27 @@ export class DKGAgent {
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
       return { bindings: [] };
+    }
+
+    // Spec §04 / RFC-29 — multi-agent WM isolation. When more than one agent
+    // is registered on this node, an explicit `agentAddress` for a
+    // `working-memory` view requires a signature proving the caller owns
+    // the private key. Otherwise any in-process caller could read another
+    // co-hosted agent's WM by knowing/guessing the address.
+    // See BUGS_FOUND.md A-1.
+    if (
+      opts.view === 'working-memory'
+      && opts.agentAddress
+      && this.localAgents.size > 1
+    ) {
+      const ok = this.verifyWmAuthSignature(opts.agentAddress, opts.agentAuthSignature);
+      if (!ok) {
+        this.log.info(
+          ctx,
+          `WM cross-agent query denied: missing/invalid agentAuthSignature for ${opts.agentAddress}`,
+        );
+        return { bindings: [] };
+      }
     }
 
     // When no context graph is specified, exclude private CGs the caller cannot
@@ -2781,26 +2936,34 @@ export class DKGAgent {
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
       const gph = this.getOrCreateGossipPublishHandler();
-      await gph.handlePublishMessage(data, contextGraphId, undefined, from);
+      const env = tryUnwrapSignedEnvelope(data);
+      const payload = env?.envelope.payload ?? data;
+      await gph.handlePublishMessage(payload, contextGraphId, undefined, from);
     });
 
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
       const wh = this.getOrCreateSharedMemoryHandler();
-      await wh.handle(data, from);
+      const env = tryUnwrapSignedEnvelope(data);
+      const payload = env?.envelope.payload ?? data;
+      await wh.handle(payload, from);
     });
 
     const updateTopic = paranetUpdateTopic(contextGraphId);
     this.gossip.subscribe(updateTopic);
     this.gossip.onMessage(updateTopic, async (_topic, data, from) => {
       const uh = this.getOrCreateUpdateHandler();
-      await uh.handle(data, from);
+      const env = tryUnwrapSignedEnvelope(data);
+      const payload = env?.envelope.payload ?? data;
+      await uh.handle(payload, from);
     });
 
     const finalizationTopic = paranetFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
     this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, contextGraphId);
+      const env = tryUnwrapSignedEnvelope(data);
+      const payload = env?.envelope.payload ?? data;
+      await fh.handleFinalizationMessage(payload, contextGraphId);
     });
   }
 
@@ -3117,22 +3280,26 @@ export class DKGAgent {
           return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
         }).join('\n');
 
+        const ualCG = `did:dkg:context-graph:${opts.id}`;
+        const nquadsBufCG = new TextEncoder().encode(nquads);
+        const sigWalletCG = this.getDefaultPublisherWallet();
+        const sigCG = buildPublishRequestSig(sigWalletCG, ualCG, nquadsBufCG);
         const msg = encodePublishRequest({
-          ual: `did:dkg:context-graph:${opts.id}`,
-          nquads: new TextEncoder().encode(nquads),
+          ual: ualCG,
+          nquads: nquadsBufCG,
           paranetId: SYSTEM_PARANETS.ONTOLOGY,
           kas: [],
           publisherIdentity: this.wallet.keypair.publicKey,
-          publisherAddress: '',
+          publisherAddress: sigWalletCG?.address ?? '',
           startKAId: 0,
           endKAId: 0,
           chainId: '',
-          publisherSignatureR: new Uint8Array(0),
-          publisherSignatureVs: new Uint8Array(0),
+          publisherSignatureR: sigCG.publisherSignatureR,
+          publisherSignatureVs: sigCG.publisherSignatureVs,
         });
 
         try {
-          await this.gossip.publish(ontologyTopic, msg);
+          await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
         } catch {
           // No peers subscribed — ok for now
         }
@@ -3310,20 +3477,24 @@ export class DKGAgent {
     try {
       const onChainNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const ualReg = `did:dkg:context-graph:${id}`;
+      const nquadsBufReg = new TextEncoder().encode(onChainNquad);
+      const sigWalletReg = this.getDefaultPublisherWallet();
+      const sigReg = buildPublishRequestSig(sigWalletReg, ualReg, nquadsBufReg);
       const regMsg = encodePublishRequest({
-        ual: `did:dkg:context-graph:${id}`,
-        nquads: new TextEncoder().encode(onChainNquad),
+        ual: ualReg,
+        nquads: nquadsBufReg,
         paranetId: SYSTEM_PARANETS.ONTOLOGY,
         kas: [],
         publisherIdentity: this.wallet.keypair.publicKey,
-        publisherAddress: '',
+        publisherAddress: sigWalletReg?.address ?? '',
         startKAId: 0,
         endKAId: 0,
         chainId: '',
-        publisherSignatureR: new Uint8Array(0),
-        publisherSignatureVs: new Uint8Array(0),
+        publisherSignatureR: sigReg.publisherSignatureR,
+        publisherSignatureVs: sigReg.publisherSignatureVs,
       });
-      await this.gossip.publish(ontologyTopic, regMsg);
+      await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, regMsg);
     } catch (err) {
       this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -5825,22 +5996,25 @@ export class DKGAgent {
       return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
     }).join('\n');
 
+    const nquadsBufOnt = new TextEncoder().encode(nquads);
+    const sigWalletOnt = this.getDefaultPublisherWallet();
+    const sigOnt = buildPublishRequestSig(sigWalletOnt, ual, nquadsBufOnt);
     const msg = encodePublishRequest({
       ual,
-      nquads: new TextEncoder().encode(nquads),
+      nquads: nquadsBufOnt,
       paranetId: SYSTEM_PARANETS.ONTOLOGY,
       kas: [],
       publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: '',
+      publisherAddress: sigWalletOnt?.address ?? '',
       startKAId: 0,
       endKAId: 0,
       chainId: '',
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
+      publisherSignatureR: sigOnt.publisherSignatureR,
+      publisherSignatureVs: sigOnt.publisherSignatureVs,
     });
 
     try {
-      await this.gossip.publish(ontologyTopic, msg);
+      await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
     } catch {
       // No peers subscribed — ok for local-only operation
     }
@@ -6283,9 +6457,18 @@ export class DKGAgent {
         );
       }
 
-      const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
+      // Per-CG quorum (spec §06_PUBLISH / BUGS_FOUND.md A-5) supersedes the
+      // global ParametersStorage minimum, which is only the network-wide
+      // floor. Read both, use whichever is HIGHER so neither gate is bypassed.
+      const globalMin = typeof chain.getMinimumRequiredSignatures === 'function'
         ? await chain.getMinimumRequiredSignatures()
         : undefined;
+      const perCgMin = typeof chain.getContextGraphRequiredSignatures === 'function'
+        ? await chain.getContextGraphRequiredSignatures(cgIdBigInt).catch(() => 0)
+        : 0;
+      const requiredACKs = (globalMin === undefined && (!perCgMin || perCgMin <= 0))
+        ? undefined
+        : Math.max(globalMin ?? 0, perCgMin ?? 0);
 
       // H5 prefix inputs — both come from the chain adapter so that
       // publisher-side digest construction matches what core-node handlers
@@ -6326,9 +6509,12 @@ export class DKGAgent {
     }).join('\n');
 
     const onChain = result.onChainResult;
+    const ntriplesBuf = new TextEncoder().encode(ntriples);
+    const sigWalletBP = this.getDefaultPublisherWallet();
+    const sigBP = buildPublishRequestSig(sigWalletBP, result.ual, ntriplesBuf);
     const msg = encodePublishRequest({
       ual: result.ual,
-      nquads: new TextEncoder().encode(ntriples),
+      nquads: ntriplesBuf,
       paranetId: contextGraphId,
       kas: result.kaManifest.map(ka => ({
         tokenId: Number(ka.tokenId),
@@ -6337,12 +6523,12 @@ export class DKGAgent {
         privateTripleCount: ka.privateTripleCount ?? 0,
       })),
       publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: onChain?.publisherAddress ?? '',
+      publisherAddress: onChain?.publisherAddress ?? sigWalletBP?.address ?? '',
       startKAId: Number(onChain?.startKAId ?? 0),
       endKAId: Number(onChain?.endKAId ?? 0),
       chainId: this.chain.chainId,
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
+      publisherSignatureR: sigBP.publisherSignatureR,
+      publisherSignatureVs: sigBP.publisherSignatureVs,
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
@@ -6352,7 +6538,7 @@ export class DKGAgent {
     const topic = paranetPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
-      await this.gossip.publish(topic, msg);
+      await this.signedGossipPublish(topic, 'PUBLISH_REQUEST', contextGraphId, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }

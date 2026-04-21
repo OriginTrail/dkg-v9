@@ -298,8 +298,13 @@ contract Hub is INamed, IVersioned, Ownable {
 
     function _checkOwnerOrMultiSigOwner() internal view virtual {
         address hubOwner = owner();
+        // Spec: align with OZ Ownable v5 — privileged-call rejection raises
+        // `OwnableUnauthorizedAccount(msg.sender)` so indexers + clients can
+        // route on the same selector that `_checkOwner` produces.
+        // See BUGS_FOUND.md "OwnableUnauthorizedAccount vs UnauthorizedAccess"
+        // (Solidity coverage shards 3/4 + 4/4).
         if (msg.sender != hubOwner && !_isMultiSigOwner(hubOwner)) {
-            revert HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner");
+            revert OwnableUnauthorizedAccount(msg.sender);
         }
     }
 }

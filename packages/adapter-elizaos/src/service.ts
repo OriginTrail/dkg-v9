@@ -5,7 +5,8 @@
  * settings (DKG_*), starts a DKGAgent, and publishes the agent profile.
  */
 import { DKGAgent, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
-import type { IAgentRuntime, Service } from './types.js';
+import type { IAgentRuntime, Memory, Service, State } from './types.js';
+import { persistChatTurnImpl } from './actions.js';
 
 let agentInstance: DKGAgent | null = null;
 
@@ -51,4 +52,33 @@ export const dkgService: Service = {
     await agentInstance.stop();
     agentInstance = null;
   },
+
+  /**
+   * Spec §09A_FRAMEWORK_ADAPTERS — chat-turn persistence hook surface.
+   * Delegates to the same RDF-emitting impl as DKG_PERSIST_CHAT_TURN so
+   * frameworks that don't expose actions can still route turns through
+   * the DKG node. See BUGS_FOUND.md K-11.
+   */
+  async persistChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options: Record<string, unknown> = {},
+  ): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
+    const agent = requireAgent();
+    return persistChatTurnImpl(agent, runtime, message, (state ?? {}) as State, options);
+  },
+
+  /** Alias used by the ElizaOS hook contract (`hooks.onChatTurn`). */
+  async onChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options: Record<string, unknown> = {},
+  ): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
+    return (dkgService as any).persistChatTurn(runtime, message, state, options);
+  },
+} as Service & {
+  persistChatTurn: (...args: any[]) => Promise<any>;
+  onChatTurn: (...args: any[]) => Promise<any>;
 };

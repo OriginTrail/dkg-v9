@@ -664,6 +664,11 @@ export class MockChainAdapter implements ChainAdapter {
     return this.minimumRequiredSignatures;
   }
 
+  async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
+    if (contextGraphId <= 0n) return 0;
+    return this.contextGraphs.get(contextGraphId)?.requiredSignatures ?? 0;
+  }
+
   async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
     // Strict binding: recovered address must match the identity's registered address
     const normalizedAddress = recoveredAddress.toLowerCase();

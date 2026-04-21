@@ -364,6 +364,18 @@ export interface ChainAdapter {
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;
 
+  /**
+   * Read the per-Context-Graph `requiredSignatures` value (M-of-N quorum)
+   * from `ContextGraphStorage`. Returns 0 if the CG has no on-chain entry,
+   * or `undefined` if the adapter does not implement the lookup.
+   *
+   * Spec §06_PUBLISH: every publish to a CG must collect at least
+   * `requiredSignatures` participant ACKs before it can confirm on chain.
+   * This is per-CG governance and supersedes the global ParametersStorage
+   * minimum, which is only the network-wide floor. See BUGS_FOUND.md A-5.
+   */
+  getContextGraphRequiredSignatures?(contextGraphId: bigint): Promise<number>;
+
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
 

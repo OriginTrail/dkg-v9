@@ -22,20 +22,16 @@ Memory writes are not exposed as an adapter tool. The agent persists memory thro
 
 ## Quick Start
 
-Install the adapter globally, then run setup:
+Install the DKG CLI and run setup:
 
 ```bash
-npm install -g @origintrail-official/dkg-adapter-openclaw
-dkg-openclaw setup
-```
-
-Or via the DKG CLI if it is already installed:
-
-```bash
+npm install -g @origintrail-official/dkg
 dkg openclaw setup
 ```
 
-The setup flow is non-interactive and idempotent. It installs or verifies the DKG CLI, writes the local DKG config, merges the adapter into `~/.openclaw/openclaw.json`, writes `WORKSPACE_DIR/config.json`, starts the daemon if requested, and verifies the node.
+The setup flow is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json`, writes `WORKSPACE_DIR/config.json`, starts the daemon if requested, and verifies the node.
+
+The node UI's right-panel "Connect OpenClaw" button runs this same setup flow in-process — clicking it from a fresh install is equivalent to running `dkg openclaw setup` on the command line (issue #198).
 
 If the OpenClaw gateway does not auto-reload after the config change, run:
 

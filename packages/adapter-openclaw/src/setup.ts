@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import type { DkgOpenClawConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -477,11 +478,14 @@ function isAdapterLoadPath(value: string): boolean {
     || normalized.includes('/packages/adapter-openclaw/');
 }
 
-export interface AdapterEntryConfig {
-  daemonUrl: string;
-  memory: { enabled: boolean };
-  channel: { enabled: boolean };
-}
+/**
+ * Shape of `plugins.entries.adapter-openclaw.config` that
+ * `mergeOpenClawConfig` accepts. A `Pick` of `DkgOpenClawConfig` so the
+ * write-path stays aligned with the runtime's config contract: callers
+ * can pass any of the same sub-fields the adapter reads at load time,
+ * including `channel.port` for advanced bridge-port overrides.
+ */
+export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'memory' | 'channel'>;
 
 export function mergeOpenClawConfig(
   openclawConfigPath: string,

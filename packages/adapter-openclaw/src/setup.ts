@@ -144,8 +144,13 @@ function canonicalWorkspaceSkillPath(workspaceDir: string): string {
  *   3. Relative paths are resolved against `dirname(openclawConfigPath)`,
  *      not `cwd` — so a given openclaw.json produces the same absolute
  *      workspace no matter where the process is invoked from.
- *   4. When no key is set, fall back to `$OPENCLAW_HOME/workspace` (via
- *      `openclawDir()`) only if that directory exists on disk.
+ *   4. When no key is set, fall back to `dirname(openclawConfigPath)/workspace`
+ *      (co-located with the config file, matching the relative-path
+ *      resolution in rule 3) only if that directory exists on disk. R9-1:
+ *      must NOT read the process-wide `$OPENCLAW_HOME` here — a legacy
+ *      install whose openclaw.json lives at a non-default path would
+ *      otherwise resolve to the default `~/.openclaw/workspace` on
+ *      Disconnect and clean up (or miss) the wrong SKILL.md.
  *   5. Otherwise return `null`. Callers decide whether to throw or
  *      skip-best-effort.
  */
@@ -164,7 +169,7 @@ export function resolveWorkspaceDirFromConfig(
     return resolve(dirname(openclawConfigPath), expanded);
   }
 
-  const defaultWs = join(openclawDir(), 'workspace');
+  const defaultWs = join(dirname(openclawConfigPath), 'workspace');
   if (existsSync(defaultWs)) return defaultWs;
 
   return null;

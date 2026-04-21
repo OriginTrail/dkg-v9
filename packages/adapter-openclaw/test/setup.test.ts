@@ -1261,6 +1261,43 @@ describe('resolveWorkspaceDirFromConfig', () => {
     }
   });
 
+  // R9-1: the default-fallback must derive from `dirname(openclawConfigPath)`
+  // rather than the process-wide `$OPENCLAW_HOME`. A legacy install whose
+  // openclaw.json lives at a non-default path (e.g. a user-specified
+  // `--config-path`-style location in scripts, or a `OPENCLAW_HOME`-shadowed
+  // directory from a prior version) would otherwise resolve to the default
+  // `~/.openclaw/workspace` on Disconnect — cleaning the wrong SKILL.md or
+  // missing the real one.
+  it('derives the default fallback from dirname(openclawConfigPath), not $OPENCLAW_HOME (R9-1)', () => {
+    // Set `OPENCLAW_HOME` to one place; the openclaw.json lives somewhere
+    // else entirely. The fallback must target the config-adjacent workspace,
+    // NOT `$OPENCLAW_HOME/workspace`.
+    const shadowHome = join(testDir, 'shadow-openclaw-home');
+    const shadowWs = join(shadowHome, 'workspace');
+    mkdirSync(shadowWs, { recursive: true });
+
+    const configHome = join(testDir, 'legacy-install-dir');
+    const configWs = join(configHome, 'workspace');
+    mkdirSync(configWs, { recursive: true });
+    const legacyConfigPath = join(configHome, 'openclaw.json');
+
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = shadowHome;
+    try {
+      const result = resolveWorkspaceDirFromConfig(
+        { plugins: {} },
+        legacyConfigPath,
+      );
+      // Correct answer: co-located with the config file.
+      expect(result).toBe(configWs);
+      // Pre-R9-1 regression guard — the shadow path must NOT win.
+      expect(result).not.toBe(shadowWs);
+    } finally {
+      if (original === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = original;
+    }
+  });
+
   it('returns null when the winning key is present but not a non-empty string (no fallback cascade across keys)', () => {
     // Matches discoverWorkspace semantics: `??` only skips null/undefined, so
     // a present-but-empty-string / non-string value does NOT cascade to the

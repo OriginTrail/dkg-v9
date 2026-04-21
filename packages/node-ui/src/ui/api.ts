@@ -276,6 +276,13 @@ export interface ImportFileResult {
     provenance?: any;
     error?: string;
     pipelineUsed?: string;
+    semanticEnrichment?: {
+      eventId: string;
+      status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+      semanticTripleCount: number;
+      updatedAt: string;
+      lastError?: string;
+    };
   };
 }
 
@@ -385,6 +392,13 @@ export interface ExtractionStatus {
   pipelineUsed: string | null;
   tripleCount: number;
   mdIntermediateHash?: string;
+  semanticEnrichment?: {
+    eventId: string;
+    status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+    semanticTripleCount: number;
+    updatedAt: string;
+    lastError?: string;
+  };
   startedAt: string;
   completedAt?: string;
 }
@@ -775,12 +789,15 @@ interface LocalAgentIntegrationRecord {
     dkgPrimaryMemory?: boolean;
     wmImportPipeline?: boolean;
     nodeServedSkill?: boolean;
+    semanticEnrichment?: boolean;
   };
   transport?: {
     kind?: string;
     bridgeUrl?: string;
     gatewayUrl?: string;
     healthUrl?: string;
+    wakeUrl?: string;
+    wakeAuth?: 'bridge-token' | 'gateway' | 'none';
   };
   runtime?: {
     status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
@@ -938,7 +955,8 @@ function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boole
   return Boolean(
     record.transport?.bridgeUrl
     || record.transport?.gatewayUrl
-    || record.transport?.healthUrl,
+    || record.transport?.healthUrl
+    || record.transport?.wakeUrl,
   );
 }
 

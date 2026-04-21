@@ -14,11 +14,23 @@ import {
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
+  notifyLocalAgentIntegrationWake,
+  canQueueLocalAgentSemanticEnrichment,
+  queueLocalAgentSemanticEnrichmentBestEffort,
+  reconcileOpenClawSemanticAvailability,
+  saveConfigAndReconcileOpenClawSemanticAvailability,
+  fileImportSourceIdentityMatchesCurrentState,
+  normalizeQueriedLiteralValue,
+  normalizeOntologyQuadObjectInput,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  isAuthorizedLocalAgentSemanticWorkerRequest,
+  requestAdvertisesLocalAgentSemanticEnrichment,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
+  readSemanticTripleCountForEvent,
+  resolveChatTurnsAssertionAgentAddress,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
@@ -128,6 +140,28 @@ describe('OpenClaw channel routing helpers', () => {
         },
       },
     }))).toEqual([]);
+  });
+
+  it('does not synthesize normal chat targets from a wake-only transport', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            wakeUrl: 'http://wake-only.local:9301/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9201/inbound',
+        streamUrl: 'http://127.0.0.1:9201/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9201/health',
+      },
+    ]);
   });
 
   it('adds the bridge auth header only for standalone bridge requests', () => {
@@ -251,6 +285,815 @@ describe('OpenClaw channel routing helpers', () => {
     await proxyPromise;
 
     expect(secondReadCalled).toBe(true);
+  });
+});
+
+describe('local agent semantic wake helper', () => {
+  const wakePayload = {
+    kind: 'semantic_enrichment' as const,
+    eventKind: 'chat_turn' as const,
+    eventId: 'evt-wake-1',
+  };
+
+  it('skips when the target integration is disabled or has no wake url', async () => {
+    await expect(
+      notifyLocalAgentIntegrationWake(makeConfig(), 'openclaw', wakePayload, 'bridge-token', vi.fn() as any),
+    ).resolves.toEqual({ status: 'skipped', reason: 'integration_disabled' });
+
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn() as any,
+      ),
+    ).resolves.toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+  });
+
+  it('applies bridge-token auth when the wake transport requires it', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:9301/semantic-enrichment/wake',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-dkg-bridge-token': 'bridge-token',
+        }),
+      }),
+    );
+  });
+
+  it('uses gateway wake auth mode without sending the bridge token header', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+              wakeAuth: 'gateway',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+      expect.objectContaining({
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  });
+
+  it('infers bridge-token wake auth from a preserved wakeUrl when wakeAuth is missing', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake/',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:9301/semantic-enrichment/wake/',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-dkg-bridge-token': 'bridge-token',
+        }),
+      }),
+    );
+  });
+
+  it('returns a failed wake result on fetch errors or non-2xx responses without throwing', async () => {
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+                wakeAuth: 'bridge-token',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn().mockResolvedValue(new Response('nope', { status: 503, statusText: 'Service Unavailable' })) as any,
+      ),
+    ).resolves.toEqual({ status: 'failed', reason: 'HTTP 503 Service Unavailable' });
+
+    await expect(
+      notifyLocalAgentIntegrationWake(
+        makeConfig({
+          localAgentIntegrations: {
+            openclaw: {
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+                wakeAuth: 'bridge-token',
+              },
+            },
+          },
+        }),
+        'openclaw',
+        wakePayload,
+        'bridge-token',
+        vi.fn().mockRejectedValue(new Error('wake offline')) as any,
+      ),
+    ).resolves.toEqual({ status: 'failed', reason: 'wake offline' });
+  });
+});
+
+describe('best-effort semantic enqueue helper', () => {
+  it('skips semantic event creation when the integration is unavailable and skipWhenUnavailable is enabled', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw')).toBe(false);
+
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn(),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig(),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'file_import',
+      payload: {
+        kind: 'file_import',
+        contextGraphId: 'cg1',
+        assertionName: 'roadmap',
+        assertionUri: 'did:dkg:context-graph:cg1/assertion/peer/roadmap',
+        importStartedAt: '2026-04-15T12:00:00.000Z',
+        fileHash: 'sha256:file-1',
+        mdIntermediateHash: 'sha256:md-1',
+        detectedContentType: 'text/markdown',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'file import test',
+    });
+
+    expect(descriptor).toBeUndefined();
+    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
+  });
+
+  it('allows queueing when the live adapter request advertises semantic enrichment support before stored capability sync lands', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: true,
+    })).toBe(true);
+
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw', {
+      liveSemanticEnrichmentSupported: true,
+    })).toBe(false);
+
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-live-hint',
+        status: 'pending',
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-live-hint',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-live-hint',
+        userMessage: 'remember this',
+        assistantReply: 'noted',
+        persistenceState: 'stored',
+      },
+      skipWhenUnavailable: true,
+      liveSemanticEnrichmentSupported: true,
+      logLabel: 'chat live semantic hint',
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-live-hint',
+      status: 'pending',
+    });
+  });
+
+  it('does not queue semantic jobs from stale ready OpenClaw state when explicit capability support is missing', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          metadata: {
+            registrationMode: 'full',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
+  it('does not queue semantic jobs during first-attach connecting state without explicit capability support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          runtime: {
+            status: 'connecting',
+            ready: false,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
+  it('does not queue semantic jobs for setup-runtime OpenClaw registrations without explicit capability support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          metadata: {
+            registrationMode: 'setup-runtime',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
+  it('honors a live runtime downgrade when the stored integration still has stale semantic support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: false,
+    })).toBe(false);
+  });
+
+  it('treats missing live semantic-enrichment headers as absent so direct daemon routes fall back to stored capability', () => {
+    const req = {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw')).toBeUndefined();
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
+    })).toBe(true);
+  });
+
+  it('treats explicit false live semantic-enrichment headers as a runtime downgrade', () => {
+    const req = {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-local-agent-semantic-enrichment': 'false',
+      },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw')).toBe(false);
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
+    })).toBe(false);
+  });
+
+  it('restricts semantic worker routes to loopback OpenClaw integration requests', () => {
+    const enabledConfig = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+        },
+      },
+    });
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(true);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {},
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '10.0.0.8' },
+    } as any, 'openclaw')).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(makeConfig(), {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(false);
+  });
+
+  it('uses the same resolved default agent address as assertion writes for chat-turn semantic URIs', () => {
+    expect(resolveChatTurnsAssertionAgentAddress({
+      peerId: 'peer-id',
+      getDefaultAgentAddress: () => 'agent-address-1',
+    })).toBe('agent-address-1');
+
+    expect(resolveChatTurnsAssertionAgentAddress({
+      peerId: 'peer-id',
+      getDefaultAgentAddress: () => undefined,
+    })).toBe('peer-id');
+  });
+
+  it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: false,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
+  it('dead-letters queued semantic events at reconciliation time when stored OpenClaw support is disabled', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: false,
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('dead-letters queued semantic events at reconciliation time when the stored OpenClaw integration is missing', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig(),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('saves config before reconciling OpenClaw semantic availability', async () => {
+    const extractionStatus = new Map<string, any>();
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    await saveConfigAndReconcileOpenClawSemanticAvailability({
+      config: makeConfig(),
+      extractionStatus: extractionStatus as any,
+      dashDb: dashDb as any,
+      saveConfig,
+    });
+
+    expect(saveConfig).toHaveBeenCalledOnce();
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+    expect(saveConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      dashDb.deadLetterActiveSemanticEnrichmentEvents.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not reconcile OpenClaw semantic availability when saving config fails', async () => {
+    const extractionStatus = new Map<string, any>();
+    const saveConfig = vi.fn().mockRejectedValue(new Error('disk full'));
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn(),
+    };
+
+    await expect(saveConfigAndReconcileOpenClawSemanticAvailability({
+      config: makeConfig(),
+      extractionStatus: extractionStatus as any,
+      dashDb: dashDb as any,
+      saveConfig,
+    })).rejects.toThrow('disk full');
+
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
+  });
+
+  it('does not dead-letter queued semantic events at reconciliation time when support is merely unknown', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn(),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            runtime: {
+              status: 'ready',
+              ready: true,
+            },
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
+  });
+
+  it('still persists the semantic event when OpenClaw is enabled but wake transport metadata is temporarily unavailable', () => {
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-chat-queued',
+        status: 'pending',
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-outage-window',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-outage-window',
+        userMessage: 'remember this',
+        assistantReply: 'noted',
+        persistenceState: 'stored',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'chat outage window',
+    });
+
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw')).toBe(true);
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-chat-queued',
+      status: 'pending',
+    });
+  });
+
+  it('reuses the stored semantic triple count when an idempotent semantic event already exists', () => {
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue({
+        id: 'evt-existing',
+        status: 'completed',
+        semantic_triple_count: 7,
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'file_import',
+      payload: {
+        kind: 'file_import',
+        contextGraphId: 'project-1',
+        assertionName: 'roadmap',
+        assertionUri: 'did:dkg:context-graph:project-1/assertion/peer/roadmap',
+        importStartedAt: '2026-04-15T12:00:00.000Z',
+        fileHash: 'sha256:file-1',
+        mdIntermediateHash: 'sha256:md-1',
+        detectedContentType: 'text/markdown',
+      },
+      skipWhenUnavailable: true,
+      logLabel: 'existing semantic event',
+      semanticTripleCount: 0,
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-existing',
+      status: 'completed',
+      semanticTripleCount: 7,
+    });
+  });
+
+  it('swallows enqueue failures so the primary route can still succeed', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(() => {
+        throw new Error('sqlite busy');
+      }),
+      getSemanticEnrichmentEvent: vi.fn(),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-1',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-1',
+        userMessage: 'hi',
+        assistantReply: 'hello',
+        persistenceState: 'stored',
+      },
+      bridgeAuthToken: 'bridge-token',
+      skipWhenUnavailable: true,
+      logLabel: 'chat turn test',
+    });
+
+    expect(descriptor).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to enqueue chat turn test'),
+    );
+  });
+});
+
+describe('file import semantic source identity matching', () => {
+  const payload = {
+    kind: 'file_import' as const,
+    contextGraphId: 'cg1',
+    assertionName: 'roadmap',
+    assertionUri: 'did:dkg:context-graph:cg1/assertion/peer/roadmap',
+    importStartedAt: '2026-04-15T12:00:00.000Z',
+    fileHash: 'sha256:file-1',
+    mdIntermediateHash: 'sha256:md-1',
+    detectedContentType: 'text/markdown',
+  };
+
+  it('accepts the current assertion only when file and markdown hashes still match the queued job', () => {
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+    })).toBe(true);
+  });
+
+  it('rejects replaced or discarded assertion state when the source identity no longer matches', () => {
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, null)).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-2',
+      mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+    })).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-2',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+    })).toBe(false);
+    expect(fileImportSourceIdentityMatchesCurrentState(payload, {
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-1',
+      importStartedAt: '2026-04-15T12:05:00.000Z',
+    })).toBe(false);
+  });
+
+  it('decodes queried RDF literals back to plain string values before identity matching', () => {
+    expect(normalizeQueriedLiteralValue('"sha256:file-1"')).toBe('sha256:file-1');
+    expect(normalizeQueriedLiteralValue('"sha256:md-1"')).toBe('sha256:md-1');
+    expect(normalizeQueriedLiteralValue('"2026-04-15T12:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'))
+      .toBe('2026-04-15T12:00:00.000Z');
+    expect(normalizeQueriedLiteralValue('<did:dkg:context-graph:cg1/assertion/peer/roadmap>'))
+      .toBe('did:dkg:context-graph:cg1/assertion/peer/roadmap');
+  });
+});
+
+describe('semantic enrichment triple count readers', () => {
+  it('reuses semantic provenance counts for replayed chat-turn events', async () => {
+    const agent = {
+      store: {
+        query: vi.fn().mockResolvedValue({
+          bindings: [{ count: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+        }),
+      },
+    };
+
+    await expect(readSemanticTripleCountForEvent(
+      agent as any,
+      {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-1',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-1',
+        userMessage: 'hello',
+        assistantReply: 'hi',
+        persistenceState: 'stored',
+      },
+      'evt-chat-replay',
+    )).resolves.toBe(4);
+
+    expect(agent.store.query).toHaveBeenCalledWith(expect.stringContaining('urn:dkg:semantic-enrichment:evt-chat-replay'));
+  });
+});
+
+describe('ontology write object normalization', () => {
+  it('rejects malformed quoted RDF literals', () => {
+    expect(normalizeOntologyQuadObjectInput('\"unterminated')).toBeUndefined();
+    expect(normalizeOntologyQuadObjectInput('\"value\"^^<not a valid iri>')).toBeUndefined();
+  });
+
+  it('preserves valid RDF terms and quotes plain text values', () => {
+    expect(normalizeOntologyQuadObjectInput('https://schema.org/Person')).toBe('https://schema.org/Person');
+    expect(normalizeOntologyQuadObjectInput('\"Alice\"@en')).toBe('\"Alice\"@en');
+    expect(normalizeOntologyQuadObjectInput('schema.org')).toBe('\"schema.org\"');
   });
 });
 
@@ -396,6 +1239,29 @@ describe('OpenClaw persist-turn validation', () => {
     })).toBe(false);
   });
 
+  it('rejects non-string or invalid projectContextGraphId values in persist-turn payloads', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 42,
+    })).toBe(false);
+
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 'bad graph id',
+    })).toBe(false);
+
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      projectContextGraphId: 'project-alpha',
+    })).toBe(true);
+  });
+
   it('rejects attachment ref arrays when any entry is malformed', () => {
     const validRef = {
       assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
@@ -437,6 +1303,12 @@ describe('OpenClaw persist-turn validation', () => {
         detectedContentType: 'application/pdf',
         pipelineUsed: 'application/pdf',
         tripleCount: 42,
+        semanticEnrichment: {
+          eventId: 'evt-semantic-1',
+          status: 'completed',
+          semanticTripleCount: 9,
+          updatedAt: completedAt,
+        },
         rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
         startedAt,
         completedAt,
@@ -890,6 +1762,8 @@ describe('local agent integration registry helpers', () => {
           transport: {
             kind: 'openclaw-channel',
             bridgeUrl: 'http://127.0.0.1:9201',
+            wakeUrl: 'http://127.0.0.1:9201/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
           },
         },
       },
@@ -918,6 +1792,8 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(result.integration.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
@@ -965,7 +1841,49 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.metadata?.userDisabled).toBe(false);
+    expect(result.integration.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
+  it('treats a stored wake-only OpenClaw transport as enough to reuse the healthy-bridge fast path', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            wakeUrl: 'http://bridge.remote:9305/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
+          },
+        },
+      },
+    });
+    const runSetup = vi.fn();
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.transport.bridgeUrl).toBe('http://bridge.remote:9305');
+    expect(result.integration.transport.wakeUrl).toBe('http://bridge.remote:9305/semantic-enrichment/wake');
+    expect(result.integration.transport.wakeAuth).toBe('bridge-token');
   });
 
   it('UI connect does not trust a healthy bridge fast-path for a first-time attach', async () => {
@@ -1060,6 +1978,8 @@ describe('local agent integration registry helpers', () => {
           transport: {
             kind: 'openclaw-channel',
             bridgeUrl: 'http://127.0.0.1:9201',
+            wakeUrl: 'http://127.0.0.1:9201/semantic-enrichment/wake',
+            wakeAuth: 'bridge-token',
           },
         },
       },
@@ -1097,6 +2017,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.enabled).toBe(true);
     expect(integration?.status).toBe('error');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(integration?.transport.wakeAuth).toBe('bridge-token');
     expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1199,6 +2121,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(integration?.transport.wakeUrl).toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+    expect(integration?.transport.wakeAuth).toBe('bridge-token');
     expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1434,8 +2358,39 @@ describe('local agent integration registry helpers', () => {
 
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
     expect(integration.transport.gatewayUrl).toBeUndefined();
+    expect(integration.transport.wakeUrl).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+
+  it('preserves wake transport metadata when OpenClaw updates still use the legacy top-level transport shim', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const integration = updateLocalAgentIntegration(config, 'openclaw', {
+      bridgeUrl: 'http://127.0.0.1:9301',
+      healthUrl: 'http://127.0.0.1:9301/health',
+      wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      wakeAuth: 'bridge-token',
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+    }, new Date('2026-04-13T10:50:00.000Z'));
+
+    expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
+    expect(integration.transport.healthUrl).toBe('http://127.0.0.1:9301/health');
+    expect(integration.transport.wakeUrl).toBe('http://127.0.0.1:9301/semantic-enrichment/wake');
+    expect(integration.transport.wakeAuth).toBe('bridge-token');
   });
 });
 

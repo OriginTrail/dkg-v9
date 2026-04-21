@@ -33,7 +33,7 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
-const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
+const OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES = {
   localChat: true,
   chatAttachments: true,
   connectFromUi: true,
@@ -112,6 +112,14 @@ export class DkgNodePlugin {
    * failure or after a successful load.
    */
   private lastLocalAgentIntegrationLoadError: string | null = null;
+  /**
+   * Live semantic-enrichment availability hint sent on daemon-bound requests.
+   * `undefined` means startup state is still unknown, so the daemon may fall
+   * back to stored capability metadata. Once the adapter knows the worker is
+   * unavailable or explicitly disabled, this flips to `false` so new semantic
+   * jobs are not queued into an undrainable outbox.
+   */
+  private semanticEnrichmentAvailabilityHint: boolean | undefined = undefined;
   private nodePeerId: string | undefined;
   /**
    * In-flight handle for the node peer ID probe, used to debounce
@@ -129,6 +137,161 @@ export class DkgNodePlugin {
   private peerIdDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Cached API handle used by `ensureNodePeerId` for logging. Set on register. */
   private memoryResolverApi: OpenClawPluginApi | null = null;
+
+  private buildOpenClawCapabilities(registrationMode: string) {
+    const capabilities = {
+      ...OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES,
+    };
+    const semanticEnrichmentSupported = this.channelPlugin?.supportsSemanticEnrichment() === true;
+    if (registrationMode === 'full' || registrationMode === 'setup-runtime') {
+      return {
+        ...capabilities,
+        semanticEnrichment: semanticEnrichmentSupported,
+      } as const;
+    }
+    return capabilities;
+  }
+
+  private inferWakeAuthFromUrl(wakeUrl: string | undefined): 'bridge-token' | 'gateway' | undefined {
+    const trimmed = wakeUrl?.trim();
+    if (!trimmed) return undefined;
+    let pathname = trimmed;
+    try {
+      pathname = new URL(trimmed).pathname;
+    } catch {
+      pathname = trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '');
+    }
+    const normalizedPath = (pathname || '/').replace(/\/+$/, '');
+    if (normalizedPath.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
+    if (normalizedPath.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
+    return undefined;
+  }
+
+  private normalizeWakeUrl(wakeUrl: string | undefined): string | undefined {
+    const trimmed = wakeUrl?.trim();
+    if (!trimmed) return undefined;
+    return trimmed.replace(/\/+$/, '');
+  }
+
+  private buildDerivedWakeCandidates(
+    transport: Pick<LocalAgentIntegrationTransport, 'bridgeUrl' | 'gatewayUrl'> | undefined,
+  ): Array<{ url: string; auth: 'bridge-token' | 'gateway' }> {
+    const candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
+    const gatewayUrl = transport?.gatewayUrl?.trim();
+    if (gatewayUrl) {
+      candidates.push({
+        url: `${gatewayUrl.replace(/\/+$/, '')}/api/dkg-channel/semantic-enrichment/wake`,
+        auth: 'gateway',
+      });
+    }
+    const bridgeUrl = transport?.bridgeUrl?.trim();
+    if (bridgeUrl) {
+      candidates.push({
+        url: `${bridgeUrl.replace(/\/+$/, '')}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
+    }
+    return candidates;
+  }
+
+  private resolveWakeTransport(
+    existing: LocalAgentIntegrationTransport | undefined,
+    existingWakeAuth: 'bridge-token' | 'gateway' | 'none' | undefined,
+    candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }>,
+  ): { url: string; auth?: 'bridge-token' | 'gateway' | 'none' } | undefined {
+    const existingWakeUrl = existing?.wakeUrl;
+    const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
+    if (!normalizedExistingWakeUrl) {
+      return candidates[0];
+    }
+
+    const matchingCandidate = candidates.find((candidate) =>
+      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
+    );
+    const existingDerivedCandidate = this.buildDerivedWakeCandidates(existing).find((candidate) =>
+      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
+    );
+    if (existingDerivedCandidate) {
+      return candidates[0];
+    }
+    if (matchingCandidate) {
+      return matchingCandidate;
+    }
+    return {
+      url: normalizedExistingWakeUrl,
+      auth: existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl),
+    };
+  }
+
+  private syncClientLocalAgentRequestContext(): void {
+    if (!this.initialized) return;
+    if (!this.channelPlugin || !this.config.channel?.enabled) {
+      this.client.setLocalAgentRequestContext(null);
+      return;
+    }
+    const semanticEnrichmentSupported = this.channelPlugin?.isSemanticEnrichmentActive() === true
+      ? true
+      : this.semanticEnrichmentAvailabilityHint === false
+        ? false
+        : undefined;
+    this.client.setLocalAgentRequestContext({
+      integrationId: 'openclaw',
+      ...(semanticEnrichmentSupported !== undefined ? { semanticEnrichmentSupported } : {}),
+    });
+  }
+
+  private setSemanticEnrichmentAvailabilityHint(value: boolean | undefined): void {
+    this.semanticEnrichmentAvailabilityHint = value;
+    this.syncClientLocalAgentRequestContext();
+  }
+
+  private async persistOpenClawSemanticDowngrade(args: {
+    api: OpenClawPluginApi;
+    basePayload: {
+      enabled: boolean;
+      description: string;
+      transport: LocalAgentIntegrationTransport | undefined;
+      capabilities: Record<string, unknown>;
+      manifest: typeof OPENCLAW_LOCAL_AGENT_MANIFEST;
+      setupEntry: string;
+      metadata: Record<string, unknown>;
+    };
+    reason: string;
+    runtime?: {
+      status: 'connecting' | 'ready' | 'degraded' | 'error';
+      ready: boolean;
+    };
+  }): Promise<void> {
+    try {
+      await this.client.updateLocalAgentIntegration('openclaw', {
+        ...args.basePayload,
+        capabilities: {
+          ...args.basePayload.capabilities,
+          semanticEnrichment: false,
+        },
+        runtime: {
+          status: args.runtime?.status ?? 'error',
+          ready: args.runtime?.ready ?? false,
+          lastError: args.reason,
+        },
+      });
+    } catch (err: any) {
+      args.api.logger.warn?.(`[dkg] Failed to persist OpenClaw semantic downgrade: ${err?.message ?? String(err)}`);
+    }
+  }
+
+  private withSemanticCapability(
+    baseCapabilities: Record<string, unknown>,
+    enabled: boolean,
+  ): Record<string, unknown> {
+    if (!Object.prototype.hasOwnProperty.call(baseCapabilities, 'semanticEnrichment')) {
+      return baseCapabilities;
+    }
+    return {
+      ...baseCapabilities,
+      semanticEnrichment: enabled,
+    };
+  }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
    * list of subscribed context graphs for the write-path clarification
@@ -276,6 +439,7 @@ export class DkgNodePlugin {
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
       this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      this.syncClientLocalAgentRequestContext();
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
@@ -302,6 +466,7 @@ export class DkgNodePlugin {
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+    this.syncClientLocalAgentRequestContext();
 
     if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
@@ -520,6 +685,8 @@ export class DkgNodePlugin {
 
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.setSemanticEnrichmentAvailabilityHint(false);
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
       // default log level) until either the reason changes or the load
@@ -550,6 +717,8 @@ export class DkgNodePlugin {
     this.lastLocalAgentIntegrationWarnReason = null;
     this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.setSemanticEnrichmentAvailabilityHint(false);
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
     }
@@ -565,7 +734,7 @@ export class DkgNodePlugin {
       enabled: true,
       description: 'Connect a local OpenClaw agent through the DKG node.',
       transport: this.buildOpenClawTransport(existing?.transport, api),
-      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      capabilities: this.buildOpenClawCapabilities(registrationMode),
       manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
       setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
       metadata,
@@ -581,8 +750,36 @@ export class DkgNodePlugin {
         },
       });
     } catch (err: any) {
+      await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.setSemanticEnrichmentAvailabilityHint(false);
+      if (basePayload.capabilities.semanticEnrichment !== false) {
+        await this.persistOpenClawSemanticDowngrade({
+          api,
+          basePayload,
+          reason: err?.message ?? String(err),
+        });
+      }
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
+    }
+
+    let semanticWorkerStartError: string | null = null;
+    await this.channelPlugin?.startSemanticEnrichmentWorker().catch((err: any) => {
+      semanticWorkerStartError = err?.message ?? String(err);
+      api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${semanticWorkerStartError}`);
+    });
+    const semanticWorkerActive = this.channelPlugin?.isSemanticEnrichmentActive() === true;
+    this.setSemanticEnrichmentAvailabilityHint(semanticWorkerActive ? true : false);
+    if (!semanticWorkerActive && basePayload.capabilities.semanticEnrichment !== false) {
+      await this.persistOpenClawSemanticDowngrade({
+        api,
+        basePayload,
+        reason: semanticWorkerStartError ?? 'Semantic enrichment worker unavailable after integration sync',
+        runtime: {
+          status: bridgeAlreadyReady ? 'degraded' : 'connecting',
+          ready: bridgeAlreadyReady,
+        },
+      });
     }
 
     if (bridgeAlreadyReady || !this.channelPlugin) {
@@ -593,10 +790,13 @@ export class DkgNodePlugin {
       .then(() => this.client.updateLocalAgentIntegration('openclaw', {
         ...basePayload,
         transport: this.buildOpenClawTransport(existing?.transport, api),
+        capabilities: this.withSemanticCapability(basePayload.capabilities, this.channelPlugin?.isSemanticEnrichmentActive() === true),
         runtime: {
-          status: 'ready',
+          status: this.channelPlugin?.isSemanticEnrichmentActive() === true ? 'ready' : 'degraded',
           ready: true,
-          lastError: null,
+          lastError: this.channelPlugin?.isSemanticEnrichmentActive() === true
+            ? null
+            : (semanticWorkerStartError ?? 'Semantic enrichment worker unavailable after integration sync'),
         },
       }))
       .catch(async (err: any) => {
@@ -650,6 +850,7 @@ export class DkgNodePlugin {
     const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
 
+    const existingWakeAuth = existing?.wakeAuth;
     const gatewayBaseUrl = this.resolveGatewayBaseUrl(
       api,
       this.channelPlugin.isUsingGatewayRoute ? undefined : existing?.gatewayUrl,
@@ -659,8 +860,10 @@ export class DkgNodePlugin {
     }
 
     const bridgePort = this.channelPlugin.bridgePort;
+    let liveBridgeUrl: string | undefined;
     if (bridgePort > 0) {
       transport.bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+      liveBridgeUrl = transport.bridgeUrl;
       transport.healthUrl = `${transport.bridgeUrl}/health`;
     } else {
       const existingBridgeUrl = existing?.bridgeUrl?.trim();
@@ -670,6 +873,33 @@ export class DkgNodePlugin {
       }
       if (existingHealthUrl) {
         transport.healthUrl = existingHealthUrl;
+      }
+    }
+
+    const wakeCandidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
+    if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
+      wakeCandidates.push({
+        url: `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`,
+        auth: 'gateway',
+      });
+    }
+    if (liveBridgeUrl) {
+      wakeCandidates.push({
+        url: `${liveBridgeUrl}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
+    } else if (transport.bridgeUrl) {
+      wakeCandidates.push({
+        url: `${transport.bridgeUrl}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
+    }
+
+    const wakeTransport = this.resolveWakeTransport(existing, existingWakeAuth, wakeCandidates);
+    if (wakeTransport) {
+      transport.wakeUrl = wakeTransport.url;
+      if (wakeTransport.auth) {
+        transport.wakeAuth = wakeTransport.auth;
       }
     }
 

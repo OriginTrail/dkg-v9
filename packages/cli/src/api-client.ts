@@ -573,6 +573,13 @@ export class ApiClient {
       pipelineUsed?: string;
       mdIntermediateHash?: string;
       error?: string;
+      semanticEnrichment?: {
+        eventId: string;
+        status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+        semanticTripleCount: number;
+        updatedAt: string;
+        lastError?: string;
+      };
     };
   }> {
     const fileBytes = await readFile(request.filePath);
@@ -599,6 +606,13 @@ export class ApiClient {
     pipelineUsed?: string;
     mdIntermediateHash?: string;
     error?: string;
+    semanticEnrichment?: {
+      eventId: string;
+      status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+      semanticTripleCount: number;
+      updatedAt: string;
+      lastError?: string;
+    };
   }> {
     const params = new URLSearchParams({ contextGraphId });
     if (subGraphName) params.set('subGraphName', subGraphName);

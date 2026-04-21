@@ -252,10 +252,11 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi({ registerHttpRoute });
     plugin.register(api);
 
-    expect(registerHttpRoute.calls).toHaveLength(2);
+    expect(registerHttpRoute.calls).toHaveLength(3);
     expect(registerHttpRoute.calls.map((call) => call[0])).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: 'POST', path: '/api/dkg-channel/inbound' }),
       expect.objectContaining({ method: 'GET', path: '/api/dkg-channel/health' }),
+      expect.objectContaining({ method: 'POST', path: '/api/dkg-channel/semantic-enrichment/wake' }),
     ]));
   });
 
@@ -272,6 +273,225 @@ describe('DkgChannelPlugin', () => {
     plugin.register(api);
 
     expect(plugin.isUsingGatewayRoute).toBe(false);
+  });
+
+  it('does not queue semantic wakes when runtime.subagent helpers are unavailable', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+          },
+        },
+      },
+      subagent: {
+        run: vi.fn(),
+        waitForRun: vi.fn(),
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue({
+      ok: true,
+      turnId: 'corr-unsupported-runtime',
+      semanticEnrichment: {
+        eventId: 'evt-unsupported',
+        status: 'pending',
+        semanticTripleCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-unsupported-runtime', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const worker = (plugin as any).ensureSemanticEnrichmentWorker();
+    expect(worker.getRuntimeProbe().supported).toBe(false);
+    expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
+  it('gateway semantic wake endpoint returns 503 when runtime.subagent helpers are unavailable', async () => {
+    const registerHttpRoute = vi.fn();
+    const api = makeApi({ registerHttpRoute }) as any;
+    api.runtime = {
+      subagent: {
+        run: vi.fn(),
+        waitForRun: vi.fn(),
+      },
+    };
+    plugin.register(api);
+
+    const wakeRoute = registerHttpRoute.mock.calls
+      .map((call) => call[0])
+      .find((route: any) => route.path === '/api/dkg-channel/semantic-enrichment/wake');
+    expect(wakeRoute).toBeTruthy();
+
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+    await wakeRoute.handler({
+      body: {
+        kind: 'semantic_enrichment',
+        eventKind: 'chat_turn',
+        eventId: 'evt-gateway-noop',
+      },
+    }, res);
+
+    const worker = (plugin as any).ensureSemanticEnrichmentWorker();
+    expect(worker.getRuntimeProbe().supported).toBe(false);
+    expect(worker.getPendingSummaries()).toHaveLength(0);
+    expect(res.writeHead).toHaveBeenCalledWith(503, { 'Content-Type': 'application/json' });
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+  });
+
+  it('bridge semantic wake endpoint returns 503 when runtime.subagent helpers are unavailable', async () => {
+    const api = makeApi({
+      runtime: {
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+        },
+      } as any,
+    });
+    plugin.register(api);
+
+    const port = await waitForBridgePort(plugin);
+    const wakeUrl = `http://127.0.0.1:${port}/semantic-enrichment/wake`;
+    const response = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dkg-bridge-token': 'test-token',
+      },
+      body: JSON.stringify({
+        kind: 'semantic_enrichment',
+        eventKind: 'chat_turn',
+        eventId: 'evt-bridge-unsupported',
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Semantic enrichment worker unavailable',
+    });
+  });
+
+  it('bridge semantic wake endpoint requires the bridge token and clears duplicate wakes when nothing is claimable', async () => {
+    const claimSemanticEnrichmentEvent = vi
+      .spyOn(client, 'claimSemanticEnrichmentEvent')
+      .mockResolvedValue({ event: null });
+    const api = makeApi({
+      runtime: {
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        },
+      } as any,
+    });
+    plugin.register(api);
+    await plugin.startSemanticEnrichmentWorker();
+
+    const port = await waitForBridgePort(plugin);
+    const wakeUrl = `http://127.0.0.1:${port}/semantic-enrichment/wake`;
+    const payload = {
+      kind: 'semantic_enrichment',
+      eventKind: 'file_import',
+      eventId: 'evt-bridge-wake',
+    };
+
+    const missingToken = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    expect(missingToken.status).toBe(401);
+
+    const invalidToken = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dkg-bridge-token': 'wrong-token',
+      },
+      body: JSON.stringify(payload),
+    });
+    expect(invalidToken.status).toBe(401);
+
+    const validHeaders = {
+      'Content-Type': 'application/json',
+      'x-dkg-bridge-token': 'test-token',
+    };
+    const firstWake = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: validHeaders,
+      body: JSON.stringify(payload),
+    });
+    const secondWake = await fetch(wakeUrl, {
+      method: 'POST',
+      headers: validHeaders,
+      body: JSON.stringify(payload),
+    });
+    expect(firstWake.status).toBe(200);
+    expect(secondWake.status).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const worker = (plugin as any).ensureSemanticEnrichmentWorker();
+    expect(claimSemanticEnrichmentEvent).toHaveBeenCalled();
+    expect(worker.getPendingSummaries()).toEqual([]);
+  });
+
+  it('gateway semantic wake endpoint returns 503 when the semantic worker has been stopped', async () => {
+    const registerHttpRoute = vi.fn();
+    const api = makeApi({
+      registerHttpRoute,
+      runtime: {
+        subagent: {
+          run: vi.fn(),
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        },
+      } as any,
+    }) as any;
+    plugin.register(api);
+    await plugin.startSemanticEnrichmentWorker();
+    await plugin.stopSemanticEnrichmentWorker();
+
+    const wakeRoute = registerHttpRoute.mock.calls
+      .map((call) => call[0])
+      .find((route: any) => route.path === '/api/dkg-channel/semantic-enrichment/wake');
+    expect(wakeRoute).toBeTruthy();
+
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+    await wakeRoute.handler({
+      body: {
+        kind: 'semantic_enrichment',
+        eventKind: 'chat_turn',
+        eventId: 'evt-gateway-stopped',
+      },
+    }, res);
+
+    expect(res.writeHead).toHaveBeenCalledWith(503, { 'Content-Type': 'application/json' });
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
   });
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {
@@ -413,6 +633,55 @@ describe('DkgChannelPlugin', () => {
       'Agent reply',
       { turnId: 'corr-persist' },
     ]);
+  });
+
+  it('processInbound does not queue an in-memory semantic wake before the daemon callback arrives', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+          },
+        },
+      },
+      subagent: {
+        run: vi.fn(),
+        waitForRun: vi.fn(),
+        getSessionMessages: vi.fn(),
+        deleteSession: vi.fn(),
+      },
+    };
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = { session: { dmScope: 'main' }, agents: {} };
+    vi.spyOn(client, 'claimSemanticEnrichmentEvent').mockResolvedValue({ event: null });
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue({
+      ok: true,
+      turnId: 'corr-persist-no-inline-wake',
+      semanticEnrichment: {
+        eventId: 'evt-persist-no-inline-wake',
+        status: 'pending',
+        semanticTripleCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    plugin.register(api);
+
+    await plugin.processInbound('User message', 'corr-persist-no-inline-wake', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const worker = (plugin as any).ensureSemanticEnrichmentWorker();
+    expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
   it('processInbound should carry attachment refs into the runtime prompt and persist them with the turn', async () => {

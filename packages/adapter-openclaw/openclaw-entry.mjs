@@ -15,16 +15,28 @@ export default function (api) {
     return;
   }
 
+  // Mirror the fallback order used by isMemorySlotOwnedByThisAdapter in
+  // DkgMemoryPlugin.ts — some OpenClaw gateway versions expose the merged
+  // config on api.cfg / runtime.cfg instead of api.config.
+  const anyApi = api;
+  const runtime = anyApi?.runtime;
+  const mergedConfig =
+    anyApi?.cfg ??
+    anyApi?.config ??
+    runtime?.cfg ??
+    runtime?.config ??
+    {};
+
   // Workspace directory is still needed for the SKILL.md sync below and for
   // downstream auto-detection, even though per-workspace config.json is gone.
-  let workspaceDir = api.config?.agents?.defaults?.workspace;
+  let workspaceDir = mergedConfig?.agents?.defaults?.workspace;
   if (!workspaceDir) {
-    workspaceDir = api.config?.workspace ?? api.workspaceDir;
+    workspaceDir = mergedConfig?.workspace ?? api.workspaceDir;
   }
 
   // Read DKG config from the OpenClaw plugin entry
   // (plugins.entries["adapter-openclaw"].config in openclaw.json).
-  const entryConfig = api.config?.plugins?.entries?.['adapter-openclaw']?.config ?? {};
+  const entryConfig = mergedConfig?.plugins?.entries?.['adapter-openclaw']?.config ?? {};
   const config = { ...entryConfig };
 
   // Deep-clone integration sub-configs so we don't mutate the incoming config.

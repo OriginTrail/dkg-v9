@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1707,6 +1707,68 @@ describe('runSetup workspace migration', () => {
       expect(existsSync(skillPath)).toBe(true);
       expect(readFileSync(skillPath, 'utf-8')).toBe(firstSkillBytes);
       expect(existsSync(sibling)).toBe(true);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  // Codex PR #234 R7-1: symlink aliases of the same workspace must NOT
+  // trigger migration. Raw string compare sees `/real` and `/alias` as
+  // different — the cleanup would then unlink the freshly-installed SKILL.md
+  // through the alias path. `realpathSync`-based compare must collapse
+  // them to a single canonical form so cleanup only fires on actual
+  // workspace changes.
+  it('does NOT trigger migration when the second setup routes through a symlink alias of the prior workspace (R7-1)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const realWs = join(testDir, 'ws-real');
+    const aliasWs = join(testDir, 'ws-alias');
+    mkdirSync(realWs, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+
+    // Create the symlink. Windows needs admin / developer mode; skip the
+    // test gracefully if the OS won't let us create the alias.
+    let symlinkCreated = false;
+    try {
+      symlinkSync(realWs, aliasWs, 'dir');
+      symlinkCreated = true;
+    } catch {
+      // Skip — can't exercise the R7-1 failure mode without a symlink.
+    }
+    if (!symlinkCreated) return;
+
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      // First install targets the real path.
+      await runSetup({ workspace: realWs, start: false, verify: false });
+      const skillReal = join(realWs, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillReal)).toBe(true);
+      const installedBytes = readFileSync(skillReal, 'utf-8');
+
+      // Second install targets the alias (symlink). Both paths resolve to
+      // the same physical directory; the install is effectively a no-op
+      // re-copy, and migration MUST NOT fire (raw compare would make it
+      // fire — that's the R7-1 bug).
+      await runSetup({ workspace: aliasWs, start: false, verify: false });
+
+      // The SKILL.md must still be on disk — if R7-1 regressed, the raw
+      // compare would have treated alias ≠ real, fired migration, and
+      // called `removeCanonicalNodeSkill(realWs)` which would delete this
+      // file through the other view of the same directory.
+      expect(existsSync(skillReal)).toBe(true);
+      expect(readFileSync(skillReal, 'utf-8')).toBe(installedBytes);
+      // The alias view sees the same file (same physical inode).
+      expect(existsSync(join(aliasWs, 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;

@@ -14,7 +14,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -1178,7 +1178,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     if (!existsSync(effectiveConfigPathForMigration)) {
       throw new Error(
         `openclaw.json not found at ${effectiveConfigPathForMigration} — ` +
-        `install OpenClaw first, or pass --config-path <path>`,
+        `install OpenClaw first`,
       );
     }
     let rawExisting: any;
@@ -1256,17 +1256,34 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // warning with the orphan path + explicit cleanup command. Not thrown —
   // the new install is valid; the residue is a stale-file nuisance, not a
   // broken install.
-  if (!dryRun && priorInstalledForMigration && priorInstalledForMigration !== workspaceDir) {
-    log(`Migrating install workspace: ${priorInstalledForMigration} → ${workspaceDir}`);
-    removeCanonicalNodeSkill(priorInstalledForMigration);
-    const residue = verifySkillRemoved(priorInstalledForMigration);
-    if (residue) {
-      const orphan = canonicalWorkspaceSkillPath(priorInstalledForMigration);
-      warn(
-        `Migration cleanup did not remove the old SKILL.md — ${residue}. ` +
-        `The new install at ${workspaceDir} is functional, but the orphan ` +
-        `must be removed manually: rm "${orphan}"`,
-      );
+  //
+  // R7-1: compare CANONICAL paths, not raw strings. Symlink aliases
+  // (`/tmp/ws` ↔ `/private/tmp/ws` on macOS), case-only differences on
+  // case-insensitive filesystems (NTFS, APFS), and relative/absolute
+  // variants of the same directory can all look like a workspace change
+  // through raw string compare — and the cleanup below would then delete
+  // the just-installed SKILL.md through the old alias. `realpathSync`
+  // resolves symlinks AND normalizes case/separators. Falls back to the
+  // raw string when realpath throws (e.g. the prior workspace was deleted
+  // off-disk between setups) — raw compare is still a correct lower-bound
+  // for "definitely different paths".
+  if (!dryRun && priorInstalledForMigration) {
+    let priorCanonical = priorInstalledForMigration;
+    let currentCanonical = workspaceDir;
+    try { priorCanonical = realpathSync(priorInstalledForMigration); } catch { /* path gone — keep raw */ }
+    try { currentCanonical = realpathSync(workspaceDir); } catch { /* path gone — keep raw */ }
+    if (priorCanonical !== currentCanonical) {
+      log(`Migrating install workspace: ${priorInstalledForMigration} → ${workspaceDir}`);
+      removeCanonicalNodeSkill(priorInstalledForMigration);
+      const residue = verifySkillRemoved(priorInstalledForMigration);
+      if (residue) {
+        const orphan = canonicalWorkspaceSkillPath(priorInstalledForMigration);
+        warn(
+          `Migration cleanup did not remove the old SKILL.md — ${residue}. ` +
+          `The new install at ${workspaceDir} is functional, but the orphan ` +
+          `must be removed manually: rm "${orphan}"`,
+        );
+      }
     }
   }
 

@@ -292,7 +292,19 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
       name: `test-node-${i + 1}`,
       apiPort,
       listenPort: libp2pPort,
-      nodeRole: isRelay ? 'core' : 'edge',
+      // All game-e2e nodes run as `core`. Previously only node 0 was `core`
+      // and nodes 1-2 were `edge`, which broke every e2e test: `dkg-agent`
+      // skips on-chain profile creation and StorageACK handler registration
+      // for edge nodes (see `packages/agent/src/dkg-agent.ts:483` +
+      // `:508`), so edge nodes never log `identityId=<n>` (breaking the
+      // `all nodes registered on-chain identities` assertion) and never
+      // participate in M-of-N ACK collection (breaking the `on-chain
+      // publishes succeed (no MinSignaturesRequirementNotMet)` assertion).
+      // The game spec requires every participant to be a full signing peer
+      // with on-chain stake, so `core` is the correct role. This was
+      // masked by CI-2 failing first in `beforeAll`; once port contention
+      // was fixed the harness misconfiguration surfaced.
+      nodeRole: 'core',
       contextGraphs: ['origin-trail-game'],
       auth: { enabled: true, tokens: [authToken] },
     };

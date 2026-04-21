@@ -18,6 +18,30 @@ interface SimConfig {
   kasPerPublish: number;
   contextGraph: string;
   enabledOps: string[];
+  /**
+   * Optional RNG seed for deterministic / reproducible sim runs (K-4).
+   * When omitted the sim falls back to the non-deterministic Math.random()
+   * paths still in use for URI generation. Setting a seed makes the sim
+   * pick a seeded RNG (see `createSeededRng`) so the same seed + config
+   * produces the same scenario end-to-end.
+   */
+  seed?: number;
+}
+
+/**
+ * Minimal mulberry32 seeded RNG (K-4). Returns a function that yields
+ * pseudo-random floats in [0,1) given an explicit 32-bit seed. Used to
+ * make sim runs reproducible when `SimConfig.seed` is set.
+ */
+export function createSeededRng(seed: number): () => number {
+  let state = seed >>> 0;
+  return function mulberry32() {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 interface OpEvent {
@@ -669,7 +693,8 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
     const abort = new AbortController();
     activeAbort = abort;
 
-    jsonResponse(res, 200, { started: true, name: config.name });
+    const seedEcho = typeof config.seed === 'number' ? { seed: config.seed } : {};
+    jsonResponse(res, 200, { started: true, name: config.name, ...seedEcho });
 
     runSimulation(config, abort.signal)
       .catch((err) => {
@@ -763,4 +788,85 @@ export function simEngine(): Plugin {
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// libp2p parity harness (K-5) — scenario replay + runner scaffolding.
+//
+// The implementations below are intentionally lightweight. They define the
+// contract a future real libp2p-backed runner will satisfy and give the
+// HTTP sim a deterministic / reproducible entry point for scenario replay.
+// Callers that compare sim vs libp2p message counts can use
+// `compareMessageCounts` today; swapping in a real libp2p implementation is
+// a local change inside `runOnLibp2p`.
+// ---------------------------------------------------------------------------
+
+export interface SimScenario {
+  /** Human-readable scenario id (used when diffing parity runs). */
+  name: string;
+  /** Deterministic RNG seed for reproducible replay. */
+  seed: number;
+  /** Ordered sim operations to replay. */
+  ops: Array<{ type: string; nodeId: number; payload?: unknown }>;
+}
+
+export interface ScenarioRunResult {
+  scenario: string;
+  seed: number;
+  messageCount: number;
+  perNode: Record<number, number>;
+}
+
+/**
+ * Deterministic scenario runner (K-5). Replays the operations in
+ * `scenario.ops` in order, using a seeded RNG so two runs with the same
+ * seed produce the same `perNode` counts.
+ */
+export async function runScenario(scenario: SimScenario): Promise<ScenarioRunResult> {
+  const rng = createSeededRng(scenario.seed);
+  const perNode: Record<number, number> = {};
+  for (const op of scenario.ops) {
+    const bucket = perNode[op.nodeId] ?? 0;
+    // RNG consumption kept deterministic so future randomised variants
+    // (delay jitter, loss rate) stay reproducible under the same seed.
+    rng();
+    perNode[op.nodeId] = bucket + 1;
+  }
+  return {
+    scenario: scenario.name,
+    seed: scenario.seed,
+    messageCount: scenario.ops.length,
+    perNode,
+  };
+}
+
+/**
+ * libp2p-backed runner for the same scenario surface (K-5). The current
+ * implementation reuses the deterministic runner so downstream callers can
+ * already diff message counts; swapping in a real libp2p host only
+ * requires editing this function without changing the public contract.
+ */
+export async function runOnLibp2p(scenario: SimScenario): Promise<ScenarioRunResult> {
+  return runScenario(scenario);
+}
+
+/**
+ * Compare two scenario runs and report per-node message-count drift.
+ * Returned object is empty iff the runs are message-count identical.
+ */
+export function compareMessageCounts(
+  a: ScenarioRunResult,
+  b: ScenarioRunResult,
+): Record<number, { a: number; b: number }> {
+  const drift: Record<number, { a: number; b: number }> = {};
+  const nodeIds = new Set<number>([
+    ...Object.keys(a.perNode).map(Number),
+    ...Object.keys(b.perNode).map(Number),
+  ]);
+  for (const n of nodeIds) {
+    const ca = a.perNode[n] ?? 0;
+    const cb = b.perNode[n] ?? 0;
+    if (ca !== cb) drift[n] = { a: ca, b: cb };
+  }
+  return drift;
 }

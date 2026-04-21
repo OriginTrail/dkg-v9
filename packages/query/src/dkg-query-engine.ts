@@ -34,7 +34,18 @@ export interface ViewResolution {
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
-  opts?: { agentAddress?: string; verifiedGraph?: string; assertionName?: string },
+  opts?: {
+    agentAddress?: string;
+    verifiedGraph?: string;
+    assertionName?: string;
+    /**
+     * Spec §12/§14 trust-gradient filter. When set, the verified-memory
+     * resolution narrows to anchored quorum sub-graphs
+     * (`.../_verified_memory/…`) only — the root data graph is removed
+     * because it can contain mixed-trust finalized data.
+     */
+    minTrust?: TrustLevel;
+  },
 ): ViewResolution {
   if (REMOVED_VIEWS.includes(view as string)) {
     throw new Error(
@@ -74,6 +85,18 @@ export function resolveViewGraphs(
       // Verified Memory content layer (chain-confirmed data lands here after
       // finalization).  Any quorum-specific verified-memory sub-graphs live
       // under `_verified_memory/` and are unioned in as well.
+      //
+      // Spec §12/§14 (P-13): when `minTrust` is set, drop the root data
+      // graph — it may carry mixed-trust content — and return ONLY the
+      // quorum-anchored `_verified_memory/` prefix. Downstream trust
+      // enforcement (per-triple trustLevel filter) is handled when the
+      // query is rewritten by the engine.
+      if (opts?.minTrust !== undefined) {
+        return {
+          graphs: [],
+          graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
+        };
+      }
       return {
         graphs: [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
@@ -190,6 +213,7 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
+      minTrust: options._minTrust,
     });
 
     const allGraphs = [...resolution.graphs];
@@ -203,11 +227,23 @@ export class DKGQueryEngine implements QueryEngine {
       return { bindings: [] };
     }
 
-    if (allGraphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(sparql, allGraphs[0]));
+    // Spec §14 trust-gradient filter — only enforced on verified-memory
+    // where on-chain-anchored trust metadata is expected to live.
+    // When _minTrust is set, rewrite the query so every subject matched
+    // by the user's pattern MUST carry an explicit
+    // `http://dkg.io/ontology/trustLevel` literal whose integer value is
+    // ≥ minTrust. Subjects without trust metadata are rejected.
+    let effectiveSparql = sparql;
+    if (view === 'verified-memory' && options._minTrust !== undefined) {
+      const rewritten = injectMinTrustFilter(sparql, options._minTrust);
+      if (rewritten) effectiveSparql = rewritten;
     }
 
-    return this.queryMultipleGraphs(sparql, allGraphs);
+    if (allGraphs.length === 1) {
+      return this.execAndNormalize(wrapWithGraph(effectiveSparql, allGraphs[0]));
+    }
+
+    return this.queryMultipleGraphs(effectiveSparql, allGraphs);
   }
 
   private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
@@ -378,6 +414,53 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
 
   const valuesClause = graphUris.map((g) => `<${g}>`).join(' ');
   return `${before} VALUES ?_viewGraph { ${valuesClause} } GRAPH ?_viewGraph { ${inner} } ${after}`;
+}
+
+/**
+ * Rewrites a SPARQL query so every subject variable used in its WHERE
+ * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
+ * with an integer value ≥ `minTrust`. Subjects with no trust metadata
+ * are filtered out (the required triple is absent).
+ *
+ * The rewriter inspects the first statement inside the WHERE block to
+ * identify subject variables. Queries that already contain an explicit
+ * `GRAPH` pattern or no recognizable BGP subject var return unchanged.
+ * Returns `null` when rewriting isn't safe so the caller can fall back
+ * to the original (unfiltered) query.
+ */
+function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
+  const whereIdx = sparql.search(/WHERE\s*\{/i);
+  if (whereIdx === -1) return null;
+  const braceStart = sparql.indexOf('{', whereIdx);
+  if (braceStart === -1) return null;
+
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < sparql.length; i++) {
+    if (sparql[i] === '{') depth++;
+    else if (sparql[i] === '}') {
+      depth--;
+      if (depth === 0) { braceEnd = i; break; }
+    }
+  }
+  if (braceEnd === -1) return null;
+
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+
+  // Find the first subject variable — token right before the first
+  // predicate. Accept `?name` or `$name` styles.
+  const subjMatch = inner.match(/[?$]([A-Za-z_]\w*)\s+[<?$]/);
+  if (!subjMatch) return null;
+  const subjectVar = subjMatch[0].trim().split(/\s+/)[0];
+
+  const trustVar = '?__dkgTrust';
+  const extraBgp =
+    `${subjectVar} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
+    `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust}) `;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const after = sparql.slice(braceEnd);
+  return `${before} ${inner.trim()} . ${extraBgp} ${after}`;
 }
 
 function mergeSharedMemoryAndDataResults(

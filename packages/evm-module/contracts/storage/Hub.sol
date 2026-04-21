@@ -200,8 +200,6 @@ contract Hub is INamed, IVersioned, Ownable {
                 // Best-effort: contract may not implement IContractStatus; ignore.
             }
         }
-
-        emit NewContract(contractName, newContractAddress);
     }
 
     function _setContracts(HubLib.Contract[] calldata newContracts) internal {
@@ -279,6 +277,12 @@ contract Hub is INamed, IVersioned, Ownable {
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        // EOA-safe: without this short-circuit the compiler-inserted
+        // extcodesize guard on the try-external call reverts with empty
+        // data instead of falling through to the caller's typed revert.
+        if (multiSigAddress.code.length == 0) {
+            return false;
+        }
         try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
             for (uint256 i = 0; i < multiSigOwners.length; i++) {
                 if (msg.sender == multiSigOwners[i]) {

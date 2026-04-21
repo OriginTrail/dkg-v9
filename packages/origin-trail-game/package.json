@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-app-origin-trail-game",
-  "version": "0.1.0",
+  "version": "10.0.0-rc.1",
   "description": "OriginTrail Game — a multiplayer game on the DKG. Installable DKG app.",
   "type": "module",
   "main": "dist/index.js",

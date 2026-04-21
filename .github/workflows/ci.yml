@@ -346,34 +346,32 @@ jobs:
   # up 3 DKG daemons + a local Hardhat chain, plays a full game, and
   # asserts gossip / context-graph / CCL behavior end-to-end.
   #
-  # These are gated behind a separate `vitest.e2e.config.ts` and not
-  # picked up by `pnpm test`. We give them their own runner so:
-  #   (a) tier labelling stays clean (they're KOSAVA demo-app tests),
-  #   (b) wall-clock impact is ~0 — they run in parallel with the
-  #       Tornado shards which remain the critical path.
+  # Sharded 1-file-per-runner: each file is ~4-5 min on its own and
+  # was previously running serially in one job (20 min wall-clock)
+  # because all 4 files share `.test-nodes/` + ports 19200-19302 /
+  # 18545 and their daemon-process cleanup is fragile on 2-core CI
+  # runners. Splitting into 4 ephemeral runners:
+  #   (a) structurally eliminates cross-file pollution — each runner
+  #       starts fresh and never reuses state;
+  #   (b) cuts wall-clock from ~20 min to ~5-6 min in parallel;
+  #   (c) makes flakiness attributable to a single file when it does
+  #       happen.
   # ------------------------------------------------------------------
   kosava-game-e2e:
-    name: "Kosava: origin-trail-game E2E"
+    name: "Kosava: origin-trail-game E2E [${{ matrix.shard.id }}/4]"
     needs: build
     runs-on: ubuntu-latest
-    # 4 e2e files × (≤ 600s beforeAll + ≤ 120s per test * a handful of
-    # tests) → worst case ~40 min on cold 2-core CI runners. We give
-    # the lane 50 min so we either get a clean pass or a diagnostic
-    # failure with our daemon log tail instead of an opaque
-    # "Operation cancelled".
-    timeout-minutes: 50
-    # KOSAVA tier signal — do NOT block the merge gate. These e2e tests
-    # spin up 3 full DKG daemons + Hardhat into a shared
-    # `.test-nodes/` directory + shared TCP ports (19200-19302, 18545)
-    # per file. Even with `fileParallelism: false`, daemon-process
-    # cleanup between files is fragile on 2-core CI runners (we've
-    # observed pidfile + EADDRINUSE collisions despite SIGKILL on the
-    # process group + `fuser -k`). Locally these tests pass cleanly.
-    # Failures here are CI-infra issues, NOT DKG production bugs, so
-    # they must not block PR merges. The lane stays in CI so flakiness
-    # remains visible and we keep iterating until it can be promoted
-    # to required.
-    continue-on-error: true
+    # Single file per runner: ≤ 600s beforeAll + ≤ 120s per test * a
+    # handful of tests → worst case ~8 min on cold 2-core CI runners.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - { id: 1, file: test/e2e/context-graph.test.ts }
+          - { id: 2, file: test/e2e/game-ccl-e2e.test.ts }
+          - { id: 3, file: test/e2e/new-features.test.ts }
+          - { id: 4, file: test/e2e/three-player-game.test.ts }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -408,8 +406,10 @@ jobs:
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: "OriginTrail Game E2E (4 tests, 3-node cluster + Hardhat)"
-        run: pnpm --filter @origintrail-official/dkg-app-origin-trail-game run test:e2e
+      - name: "OriginTrail Game E2E (${{ matrix.shard.file }})"
+        run: |
+          pnpm --filter @origintrail-official/dkg-app-origin-trail-game exec \
+            vitest run --config vitest.e2e.config.ts ${{ matrix.shard.file }}
         env:
           NODE_OPTIONS: --max-old-space-size=4096
 
@@ -419,46 +419,48 @@ jobs:
   # contracts mean financial loss or consensus divergence.
   #   - PR + no contract changes : no-op fast pass (keeps the required
   #     check green without spinning up Hardhat).
-  #   - PR + contract changes    : hardhat test only, no coverage (~5-7m).
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net.
+  #   - PR + contract changes    : 4-way sharded hardhat test, no
+  #                                coverage (~5-6 min per shard in
+  #                                parallel; previously ~20 min single).
+  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #                                single job (coverage reports don't
+  #                                compose across shards, so we keep
+  #                                the safety-net job unsharded).
   # ------------------------------------------------------------------
   solidity:
-    name: "Tornado: Solidity (evm-module)"
+    name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
+    # PR lane only — sharded 4 ways. Push lane runs the separate
+    # solidity-coverage job below (full coverage + ratchet check).
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
       - name: Skip — no contract changes on this PR
-        if: |
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.contracts != 'true'
-        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity. Full coverage still runs on push to main/v10-rc."
+        if: needs.changes.outputs.contracts != 'true'
+        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity shard ${{ matrix.shard }}/4. Full coverage still runs on push to main/v10-rc."
 
       - uses: pnpm/action-setup@v4
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
+        if: needs.changes.outputs.contracts == 'true'
 
       - uses: actions/setup-node@v4
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
+        if: needs.changes.outputs.contracts == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
+        if: needs.changes.outputs.contracts == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Cache Hardhat artifacts
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
+        if: needs.changes.outputs.contracts == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -470,23 +472,71 @@ jobs:
             hardhat-${{ runner.os }}-
 
       - name: Compile contracts
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
+        if: needs.changes.outputs.contracts == 'true'
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: Hardhat tests (PR — fast, no coverage)
-        if: |
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.contracts == 'true'
-        run: pnpm test
-        working-directory: packages/evm-module
+      - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
+        if: needs.changes.outputs.contracts == 'true'
+        # Round-robin distribute the 48 .test.ts files across 4
+        # shards. `sort` gives deterministic ordering so the same file
+        # always lands in the same shard across runs — makes failure
+        # reproduction trivial. Hardhat accepts multiple positional
+        # file paths as `hardhat test FILE1 FILE2 ...`.
+        run: |
+          set -euo pipefail
+          cd packages/evm-module
+          mapfile -t FILES < <(find test -type f -name '*.test.ts' | sort)
+          SHARD_FILES=()
+          SHARD_ID=${{ matrix.shard }}
+          for i in "${!FILES[@]}"; do
+            if (( (i % 4) + 1 == SHARD_ID )); then
+              SHARD_FILES+=("${FILES[$i]}")
+            fi
+          done
+          echo "::group::Shard ${SHARD_ID}/4 — ${#SHARD_FILES[@]} files"
+          printf '  %s\n' "${SHARD_FILES[@]}"
+          echo "::endgroup::"
+          npx hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
         env:
           NODE_OPTIONS: --max-old-space-size=8192
 
-      - name: Hardhat tests + Solidity coverage + ratchet check (push — safety net)
-        if: github.event_name != 'pull_request'
+  # ------------------------------------------------------------------
+  # Tornado Solidity coverage lane — safety net on push to main/v10-rc
+  # only. Full Solidity suite + solidity-coverage + coverage ratchet.
+  # Not sharded because solidity-coverage's instrumentation state
+  # doesn't compose across parallel runners. Wall-clock on push is
+  # not on the critical path so ~20-25 min here is acceptable.
+  # ------------------------------------------------------------------
+  solidity-coverage:
+    name: "Tornado: Solidity coverage (push safety net)"
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Cache Hardhat artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
+      - name: Compile contracts
+        run: npx hardhat compile --config hardhat.node.config.ts
+        working-directory: packages/evm-module
+      - name: Hardhat tests + Solidity coverage + ratchet check
         run: pnpm test:coverage
         working-directory: packages/evm-module
         env:

@@ -13,6 +13,30 @@ import React from 'react';
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
 
+/**
+ * URL allow-list for anchors embedded in LLM-generated / graph-sourced GenUI.
+ * Blocks `javascript:`, `data:`, `file:`, and other hostile schemes that would
+ * otherwise execute when the user clicks an auto-rendered link. Returns the
+ * URL itself for http(s) / mailto (relative URLs are let through unchanged),
+ * and `null` for anything else so the caller can fall back to plain text.
+ */
+function safeHref(url: string | undefined | null): string | null {
+  if (typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  try {
+    // `URL` throws on non-absolute inputs; treat those as relative and allow.
+    const parsed = new URL(trimmed, 'https://placeholder.invalid');
+    if (parsed.origin === 'https://placeholder.invalid') return trimmed; // relative URL
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+      return trimmed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Root wrapper ──────────────────────────────────────────────
 export const EntityDetailImpl: React.FC<RenderProps<{ title?: string; children?: unknown }>> = ({ props, renderNode }) => {
   const kids = (props as { children?: unknown }).children;
@@ -212,7 +236,12 @@ export const PRCardImpl: React.FC<RenderProps<{
     <div className="v10-genui-chips">
       {props.author ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">by</span><span className="v10-genui-chip-value">{props.author}</span></span> : null}
       {props.mergedAt ? <span className="v10-genui-chip tone-success"><span className="v10-genui-chip-label">merged</span><span className="v10-genui-chip-value">{props.mergedAt.split('T')[0]}</span></span> : null}
-      {props.url ? <a className="v10-genui-chip tone-info" href={props.url} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a> : null}
+      {(() => {
+        const href = safeHref(props.url);
+        return href
+          ? <a className="v10-genui-chip tone-info" href={href} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a>
+          : null;
+      })()}
     </div>
     {props.body ? <div className="v10-genui-pr-body">{props.body}</div> : null}
   </div>

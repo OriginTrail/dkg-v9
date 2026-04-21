@@ -6578,14 +6578,12 @@ async function handleRequest(
   // POST /api/context-graph/rename (or /api/paranet/rename)
   //
   // Updates the display name (schema:name) of an existing context graph
-  // without touching any of its data. Targets both possible definition
-  // graphs — the ONTOLOGY graph (open CGs) and the CG's _meta graph
-  // (curated CGs) — so callers don't need to know which one applies.
-  //
-  // We delete any pre-existing name triple on the CG URI in both graphs
-  // before inserting the new one, guaranteeing idempotent rename and
-  // avoiding the "two names in the store" failure mode that pure-insert
-  // semantics would produce.
+  // without touching any of its data. Delegates to `agent.renameContextGraph`
+  // which (a) enforces owner-only authorization via `assertCallerIsOwner`
+  // (same protection as add/remove-participant), (b) wipes old name triples
+  // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
+  // the new name into both so the rename is durable for open AND private
+  // CGs (private curated graphs read their definition from `_meta`).
   if (
     req.method === "POST" &&
     (path === "/api/context-graph/rename" || path === "/api/paranet/rename")
@@ -6595,37 +6593,19 @@ async function handleRequest(
     if (!id || !name) {
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     }
-    const cgUri = `did:dkg:context-graph:${id}`;
-    const ontologyGraph = 'did:dkg:context-graph:ontology';
-    const cgMetaGraph = `did:dkg:context-graph:${id}/_meta`;
-    const schemaName = 'https://schema.org/name';
     try {
-      // Wipe any existing name triples in both candidate graphs — either one
-      // will be a no-op for CGs that don't live there, which is the desired
-      // idempotence. We don't query-first because `deleteByPattern` is
-      // already a no-op on empty matches.
-      await agent.store.deleteByPattern({
-        subject: cgUri,
-        predicate: schemaName,
-        graph: ontologyGraph,
-      });
-      await agent.store.deleteByPattern({
-        subject: cgUri,
-        predicate: schemaName,
-        graph: cgMetaGraph,
-      });
-      // Insert the canonical name triple into whichever graph the CG was
-      // originally created in. We write to both deterministically — the
-      // ONTOLOGY graph is the primary source for `listContextGraphs`, and
-      // _meta doubles as a private curated-CG index. Harmless duplication
-      // in open CGs.
-      await agent.store.insert([
-        { subject: cgUri, predicate: schemaName, object: `"${String(name).replace(/"/g, '\\"')}"`, graph: ontologyGraph },
-      ]);
+      await agent.renameContextGraph(id, String(name), requestAgentAddress);
       return jsonResponse(res, 200, { renamed: id, name });
     } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/Only the context graph creator/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (/does not exist|has no known creator|non-empty string/.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
       return jsonResponse(res, 500, {
-        error: `Failed to rename context graph: ${err?.message ?? String(err)}`,
+        error: `Failed to rename context graph: ${msg}`,
       });
     }
   }

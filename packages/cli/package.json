@@ -15,6 +15,7 @@
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
+    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",

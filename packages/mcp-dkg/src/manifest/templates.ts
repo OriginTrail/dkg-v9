@@ -187,6 +187,11 @@ export const CURSOR_MCP_JSON_TEMPLATE = JSON.stringify(
       dkg: {
         command: 'node',
         args: ['{{mcpDkgDistAbsPath}}'],
+        // Cursor spawns MCP servers from its own CWD (not the workspace),
+        // so the dkg MCP can't walk up to find .dkg/config.yaml on its
+        // own. Pin cwd to the workspace root so loadConfig() picks up
+        // the generated config (and, via it, the auth token file).
+        cwd: '{{workspaceAbsPath}}',
         env: {
           DKG_API: '{{daemonApiUrl}}',
           DKG_PROJECT: '{{contextGraphId}}',

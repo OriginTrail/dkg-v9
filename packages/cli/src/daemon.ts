@@ -20,6 +20,7 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 
@@ -2274,113 +2275,24 @@ export async function probeOpenClawChannelHealth(
   return { ok: false, bridge, gateway, error: lastError };
 }
 
-type OpenClawUiSetupCommand = {
-  command: string;
-  args: string[];
-  source: 'workspace' | 'npx';
-};
+async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('OpenClaw attach cancelled');
+  const { runSetup } = await import('@origintrail-official/dkg-adapter-openclaw');
+  await runSetup({ start: false, verify: false });
+}
 
-type WorkspacePackageLookupDeps = {
-  fileExists?: (path: string) => boolean;
-  readFileText?: (path: string) => string;
-  readDirNames?: (path: string) => string[];
-};
-
-function resolveWorkspacePackageBinCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  deps: WorkspacePackageLookupDeps = {},
-): OpenClawUiSetupCommand | null {
-  const fileExists = deps.fileExists ?? existsSync;
-  const readFileText = deps.readFileText ?? ((path: string) => readFileSync(path, 'utf8'));
-  const readDirNames = deps.readDirNames ?? ((path: string) => readdirSync(path, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name));
-
-  const repoRoot = fileURLToPath(new URL('../../../', runtimeModuleUrl));
-  const packagesDir = join(repoRoot, 'packages');
-  let packageDirs: string[];
+function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
+  const configPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : join(homedir(), '.openclaw', 'openclaw.json');
+  if (!existsSync(configPath)) return false;
   try {
-    packageDirs = readDirNames(packagesDir);
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed?.plugins?.slots?.memory === 'adapter-openclaw';
   } catch {
-    return null;
+    return false;
   }
-
-  for (const dirName of packageDirs) {
-    const packageDir = join(packagesDir, dirName);
-    const packageJsonPath = join(packageDir, 'package.json');
-    if (!fileExists(packageJsonPath)) continue;
-
-    try {
-      const packageJson = JSON.parse(readFileText(packageJsonPath)) as {
-        name?: unknown;
-        bin?: unknown;
-      };
-      if (packageJson.name !== packageName) continue;
-
-      const binField = packageJson.bin;
-      const binPath = typeof binField === 'string'
-        ? binField
-        : isPlainRecord(binField)
-          ? Object.values(binField).find((value): value is string => typeof value === 'string')
-          : undefined;
-      if (!binPath) continue;
-
-      const commandPath = join(packageDir, binPath);
-      if (!fileExists(commandPath)) continue;
-
-      return {
-        command: process.execPath,
-        args: [commandPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
-export function getOpenClawUiSetupCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  fileExists: (path: string) => boolean = existsSync,
-  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
-): OpenClawUiSetupCommand {
-  if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
-    const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
-    if (fileExists(localSetupCliPath)) {
-      return {
-        command: process.execPath,
-        args: [localSetupCliPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    }
-  }
-
-  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, {
-    ...deps,
-    fileExists,
-  });
-  if (workspaceCommand) {
-    return workspaceCommand;
-  }
-
-  return {
-    command: 'npx',
-    args: ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'],
-    source: 'npx',
-  };
-}
-
-async function runOpenClawUiSetup(packageName: string, signal?: AbortSignal): Promise<void> {
-  const setupCommand = getOpenClawUiSetupCommand(packageName);
-  await execFileAsync(setupCommand.command, setupCommand.args, {
-    shell: setupCommand.source === 'npx' && process.platform === 'win32',
-    signal,
-    timeout: 120_000,
-  });
 }
 
 async function restartOpenClawGateway(signal?: AbortSignal): Promise<void> {
@@ -2431,7 +2343,7 @@ async function waitForOpenClawChatReady(
 }
 
 type OpenClawUiAttachDeps = {
-  runSetup?: (packageName: string, signal?: AbortSignal) => Promise<void>;
+  runSetup?: (signal?: AbortSignal) => Promise<void>;
   restartGateway?: (signal?: AbortSignal) => Promise<void>;
   waitForReady?: (
     config: DkgConfig,
@@ -2445,6 +2357,7 @@ type OpenClawUiAttachDeps = {
   ) => Promise<OpenClawChannelHealthReport>;
   saveConfig?: (config: DkgConfig) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
+  verifyMemorySlot?: () => boolean;
 };
 
 function formatOpenClawUiAttachFailure(err: any): string {
@@ -2493,6 +2406,12 @@ function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
   return job.cancelled || job.controller.signal.aborted;
 }
 
+/**
+ * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
+ * where the OpenClaw gateway, on next restart, will load the adapter from the
+ * workspace build and elect it into plugins.slots.memory. The post-setup invariant
+ * check enforces this before transitioning to `ready`.
+ */
 export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
@@ -2510,7 +2429,6 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
-  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requested.id];
   if (requested.id !== 'openclaw') {
     return {
       integration: requested,
@@ -2522,6 +2440,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
   const runSetup = deps.runSetup ?? runOpenClawUiSetup;
   const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+  const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
@@ -2540,14 +2459,6 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  const packageName = definition?.manifest?.packageName;
-  if (!packageName) {
-    return {
-      integration: requested,
-      notice: `${requested.name} was registered, but this node does not yet know how to attach it automatically.`,
-    };
-  }
-
   const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
     const current = getLocalAgentIntegration(config, requested.id);
     if (current?.enabled === false && patch.enabled !== false) {
@@ -2563,9 +2474,20 @@ export async function connectLocalAgentIntegrationFromUi(
   const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
     try {
       bridgeHealthCache = null;
-      await runSetup(packageName, attachJob.controller.signal);
+      await runSetup(attachJob.controller.signal);
       if (isOpenClawUiAttachCancelled(attachJob)) return;
       bridgeHealthCache = null;
+
+      if (!verifyMemorySlot()) {
+        await persistIntegrationState({
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: 'OpenClaw memory slot election failed after setup — adapter-openclaw not elected to plugins.slots.memory',
+          },
+        });
+        return;
+      }
 
       let latest = await probeHealth(config, bridgeAuthToken, {
         ignoreBridgeCache: true,
@@ -2633,6 +2555,69 @@ export async function connectLocalAgentIntegrationFromUi(
       ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
       : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
   };
+}
+
+/**
+ * CONTRACT (issue #198 / D1 reverse-setup): This helper MUST leave
+ * ~/.openclaw/openclaw.json in a state where `plugins.slots.memory !==
+ * "adapter-openclaw"` and the adapter load path is no longer listed.
+ * If the reverse-merge completes but the invariant is still violated,
+ * callers must surface runtime.status='error' and NOT transition to
+ * 'disconnected'. The adapter's `unmergeOpenClawConfig` is symmetric to
+ * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
+ */
+export async function reverseLocalAgentSetupForUi(
+  _config: DkgConfig,
+  openclawConfigPath?: string,
+): Promise<void> {
+  const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : join(homedir(), '.openclaw', 'openclaw.json');
+  const { unmergeOpenClawConfig } = await import('@origintrail-official/dkg-adapter-openclaw');
+  unmergeOpenClawConfig(resolvedPath);
+  if (isOpenClawMemorySlotElected(resolvedPath)) {
+    throw new Error('OpenClaw disconnect failed: adapter-openclaw still elected to plugins.slots.memory after reverse-merge');
+  }
+}
+
+export async function refreshLocalAgentIntegrationFromUi(
+  config: DkgConfig,
+  id: string,
+  bridgeAuthToken: string | undefined,
+): Promise<LocalAgentIntegrationRecord> {
+  const normalizedId = normalizeIntegrationId(id);
+  const existing = getLocalAgentIntegration(config, normalizedId);
+  if (!existing) {
+    throw new Error(`Unknown integration: ${id}`);
+  }
+  if (normalizedId !== 'openclaw') {
+    return existing;
+  }
+
+  bridgeHealthCache = null;
+  const health = await probeOpenClawChannelHealth(config, bridgeAuthToken, {
+    ignoreBridgeCache: true,
+    timeoutMs: 3_000,
+  });
+
+  if (health.ok) {
+    return updateLocalAgentIntegration(config, normalizedId, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+  }
+
+  return updateLocalAgentIntegration(config, normalizedId, {
+    runtime: {
+      status: 'error',
+      ready: false,
+      lastError: health.error ?? 'OpenClaw bridge offline',
+    },
+  });
 }
 
 function shouldTryNextOpenClawTarget(status: number): boolean {
@@ -6354,6 +6339,17 @@ async function handleRequest(
     }
   }
 
+  // POST /api/local-agent-integrations/openclaw/refresh — re-probe OpenClaw bridge health with cache bypass
+  if (req.method === 'POST' && path === '/api/local-agent-integrations/openclaw/refresh') {
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', bridgeAuthToken);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'OpenClaw refresh failed' });
+    }
+  }
+
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
     const id = path.slice('/api/local-agent-integrations/'.length);
@@ -6363,11 +6359,31 @@ async function handleRequest(
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
       const normalizedId = normalizeIntegrationId(id);
+      const explicitDisconnect = parsed.enabled === false
+        && isPlainRecord(parsed.runtime)
+        && parsed.runtime.status === 'disconnected';
       const disconnectRequested = parsed.enabled === false
         || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
       if (disconnectRequested && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
+
+      if (explicitDisconnect && normalizedId === 'openclaw') {
+        try {
+          await reverseLocalAgentSetupForUi(config);
+        } catch (err: any) {
+          const integration = updateLocalAgentIntegration(config, id, {
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
+            },
+          });
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, integration });
+        }
+      }
+
       const integration = updateLocalAgentIntegration(config, id, parsed);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });

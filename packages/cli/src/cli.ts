@@ -1578,58 +1578,33 @@ const openclawCmd = program
   .command('openclaw')
   .description('OpenClaw adapter management');
 
-// Delegate `dkg openclaw setup` to the adapter's own `dkg-openclaw`
-// binary via a child process so:
-//   1. the flag surface, help text, and exit semantics live in exactly
-//      one place (packages/adapter-openclaw/src/setup-cli.ts), with no
-//      risk of drift between `dkg openclaw setup` and `dkg-openclaw
-//      setup`;
-//   2. we avoid a top-level static import that would break `dkg`
-//      startup in fresh workspace checkouts where the adapter's
-//      `dist/` has not been built yet — the resolution is now deferred
-//      to the point where the user actually runs the command, and the
-//      failure (if any) is localized with an actionable error.
-//
-// `allowUnknownOption` + `passThroughOptions` ensure every flag the
-// user passes (including `--help` and anything added to the adapter
-// later) is forwarded verbatim to the underlying binary.
 openclawCmd
   .command('setup')
-  .description('Set up the DKG OpenClaw adapter (delegates to dkg-openclaw)')
-  .allowUnknownOption(true)
-  .allowExcessArguments(true)
-  .helpOption(false)
-  .action(async () => {
-    const { spawnSync } = await import('node:child_process');
-    const { createRequire } = await import('node:module');
-    const { dirname: _dirname, join: _join } = await import('node:path');
-    const { existsSync: _existsSync } = await import('node:fs');
-
-    const req = createRequire(import.meta.url);
-    let binPath: string;
+  .description('Set up DKG node + OpenClaw adapter (non-interactive, idempotent)')
+  .option('--workspace <dir>', 'Override OpenClaw workspace directory')
+  .option('--name <name>', 'Override agent name')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--no-verify', 'Skip post-setup verification')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .option('--dry-run', 'Preview changes without writing anything')
+  .action(async (opts) => {
+    let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
-      const adapterPkgJson = req.resolve('@origintrail-official/dkg-adapter-openclaw/package.json');
-      binPath = _join(_dirname(adapterPkgJson), 'dist', 'setup-cli.js');
-      if (!_existsSync(binPath)) {
-        throw new Error(`adapter binary not found at ${binPath}`);
-      }
+      ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));
     } catch (err: any) {
       console.error('\n[dkg openclaw setup] OpenClaw adapter is not available.');
-      console.error(`  Reason: ${err.message ?? err}`);
+      console.error(`  Reason: ${err?.message ?? err}`);
       console.error('  • In a monorepo dev checkout: run `pnpm build` at the repo root to build all workspaces.');
       console.error('  • With a global install: reinstall with `npm install -g @origintrail-official/dkg`.\n');
       process.exit(1);
     }
 
-    // Forward every argument that came after `openclaw setup`, including
-    // unknown flags and `--help`, verbatim to the adapter binary.
-    const rawArgs = process.argv.slice(2);
-    const openclawIdx = rawArgs.indexOf('openclaw');
-    const setupIdx = openclawIdx >= 0 ? rawArgs.indexOf('setup', openclawIdx) : -1;
-    const forwarded = setupIdx >= 0 ? rawArgs.slice(setupIdx + 1) : [];
-
-    const res = spawnSync(process.execPath, [binPath, 'setup', ...forwarded], { stdio: 'inherit' });
-    process.exit(res.status ?? 0);
+    try {
+      await runSetup(opts);
+    } catch (err: any) {
+      console.error(`\n[setup] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
   });
 
 // ─── dkg ccl ────────────────────────────────────────────────────────

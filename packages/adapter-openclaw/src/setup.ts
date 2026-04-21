@@ -2,15 +2,13 @@
  * Non-interactive setup script for the DKG OpenClaw adapter.
  *
  * Handles the entire DKG node + adapter setup end-to-end:
- *  1. Install DKG CLI (full node) via npm if not present
- *  2. Discover OpenClaw workspace and agent name
- *  3. Write ~/.dkg/config.json with testnet defaults
- *  4. Start the DKG daemon
- *  5. Fund wallets via testnet faucet
- *  6. Merge adapter plugin into ~/.openclaw/openclaw.json
- *  7. Write workspace config.json with feature flags
- *  8. Copy the canonical DKG node skill into the OpenClaw workspace
- *  9. Verify setup
+ *  1. Discover OpenClaw workspace and agent name
+ *  2. Write ~/.dkg/config.json with testnet defaults
+ *  3. Start the DKG daemon
+ *  4. Merge adapter plugin into ~/.openclaw/openclaw.json
+ *  5. Write workspace config.json with feature flags
+ *  6. Copy the canonical DKG node skill into the OpenClaw workspace
+ *  7. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
@@ -29,7 +27,6 @@ export interface SetupOptions {
   workspace?: string;
   name?: string;
   port?: string;
-  fund?: boolean;
   verify?: boolean;
   start?: boolean;
   dryRun?: boolean;
@@ -107,30 +104,7 @@ function canonicalWorkspaceSkillPath(workspaceDir: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: Install DKG CLI
-// ---------------------------------------------------------------------------
-
-export function installDkgCli(): void {
-  try {
-    const version = execSync('dkg --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    log(`DKG CLI already installed (${version})`);
-    return;
-  } catch {
-    // Not installed — proceed to install
-  }
-
-  log('Installing DKG CLI (full node)... npm install -g @origintrail-official/dkg');
-  try {
-    execSync('npm install -g @origintrail-official/dkg', { stdio: 'inherit' });
-    const version = execSync('dkg --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    log(`DKG CLI installed (${version})`);
-  } catch (err: any) {
-    throw new Error(`Failed to install DKG CLI: ${err.message}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 2: Discover OpenClaw workspace
+// Step 1: Discover OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function discoverWorkspace(override?: string): { configPath: string; workspaceDir: string } {
@@ -179,7 +153,7 @@ export function discoverWorkspace(override?: string): { configPath: string; work
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Discover agent name
+// Step 2: Discover agent name
 // ---------------------------------------------------------------------------
 
 export function discoverAgentName(workspaceDir: string, override?: string): string {
@@ -203,7 +177,7 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Write DKG config
+// Step 3: Write DKG config
 // ---------------------------------------------------------------------------
 
 export function loadNetworkConfig(): NetworkConfig {
@@ -359,7 +333,7 @@ export function writeDkgConfig(
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Start DKG daemon
+// Step 4: Start DKG daemon
 // ---------------------------------------------------------------------------
 
 export async function startDaemon(apiPort: number): Promise<void> {
@@ -427,88 +401,22 @@ function isProcessRunning(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: Read wallets and fund via faucet
+// Step 5: Merge adapter into openclaw.json
 // ---------------------------------------------------------------------------
 
-export function readWallets(): string[] {
-  const walletsPath = join(dkgDir(), 'wallets.json');
-  if (!existsSync(walletsPath)) {
-    warn('wallets.json not found — daemon may not have started yet');
-    return [];
-  }
+const ADAPTER_PLUGIN_ID = 'adapter-openclaw';
 
-  let raw: any;
-  try {
-    raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
-  } catch {
-    warn('wallets.json is malformed or still being written — skipping');
-    return [];
-  }
-  // The daemon writes { wallets: [{ address, privateKey }] }.
-  // Handle this shape first, then fall back to other formats.
-  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
-    : Array.isArray(raw) ? raw
-    : [];
-  const addresses: string[] = [];
-  for (const w of walletList) {
-    if (w?.address) addresses.push(w.address);
-  }
-
-  if (addresses.length) {
-    log(`Wallets: ${addresses.join(', ')}`);
-  }
-  return addresses;
+/**
+ * Shared predicate between merge and unmerge so the unmerge only removes
+ * load paths that setup would itself have written. User-added paths that
+ * happen to mention "openclaw" fall through untouched.
+ */
+function isAdapterLoadPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
+    || normalized.endsWith('/packages/adapter-openclaw')
+    || normalized.includes('/packages/adapter-openclaw/');
 }
-
-export async function fundWallets(addresses: string[]): Promise<void> {
-  if (!addresses.length) {
-    warn('No wallet addresses to fund');
-    return;
-  }
-
-  log('Funding wallets via testnet faucet...');
-  try {
-    // Use a stable idempotency key based on wallet addresses so re-runs
-    // don't create duplicate faucet requests and hit rate limits.
-    const idempotencyKey = `dkg-openclaw-setup-${addresses.sort().join('-')}`;
-    const res = await fetch('https://euphoria.origin-trail.network/faucet/fund', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': idempotencyKey,
-      },
-      body: JSON.stringify({
-        mode: 'v9_base_sepolia',
-        wallets: addresses,
-      }),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      log(`Faucet response: ${JSON.stringify(data)}`);
-    } else {
-      const text = await res.text();
-      warn(`Faucet returned ${res.status}: ${text}`);
-      logManualFundingInstructions(addresses);
-    }
-  } catch (err: any) {
-    warn(`Faucet call failed: ${err.message}`);
-    logManualFundingInstructions(addresses);
-  }
-}
-
-function logManualFundingInstructions(addresses: string[]): void {
-  console.log('\nTo fund wallets manually, run:');
-  console.log(`  curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \\`);
-  console.log(`    -H "Content-Type: application/json" \\`);
-  console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
-  console.log(`    --data-raw '{"mode":"v9_base_sepolia","wallets":${JSON.stringify(addresses)}}'`);
-  console.log('');
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: Merge adapter into openclaw.json
-// ---------------------------------------------------------------------------
 
 export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: string): void {
   if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
@@ -530,15 +438,9 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
   if (!config.plugins.entries) config.plugins.entries = {};
 
-  const pluginId = 'adapter-openclaw';
+  const pluginId = ADAPTER_PLUGIN_ID;
   // Normalize adapter path to forward slashes for cross-platform compatibility
   const normalizedPath = adapterPath.replace(/\\/g, '/');
-  const isAdapterLoadPath = (value: string): boolean => {
-    const normalized = value.replace(/\\/g, '/').toLowerCase();
-    return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
-      || normalized.endsWith('/packages/adapter-openclaw')
-      || normalized.includes('/packages/adapter-openclaw/');
-  };
 
   // Add to allow list (idempotent)
   if (!config.plugins.allow.includes(pluginId)) {
@@ -631,8 +533,85 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   log(`Updated ${openclawConfigPath} (backed up original)`);
 }
 
+/**
+ * Symmetric undo of `mergeOpenClawConfig`. Scoped to only the fields setup
+ * would have written:
+ *   - removes `"adapter-openclaw"` from `plugins.allow`
+ *   - filters `plugins.load.paths` by the same `isAdapterLoadPath` predicate
+ *   - flips `plugins.entries["adapter-openclaw"].enabled = false` (keeps other fields)
+ *   - clears `plugins.slots.memory` iff it currently equals `"adapter-openclaw"`
+ *
+ * Leaves `tools.alsoAllow` (shared with other plugins), workspace `config.json`
+ * (user-owned), and any workspace `SKILL.md` copies alone. Idempotent — a
+ * second call produces zero diff. Backs up to `.bak.<ts>` only when content
+ * changes (same contract as merge).
+ */
+export function unmergeOpenClawConfig(openclawConfigPath: string): void {
+  if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
+    openclawConfigPath = join(openclawDir(), 'openclaw.json');
+    if (!existsSync(openclawConfigPath)) {
+      throw new Error(`openclaw.json not found at ${openclawConfigPath}`);
+    }
+  }
+
+  const raw = readFileSync(openclawConfigPath, 'utf-8');
+  const config = JSON.parse(raw);
+  const pluginId = ADAPTER_PLUGIN_ID;
+
+  // Remove from plugins.allow
+  if (config.plugins && Array.isArray(config.plugins.allow)) {
+    const filtered = config.plugins.allow.filter((id: unknown) => id !== pluginId);
+    if (filtered.length !== config.plugins.allow.length) {
+      config.plugins.allow = filtered;
+      log(`Removed ${pluginId} from plugins.allow`);
+    }
+  }
+
+  // Remove adapter load paths (same predicate as merge)
+  if (config.plugins && config.plugins.load && Array.isArray(config.plugins.load.paths)) {
+    const strings = config.plugins.load.paths.filter((p: unknown) => typeof p === 'string');
+    const kept = strings.filter((p: string) => !isAdapterLoadPath(p));
+    const removed = strings.length - kept.length;
+    if (removed > 0) {
+      config.plugins.load.paths = kept;
+      log(`Removed ${removed} adapter-openclaw load path(s) from plugins.load.paths`);
+    } else if (strings.length !== config.plugins.load.paths.length) {
+      // Normalize away non-string entries even when nothing adapter-owned was present
+      config.plugins.load.paths = strings;
+    }
+  }
+
+  // Flip entry.enabled to false (preserve other plugin-specific fields)
+  if (config.plugins && config.plugins.entries) {
+    const entry = config.plugins.entries[pluginId];
+    if (entry && typeof entry === 'object' && entry.enabled !== false) {
+      entry.enabled = false;
+      log(`Disabled ${pluginId} in plugins.entries`);
+    }
+  }
+
+  // Clear slots.memory iff it still points at the adapter
+  if (config.plugins && config.plugins.slots && config.plugins.slots.memory === pluginId) {
+    delete config.plugins.slots.memory;
+    log(`Cleared plugins.slots.memory (was "${pluginId}")`);
+  }
+
+  const updated = JSON.stringify(config, null, 2) + '\n';
+  if (updated === raw) {
+    log('openclaw.json already disconnected from adapter — no changes needed');
+    return;
+  }
+
+  // Backup only when content actually changes (same contract as mergeOpenClawConfig)
+  const backupPath = `${openclawConfigPath}.bak.${Date.now()}`;
+  writeFileSync(backupPath, raw);
+
+  writeFileSync(openclawConfigPath, updated);
+  log(`Unmerged adapter from ${openclawConfigPath} (backed up original)`);
+}
+
 // ---------------------------------------------------------------------------
-// Step 8: Write workspace config
+// Step 6: Write workspace config
 // ---------------------------------------------------------------------------
 
 export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, portExplicit?: boolean): void {
@@ -671,7 +650,7 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, port
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
+// Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function installCanonicalNodeSkill(
@@ -686,7 +665,7 @@ export function installCanonicalNodeSkill(
 }
 
 // ---------------------------------------------------------------------------
-// Step 10: Verify
+// Step 8: Verify
 // ---------------------------------------------------------------------------
 
 export async function verifySetup(
@@ -726,7 +705,7 @@ export async function verifySetup(
   // plan §5.8 / §7 B1,B2,B13 gates.
   // B40: pass through the actual openclaw.json path the setup run merged
   // into, not the default `~/.openclaw/openclaw.json`. When the operator
-  // runs `dkg-openclaw setup --workspace ...`, verification must read
+  // runs `dkg openclaw setup --workspace ...`, verification must read
   // the same file setup wrote, otherwise it reports false slot-election
   // failures against an untouched default config.
   verifyMemorySlotInvariants(opts?.openclawConfigPath);
@@ -798,7 +777,6 @@ export function verifyMemorySlotInvariants(configPath?: string): void {
 
 export async function runSetup(options: SetupOptions): Promise<void> {
   const dryRun = options.dryRun ?? false;
-  const shouldFund = options.fund !== false;
   const shouldVerify = options.verify !== false;
   const shouldStart = options.start !== false;
   const apiPort = Number(options.port ?? '9200');
@@ -813,22 +791,15 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('DRY RUN — no files will be modified\n');
   }
 
-  // Step 1: Ensure DKG CLI is installed
-  if (!dryRun) {
-    installDkgCli();
-  } else {
-    log('[dry-run] Would install DKG CLI if not present');
-  }
-
-  // Step 2: Discover OpenClaw workspace
+  // Step 1: Discover OpenClaw workspace
   const { configPath: openclawConfigPath, workspaceDir } = discoverWorkspace(options.workspace);
   log(`OpenClaw workspace: ${workspaceDir}`);
 
-  // Step 3: Discover agent name
+  // Step 2: Discover agent name
   const agentName = discoverAgentName(workspaceDir, options.name);
   log(`Agent name: ${agentName}`);
 
-  // Step 4: Write DKG config
+  // Step 3: Write DKG config
   let network: NetworkConfig | null = null;
   try {
     network = loadNetworkConfig();
@@ -860,7 +831,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
 
-  // Step 5: Start daemon
+  // Step 4: Start daemon
   if (shouldStart && !dryRun) {
     await startDaemon(effectivePort);
   } else if (shouldStart) {
@@ -869,35 +840,15 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('Skipping daemon start (--no-start)');
   }
 
-  // Step 6: Read wallets and optionally fund
-  // Retry a few times since wallets.json may be written slightly after daemon start.
-  let walletAddresses: string[] = [];
-  if (!dryRun) {
-    walletAddresses = readWallets();
-    if (!walletAddresses.length && shouldStart) {
-      for (let i = 0; i < 5 && !walletAddresses.length; i++) {
-        await sleep(1_000);
-        walletAddresses = readWallets();
-      }
-    }
-    if (shouldFund && walletAddresses.length > 0) {
-      await fundWallets(walletAddresses);
-    } else if (!shouldFund) {
-      log('Skipping wallet funding (--no-fund)');
-    }
-  } else {
-    log('[dry-run] Would read wallets and fund via faucet');
-  }
-
-  // Step 7: Merge adapter into openclaw.json
+  // Step 5: Merge adapter into openclaw.json
   // Use the script's own location as the adapter path — always correct for
   // the currently running code. Warn if the path looks ephemeral (npx cache).
   const resolvedAdapterPath = adapterRoot();
   if (isEphemeralPath(resolvedAdapterPath)) {
     warn(
       'Adapter is running from an npx cache path which may not persist.\n' +
-      '         Install the adapter globally for a stable plugin path:\n' +
-      '         npm install -g @origintrail-official/dkg-adapter-openclaw',
+      '         Install the DKG CLI globally for a stable plugin path:\n' +
+      '         npm install -g @origintrail-official/dkg',
     );
   }
   if (!dryRun) {
@@ -906,14 +857,14 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 8: Write workspace config
+  // Step 6: Write workspace config
   if (!dryRun) {
     writeWorkspaceConfig(workspaceDir, effectivePort, options.port != null);
   } else {
     log('[dry-run] Would write workspace config.json');
   }
 
-  // Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
+  // Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
   if (!dryRun) {
     installCanonicalNodeSkill(workspaceDir);
   } else {
@@ -924,7 +875,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // after config changes, but manual restart remains the safe fallback.
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
-  // Step 10: Verify
+  // Step 8: Verify
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });
   } else if (shouldVerify) {

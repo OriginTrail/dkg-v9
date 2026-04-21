@@ -1,11 +1,13 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
   cancelPendingLocalAgentAttachJob,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
-  getOpenClawUiSetupCommand,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
@@ -17,11 +19,14 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  refreshLocalAgentIntegrationFromUi,
+  reverseLocalAgentSetupForUi,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
+import { mergeOpenClawConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
@@ -251,62 +256,6 @@ describe('OpenClaw channel routing helpers', () => {
     await proxyPromise;
 
     expect(secondReadCalled).toBe(true);
-  });
-});
-
-describe('OpenClaw UI setup command resolution', () => {
-  const runtimeModuleUrl = 'file:///C:/Projects/dkg-v9/packages/cli/dist/daemon.js';
-
-  it('prefers the local workspace adapter setup CLI when it exists', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-openclaw',
-      runtimeModuleUrl,
-      (path) => /packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/.test(path),
-    );
-
-    expect(command.source).toBe('workspace');
-    expect(command.command).toBe(process.execPath);
-    expect(command.args[0]).toMatch(/packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/);
-    expect(command.args.slice(1)).toEqual(['setup', '--no-fund', '--no-start', '--no-verify']);
-  });
-
-  it('falls back to npx when the local adapter build is unavailable', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-openclaw',
-      runtimeModuleUrl,
-      () => false,
-    );
-
-    expect(command).toEqual({
-      command: 'npx',
-      args: ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', '--no-fund', '--no-start', '--no-verify'],
-      source: 'npx',
-    });
-  });
-
-  it('resolves workspace package bins from the repo root instead of packages/packages', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-hermes',
-      runtimeModuleUrl,
-      () => true,
-      {
-        readDirNames: (path) => {
-          expect(path).toMatch(/dkg-v9[\\/]packages$/);
-          return ['adapter-hermes'];
-        },
-        readFileText: (path) => {
-          expect(path).toMatch(/packages[\\/]adapter-hermes[\\/]package\.json$/);
-          return JSON.stringify({
-            name: '@origintrail-official/dkg-adapter-hermes',
-            bin: 'dist/setup-cli.js',
-          });
-        },
-      },
-    );
-
-    expect(command.source).toBe('workspace');
-    expect(command.command).toBe(process.execPath);
-    expect(command.args[0]).toMatch(/packages[\\/]adapter-hermes[\\/]dist[\\/]setup-cli\.js$/);
   });
 });
 
@@ -998,6 +947,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1035,6 +985,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1085,6 +1036,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1132,6 +1084,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1142,7 +1095,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     expect(probeHealthCalls.length).toBe(2);
@@ -1184,6 +1138,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1192,7 +1147,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
@@ -1229,6 +1185,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1301,6 +1258,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1319,7 +1277,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
@@ -1436,6 +1395,257 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.gatewayUrl).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+});
+
+describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #198)', () => {
+  let tempRoot: string;
+  let openclawDir: string;
+  let openclawConfigPath: string;
+  let workspaceDir: string;
+  let adapterPath: string;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'dkg-fresh-home-'));
+    openclawDir = join(tempRoot, '.openclaw');
+    workspaceDir = join(tempRoot, 'workspace');
+    openclawConfigPath = join(openclawDir, 'openclaw.json');
+    mkdirSync(openclawDir, { recursive: true });
+    mkdirSync(workspaceDir, { recursive: true });
+    // Simulate an installed adapter path under workspace node_modules.
+    // The merge routine uses isAdapterLoadPath() (matches .../@origintrail-official/dkg-adapter-openclaw
+    // or .../packages/adapter-openclaw/). Use a packages/ path so both forms work on Windows & POSIX.
+    adapterPath = join(tempRoot, 'packages', 'adapter-openclaw');
+    writeFileSync(openclawConfigPath, JSON.stringify({
+      plugins: {},
+      agents: { defaults: { workspace: workspaceDir } },
+    }, null, 2));
+  });
+
+  afterEach(() => {
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function seedOpenClawConfig(data: Record<string, unknown>): void {
+    writeFileSync(openclawConfigPath, JSON.stringify(data, null, 2) + '\n');
+  }
+
+  it('scenario 1: fresh-HOME UI Connect merges adapter-openclaw into plugins.slots.memory and marks integration ready', async () => {
+    // Fresh openclaw.json (no adapter wiring yet).
+    seedOpenClawConfig({ plugins: {}, agents: { defaults: { workspace: workspaceDir } } });
+
+    const config = makeConfig();
+    // DI stub: simulates runSetup by running the REAL mergeOpenClawConfig against
+    // the temp-HOME openclaw.json. This is the highest-fidelity stand-in we can
+    // get without spinning up a real daemon in the test.
+    const runSetup = async () => {
+      mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    };
+    const restartGateway = async () => {};
+    const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
+    const probeResults: Array<{ ok: boolean; target?: string; error?: string }> = [
+      { ok: false, error: 'bridge offline' },
+      { ok: true, target: 'bridge' },
+    ];
+    let probeIdx = 0;
+    const probeHealth = async () => probeResults[probeIdx++] as any;
+    const saveConfig = async () => {};
+    // Real verifyMemorySlot reads the temp openclaw.json to confirm election.
+    const verifyMemorySlot = () => {
+      const raw = readFileSync(openclawConfigPath, 'utf-8');
+      return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
+    };
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'openclaw', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        verifyMemorySlot,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    // Real openclaw.json on the temp filesystem now reflects the merge.
+    const mergedRaw = readFileSync(openclawConfigPath, 'utf-8');
+    const merged = JSON.parse(mergedRaw);
+    expect(merged.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(merged.plugins.allow).toContain('adapter-openclaw');
+    expect(merged.plugins.entries['adapter-openclaw']).toEqual({ enabled: true });
+    // Windows-path normalization assertion: mergeOpenClawConfig normalizes backslashes to
+    // forward slashes before storing the path.
+    const storedPaths = merged.plugins.load.paths as string[];
+    expect(storedPaths.length).toBeGreaterThan(0);
+    for (const p of storedPaths) {
+      expect(p).not.toContain('\\');
+    }
+    expect(storedPaths.some((p) => /packages\/adapter-openclaw/.test(p))).toBe(true);
+
+    // Integration record reflects ready state with no lastError.
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('ready');
+    expect(integration?.runtime.ready).toBe(true);
+    expect(integration?.runtime.lastError).toBeFalsy();
+  });
+
+  it('scenario 2: post-Connect Disconnect reverse-merges adapter wiring and writes a .bak.<ts>', async () => {
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+
+    // Sanity: adapter is fully wired before disconnect.
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(before.plugins.allow).toContain('adapter-openclaw');
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath);
+
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).not.toContain('adapter-openclaw');
+    expect(after.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+    const remainingPaths = (after.plugins.load.paths ?? []) as string[];
+    expect(remainingPaths.some((p) => /packages[\\/]adapter-openclaw/.test(p))).toBe(false);
+    // tools.alsoAllow is intentionally NOT reverted (shared with other plugins per D1 decision).
+    expect(after.tools.alsoAllow).toContain('group:plugins');
+
+    // A .bak.<ts> snapshot sits next to the config.
+    const siblings = readdirSync(openclawDir);
+    expect(siblings.some((name) => /^openclaw\.json\.bak\.\d+$/.test(name))).toBe(true);
+  });
+
+  it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: 'bridge offline (stale)',
+          },
+        },
+      },
+    });
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      expect(fetchCalls).toBeGreaterThan(0);
+      expect(integration.status).toBe('ready');
+      expect(integration.runtime.ready).toBe(true);
+      expect(integration.runtime.lastError).toBeFalsy();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 3b: refresh endpoint surfaces a 503 as runtime.status=error with lastError populated', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+        },
+      },
+    });
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('bridge offline', {
+      status: 503,
+      headers: { 'Content-Type': 'text/plain' },
+    })) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      expect(integration.status).toBe('error');
+      expect(integration.runtime.ready).toBe(false);
+      expect(integration.runtime.lastError).toBeTruthy();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 4: post-setup invariant surfaces error when slot election silently fails', async () => {
+    // Stub runSetup so it does NOT write plugins.slots.memory — simulates the
+    // silent-no-op class of bug where mergeOpenClawConfig runs but leaves a
+    // conflicting slot in place.
+    seedOpenClawConfig({
+      plugins: {
+        slots: { memory: 'some-other-plugin' },
+        allow: ['adapter-openclaw'],
+        load: { paths: [] },
+        entries: { 'adapter-openclaw': { enabled: true } },
+      },
+    });
+
+    const config = makeConfig();
+    const runSetup = async () => {
+      // Intentionally no-op on the slot — the invariant check must catch this.
+    };
+    const restartGateway = async () => {};
+    const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
+    const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
+    const saveConfig = async () => {};
+    const verifyMemorySlot = () => {
+      const raw = readFileSync(openclawConfigPath, 'utf-8');
+      return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
+    };
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'openclaw', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        verifyMemorySlot,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('error');
+    expect(integration?.runtime.ready).toBe(false);
+    expect(integration?.runtime.lastError).toMatch(/slot election/i);
   });
 });
 

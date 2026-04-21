@@ -10,7 +10,7 @@
   "scripts": {
     "clean": "hardhat clean",
     "compile": "hardhat compile --config hardhat.node.config.ts",
-    "build": "hardhat compile --config hardhat.node.config.ts",
+    "build": "node scripts/maybe-compile.mjs",
     "test": "node scripts/run-tests.js",
     "test:coverage": "node scripts/run-coverage.js && node ../../scripts/check-evm-coverage.mjs",
     "test:unit": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@unit'",

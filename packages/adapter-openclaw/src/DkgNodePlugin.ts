@@ -244,6 +244,50 @@ export class DkgNodePlugin {
     this.semanticEnrichmentAvailabilityHint = value;
     this.syncClientLocalAgentRequestContext();
   }
+
+  private async persistOpenClawSemanticDowngrade(args: {
+    api: OpenClawPluginApi;
+    basePayload: {
+      enabled: boolean;
+      description: string;
+      transport: LocalAgentIntegrationTransport | undefined;
+      capabilities: Record<string, unknown>;
+      manifest: typeof OPENCLAW_LOCAL_AGENT_MANIFEST;
+      setupEntry: string;
+      metadata: Record<string, unknown>;
+    };
+    reason: string;
+  }): Promise<void> {
+    try {
+      await this.client.updateLocalAgentIntegration('openclaw', {
+        ...args.basePayload,
+        capabilities: {
+          ...args.basePayload.capabilities,
+          semanticEnrichment: false,
+        },
+        runtime: {
+          status: 'error',
+          ready: false,
+          lastError: args.reason,
+        },
+      });
+    } catch (err: any) {
+      args.api.logger.warn?.(`[dkg] Failed to persist OpenClaw semantic downgrade: ${err?.message ?? String(err)}`);
+    }
+  }
+
+  private withSemanticCapability(
+    baseCapabilities: Record<string, unknown>,
+    enabled: boolean,
+  ): Record<string, unknown> {
+    if (!Object.prototype.hasOwnProperty.call(baseCapabilities, 'semanticEnrichment')) {
+      return baseCapabilities;
+    }
+    return {
+      ...baseCapabilities,
+      semanticEnrichment: enabled,
+    };
+  }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
    * list of subscribed context graphs for the write-path clarification
@@ -704,16 +748,31 @@ export class DkgNodePlugin {
     } catch (err: any) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
       this.setSemanticEnrichmentAvailabilityHint(false);
+      if (basePayload.capabilities.semanticEnrichment !== false) {
+        await this.persistOpenClawSemanticDowngrade({
+          api,
+          basePayload,
+          reason: err?.message ?? String(err),
+        });
+      }
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
     }
 
+    let semanticWorkerStartError: string | null = null;
     await this.channelPlugin?.startSemanticEnrichmentWorker().catch((err: any) => {
-      api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${err?.message ?? String(err)}`);
+      semanticWorkerStartError = err?.message ?? String(err);
+      api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${semanticWorkerStartError}`);
     });
-    this.setSemanticEnrichmentAvailabilityHint(
-      this.channelPlugin?.isSemanticEnrichmentActive() === true ? true : false,
-    );
+    const semanticWorkerActive = this.channelPlugin?.isSemanticEnrichmentActive() === true;
+    this.setSemanticEnrichmentAvailabilityHint(semanticWorkerActive ? true : false);
+    if (!semanticWorkerActive && basePayload.capabilities.semanticEnrichment !== false) {
+      await this.persistOpenClawSemanticDowngrade({
+        api,
+        basePayload,
+        reason: semanticWorkerStartError ?? 'Semantic enrichment worker unavailable after integration sync',
+      });
+    }
 
     if (bridgeAlreadyReady || !this.channelPlugin) {
       return;
@@ -723,6 +782,7 @@ export class DkgNodePlugin {
       .then(() => this.client.updateLocalAgentIntegration('openclaw', {
         ...basePayload,
         transport: this.buildOpenClawTransport(existing?.transport, api),
+        capabilities: this.withSemanticCapability(basePayload.capabilities, this.channelPlugin?.isSemanticEnrichmentActive() === true),
         runtime: {
           status: 'ready',
           ready: true,

@@ -18,7 +18,15 @@ export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler } from './messaging.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
-export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
+export {
+  buildEndorsementQuads,
+  canonicalEndorseDigest,
+  DKG_ENDORSES,
+  DKG_ENDORSED_AT,
+  DKG_ENDORSEMENT_NONCE,
+  DKG_ENDORSEMENT_SIGNATURE,
+  type BuildEndorsementQuadsOptions,
+} from './endorse.js';
 export {
   CclEvaluator,
   parseCclPolicy,
@@ -59,4 +67,12 @@ export {
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
+export {
+  loadWorkspaceConfig,
+  parseWorkspaceConfig,
+  parseAgentsMdFrontmatter,
+  type WorkspaceConfig,
+  type LoadedWorkspaceConfig,
+  type ExtractionPolicy,
+} from './workspace-config.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';

@@ -92,14 +92,36 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
  */
 export function enrichEvmError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
-  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
-  if (!match) return null;
-  const decoded = decodeEvmError(match[1]);
-  if (!decoded) return null;
-  const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
-  const decodedStr = `${decoded.name}${argsStr}`;
-  err.message = err.message.replace('unknown custom error', decodedStr);
-  return decoded.name;
+  // CH-10: match multiple RPC revert-data shapes so we don't leak raw
+  // selectors to operators (issue #159 class). Providers serialize revert
+  // data under many keys — `data`, `errorData`, JSON-encoded `"data"` — and
+  // with or without quotes / with a space after the colon. We try each
+  // shape in order and use the first hex blob that decodes into a known
+  // custom error selector.
+  const candidates: string[] = [];
+  const patterns = [
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*"(0x[0-9a-fA-F]+)"/g,
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*(0x[0-9a-fA-F]+)/g,
+    /"data"\s*:\s*"(0x[0-9a-fA-F]+)"/g,
+  ];
+  for (const re of patterns) {
+    for (const m of err.message.matchAll(re)) {
+      if (m[1]) candidates.push(m[1]);
+    }
+  }
+  for (const hex of candidates) {
+    const decoded = decodeEvmError(hex);
+    if (!decoded) continue;
+    const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
+    const decodedStr = `${decoded.name}${argsStr}`;
+    if (err.message.includes('unknown custom error')) {
+      err.message = err.message.replace('unknown custom error', decodedStr);
+    } else {
+      err.message = `${err.message} [${decodedStr}]`;
+    }
+    return decoded.name;
+  }
+  return null;
 }
 
 export interface EVMAdapterConfig {

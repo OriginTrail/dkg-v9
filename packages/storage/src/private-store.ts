@@ -41,6 +41,13 @@ export class PrivateContentStore {
   ): Promise<void> {
     if (quads.length === 0) return;
 
+    // ST-7 defence-in-depth: reject unsafe rootEntity at the entry point so
+    // malformed IRIs never reach the in-memory tracker. Without this, a
+    // subsequent hasPrivate/getPrivate/delete call against the same key
+    // either crashes or attempts to build a SPARQL query containing the
+    // smuggled payload.
+    assertSafeIri(rootEntity);
+
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
     const normalized = quads.map((q) => ({ ...q, graph: graphUri }));
     await this.store.insert(normalized);
@@ -107,6 +114,9 @@ export class PrivateContentStore {
     rootEntity: string,
     subGraphName?: string,
   ): Promise<void> {
+    // ST-7: assertSafeIri on the delete path so a malicious rootEntity
+    // cannot smuggle SPARQL-update tokens into `deleteBySubjectPrefix`.
+    assertSafeIri(rootEntity);
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
     await this.store.deleteBySubjectPrefix(graphUri, rootEntity);
     const key = this.privateKey(contextGraphId, subGraphName);

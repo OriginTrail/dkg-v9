@@ -9,7 +9,9 @@ describe('buildEndorsementQuads', () => {
       'ml-research',
     );
 
-    expect(quads).toHaveLength(2);
+    // A-7: in addition to ENDORSES + ENDORSED_AT, the function now emits
+    // a replay-protection nonce quad and a proof / signature quad.
+    expect(quads).toHaveLength(4);
 
     const endorseQuad = quads.find(q => q.predicate === DKG_ENDORSES);
     expect(endorseQuad).toBeDefined();

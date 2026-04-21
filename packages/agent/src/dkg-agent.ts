@@ -2826,7 +2826,11 @@ export class DKGAgent {
         this.subscribedContextGraphs,
         {
           contextGraphExists: (id) => this.contextGraphExists(id),
-          getContextGraphOwner: (id) => this.getContextGraphOwner(id),
+          // Gossip validation compares `approvedBy`/`revokedBy` against the
+          // paranet owner. Those triples are emitted with `dkg:creator` (peer
+          // DID) so peers validate against the same creator-scoped DID.
+          // `dkg:curator` (wallet DID) is for local authorization only.
+          getContextGraphOwner: (id) => this.getContextGraphCreator(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
         },

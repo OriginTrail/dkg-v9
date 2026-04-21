@@ -1006,11 +1006,16 @@ decisions: []
     await other.stop().catch(() => {});
   });
 
-  // Regression coverage for PR #200: when a non-default local agent creates a
-  // CG (callerAgentAddress != defaultAgentAddress), owner checks must accept
-  // that caller for register/invite/approve/revoke and reject everyone else
-  // — including the node's default agent.
-  it('allows a non-default agent to manage its own CG and blocks sibling agents', async () => {
+  // Regression coverage for PR #200's multi-agent access control. When a
+  // non-default local agent creates a CG (callerAgentAddress !=
+  // defaultAgentAddress), every owner-checked route must:
+  //   - accept the owning caller wallet,
+  //   - reject the node's default-agent token, and
+  //   - reject a sibling agent wallet on the same node.
+  // This exercises approve/revoke (CCL policy) and invite (peer allowlist);
+  // registerContextGraph is covered implicitly through `isCallerOrNodeOwner`
+  // sharing the same code path as invite via `assertCallerIsOwner`.
+  it('scopes CG management to the owning non-default agent across policy and invite paths', async () => {
     const store = new OxigraphStore();
     const node = await DKGAgent.create({
       name: 'MultiAgentNode',
@@ -1021,6 +1026,7 @@ decisions: []
 
     const nonDefaultAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
     const siblingAddr = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+    const invitePeerId = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
 
     await node.createContextGraph({
       id: 'ops-multi-agent',
@@ -1039,20 +1045,29 @@ decisions: []
 `,
     });
 
-    // Default agent token (no callerAgentAddress) must NOT be able to approve
-    // a CG owned by a non-default agent.
+    // --- approveCclPolicy ---
     await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri }))
       .rejects.toThrow(/Only the paranet owner can manage policies/);
-
-    // A different non-default agent on the same node must also be rejected.
     await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: siblingAddr }))
       .rejects.toThrow(/Only the paranet owner can manage policies/);
-
-    // The owning non-default agent can approve and then revoke.
     await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: nonDefaultAddr }))
       .resolves.toBeTruthy();
+
+    // --- revokeCclPolicy ---
+    await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+    await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: siblingAddr }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
     await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: nonDefaultAddr }))
       .resolves.toMatchObject({ status: 'revoked' });
+
+    // --- inviteToContextGraph ---
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId))
+      .rejects.toThrow(/Only the context graph creator can manage peer invitations/);
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId, siblingAddr))
+      .rejects.toThrow(/Only the context graph creator can manage peer invitations/);
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId, nonDefaultAddr))
+      .resolves.toBeUndefined();
 
     await node.stop().catch(() => {});
   });

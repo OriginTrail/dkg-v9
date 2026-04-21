@@ -6524,13 +6524,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.approveCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-      callerAgentAddress: requestAgentAddress,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.approveCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // POST /api/ccl/policy/revoke
@@ -6542,13 +6550,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.revokeCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-      callerAgentAddress: requestAgentAddress,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.revokeCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // GET /api/ccl/policy/list

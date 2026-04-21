@@ -676,6 +676,15 @@ describe('bulletproof: SYNC set-reconciliation (regression for issue #2)', () =>
     // needs to be poked to see its peer's data IS the bug.
     await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
     await sleep(500);
+    // Since v10-rc, ontology-discovered CGs are registered as
+    // "discoverable only" with `subscribed: false` — intentional
+    // product hardening so a node doesn't auto-ingest every public
+    // CG a peer happens to know about. Issue #2 is about "effective
+    // KC set differs across peers after the operator opts in", not
+    // about implicit ingestion, so explicitly subscribe here before
+    // the authoritative data-catchup sync. This is the exact call
+    // the UI / API makes when the user clicks "join public CG X".
+    nodeB.subscribeToContextGraph(cgId);
     // Now the CG ought to be in B's runtime scope. If it isn't, this
     // next explicit sync is a no-op and the subsequent assertions
     // will fail with the exact missing-entity or count mismatch.
@@ -1136,7 +1145,23 @@ describe('bulletproof: working-memory assertions are invisible to peers until pr
     // If we ever want this to change, the fix lives in the
     // data-phase filter at dkg-agent.ts:770–779 (remove the WM
     // exclusion) AND in promote (so WM isn't leaked by default).
-    const bQuads = await nodeB.assertion.query(cgId, assertionName).catch(() => []);
+    //
+    // Bug-hiding guard: we previously `.catch(() => [])` here which
+    // silently turned ANY throw (not just "assertion graph unknown")
+    // into a passing privacy check. We now ONLY accept the specific
+    // "graph not present" error shape as equivalent to zero rows; any
+    // other failure re-throws so a broken query pipeline cannot
+    // masquerade as a successful privacy outcome.
+    let bQuads: Awaited<ReturnType<typeof nodeB.assertion.query>>;
+    try {
+      bQuads = await nodeB.assertion.query(cgId, assertionName);
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      if (!/not\s*found|does\s*not\s*exist|no\s*such|unknown\s*assertion|missing/i.test(msg)) {
+        throw err;
+      }
+      bQuads = [];
+    }
     expect(
       bQuads.length,
       'WM assertion leaked to peer — if this fails, the sync handler ' +

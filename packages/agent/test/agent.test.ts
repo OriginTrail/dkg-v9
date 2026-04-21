@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -1356,10 +1356,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('syncContextGraphFromConnectedPeers retries until sync protocol is visible', async () => {
+    // Real EVMChainAdapter against the shared Hardhat node — no blockchain
+    // mocks anywhere in this file. The chain is only touched at
+    // `agent.start()` (identity resolution); the sync behaviour under test
+    // is purely libp2p, and the libp2p spies below stub only peer-discovery
+    // surfaces that would otherwise need a full remote-agent harness.
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupProtocolRetry',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1380,16 +1385,42 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         return { protocols: [PROTOCOL_SYNC] } as any;
       });
 
-      const syncFromPeer = vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(5);
-      const syncSharedMemoryFromPeer = vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(2);
+      // `syncContextGraphFromConnectedPeers` dispatches through the private
+      // `*Detailed` variants (see packages/agent/src/dkg-agent.ts #1441/1453)
+      // because it consumes the per-phase diagnostics, not just the plain
+      // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
+      // Mock those so we can assert both the call shape and the reported totals
+      // without spinning up a remote peer.
+      const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 5,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 5,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      });
+      const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 2,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 2,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      });
 
       const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
         includeSharedMemory: true,
       });
 
       expect(peerStoreReads).toBe(3);
-      expect(syncFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
-      expect(syncSharedMemoryFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
       expect(result.connectedPeers).toBe(1);
       expect(result.syncCapablePeers).toBe(1);
       expect(result.peersTried).toBe(1);
@@ -1407,7 +1438,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoProtocolDiagnostics',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1437,7 +1468,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupPreferredPeer',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1484,7 +1515,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'PerContextGraphDeadline',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1521,7 +1552,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'MetaSyncedScopeOnly',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1555,7 +1586,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'MetaSyncedOntologyConfirmed',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1657,6 +1688,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
+      // Ensure buildSyncRequest takes the authenticated private-CG path.
+      (agent as any).isPrivateContextGraph = async () => true;
 
       const chain = (agent as any).chain as EVMChainAdapter;
       const identityId = await chain.ensureProfile();
@@ -1680,10 +1713,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
+    // Real EVMChainAdapter — `autoRegisterDefaultAgent` calls
+    // `chain.getOperationalPrivateKey()` which only EVMChainAdapter
+    // exposes, so a real adapter is required to reach the assertion.
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthMissingKey',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: chain,
     });
     try {
       await agent.start();
@@ -1693,6 +1730,19 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: false,
         onChainId: '1',
       });
+      // Force `needsAuth = true` in buildSyncRequest — the precondition
+      // check Viktor added (see dkg-agent.ts #4880) only fires on the
+      // authenticated-sync path. Without this stub, a clean Hardhat
+      // reports the CG as non-private and the unsigned path succeeds.
+      (agent as any).isPrivateContextGraph = async () => true;
+      // Force the fallback signing path in buildSyncRequest — when the
+      // chain identity is non-zero (EVMChainAdapter post-ensureProfile),
+      // it signs via `chain.signMessage` and the default-agent key is
+      // never touched, so deleting it has no effect. Stubbing
+      // identityId → 0 drives the code into the
+      // `defaultAgentAddress && agent.privateKey` branch we actually
+      // want to assert on.
+      (chain as any).getIdentityId = async () => 0n;
 
       const defaultAgentAddress = agent.getDefaultAgentAddress();
       expect(defaultAgentAddress).toBeDefined();

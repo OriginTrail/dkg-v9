@@ -1912,6 +1912,52 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(existsSync(skillPath)).toBe(false);
   });
 
+  it('scenario 2g: second Disconnect after a clean first Disconnect does NOT touch user-placed files at the config-derived workspace (Codex R5-4)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120437829
+    // After a clean first Disconnect, the adapter entry is fully removed from
+    // openclaw.json. The old code still fell through to
+    // `resolveWorkspaceDirFromConfig` and would target SKILL.md at the
+    // config-derived workspace — clobbering any user-placed file there.
+    // Post-R5-4, an absent adapter entry gates skill cleanup entirely.
+
+    // Seed openclaw.json WITHOUT a `plugins.entries['adapter-openclaw']`
+    // entry (simulates the post-clean-Disconnect state) but with an
+    // `agents.defaults.workspace` the old fallback would have targeted.
+    writeFileSync(openclawConfigPath, JSON.stringify({
+      plugins: { allow: [], load: { paths: [] }, entries: {}, slots: {} },
+      agents: { defaults: { workspace: workspaceDir } },
+    }, null, 2));
+
+    // Seed a user-placed SKILL.md at the config-derived workspace. After a
+    // clean first Disconnect this could be something the user restored
+    // manually, or an unrelated file they placed under the same name.
+    const userSkillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const userSkillPath = join(userSkillDir, 'SKILL.md');
+    mkdirSync(userSkillDir, { recursive: true });
+    writeFileSync(userSkillPath, '# User-placed SKILL.md — NOT adapter-owned\n');
+    const userBytes = readFileSync(userSkillPath, 'utf-8');
+
+    const removeSkillSpy = vi.fn();
+    const verifySkillRemovedSpy = vi.fn(() => null);
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillSpy,
+        verifySkillRemoved: verifySkillRemovedSpy,
+      }),
+    ).resolves.toBeUndefined();
+
+    // R5-4: entry absent → skill cleanup path is never entered. Spies
+    // prove neither helper was invoked.
+    expect(removeSkillSpy).not.toHaveBeenCalled();
+    expect(verifySkillRemovedSpy).not.toHaveBeenCalled();
+
+    // User's SKILL.md is intact — byte-identical.
+    expect(existsSync(userSkillPath)).toBe(true);
+    expect(readFileSync(userSkillPath, 'utf-8')).toBe(userBytes);
+  });
+
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
     const config = makeConfig({
       localAgentIntegrations: {

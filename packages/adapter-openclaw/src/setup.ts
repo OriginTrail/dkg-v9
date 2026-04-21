@@ -1151,14 +1151,14 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     channel: { enabled: true },
   };
 
-  // Codex PR #234 R3-3 / R4-2: workspace migration. If a prior install
-  // targeted a different workspace (e.g. `dkg openclaw setup --workspace /dir-a`
-  // then `--workspace /dir-b`), the second merge overwrites
-  // `entry.installedWorkspace` and the old SKILL.md at /dir-a would be
-  // orphaned. Capture the prior workspace via a read-only inspection BEFORE
-  // merge; defer the actual cleanup until AFTER the new install is in place
-  // (R4-2) — so a mid-flight failure leaves the user with the PRIOR working
-  // install rather than no install at all.
+  // Codex PR #234 R3-3 / R4-2 / R5-2 / R5-3: workspace migration, canary-
+  // ordered. If a prior install targeted a different workspace (e.g.
+  // `dkg openclaw setup --workspace /dir-a` then `--workspace /dir-b`),
+  // step 6b below retires the old SKILL.md — but only AFTER the new install
+  // has fully landed (install-new → merge → cleanup-old). Canary-deploy
+  // ordering: if install-new throws, openclaw.json still points at the
+  // OLD workspace, which IS the real install, so a retry sees OLD as the
+  // prior and migrates normally (R5-3).
   //
   // `discoverWorkspace` returns configPath: '' when `--workspace` was used,
   // so resolve the effective path the same way `mergeOpenClawConfig` does at
@@ -1171,10 +1171,21 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     try {
       const rawExisting = JSON.parse(readFileSync(effectiveConfigPathForMigration, 'utf-8'));
       const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
-      if (existingEntry
-          && typeof existingEntry === 'object'
-          && typeof existingEntry.installedWorkspace === 'string') {
-        priorInstalledForMigration = existingEntry.installedWorkspace.trim();
+      if (existingEntry && typeof existingEntry === 'object') {
+        if (typeof existingEntry.installedWorkspace === 'string'
+            && existingEntry.installedWorkspace.trim()) {
+          priorInstalledForMigration = existingEntry.installedWorkspace.trim();
+        } else {
+          // R5-2: legacy adapter entry predates the `installedWorkspace`
+          // field. Fall back to the config-derived workspace — same
+          // resolver the daemon's Disconnect path uses. Gated on entry
+          // presence so a fresh install (no prior entry) doesn't trigger
+          // a spurious migration against an unrelated workspace key.
+          const derived = resolveWorkspaceDirFromConfig(rawExisting, effectiveConfigPathForMigration);
+          if (typeof derived === 'string' && derived.trim()) {
+            priorInstalledForMigration = derived.trim();
+          }
+        }
       }
     } catch {
       // Unparseable openclaw.json — nothing to migrate from. The merge step
@@ -1182,6 +1193,19 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     }
   }
 
+  // Step 5: Install the canonical DKG node skill into the OpenClaw workspace
+  // FIRST (canary). If this throws, openclaw.json is untouched and still
+  // points at whatever the prior install was — user keeps a working install.
+  throwIfAborted();
+  if (!dryRun) {
+    installCanonicalNodeSkill(workspaceDir);
+  } else {
+    log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
+  }
+
+  // Step 6: Merge adapter wiring into openclaw.json. Flips `entry.installedWorkspace`
+  // to the new workspace — safe now that the new SKILL.md is on disk (R5-3).
+  throwIfAborted();
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, workspaceDir, {
       overrideDaemonUrl: portExplicit,
@@ -1190,22 +1214,12 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
-  throwIfAborted();
-  if (!dryRun) {
-    installCanonicalNodeSkill(workspaceDir);
-  } else {
-    log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
-  }
-
-  // Step 6b: Workspace-migration cleanup — runs AFTER merge + install-new.
+  // Step 6b: Workspace-migration cleanup — runs AFTER install-new + merge.
   // Strictly-additive install sequence (R4-2): if any earlier step throws,
   // the prior install's SKILL.md is still on disk, which is strictly better
-  // than leaving the user with no install at all. Reaching this point means
-  // `entry.installedWorkspace` is updated to the new dir AND the new SKILL.md
-  // is in place — safe to retire the orphan. A failure here still leaves a
-  // working new install; a subsequent `dkg openclaw setup` re-run would
-  // detect and clean the orphan naturally on the next migration pass.
+  // than leaving the user with no install at all. A failure here still
+  // leaves a working new install; a subsequent `dkg openclaw setup` re-run
+  // would detect and clean the orphan naturally on the next migration pass.
   if (!dryRun && priorInstalledForMigration && priorInstalledForMigration !== workspaceDir) {
     log(`Migrating install workspace: ${priorInstalledForMigration} → ${workspaceDir}`);
     removeCanonicalNodeSkill(priorInstalledForMigration);

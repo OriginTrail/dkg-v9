@@ -2640,19 +2640,27 @@ export async function reverseLocalAgentSetupForUi(
   // Step 1 — discover the workspace to clean up, reading openclaw.json once.
   // Authoritative source is `plugins.entries['adapter-openclaw'].installedWorkspace`
   // persisted at merge time (R2-1). Config-derived resolver is the pre-R2
-  // / legacy fallback when the entry was written before this PR.
+  // / legacy fallback, but ONLY when the adapter entry exists — an absent
+  // entry means the adapter was never installed (or already disconnected),
+  // and the config-derived fallback would point at a workspace the user may
+  // be using for other purposes (e.g. a user-placed SKILL.md after a prior
+  // clean Disconnect). Gating on entry presence (Codex R5-4) keeps skill
+  // cleanup scoped to adapter-owned state.
   let workspaceDir: string | null = null;
   if (existsSync(resolvedPath)) {
     try {
       const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
       const entry = raw?.plugins?.entries?.['adapter-openclaw'];
-      if (entry && typeof entry === 'object'
-          && typeof entry.installedWorkspace === 'string'
-          && entry.installedWorkspace.trim()) {
-        workspaceDir = entry.installedWorkspace;
-      } else {
-        workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
+      if (entry && typeof entry === 'object') {
+        if (typeof entry.installedWorkspace === 'string' && entry.installedWorkspace.trim()) {
+          workspaceDir = entry.installedWorkspace;
+        } else {
+          // Legacy entry predating R2 — fall back to the config-derived workspace.
+          workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
+        }
       }
+      // else: entry already absent → workspaceDir stays null → skill cleanup
+      // is skipped. The config-level unmerge below is a no-op in that case.
     } catch {
       // Unparseable openclaw.json — leave null. The config-level unmerge
       // below short-circuits on the same condition and no skill file path

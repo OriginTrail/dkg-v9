@@ -140,6 +140,7 @@ The publication 4-state machine per spec §06 (`queued | processing | finalized 
 | Low | 11 | Coverage gates, naming inconsistencies, stale spec, view helpers untested |
 
 **Production bugs found (not test bugs):**
+0. **CRITICAL** — **`origin-trail-game` coordinator calls a non-existent agent API shape** (G-1) → every on-chain expedition launch silently falls back to no context graph → every multi-turn game e2e fails at `status === 'traveling'`. `createContextGraph` returns void; game expects `{success, contextGraphId}` — should call `registerContextGraphOnChain` instead.
 1. **CRITICAL** — **`computeUpdateACKDigest` allocates 340 bytes but writes 308** (C-1) → off-chain UPDATE digest never matches on-chain digest → **every V10 UPDATE signature will fail `_verifySignatures` on chain**. Confirmed by ethers cross-check.
 2. `Hub._setContractAddress` emits `NewContract` event twice (E-7)
 3. `ProtocolRouter` has no signature verification on streams (C-9, architectural)
@@ -308,6 +309,12 @@ The audit explicitly cross-referenced and confirmed:
 | K-6 | High | TEST-DEBT | **`epcis-api.e2e.test.ts` `beforeEach` skips entire suite when node unreachable.** Most CI runs likely skip the integration test entirely. Either gate to a CI job with always-on devnet or convert to contract tests against a controlled stub. |
 
 ---
+
+### packages/origin-trail-game (KOSAVA) — 4 e2e test files, thin unit coverage
+
+| # | Severity | Type | Finding |
+|---|---|---|---|
+| G-1 | **Critical** | **PROD-BUG / NEW** | **`packages/origin-trail-game/src/dkg/coordinator.ts:766-774`** calls `this.agent.createContextGraph({ participantIdentityIds, requiredSignatures })` and then reads `result.success` + `result.contextGraphId`. But `DKGAgent.createContextGraph()` in `packages/agent/src/dkg-agent.ts:2877` returns **`Promise<void>`** — there is no `success` or `contextGraphId` field. At runtime this raises `Cannot read properties of undefined (reading 'success')`, which is swallowed by the surrounding `try/catch` and logged as `Context graph creation failed (game proceeds without on-chain anchoring)`. The game silently falls back to no-op: no on-chain context graph is ever registered, `swarm.contextGraphId` stays `undefined`, and every downstream assertion (`swarm.status === 'traveling'`, `currentTurn === N`, `Context graph.*created.*M=...`, etc.) fails. The intended target is clearly `DKGAgent.registerContextGraphOnChain(params)` (line 2459), which *does* return `Promise<CreateOnChainContextGraphResult>` with `contextGraphId`, `txHash`, `blockNumber`, etc. — the game was written against a method signature that no longer exists. Surfaced by all 4 `kosava-game-e2e` shards once the test-harness port/selector/core-role bugs (ex-CI-2) were fixed. |
 
 ### KOSAVA adapters — `adapter-openclaw` (7), `adapter-elizaos` (1), `adapter-hermes` (1), `adapter-autoresearch` (2)
 

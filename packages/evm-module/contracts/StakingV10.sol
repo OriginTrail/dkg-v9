@@ -1452,8 +1452,18 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    the score cursor is keyed on the stake base AT the moment of
         //    the call and zeroing the base first would leave the cursor
         //    stuck at the pre-migration baseline.
+        //
+        //    Capture the returned current-epoch score: if non-zero the V8
+        //    delegator earned sampling score in this epoch that will only
+        //    be claimable via `Staking.claimDelegatorRewards(...,
+        //    currentEpoch)` AFTER the epoch closes. We need the V8
+        //    `lastStakeHeldEpoch` bookkeeping to keep the delegator in
+        //    the node's set (see step 4) — otherwise `removeDelegator`
+        //    strands this current-epoch score. This mirrors the V8
+        //    `_handleDelegatorRemovalOnZeroStake` pattern
+        //    (`Staking.sol:884-898`).
         bytes32 v8Key = keccak256(abi.encodePacked(staker));
-        staking.prepareForStakeChange(currentEpoch, identityId, v8Key);
+        uint256 v8CurrentEpochScore18 = staking.prepareForStakeChange(currentEpoch, identityId, v8Key);
 
         // 3. Read V8 amount. Revert if there's nothing to migrate. This
         //    check runs AFTER the precondition so a user who has both
@@ -1468,14 +1478,25 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    Writing 0 on the V8 bucket triggers
         //    `_updateDelegatorActivity(wasActive=true, isActive=false)`
         //    which removes the V8 key from `delegatorNodes[v8Key]` and
-        //    decrements the node's delegator count. The
-        //    `delegatorsInfo.removeDelegator` call mirrors the V8
-        //    `_handleDelegatorRemovalOnZeroStake` bookkeeping in
-        //    `Staking.sol:884-898`.
+        //    decrements the node's delegator count.
+        //
+        //    For DelegatorsInfo: if the delegator earned current-epoch V8
+        //    score (`v8CurrentEpochScore18 > 0`), they are still entitled
+        //    to a V8 claim for this epoch AFTER it closes. Mirroring
+        //    `_handleDelegatorRemovalOnZeroStake` (`Staking.sol:884-898`),
+        //    we set `lastStakeHeldEpoch = currentEpoch` instead of removing
+        //    the delegator, so the V8 claim path can find them; the
+        //    V8 `claimDelegatorRewards` post-claim cleanup (lines 608-618)
+        //    will remove them once all owed epochs are settled. If zero
+        //    score, safe to remove immediately.
         ss.setDelegatorStakeBase(identityId, v8Key, 0);
         ss.decreaseNodeStake(identityId, amount);
         ss.decreaseTotalStake(amount);
-        delegatorsInfo.removeDelegator(identityId, staker);
+        if (v8CurrentEpochScore18 > 0) {
+            delegatorsInfo.setLastStakeHeldEpoch(identityId, staker, currentEpoch);
+        } else {
+            delegatorsInfo.removeDelegator(identityId, staker);
+        }
 
         // 5. NFT already minted by the wrapper. Nothing to do here.
 

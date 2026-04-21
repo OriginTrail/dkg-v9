@@ -2,24 +2,24 @@
  * Non-interactive setup script for the DKG OpenClaw adapter.
  *
  * Handles the entire DKG node + adapter setup end-to-end:
- *  1. Install DKG CLI (full node) via npm if not present
- *  2. Discover OpenClaw workspace and agent name
- *  3. Write ~/.dkg/config.json with testnet defaults
- *  4. Start the DKG daemon
- *  5. Fund wallets via testnet faucet
- *  6. Merge adapter plugin into ~/.openclaw/openclaw.json
- *  7. Write workspace config.json with feature flags
- *  8. Copy the canonical DKG node skill into the OpenClaw workspace
- *  9. Verify setup
+ *  1. Discover OpenClaw workspace and agent name
+ *  2. Write ~/.dkg/config.json with testnet defaults
+ *  3. Start the DKG daemon
+ *  4. Merge adapter plugin into ~/.openclaw/openclaw.json (including
+ *     plugins.entries.adapter-openclaw.config with feature flags)
+ *  5. Copy the canonical DKG node skill into the OpenClaw workspace
+ *  6. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
 
 import { execSync } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import type { DkgOpenClawConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,10 +29,17 @@ export interface SetupOptions {
   workspace?: string;
   name?: string;
   port?: string;
-  fund?: boolean;
   verify?: boolean;
   start?: boolean;
   dryRun?: boolean;
+  /**
+   * Abort signal for cooperative cancellation. Checked at each step boundary
+   * so an aborted job stops between steps without further filesystem writes
+   * — matches the granularity of the previous child-process SIGKILL model.
+   * Long-running sync calls (e.g. `execSync('dkg start', ...)`) are not
+   * interrupted mid-call; cancellation takes effect before the next step.
+   */
+  signal?: AbortSignal;
 }
 
 interface NetworkConfig {
@@ -102,35 +109,25 @@ function openclawDir(): string {
   return process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw');
 }
 
+/**
+ * Resolve the `openclaw.json` config path, honoring `OPENCLAW_HOME` the same
+ * way `runSetup()` does. Exported so out-of-process callers (e.g. the DKG
+ * daemon's post-setup invariant check and disconnect handler in
+ * `packages/cli/src/daemon.ts`) read the same file that `mergeOpenClawConfig`
+ * writes to; hardcoding `join(homedir(), '.openclaw', 'openclaw.json')` on the
+ * daemon side caused false slot-election failures when the user set
+ * `OPENCLAW_HOME` to a non-default location.
+ */
+export function openclawConfigPath(): string {
+  return join(openclawDir(), 'openclaw.json');
+}
+
 function canonicalWorkspaceSkillPath(workspaceDir: string): string {
   return join(workspaceDir, 'skills', 'dkg-node', 'SKILL.md');
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: Install DKG CLI
-// ---------------------------------------------------------------------------
-
-export function installDkgCli(): void {
-  try {
-    const version = execSync('dkg --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    log(`DKG CLI already installed (${version})`);
-    return;
-  } catch {
-    // Not installed — proceed to install
-  }
-
-  log('Installing DKG CLI (full node)... npm install -g @origintrail-official/dkg');
-  try {
-    execSync('npm install -g @origintrail-official/dkg', { stdio: 'inherit' });
-    const version = execSync('dkg --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    log(`DKG CLI installed (${version})`);
-  } catch (err: any) {
-    throw new Error(`Failed to install DKG CLI: ${err.message}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 2: Discover OpenClaw workspace
+// Step 1: Discover OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function discoverWorkspace(override?: string): { configPath: string; workspaceDir: string } {
@@ -179,7 +176,7 @@ export function discoverWorkspace(override?: string): { configPath: string; work
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Discover agent name
+// Step 2: Discover agent name
 // ---------------------------------------------------------------------------
 
 export function discoverAgentName(workspaceDir: string, override?: string): string {
@@ -203,32 +200,75 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Write DKG config
+// Step 3: Write DKG config
 // ---------------------------------------------------------------------------
 
-export function loadNetworkConfig(): NetworkConfig {
-  // Try resolving from the installed CLI package first
+/**
+ * Locate the `@origintrail-official/dkg` CLI package root. Probes three
+ * layouts in the order they're likeliest to succeed during setup:
+ *   (1) Monorepo dev checkout — `packages/cli` sibling of this adapter.
+ *   (2) Local install — `./node_modules/@origintrail-official/dkg`, found
+ *       via `createRequire(import.meta.url).resolve('.../package.json')`.
+ *   (3) Global install — `npm prefix -g` + `[lib/]node_modules/...`.
+ *
+ * Returns `null` when the CLI isn't reachable; callers are responsible for
+ * emitting the error message that's appropriate for the specific file they
+ * were looking for (SKILL.md, testnet.json, etc.).
+ */
+export function resolveCliPackageDir(): string | null {
+  // (1) Monorepo dev checkout — sibling `packages/cli`.
+  const monorepoCandidate = resolve(adapterRoot(), '..', 'cli');
+  if (existsSync(join(monorepoCandidate, 'package.json'))) {
+    return monorepoCandidate;
+  }
+
+  // (2) Local install — `./node_modules/@origintrail-official/dkg/...`.
+  // This path is invisible to `npm prefix -g` since the CLI lives inside the
+  // calling project rather than the global prefix.
   try {
-    // Use dynamic resolution — CLI is installed globally
+    const req = createRequire(import.meta.url);
+    const cliPkgJson = req.resolve('@origintrail-official/dkg/package.json');
+    const localInstallCandidate = dirname(cliPkgJson);
+    if (existsSync(join(localInstallCandidate, 'package.json'))) {
+      return localInstallCandidate;
+    }
+  } catch { /* fall through to npm prefix -g */ }
+
+  // (3) Global install — `npm install -g @origintrail-official/dkg`.
+  try {
     const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg', 'network', 'testnet.json'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg', 'network', 'testnet.json'),
+      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg'),
+      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg'),
     ];
     for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        return JSON.parse(readFileSync(candidate, 'utf-8'));
+      if (existsSync(join(candidate, 'package.json'))) {
+        return candidate;
       }
     }
   } catch { /* fall through */ }
 
-  // Monorepo fallback
+  return null;
+}
+
+export function loadNetworkConfig(): NetworkConfig {
+  const cliDir = resolveCliPackageDir();
+  if (cliDir) {
+    const candidate = join(cliDir, 'network', 'testnet.json');
+    if (existsSync(candidate)) {
+      return JSON.parse(readFileSync(candidate, 'utf-8'));
+    }
+  }
+
+  // Monorepo pre-build fallback: the cli package copies `network/*.json`
+  // from the repo root into `packages/cli/network/` during its build, so
+  // before `pnpm build` has run the cli-scoped path above won't resolve.
+  // Probe the repo-root `network/testnet.json` directly so the monorepo dev
+  // flow (tests, scratch checkouts) keeps working pre-build.
   const monorepoPath = resolve(__dirname, '..', '..', '..', 'network', 'testnet.json');
   if (existsSync(monorepoPath)) {
     return JSON.parse(readFileSync(monorepoPath, 'utf-8'));
   }
-
-  // Another monorepo path (from src/ during dev)
   const devPath = resolve(__dirname, '..', '..', '..', '..', 'network', 'testnet.json');
   if (existsSync(devPath)) {
     return JSON.parse(readFileSync(devPath, 'utf-8'));
@@ -240,20 +280,14 @@ export function loadNetworkConfig(): NetworkConfig {
   );
 }
 
-function resolveCanonicalNodeSkillSourcePath(): string {
-  const localWorkspaceCandidate = resolve(adapterRoot(), '..', 'cli', 'skills', 'dkg-node', 'SKILL.md');
-  if (existsSync(localWorkspaceCandidate)) return localWorkspaceCandidate;
-
-  try {
-    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
+export function resolveCanonicalNodeSkillSourcePath(): string {
+  const cliDir = resolveCliPackageDir();
+  if (cliDir) {
+    const candidate = join(cliDir, 'skills', 'dkg-node', 'SKILL.md');
+    if (existsSync(candidate)) {
+      return candidate;
     }
-  } catch { /* fall through */ }
+  }
 
   throw new Error(
     'Could not find the canonical DKG node SKILL.md in the installed CLI package. ' +
@@ -359,7 +393,7 @@ export function writeDkgConfig(
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Start DKG daemon
+// Step 4: Start DKG daemon
 // ---------------------------------------------------------------------------
 
 export async function startDaemon(apiPort: number): Promise<void> {
@@ -427,90 +461,38 @@ function isProcessRunning(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: Read wallets and fund via faucet
+// Step 5: Merge adapter into openclaw.json
 // ---------------------------------------------------------------------------
 
-export function readWallets(): string[] {
-  const walletsPath = join(dkgDir(), 'wallets.json');
-  if (!existsSync(walletsPath)) {
-    warn('wallets.json not found — daemon may not have started yet');
-    return [];
-  }
+const ADAPTER_PLUGIN_ID = 'adapter-openclaw';
 
-  let raw: any;
-  try {
-    raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
-  } catch {
-    warn('wallets.json is malformed or still being written — skipping');
-    return [];
-  }
-  // The daemon writes { wallets: [{ address, privateKey }] }.
-  // Handle this shape first, then fall back to other formats.
-  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
-    : Array.isArray(raw) ? raw
-    : [];
-  const addresses: string[] = [];
-  for (const w of walletList) {
-    if (w?.address) addresses.push(w.address);
-  }
-
-  if (addresses.length) {
-    log(`Wallets: ${addresses.join(', ')}`);
-  }
-  return addresses;
+/**
+ * Shared predicate between merge and unmerge so the unmerge only removes
+ * load paths that setup would itself have written. User-added paths that
+ * happen to mention "openclaw" fall through untouched.
+ */
+function isAdapterLoadPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
+    || normalized.endsWith('/packages/adapter-openclaw')
+    || normalized.includes('/packages/adapter-openclaw/');
 }
 
-export async function fundWallets(addresses: string[]): Promise<void> {
-  if (!addresses.length) {
-    warn('No wallet addresses to fund');
-    return;
-  }
+/**
+ * Shape of `plugins.entries.adapter-openclaw.config` that
+ * `mergeOpenClawConfig` accepts. A `Pick` of `DkgOpenClawConfig` so the
+ * write-path stays aligned with the runtime's config contract: callers
+ * can pass any of the same sub-fields the adapter reads at load time,
+ * including `channel.port` for advanced bridge-port overrides.
+ */
+export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'memory' | 'channel'>;
 
-  log('Funding wallets via testnet faucet...');
-  try {
-    // Use a stable idempotency key based on wallet addresses so re-runs
-    // don't create duplicate faucet requests and hit rate limits.
-    const idempotencyKey = `dkg-openclaw-setup-${addresses.sort().join('-')}`;
-    const res = await fetch('https://euphoria.origin-trail.network/faucet/fund', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': idempotencyKey,
-      },
-      body: JSON.stringify({
-        mode: 'v9_base_sepolia',
-        wallets: addresses,
-      }),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      log(`Faucet response: ${JSON.stringify(data)}`);
-    } else {
-      const text = await res.text();
-      warn(`Faucet returned ${res.status}: ${text}`);
-      logManualFundingInstructions(addresses);
-    }
-  } catch (err: any) {
-    warn(`Faucet call failed: ${err.message}`);
-    logManualFundingInstructions(addresses);
-  }
-}
-
-function logManualFundingInstructions(addresses: string[]): void {
-  console.log('\nTo fund wallets manually, run:');
-  console.log(`  curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \\`);
-  console.log(`    -H "Content-Type: application/json" \\`);
-  console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
-  console.log(`    --data-raw '{"mode":"v9_base_sepolia","wallets":${JSON.stringify(addresses)}}'`);
-  console.log('');
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: Merge adapter into openclaw.json
-// ---------------------------------------------------------------------------
-
-export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: string): void {
+export function mergeOpenClawConfig(
+  openclawConfigPath: string,
+  adapterPath: string,
+  entryConfig: AdapterEntryConfig,
+  options?: { overrideDaemonUrl?: boolean },
+): void {
   if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
     // If we got here via --workspace override, the openclaw.json path may be unknown.
     // Try the default location.
@@ -530,15 +512,9 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
   if (!config.plugins.entries) config.plugins.entries = {};
 
-  const pluginId = 'adapter-openclaw';
+  const pluginId = ADAPTER_PLUGIN_ID;
   // Normalize adapter path to forward slashes for cross-platform compatibility
   const normalizedPath = adapterPath.replace(/\\/g, '/');
-  const isAdapterLoadPath = (value: string): boolean => {
-    const normalized = value.replace(/\\/g, '/').toLowerCase();
-    return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
-      || normalized.endsWith('/packages/adapter-openclaw')
-      || normalized.includes('/packages/adapter-openclaw/');
-  };
 
   // Add to allow list (idempotent)
   if (!config.plugins.allow.includes(pluginId)) {
@@ -580,6 +556,34 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     log(`${pluginId} already in plugins.entries`);
   }
 
+  // Populate entry.config with first-wins semantics: user-customized values
+  // survive re-runs (same pattern as previousMemorySlotOwner). Sub-objects
+  // (memory, channel) are shallow-merged per-key so new defaults added in a
+  // later release flow in while user overrides for existing keys hold.
+  // When `overrideDaemonUrl` is set (caller passed --port explicitly), the
+  // new `daemonUrl` wins over any existing value.
+  const entryForConfig = config.plugins.entries[pluginId];
+  const hadConfig = entryForConfig.config && typeof entryForConfig.config === 'object';
+  const existingEntryConfig: Record<string, any> = hadConfig ? { ...entryForConfig.config } : {};
+  if (options?.overrideDaemonUrl) {
+    delete existingEntryConfig.daemonUrl;
+  }
+  const existingMemory = existingEntryConfig.memory && typeof existingEntryConfig.memory === 'object'
+    ? existingEntryConfig.memory
+    : {};
+  const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
+    ? existingEntryConfig.channel
+    : {};
+  entryForConfig.config = {
+    ...entryConfig,
+    ...existingEntryConfig,
+    memory: { ...entryConfig.memory, ...existingMemory },
+    channel: { ...entryConfig.channel, ...existingChannel },
+  };
+  if (!hadConfig) {
+    log(`Populated plugins.entries.${pluginId}.config`);
+  }
+
   // Ensure plugin-registered tools are visible to the agent
   if (!config.tools) config.tools = {};
   if (!Array.isArray(config.tools.alsoAllow)) {
@@ -608,8 +612,20 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     );
   }
   if (config.plugins.slots.memory !== pluginId) {
-    if (config.plugins.slots.memory && config.plugins.slots.memory !== pluginId) {
-      log(`plugins.slots.memory was "${config.plugins.slots.memory}" — overwriting with "${pluginId}"`);
+    // Capture the prior non-adapter owner so `unmergeOpenClawConfig` can
+    // restore it on disconnect. First-wins: if the entry already carries a
+    // `previousMemorySlotOwner` from an earlier merge, keep it rather than
+    // overwriting with whatever's currently in the slot. This guards against
+    // losing the original owner if the slot gets manipulated between merges.
+    const currentOwner = config.plugins.slots.memory;
+    if (currentOwner && currentOwner !== pluginId) {
+      const adapterEntry = config.plugins.entries[pluginId];
+      if (adapterEntry && typeof adapterEntry === 'object' && !adapterEntry.previousMemorySlotOwner) {
+        adapterEntry.previousMemorySlotOwner = currentOwner;
+        log(`plugins.slots.memory was "${currentOwner}" — saved as previousMemorySlotOwner for restoration on disconnect`);
+      } else if (adapterEntry && typeof adapterEntry === 'object') {
+        log(`plugins.slots.memory was "${currentOwner}" — existing previousMemorySlotOwner="${adapterEntry.previousMemorySlotOwner}" preserved (first-wins)`);
+      }
     }
     config.plugins.slots.memory = pluginId;
     log(`Set plugins.slots.memory = "${pluginId}"`);
@@ -631,47 +647,183 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   log(`Updated ${openclawConfigPath} (backed up original)`);
 }
 
-// ---------------------------------------------------------------------------
-// Step 8: Write workspace config
-// ---------------------------------------------------------------------------
+/**
+ * Symmetric undo of `mergeOpenClawConfig`. Scoped to only the fields setup
+ * would have written:
+ *   - removes `"adapter-openclaw"` from `plugins.allow`
+ *   - filters `plugins.load.paths` by the same `isAdapterLoadPath` predicate
+ *   - removes `plugins.entries["adapter-openclaw"]` entirely (including any
+ *     `config` sub-object — the adapter owns the whole entry)
+ *   - restores `plugins.slots.memory` to the prior owner captured during merge
+ *     (`entries["adapter-openclaw"].previousMemorySlotOwner`, read before the
+ *     entry is deleted), or clears it when no prior owner was persisted.
+ *
+ * Leaves `tools.alsoAllow` (shared with other plugins), workspace `config.json`
+ * (user-owned), and any workspace `SKILL.md` copies alone. Idempotent — a
+ * second call produces zero diff. Backs up to `.bak.<ts>` only when content
+ * changes (same contract as merge).
+ *
+ * Already-disconnected shortcut: a missing or unparseable `openclaw.json` is
+ * treated as "nothing to unmerge" — logs a one-liner and returns without
+ * throwing or writing `.bak`. The adapter cannot be loading from a config
+ * that doesn't exist (or can't be parsed), so blocking the Disconnect UI
+ * flow on it would strand users who removed or relocated OpenClaw.
+ */
+export function unmergeOpenClawConfig(openclawConfigPath: string): void {
+  // Fall back to the default `~/.openclaw/openclaw.json` ONLY when no path was
+  // supplied. If the caller passed an explicit path that happens to be missing
+  // (e.g. the user relocated OpenClaw), never swap to the default home —
+  // that would unmerge the wrong config and corrupt the user's real setup.
+  if (!openclawConfigPath || !openclawConfigPath.trim()) {
+    openclawConfigPath = join(openclawDir(), 'openclaw.json');
+  }
+  if (!existsSync(openclawConfigPath)) {
+    log(`openclaw.json not found at ${openclawConfigPath} — nothing to unmerge`);
+    return;
+  }
 
-export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, portExplicit?: boolean): void {
-  const configPath = join(workspaceDir, 'config.json');
+  const raw = readFileSync(openclawConfigPath, 'utf-8');
+  let config: any;
+  try {
+    config = JSON.parse(raw);
+  } catch (err: any) {
+    log(`openclaw.json at ${openclawConfigPath} is not valid JSON (${err?.message ?? err}) — nothing to unmerge`);
+    return;
+  }
+  const pluginId = ADAPTER_PLUGIN_ID;
 
-  let existing: Record<string, any> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'));
-    } catch {
-      warn(`Could not parse ${configPath} — will overwrite`);
+  // Remove from plugins.allow
+  if (config.plugins && Array.isArray(config.plugins.allow)) {
+    const filtered = config.plugins.allow.filter((id: unknown) => id !== pluginId);
+    if (filtered.length !== config.plugins.allow.length) {
+      config.plugins.allow = filtered;
+      log(`Removed ${pluginId} from plugins.allow`);
     }
   }
 
-  // Deep-merge: preserve existing dkg-node sub-config.
-  // daemonUrl is only overridden when --port is explicitly passed; otherwise
-  // the existing value is kept so custom URLs (e.g. remote daemons) survive re-runs.
-  // Feature flags default to true on first run but are not overridden on re-runs
-  // so that user-configured `false` values are respected.
-  const dkgNode = existing['dkg-node'] ?? {};
-  const nextDkgNode = {
-    ...dkgNode,
-    daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
-    memory: { enabled: true, ...dkgNode.memory },
-    channel: { enabled: true, ...dkgNode.channel },
-  };
-  if (nextDkgNode.game !== undefined) {
-    delete nextDkgNode.game;
-    log('Removed legacy dkg-node.game config from workspace config');
+  // Remove adapter load paths (same predicate as merge)
+  if (config.plugins && config.plugins.load && Array.isArray(config.plugins.load.paths)) {
+    const strings = config.plugins.load.paths.filter((p: unknown) => typeof p === 'string');
+    const kept = strings.filter((p: string) => !isAdapterLoadPath(p));
+    const removed = strings.length - kept.length;
+    if (removed > 0) {
+      config.plugins.load.paths = kept;
+      log(`Removed ${removed} adapter-openclaw load path(s) from plugins.load.paths`);
+    } else if (strings.length !== config.plugins.load.paths.length) {
+      // Normalize away non-string entries even when nothing adapter-owned was present
+      config.plugins.load.paths = strings;
+    }
   }
-  existing['dkg-node'] = nextDkgNode;
 
-  mkdirSync(workspaceDir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
-  log('Wrote workspace config (memory=on, channel=on)');
+  // Read the prior memory-slot owner that `mergeOpenClawConfig` persisted
+  // (before we mutate the entry). A string value means we should restore the
+  // slot on disconnect; anything else means the slot was empty at merge time.
+  let previousMemorySlotOwner: string | undefined;
+  const entry = config.plugins?.entries?.[pluginId];
+  if (entry && typeof entry === 'object' && typeof entry.previousMemorySlotOwner === 'string') {
+    previousMemorySlotOwner = entry.previousMemorySlotOwner;
+  }
+
+  // Delete the adapter entry entirely. The adapter owns this entry — all of
+  // its fields (enabled, config, previousMemorySlotOwner) are setup-written,
+  // so there's no user-customizable state to preserve. A fresh merge will
+  // rebuild everything from scratch, including re-capturing the current slot
+  // owner into previousMemorySlotOwner.
+  if (config.plugins && config.plugins.entries && pluginId in config.plugins.entries) {
+    delete config.plugins.entries[pluginId];
+    log(`Removed ${pluginId} from plugins.entries`);
+  }
+
+  // Restore or clear slots.memory iff it still points at the adapter. If the
+  // user has externally re-owned the slot between merge and unmerge we leave
+  // it untouched — only the adapter's own claim gets reversed.
+  if (config.plugins && config.plugins.slots && config.plugins.slots.memory === pluginId) {
+    if (previousMemorySlotOwner) {
+      config.plugins.slots.memory = previousMemorySlotOwner;
+      log(`Restored plugins.slots.memory to "${previousMemorySlotOwner}" (was "${pluginId}")`);
+    } else {
+      delete config.plugins.slots.memory;
+      log(`Cleared plugins.slots.memory (was "${pluginId}")`);
+    }
+  }
+
+  const updated = JSON.stringify(config, null, 2) + '\n';
+  if (updated === raw) {
+    log('openclaw.json already disconnected from adapter — no changes needed');
+    return;
+  }
+
+  // Backup only when content actually changes (same contract as mergeOpenClawConfig)
+  const backupPath = `${openclawConfigPath}.bak.${Date.now()}`;
+  writeFileSync(backupPath, raw);
+
+  writeFileSync(openclawConfigPath, updated);
+  log(`Unmerged adapter from ${openclawConfigPath} (backed up original)`);
+}
+
+/**
+ * Post-unmerge invariant check, counterpart to `verifyMemorySlotInvariants`
+ * but for the Disconnect flow. Confirms every field `mergeOpenClawConfig`
+ * writes has been unwound by `unmergeOpenClawConfig`:
+ *   - `plugins.slots.memory !== "adapter-openclaw"`.
+ *   - `plugins.allow` does not contain `"adapter-openclaw"`.
+ *   - `plugins.load.paths` contains no entry matching `isAdapterLoadPath`.
+ *   - `plugins.entries["adapter-openclaw"]?.enabled` is not `true`.
+ *
+ * Returns `null` when all invariants hold (disconnect is clean). Returns a
+ * descriptive string naming the first failed invariant otherwise — callers
+ * (e.g. the DKG daemon's PUT `/api/local-agent-integrations/:id` handler in
+ * `packages/cli/src/daemon.ts`) surface the string as `runtime.lastError` and
+ * refuse to transition the integration to `disconnected`.
+ *
+ * Non-throwing by design. File-state handling mirrors
+ * `unmergeOpenClawConfig`:
+ *   - Missing file → returns `null`. The invariants hold trivially because
+ *     no adapter can be loading from a config that doesn't exist; blocking
+ *     Disconnect in this case would strand users who removed OpenClaw.
+ *   - Unparseable file → returns a descriptive string. That's a genuinely
+ *     broken state worth surfacing — we can't verify invariants one way or
+ *     the other.
+ */
+export function verifyUnmergeInvariants(configPath: string): string | null {
+  if (!existsSync(configPath)) {
+    return null;
+  }
+
+  let config: any;
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch (err: any) {
+    return `Could not parse ${configPath}: ${err?.message ?? err}`;
+  }
+
+  const pluginId = ADAPTER_PLUGIN_ID;
+  const plugins = config?.plugins;
+
+  if (plugins?.slots?.memory === pluginId) {
+    return `plugins.slots.memory is still "${pluginId}"`;
+  }
+  if (Array.isArray(plugins?.allow) && plugins.allow.includes(pluginId)) {
+    return `plugins.allow still contains "${pluginId}"`;
+  }
+  if (Array.isArray(plugins?.load?.paths)) {
+    const stragglers = plugins.load.paths.filter(
+      (p: unknown) => typeof p === 'string' && isAdapterLoadPath(p),
+    );
+    if (stragglers.length > 0) {
+      return `plugins.load.paths still contains adapter path "${stragglers[0]}"`;
+    }
+  }
+  const entry = plugins?.entries?.[pluginId];
+  if (entry && typeof entry === 'object' && entry.enabled === true) {
+    return `plugins.entries["${pluginId}"] is still present with enabled=true`;
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
+// Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function installCanonicalNodeSkill(
@@ -686,7 +838,7 @@ export function installCanonicalNodeSkill(
 }
 
 // ---------------------------------------------------------------------------
-// Step 10: Verify
+// Step 7: Verify
 // ---------------------------------------------------------------------------
 
 export async function verifySetup(
@@ -726,7 +878,7 @@ export async function verifySetup(
   // plan §5.8 / §7 B1,B2,B13 gates.
   // B40: pass through the actual openclaw.json path the setup run merged
   // into, not the default `~/.openclaw/openclaw.json`. When the operator
-  // runs `dkg-openclaw setup --workspace ...`, verification must read
+  // runs `dkg openclaw setup --workspace ...`, verification must read
   // the same file setup wrote, otherwise it reports false slot-election
   // failures against an untouched default config.
   verifyMemorySlotInvariants(opts?.openclawConfigPath);
@@ -798,13 +950,22 @@ export function verifyMemorySlotInvariants(configPath?: string): void {
 
 export async function runSetup(options: SetupOptions): Promise<void> {
   const dryRun = options.dryRun ?? false;
-  const shouldFund = options.fund !== false;
   const shouldVerify = options.verify !== false;
   const shouldStart = options.start !== false;
   const apiPort = Number(options.port ?? '9200');
   if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535) {
     throw new Error(`Invalid port "${options.port}" — must be an integer between 1 and 65535`);
   }
+
+  // Cooperative cancellation: check at each step boundary. Matches the
+  // previous child-process model where SIGKILL only took effect between
+  // steps, so we don't try to interrupt mid-call sync work like
+  // `execSync('dkg start', ...)`.
+  const throwIfAborted = (): void => {
+    if (options.signal?.aborted) {
+      throw new Error('Setup aborted');
+    }
+  };
 
   console.log('\nDKG OpenClaw Adapter Setup');
   console.log('='.repeat(40) + '\n');
@@ -813,22 +974,18 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('DRY RUN — no files will be modified\n');
   }
 
-  // Step 1: Ensure DKG CLI is installed
-  if (!dryRun) {
-    installDkgCli();
-  } else {
-    log('[dry-run] Would install DKG CLI if not present');
-  }
-
-  // Step 2: Discover OpenClaw workspace
+  // Step 1: Discover OpenClaw workspace
+  throwIfAborted();
   const { configPath: openclawConfigPath, workspaceDir } = discoverWorkspace(options.workspace);
   log(`OpenClaw workspace: ${workspaceDir}`);
 
-  // Step 3: Discover agent name
+  // Step 2: Discover agent name
+  throwIfAborted();
   const agentName = discoverAgentName(workspaceDir, options.name);
   log(`Agent name: ${agentName}`);
 
-  // Step 4: Write DKG config
+  // Step 3: Write DKG config
+  throwIfAborted();
   let network: NetworkConfig | null = null;
   try {
     network = loadNetworkConfig();
@@ -860,7 +1017,8 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
 
-  // Step 5: Start daemon
+  // Step 4: Start daemon
+  throwIfAborted();
   if (shouldStart && !dryRun) {
     await startDaemon(effectivePort);
   } else if (shouldStart) {
@@ -869,51 +1027,34 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('Skipping daemon start (--no-start)');
   }
 
-  // Step 6: Read wallets and optionally fund
-  // Retry a few times since wallets.json may be written slightly after daemon start.
-  let walletAddresses: string[] = [];
-  if (!dryRun) {
-    walletAddresses = readWallets();
-    if (!walletAddresses.length && shouldStart) {
-      for (let i = 0; i < 5 && !walletAddresses.length; i++) {
-        await sleep(1_000);
-        walletAddresses = readWallets();
-      }
-    }
-    if (shouldFund && walletAddresses.length > 0) {
-      await fundWallets(walletAddresses);
-    } else if (!shouldFund) {
-      log('Skipping wallet funding (--no-fund)');
-    }
-  } else {
-    log('[dry-run] Would read wallets and fund via faucet');
-  }
-
-  // Step 7: Merge adapter into openclaw.json
+  // Step 5: Merge adapter into openclaw.json
   // Use the script's own location as the adapter path — always correct for
   // the currently running code. Warn if the path looks ephemeral (npx cache).
+  throwIfAborted();
   const resolvedAdapterPath = adapterRoot();
   if (isEphemeralPath(resolvedAdapterPath)) {
     warn(
       'Adapter is running from an npx cache path which may not persist.\n' +
-      '         Install the adapter globally for a stable plugin path:\n' +
-      '         npm install -g @origintrail-official/dkg-adapter-openclaw',
+      '         Install the DKG CLI globally for a stable plugin path:\n' +
+      '         npm install -g @origintrail-official/dkg',
     );
   }
+  const portExplicit = options.port != null;
+  const entryConfig: AdapterEntryConfig = {
+    daemonUrl: `http://127.0.0.1:${effectivePort}`,
+    memory: { enabled: true },
+    channel: { enabled: true },
+  };
   if (!dryRun) {
-    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
+    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, {
+      overrideDaemonUrl: portExplicit,
+    });
   } else {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 8: Write workspace config
-  if (!dryRun) {
-    writeWorkspaceConfig(workspaceDir, effectivePort, options.port != null);
-  } else {
-    log('[dry-run] Would write workspace config.json');
-  }
-
-  // Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
+  // Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
+  throwIfAborted();
   if (!dryRun) {
     installCanonicalNodeSkill(workspaceDir);
   } else {
@@ -924,7 +1065,8 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // after config changes, but manual restart remains the safe fallback.
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
-  // Step 10: Verify
+  // Step 7: Verify
+  throwIfAborted();
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });
   } else if (shouldVerify) {

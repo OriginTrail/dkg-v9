@@ -20,6 +20,7 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 
@@ -27,7 +28,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -36,6 +37,7 @@ import {
   handleNodeUIRequest,
   ChatMemoryManager,
   LogPushWorker,
+  LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -280,6 +282,21 @@ function currentBundledMarkItDownAssetName(): string | null {
         target.platform === process.platform && target.arch === process.arch,
     )?.assetName ?? null
   );
+}
+
+// SPARQL bindings returned by `agent.query()` / `/api/query` can arrive as
+// either bare strings (quadstore internal path) or SPARQL-JSON objects like
+// `{ value, type, datatype?, "xml:lang"? }` (the path that goes through the
+// query-result normaliser). Calling `.match()` / `.trim()` on the object
+// form throws at runtime, so every consumer must normalise the cell first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {
@@ -2274,113 +2291,33 @@ export async function probeOpenClawChannelHealth(
   return { ok: false, bridge, gateway, error: lastError };
 }
 
-type OpenClawUiSetupCommand = {
-  command: string;
-  args: string[];
-  source: 'workspace' | 'npx';
-};
+export async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('OpenClaw attach cancelled');
+  const { runSetup } = await import('@origintrail-official/dkg-adapter-openclaw');
+  await runSetup({ start: false, verify: false, signal });
+}
 
-type WorkspacePackageLookupDeps = {
-  fileExists?: (path: string) => boolean;
-  readFileText?: (path: string) => string;
-  readDirNames?: (path: string) => string[];
-};
+// KEEP IN SYNC with adapter's openclawConfigPath() — see packages/adapter-openclaw/src/setup.ts.
+// Intentionally duplicated to avoid a top-level static import of the adapter barrel, which would
+// break `dkg` startup in fresh workspace checkouts where the adapter's `dist/` has not been built
+// yet. The DI shape around `verifyMemorySlot` is synchronous, so a dynamic import is not an option
+// either — the fallback path has to be callable without awaiting.
+function localOpenclawConfigPath(): string {
+  return join(process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw'), 'openclaw.json');
+}
 
-function resolveWorkspacePackageBinCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  deps: WorkspacePackageLookupDeps = {},
-): OpenClawUiSetupCommand | null {
-  const fileExists = deps.fileExists ?? existsSync;
-  const readFileText = deps.readFileText ?? ((path: string) => readFileSync(path, 'utf8'));
-  const readDirNames = deps.readDirNames ?? ((path: string) => readdirSync(path, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name));
-
-  const repoRoot = fileURLToPath(new URL('../../../', runtimeModuleUrl));
-  const packagesDir = join(repoRoot, 'packages');
-  let packageDirs: string[];
+export function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
+  const configPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : localOpenclawConfigPath();
+  if (!existsSync(configPath)) return false;
   try {
-    packageDirs = readDirNames(packagesDir);
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed?.plugins?.slots?.memory === 'adapter-openclaw';
   } catch {
-    return null;
+    return false;
   }
-
-  for (const dirName of packageDirs) {
-    const packageDir = join(packagesDir, dirName);
-    const packageJsonPath = join(packageDir, 'package.json');
-    if (!fileExists(packageJsonPath)) continue;
-
-    try {
-      const packageJson = JSON.parse(readFileText(packageJsonPath)) as {
-        name?: unknown;
-        bin?: unknown;
-      };
-      if (packageJson.name !== packageName) continue;
-
-      const binField = packageJson.bin;
-      const binPath = typeof binField === 'string'
-        ? binField
-        : isPlainRecord(binField)
-          ? Object.values(binField).find((value): value is string => typeof value === 'string')
-          : undefined;
-      if (!binPath) continue;
-
-      const commandPath = join(packageDir, binPath);
-      if (!fileExists(commandPath)) continue;
-
-      return {
-        command: process.execPath,
-        args: [commandPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
-export function getOpenClawUiSetupCommand(
-  packageName: string,
-  runtimeModuleUrl = import.meta.url,
-  fileExists: (path: string) => boolean = existsSync,
-  deps: Omit<WorkspacePackageLookupDeps, 'fileExists'> = {},
-): OpenClawUiSetupCommand {
-  if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
-    const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
-    if (fileExists(localSetupCliPath)) {
-      return {
-        command: process.execPath,
-        args: [localSetupCliPath, 'setup', '--no-fund', '--no-start', '--no-verify'],
-        source: 'workspace',
-      };
-    }
-  }
-
-  const workspaceCommand = resolveWorkspacePackageBinCommand(packageName, runtimeModuleUrl, {
-    ...deps,
-    fileExists,
-  });
-  if (workspaceCommand) {
-    return workspaceCommand;
-  }
-
-  return {
-    command: 'npx',
-    args: ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'],
-    source: 'npx',
-  };
-}
-
-async function runOpenClawUiSetup(packageName: string, signal?: AbortSignal): Promise<void> {
-  const setupCommand = getOpenClawUiSetupCommand(packageName);
-  await execFileAsync(setupCommand.command, setupCommand.args, {
-    shell: setupCommand.source === 'npx' && process.platform === 'win32',
-    signal,
-    timeout: 120_000,
-  });
 }
 
 async function restartOpenClawGateway(signal?: AbortSignal): Promise<void> {
@@ -2431,7 +2368,7 @@ async function waitForOpenClawChatReady(
 }
 
 type OpenClawUiAttachDeps = {
-  runSetup?: (packageName: string, signal?: AbortSignal) => Promise<void>;
+  runSetup?: (signal?: AbortSignal) => Promise<void>;
   restartGateway?: (signal?: AbortSignal) => Promise<void>;
   waitForReady?: (
     config: DkgConfig,
@@ -2445,6 +2382,7 @@ type OpenClawUiAttachDeps = {
   ) => Promise<OpenClawChannelHealthReport>;
   saveConfig?: (config: DkgConfig) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
+  verifyMemorySlot?: () => boolean;
 };
 
 function formatOpenClawUiAttachFailure(err: any): string {
@@ -2493,6 +2431,12 @@ function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
   return job.cancelled || job.controller.signal.aborted;
 }
 
+/**
+ * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
+ * where the OpenClaw gateway, on next restart, will load the adapter from the
+ * workspace build and elect it into plugins.slots.memory. The post-setup invariant
+ * check enforces this before transitioning to `ready`.
+ */
 export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
@@ -2510,7 +2454,6 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
-  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requested.id];
   if (requested.id !== 'openclaw') {
     return {
       integration: requested,
@@ -2522,6 +2465,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
   const runSetup = deps.runSetup ?? runOpenClawUiSetup;
   const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+  const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
@@ -2540,14 +2484,6 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  const packageName = definition?.manifest?.packageName;
-  if (!packageName) {
-    return {
-      integration: requested,
-      notice: `${requested.name} was registered, but this node does not yet know how to attach it automatically.`,
-    };
-  }
-
   const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
     const current = getLocalAgentIntegration(config, requested.id);
     if (current?.enabled === false && patch.enabled !== false) {
@@ -2563,9 +2499,20 @@ export async function connectLocalAgentIntegrationFromUi(
   const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
     try {
       bridgeHealthCache = null;
-      await runSetup(packageName, attachJob.controller.signal);
+      await runSetup(attachJob.controller.signal);
       if (isOpenClawUiAttachCancelled(attachJob)) return;
       bridgeHealthCache = null;
+
+      if (!verifyMemorySlot()) {
+        await persistIntegrationState({
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: 'OpenClaw memory slot election failed after setup — adapter-openclaw not elected to plugins.slots.memory',
+          },
+        });
+        return;
+      }
 
       let latest = await probeHealth(config, bridgeAuthToken, {
         ignoreBridgeCache: true,
@@ -2633,6 +2580,80 @@ export async function connectLocalAgentIntegrationFromUi(
       ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
       : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
   };
+}
+
+/**
+ * CONTRACT (issue #198 / D1 reverse-setup): This helper MUST leave
+ * ~/.openclaw/openclaw.json in a state where `plugins.slots.memory !==
+ * "adapter-openclaw"` and the adapter load path is no longer listed.
+ * If the reverse-merge completes but the invariant is still violated,
+ * callers must surface runtime.status='error' and NOT transition to
+ * 'disconnected'. The adapter's `unmergeOpenClawConfig` is symmetric to
+ * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
+ */
+export type ReverseLocalAgentSetupDeps = {
+  unmergeOpenClawConfig?: (configPath: string) => void;
+  verifyUnmergeInvariants?: (configPath: string) => string | null;
+};
+
+export async function reverseLocalAgentSetupForUi(
+  _config: DkgConfig,
+  openclawConfigPath?: string,
+  deps: ReverseLocalAgentSetupDeps = {},
+): Promise<void> {
+  const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : localOpenclawConfigPath();
+  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants)
+    ? { unmergeOpenClawConfig: deps.unmergeOpenClawConfig, verifyUnmergeInvariants: deps.verifyUnmergeInvariants }
+    : await import('@origintrail-official/dkg-adapter-openclaw');
+  const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
+  const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
+  unmergeOpenClawConfig(resolvedPath);
+  const failure = verifyUnmergeInvariants(resolvedPath);
+  if (failure) {
+    throw new Error(failure);
+  }
+}
+
+export async function refreshLocalAgentIntegrationFromUi(
+  config: DkgConfig,
+  id: string,
+  bridgeAuthToken: string | undefined,
+): Promise<LocalAgentIntegrationRecord> {
+  const normalizedId = normalizeIntegrationId(id);
+  const existing = getLocalAgentIntegration(config, normalizedId);
+  if (!existing) {
+    throw new Error(`Unknown integration: ${id}`);
+  }
+  if (normalizedId !== 'openclaw') {
+    return existing;
+  }
+
+  bridgeHealthCache = null;
+  const health = await probeOpenClawChannelHealth(config, bridgeAuthToken, {
+    ignoreBridgeCache: true,
+    timeoutMs: 3_000,
+  });
+
+  if (health.ok) {
+    return updateLocalAgentIntegration(config, normalizedId, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+  }
+
+  return updateLocalAgentIntegration(config, normalizedId, {
+    runtime: {
+      status: 'error',
+      ready: false,
+      lastError: health.error ?? 'OpenClaw bridge offline',
+    },
+  });
 }
 
 function shouldTryNextOpenClawTarget(status: number): boolean {
@@ -4565,6 +4586,71 @@ async function handleRequest(
     }
   }
 
+  // GET /api/sub-graph/list?contextGraphId=...
+  // Returns per-sub-graph metadata + entity/triple counts so UIs can render a
+  // SubGraphBar without a second round-trip per sub-graph.
+  if (req.method === "GET" && path === "/api/sub-graph/list") {
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const contextGraphId = qs.get("contextGraphId");
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    try {
+      const registered = await agent.listSubGraphs(contextGraphId!);
+      // One pass enumerates *all* named graphs in the project + their
+      // distinct-subject and triple counts. Sub-graph ownership is inferred
+      // from the named-graph path segment after the context-graph id:
+      //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
+      //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
+      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      const counts = new Map<string, { entityCount: number; tripleCount: number }>();
+      try {
+        const sparql = `
+          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
+          WHERE { GRAPH ?g { ?s ?p ?o } }
+          GROUP BY ?g
+        `;
+        const result = await agent.query(sparql, { contextGraphId: contextGraphId! });
+        const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+        const parseCount = (v: any) => {
+          if (v === undefined || v === null) return 0;
+          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
+          const m = String(s).match(/^"?(\d+)/);
+          return m ? Number(m[1]) : 0;
+        };
+        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
+          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
+          if (!g || !g.startsWith(prefix)) continue;
+          const tail = g.slice(prefix.length);
+          // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
+          // Only care about the first segment, but skip daemon-internal graphs.
+          const firstSlash = tail.indexOf('/');
+          const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
+          if (!seg || seg.startsWith('_')) continue;
+          const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
+          entry.entityCount += parseCount(row.entities);
+          entry.tripleCount += parseCount(row.triples);
+          counts.set(seg, entry);
+        }
+      } catch {
+        // Counts are best-effort — UI degrades to zeros on query failure.
+      }
+      const items = registered.map((sg) => ({
+        name: sg.name,
+        uri: sg.uri,
+        description: sg.description,
+        createdBy: sg.createdBy,
+        createdAt: sg.createdAt,
+        entityCount: counts.get(sg.name)?.entityCount ?? 0,
+        tripleCount: counts.get(sg.name)?.tripleCount ?? 0,
+      }));
+      return jsonResponse(res, 200, { contextGraphId, subGraphs: items });
+    } catch (err: any) {
+      if (err.message?.includes("not found") || err.message?.includes("Invalid")) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
   // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
   if (req.method === "POST" && path === "/api/assertion/create") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -5956,6 +6042,194 @@ async function handleRequest(
     }
   }
 
+  // POST /api/genui/render  { contextGraphId, entityUri, libraryPrompt }
+  //
+  // Streams OpenUI Lang deltas over Server-Sent Events. The UI registers
+  // the component library client-side with @openuidev/react-lang and
+  // passes its `library.prompt()` text up; the daemon does the heavy
+  // lifting — resolving triples, reading the profile hint for the entity's
+  // rdf:type, composing the messages, and piping LlmClient stream events.
+  if (req.method === "POST" && path === "/api/genui/render") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entityUri, libraryPrompt } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof entityUri !== "string" || !entityUri.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing "entityUri"' });
+    }
+    if (typeof libraryPrompt !== "string" || !libraryPrompt.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing "libraryPrompt"' });
+    }
+    if (!config.llm?.apiKey) {
+      return jsonResponse(res, 503, {
+        error: 'LLM not configured. Set an API key in Settings to enable GenUI.',
+      });
+    }
+
+    // Fetch entity triples.
+    // The entity's data lives in the sub-graph's named assertion graph, so
+    // we must wrap the pattern in GRAPH ?g — otherwise we'd only see the
+    // default graph, which is empty for these imports. DISTINCT because
+    // promoted triples can appear under both WM and SWM/VM named graphs
+    // for the same sub-graph.
+    let triples: Array<{ p: string; o: string }> = [];
+    let entityRdfType: string | null = null;
+    try {
+      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
+      // not sanitisation — a crafted input containing `>` or whitespace can
+      // still break out of the interpolated `<…>`. `sparqlIri` runs
+      // `assertSafeIri` before wrapping.
+      const entityIri = entityUri.replace(/^<|>$/g, '');
+      let safeEntityIri: string;
+      try {
+        safeEntityIri = sparqlIri(entityIri);
+      } catch {
+        return jsonResponse(res, 400, {
+          error: `Unsafe entityUri: ${entityUri}`,
+        });
+      }
+      const triplesResult = await agent.query(
+        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
+        { contextGraphId },
+      );
+      // `agent.query()` can return bindings as SPARQL-JSON objects
+      // (`{value, type, …}`) once the result has passed through the
+      // normaliser — stringifying them directly produces "[object Object]"
+      // and wrecks the downstream rdf:type lookup / LLM prompt. See
+      // `bindingValue` near the top of this file.
+      triples = (triplesResult?.bindings ?? []).map((row: any) => ({
+        p: bindingValue(row.p),
+        o: bindingValue(row.o),
+      }));
+      const typeT = triples.find(
+        (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      );
+      if (typeT) entityRdfType = typeT.o;
+    } catch (err: any) {
+      return jsonResponse(res, 500, {
+        error: `Failed to fetch entity triples: ${err.message}`,
+      });
+    }
+
+    if (triples.length === 0) {
+      return jsonResponse(res, 404, {
+        error: `No triples found for <${entityUri}> in ${contextGraphId}`,
+      });
+    }
+
+    // Fetch the profile's detailHint for this type from the `meta` sub-graph.
+    // Same GRAPH ?g reasoning as above — the profile lives in a named
+    // assertion graph under `.../meta/assertion/...`, not in the default.
+    let detailHint: string | null = null;
+    let entityTypeLabel: string | null = null;
+    if (entityRdfType) {
+      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
+      // so it's normally a safe IRI — but crafted imported data could in
+      // principle smuggle unsafe chars through. Validate before interpolating.
+      let safeTypeIri: string | null = null;
+      try {
+        safeTypeIri = sparqlIri(entityRdfType);
+      } catch {
+        safeTypeIri = null;
+      }
+      if (safeTypeIri) {
+        try {
+          const hintResult = await agent.query(
+            `
+              SELECT ?hint ?label WHERE {
+                GRAPH ?g {
+                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
+                           <http://dkg.io/ontology/profile/detailHint> ?hint .
+                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+                }
+              } LIMIT 1
+            `,
+            { contextGraphId, subGraphName: 'meta' },
+          );
+          const row = hintResult?.bindings?.[0];
+          if (row) {
+            const hintRaw = bindingValue(row.hint);
+            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            if (row.label) {
+              const labelRaw = bindingValue(row.label);
+              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            }
+          }
+        } catch {
+          // meta sub-graph may be missing — fall through, LLM still has triples.
+        }
+      }
+    }
+
+    // Compose the prompt
+    const systemPrompt =
+      libraryPrompt +
+      `\n\n# Task\n` +
+      `You will be given an RDF entity from a DKG context graph, described by its triples (predicate -> object). ` +
+      `Compose a single OpenUI Lang response that renders a rich, domain-appropriate detail view of this entity ` +
+      `using only components from the library above.\n` +
+      `\n## Rules\n` +
+      `- Output OpenUI Lang only. No prose, no markdown fences, no commentary.\n` +
+      `- Use the EntityDetail root if the library declares one; otherwise start with whatever the library's root wants.\n` +
+      `- Extract display values from the literal objects (strip XSD datatype suffixes).\n` +
+      `- If URI objects look like "urn:dkg:...", treat them as links to other entities.\n` +
+      `- Prefer grouping: header card -> stats grid -> related lists.\n` +
+      `- Keep it compact — no more than ~12 child blocks.\n`;
+
+    const userMessage = [
+      `Entity URI: ${entityUri}`,
+      entityRdfType ? `rdf:type: ${entityRdfType}${entityTypeLabel ? ` (${entityTypeLabel})` : ''}` : '',
+      detailHint ? `\nProfile hint for this type:\n${detailHint}` : '',
+      `\nTriples (${triples.length}):\n` + triples.slice(0, 120).map(t => `  ${t.p}  ${t.o}`).join('\n'),
+      triples.length > 120 ? `  … (${triples.length - 120} more triples truncated)` : '',
+    ].filter(Boolean).join('\n');
+
+    // Start SSE stream
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+
+    const client = new LlmClient();
+    const sendEvent = (type: string, data: unknown) => {
+      res.write(`event: ${type}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    sendEvent('start', { entityUri, entityRdfType, entityTypeLabel });
+    try {
+      const events = client.stream({
+        config: config.llm!,
+        request: {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          stream: true,
+          temperature: 0.3,
+          maxTokens: 1500,
+        },
+      });
+      for await (const ev of events) {
+        if (ev.type === 'text_delta') {
+          sendEvent('delta', { text: ev.delta });
+        } else if (ev.type === 'final') {
+          sendEvent('final', { content: ev.message.content ?? '' });
+        } else if (ev.type === 'error') {
+          sendEvent('error', { error: ev.error });
+        }
+      }
+      sendEvent('done', {});
+    } catch (err: any) {
+      sendEvent('error', { error: err?.message ?? String(err) });
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
   // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }
   if (req.method === "POST" && path === "/api/query-remote") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -6307,6 +6581,41 @@ async function handleRequest(
     });
   }
 
+  // POST /api/context-graph/rename (or /api/paranet/rename)
+  //
+  // Updates the display name (schema:name) of an existing context graph
+  // without touching any of its data. Delegates to `agent.renameContextGraph`
+  // which (a) enforces owner-only authorization via `assertCallerIsOwner`
+  // (same protection as add/remove-participant), (b) wipes old name triples
+  // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
+  // the new name into both so the rename is durable for open AND private
+  // CGs (private curated graphs read their definition from `_meta`).
+  if (
+    req.method === "POST" &&
+    (path === "/api/context-graph/rename" || path === "/api/paranet/rename")
+  ) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { id, name } = JSON.parse(body);
+    if (!id || !name) {
+      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+    }
+    try {
+      await agent.renameContextGraph(id, String(name), requestAgentAddress);
+      return jsonResponse(res, 200, { renamed: id, name });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/Only the context graph creator/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (/does not exist|has no known creator|non-empty string/.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, {
+        error: `Failed to rename context graph: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/context-graph/list (V10) or /api/paranet/list (legacy)
   if (
     req.method === "GET" &&
@@ -6355,6 +6664,31 @@ async function handleRequest(
     }
   }
 
+  // POST /api/local-agent-integrations/:id/refresh — re-probe bridge health (OpenClaw) or
+  // return the current record (other integrations that don't yet have a bridge).
+  if (
+    req.method === 'POST'
+    && path.startsWith('/api/local-agent-integrations/')
+    && path.endsWith('/refresh')
+  ) {
+    const segments = path.slice('/api/local-agent-integrations/'.length, -'/refresh'.length);
+    if (!segments || segments.includes('/')) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
+    const rawId = decodeURIComponent(segments);
+    const normalizedId = normalizeIntegrationId(rawId);
+    if (!LOCAL_AGENT_INTEGRATION_DEFINITIONS[normalizedId]) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
+    }
+  }
+
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
     const id = path.slice('/api/local-agent-integrations/'.length);
@@ -6364,12 +6698,31 @@ async function handleRequest(
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
       const normalizedId = normalizeIntegrationId(id);
-      const disconnectRequested = parsed.enabled === false
-        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
-      if (disconnectRequested && normalizedId) {
+      const normalizedPatch = normalizeExplicitLocalAgentDisconnectBody(parsed);
+      const explicitDisconnect = normalizedPatch.enabled === false
+        && isPlainRecord(normalizedPatch.runtime)
+        && normalizedPatch.runtime.status === 'disconnected';
+      if (explicitDisconnect && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
-      const integration = updateLocalAgentIntegration(config, id, parsed);
+
+      if (explicitDisconnect && normalizedId === 'openclaw') {
+        try {
+          await reverseLocalAgentSetupForUi(config);
+        } catch (err: any) {
+          const integration = updateLocalAgentIntegration(config, id, {
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
+            },
+          });
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, integration });
+        }
+      }
+
+      const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {

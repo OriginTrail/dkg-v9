@@ -1718,35 +1718,39 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // Load the real verifier from the adapter barrel so we exercise the actual invariant.
     const { verifyUnmergeInvariants } = await import('@origintrail-official/dkg-adapter-openclaw');
 
-    // Seed a SKILL.md — removal runs AFTER the invariant check, so on failure
-    // the skill must stay in place (we don't cascade a half-finished cleanup).
+    // Seed a SKILL.md at the workspace `mergeOpenClawConfig` recorded above.
+    // Post-R3-2 the skill cleanup runs BEFORE the config-level unmerge; we
+    // stub the skill steps with passing no-ops so the flow reaches the
+    // partial-unmerge + invariant-failure path the test is actually about.
     const skillDir = join(workspaceDir, 'skills', 'dkg-node');
     const skillPath = join(skillDir, 'SKILL.md');
     mkdirSync(skillDir, { recursive: true });
     writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
 
-    const removeSkillSpy = vi.fn();
+    const removeSkillStub = vi.fn();
+    const verifySkillRemovedStub = vi.fn(() => null);
 
     const config = makeConfig();
     await expect(
       reverseLocalAgentSetupForUi(config, openclawConfigPath, {
         unmergeOpenClawConfig: partialUnmerge,
         verifyUnmergeInvariants,
-        removeCanonicalNodeSkill: removeSkillSpy,
+        removeCanonicalNodeSkill: removeSkillStub,
+        verifySkillRemoved: verifySkillRemovedStub,
       }),
     ).rejects.toThrow(/plugins\.allow still contains/);
 
     // The partial cleanup did happen on disk — this asserts the invariant check fired
-    // specifically on the allow-list regression, not on some earlier failure.
+    // specifically on the allow-list regression.
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(after.plugins.slots.memory).toBeUndefined();
     expect(after.plugins.allow).toContain('adapter-openclaw');
 
-    // Skill removal is gated on the invariant check passing. When it fails the
-    // openclaw.json rollback is already partial — we must not compound that by
-    // also retiring the agent-facing SKILL.md.
-    expect(removeSkillSpy).not.toHaveBeenCalled();
-    expect(existsSync(skillPath)).toBe(true);
+    // Post-R3-2 ordering: skill cleanup ran BEFORE the unmerge, against the
+    // same workspaceDir `mergeOpenClawConfig` persisted on the entry.
+    expect(removeSkillStub).toHaveBeenCalledTimes(1);
+    expect(removeSkillStub.mock.calls[0][0]).toBe(workspaceDir);
+    expect(verifySkillRemovedStub).toHaveBeenCalledTimes(1);
   });
 
   it('scenario 2d: legacy (pre-R2) openclaw.json without installedWorkspace falls back to resolveWorkspaceDirFromConfig and expands ~ (Codex R1-1)', async () => {
@@ -1811,15 +1815,16 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(verifySkillRemovedStub.mock.calls[0][0]).toBe(expandedAbsolute);
   });
 
-  it('scenario 2e: skill-removal failure propagates to runtime.lastError — Disconnect no longer silently succeeds (Codex R2-2)', async () => {
+  it('scenario 2e: skill-removal failure propagates to runtime.lastError AND leaves openclaw.json untouched for retry (Codex R2-2 + R3-2)', async () => {
     // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120159512
-    // Earlier drafts wrapped `removeCanonicalNodeSkill` in try/catch + console.warn.
-    // That left a state mismatch: the UI flipped to "disconnected" while SKILL.md
-    // still sat in the workspace. Now that `entry.installedWorkspace` is the
-    // authoritative target, failure to retire the file is a real disconnect failure
-    // worth surfacing via runtime.lastError.
+    // (R2-2) and #discussion_r3120241631 (R3-2). R2-2 stopped swallowing skill-
+    // removal errors; R3-2 reordered the flow so skill cleanup runs BEFORE
+    // the config-level unmerge — a failure at the skill step must leave
+    // `entry.installedWorkspace` and the adapter wiring intact so the user
+    // can retry Disconnect and we still know which file to target.
 
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const beforeDisconnect = readFileSync(openclawConfigPath, 'utf-8');
 
     // Stub removal to succeed (no-op) but have verifySkillRemoved claim the
     // file is still present — as if the unlink raced with another writer, or
@@ -1829,27 +1834,82 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const verifySkillRemovedFail = vi.fn(
       (ws: string) => `canonical node skill still present at ${join(ws, 'skills', 'dkg-node', 'SKILL.md')}`,
     );
+    // Spies on the config-level ops — must NOT be invoked when the skill
+    // step fails. Provide passing stubs so the default dynamic-import path
+    // would still work if the code accidentally reached them, but the spy
+    // counts prove the reorder held.
+    const unmergeSpy = vi.fn();
+    const verifyInvariantsSpy = vi.fn(() => null);
 
     const config = makeConfig();
     await expect(
       reverseLocalAgentSetupForUi(config, openclawConfigPath, {
         removeCanonicalNodeSkill: removeSkillNoop,
         verifySkillRemoved: verifySkillRemovedFail,
+        unmergeOpenClawConfig: unmergeSpy,
+        verifyUnmergeInvariants: verifyInvariantsSpy,
       }),
     ).rejects.toThrow(/SKILL\.md|still present/);
 
-    // Both injected dependencies were exercised against the installedWorkspace
-    // recorded at merge time (workspaceDir is what scenario 2's merge passed).
+    // Skill-step deps were exercised against the installedWorkspace
+    // recorded at merge time (workspaceDir is what the merge above passed).
     expect(removeSkillNoop).toHaveBeenCalledTimes(1);
     expect(removeSkillNoop.mock.calls[0][0]).toBe(workspaceDir);
     expect(verifySkillRemovedFail).toHaveBeenCalledTimes(1);
     expect(verifySkillRemovedFail.mock.calls[0][0]).toBe(workspaceDir);
 
-    // The openclaw.json unmerge still completed (it runs before the skill
-    // checks), so the PUT handler sees a consistent "disconnect went most of
-    // the way but the skill doc is still present" state and surfaces it.
+    // R3-2: the config-level unmerge + invariant check were never reached,
+    // so openclaw.json is byte-identical to its pre-Disconnect state. The
+    // adapter entry — including `installedWorkspace` — is still present,
+    // which is exactly what a retry needs.
+    expect(unmergeSpy).not.toHaveBeenCalled();
+    expect(verifyInvariantsSpy).not.toHaveBeenCalled();
+    expect(readFileSync(openclawConfigPath, 'utf-8')).toBe(beforeDisconnect);
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
-    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
+    expect(after.plugins.entries['adapter-openclaw']).toBeDefined();
+    expect(after.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(workspaceDir);
+  });
+
+  it('scenario 2f: retry after a failed skill cleanup succeeds (Codex R3-2 recovery)', async () => {
+    // First Disconnect: skill cleanup fails, openclaw.json is untouched.
+    // Second Disconnect: real skill cleanup + real verify succeed, entry is removed.
+    // Proves `entry.installedWorkspace` is still readable on retry — the whole
+    // point of the R3-2 reorder.
+
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+
+    // Attempt 1: removal fails (stubbed no-op that never actually unlinks).
+    // Real verifySkillRemoved then sees SKILL.md still on disk and throws.
+    const removeSkillNoop = vi.fn();
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillNoop,
+        // verifySkillRemoved left as the real adapter helper — it observes
+        // the still-present SKILL.md and returns a failure string.
+      }),
+    ).rejects.toThrow(/still present/);
+
+    // Post-failure state: the adapter entry AND installedWorkspace survived.
+    const afterAttempt1 = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(afterAttempt1.plugins.entries['adapter-openclaw']).toBeDefined();
+    expect(afterAttempt1.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(workspaceDir);
+    expect(afterAttempt1.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(existsSync(skillPath)).toBe(true);
+
+    // Attempt 2: no stubs — run the real flow end-to-end. The
+    // `entry.installedWorkspace` left in place is what the real
+    // `reverseLocalAgentSetupForUi` reads to target SKILL.md.
+    await expect(reverseLocalAgentSetupForUi(config, openclawConfigPath)).resolves.toBeUndefined();
+
+    const afterAttempt2 = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(afterAttempt2.plugins.entries['adapter-openclaw']).toBeUndefined();
+    expect(afterAttempt2.plugins.slots.memory).toBeUndefined();
+    expect(existsSync(skillPath)).toBe(false);
   });
 
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {

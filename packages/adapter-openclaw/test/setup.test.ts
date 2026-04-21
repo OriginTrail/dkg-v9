@@ -713,9 +713,11 @@ describe('unmergeOpenClawConfig', () => {
     expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
-  // Codex PR #234 R2-1 — unmerge returns setup-persisted metadata so the
-  // daemon-side Disconnect path can target the authoritative install workspace.
-  it('returns the installedWorkspace and previousMemorySlotOwner read before entry deletion', () => {
+  // Codex PR #234 R2-1 (as refined by R3-2) — unmerge returns the prior
+  // memory-slot owner for slot restoration. `installedWorkspace` is NOT
+  // returned post-R3-2: the daemon reads it off openclaw.json BEFORE calling
+  // unmerge, so the skill cleanup runs before the entry is deleted.
+  it('returns previousMemorySlotOwner read before entry deletion', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({
       plugins: { slots: { memory: 'memory-core' } },
@@ -725,10 +727,7 @@ describe('unmergeOpenClawConfig', () => {
 
     const result = unmergeOpenClawConfig(configPath);
 
-    expect(result).toEqual({
-      previousMemorySlotOwner: 'memory-core',
-      installedWorkspace: ws,
-    });
+    expect(result).toEqual({ previousMemorySlotOwner: 'memory-core' });
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
@@ -744,18 +743,14 @@ describe('unmergeOpenClawConfig', () => {
     expect(unmergeOpenClawConfig(configPath)).toEqual({});
   });
 
-  it('omits installedWorkspace when the entry has no installedWorkspace field (pre-PR #234 R2 configs)', () => {
+  it('omits previousMemorySlotOwner when the merge did not capture one (clean install)', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
-    // Strip the field the merge just wrote to simulate a pre-R2 install.
-    const pre = JSON.parse(readFileSync(configPath, 'utf-8'));
-    delete pre.plugins.entries['adapter-openclaw'].installedWorkspace;
-    writeFileSync(configPath, JSON.stringify(pre, null, 2));
 
     const result = unmergeOpenClawConfig(configPath);
 
-    expect(result.installedWorkspace).toBeUndefined();
+    expect(result.previousMemorySlotOwner).toBeUndefined();
   });
 });
 
@@ -1456,6 +1451,96 @@ describe('runSetup abort signal', () => {
           // no signal
         }),
       ).resolves.toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup workspace migration (Codex PR #234 R3-3)
+// Re-running setup with a different workspace must retire the prior install's
+// SKILL.md — otherwise the old `/dir-a/skills/dkg-node/SKILL.md` is orphaned
+// and Disconnect will only ever retire whatever `installedWorkspace` points
+// at (latest merge wins).
+// ---------------------------------------------------------------------------
+
+describe('runSetup workspace migration', () => {
+  it('removes the prior install\'s SKILL.md when the workspace changes between setups', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const dirA = join(testDir, 'workspace-a');
+    const dirB = join(testDir, 'workspace-b');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      // First install targets dirA.
+      await runSetup({ workspace: dirA, start: false, verify: false });
+      const skillA = join(dirA, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillA)).toBe(true);
+      const afterA = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(afterA.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirA);
+
+      // Second install targets dirB — old install's skill at dirA must be retired.
+      await runSetup({ workspace: dirB, start: false, verify: false });
+      const skillB = join(dirB, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillA)).toBe(false);
+      expect(existsSync(skillB)).toBe(true);
+      const afterB = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(afterB.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirB);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does not re-retire anything when setup is re-run against the same workspace', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await runSetup({ workspace: ws, start: false, verify: false });
+      const skillPath = join(ws, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillPath)).toBe(true);
+      const firstSkillBytes = readFileSync(skillPath, 'utf-8');
+
+      // Seed a sibling file to detect any inadvertent cleanup of the whole
+      // dkg-node/ dir on the idempotent re-run (migration cleanup is scoped
+      // to SKILL.md; the parent dir should remain intact in-place).
+      const sibling = join(ws, 'skills', 'dkg-node', 'user-note.md');
+      writeFileSync(sibling, '# kept by user\n');
+
+      await runSetup({ workspace: ws, start: false, verify: false });
+
+      // SKILL.md is still there (the fresh install re-copied it) and the
+      // sibling user file is untouched — no migration cleanup happened.
+      expect(existsSync(skillPath)).toBe(true);
+      expect(readFileSync(skillPath, 'utf-8')).toBe(firstSkillBytes);
+      expect(existsSync(sibling)).toBe(true);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;

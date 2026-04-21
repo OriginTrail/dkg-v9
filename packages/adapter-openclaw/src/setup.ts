@@ -714,14 +714,6 @@ export interface UnmergeResult {
    * when the adapter had displaced another plugin at install time.
    */
   previousMemorySlotOwner?: string;
-  /**
-   * Authoritative absolute workspace directory setup installed into,
-   * read from `plugins.entries["adapter-openclaw"].installedWorkspace`
-   * before the entry is deleted. `undefined` for openclaw.json files
-   * that predate this field (pre-PR #234 R2). Callers fall back to the
-   * config-derived workspace in that case.
-   */
-  installedWorkspace?: string;
 }
 
 export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult {
@@ -770,22 +762,19 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     }
   }
 
-  // Read setup-persisted metadata BEFORE we mutate the entry:
-  //   - `previousMemorySlotOwner` — string → restore the slot on disconnect.
-  //   - `installedWorkspace` — authoritative install-time workspace dir that
-  //     setup's `installCanonicalNodeSkill` targeted. Returning it lets the
-  //     daemon-side Disconnect path retire the exact SKILL.md setup installed,
-  //     independent of whatever the openclaw.json workspace keys say today.
+  // Read the prior memory-slot owner that `mergeOpenClawConfig` persisted
+  // BEFORE we mutate the entry. A string value means we should restore the
+  // slot on disconnect; anything else means the slot was empty at merge time.
+  //
+  // `entry.installedWorkspace` is intentionally NOT returned here — post-PR
+  // #234 R3-2 the daemon reads it directly from openclaw.json before calling
+  // this function, so the skill cleanup runs BEFORE the entry is deleted.
+  // That ordering lets a failed skill cleanup retry against the still-present
+  // authority pointer instead of relying on a return value we discard on crash.
   let previousMemorySlotOwner: string | undefined;
-  let installedWorkspace: string | undefined;
   const entry = config.plugins?.entries?.[pluginId];
-  if (entry && typeof entry === 'object') {
-    if (typeof entry.previousMemorySlotOwner === 'string') {
-      previousMemorySlotOwner = entry.previousMemorySlotOwner;
-    }
-    if (typeof entry.installedWorkspace === 'string' && entry.installedWorkspace.trim()) {
-      installedWorkspace = entry.installedWorkspace;
-    }
+  if (entry && typeof entry === 'object' && typeof entry.previousMemorySlotOwner === 'string') {
+    previousMemorySlotOwner = entry.previousMemorySlotOwner;
   }
 
   // Delete the adapter entry entirely. The adapter owns this entry — all of
@@ -814,7 +803,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   const updated = JSON.stringify(config, null, 2) + '\n';
   if (updated === raw) {
     log('openclaw.json already disconnected from adapter — no changes needed');
-    return { previousMemorySlotOwner, installedWorkspace };
+    return { previousMemorySlotOwner };
   }
 
   // Backup only when content actually changes (same contract as mergeOpenClawConfig)
@@ -823,7 +812,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
 
   writeFileSync(openclawConfigPath, updated);
   log(`Unmerged adapter from ${openclawConfigPath} (backed up original)`);
-  return { previousMemorySlotOwner, installedWorkspace };
+  return { previousMemorySlotOwner };
 }
 
 /**
@@ -1161,6 +1150,42 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     memory: { enabled: true },
     channel: { enabled: true },
   };
+
+  // Codex PR #234 R3-3: workspace migration. If a prior install targeted a
+  // different workspace (e.g. `dkg openclaw setup --workspace /dir-a` then
+  // `--workspace /dir-b`), the second merge overwrites `entry.installedWorkspace`
+  // and the old SKILL.md at /dir-a would be orphaned. Inspect the existing
+  // entry BEFORE merge; if it points at a different workspace than the one
+  // we're about to install into, retire the old skill file first.
+  // Scoped to adapter-owned SKILL.md only — not the whole skills/dkg-node/
+  // directory, matching `removeCanonicalNodeSkill` semantics (sibling files
+  // placed there by the user are preserved).
+  //
+  // `discoverWorkspace` returns configPath: '' when `--workspace` was used,
+  // so resolve the effective path the same way `mergeOpenClawConfig` does at
+  // setup.ts:524 — default to `~/.openclaw/openclaw.json` when empty.
+  const effectiveConfigPathForMigration = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : join(openclawDir(), 'openclaw.json');
+  if (!dryRun && existsSync(effectiveConfigPathForMigration)) {
+    try {
+      const rawExisting = JSON.parse(readFileSync(effectiveConfigPathForMigration, 'utf-8'));
+      const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
+      const priorInstalled = existingEntry
+        && typeof existingEntry === 'object'
+        && typeof existingEntry.installedWorkspace === 'string'
+        ? existingEntry.installedWorkspace.trim()
+        : '';
+      if (priorInstalled && priorInstalled !== workspaceDir) {
+        log(`Migrating install workspace: ${priorInstalled} → ${workspaceDir}`);
+        removeCanonicalNodeSkill(priorInstalled);
+      }
+    } catch {
+      // Unparseable openclaw.json — nothing to migrate from. The merge step
+      // below will handle (or fail on) the broken file state itself.
+    }
+  }
+
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, workspaceDir, {
       overrideDaemonUrl: portExplicit,

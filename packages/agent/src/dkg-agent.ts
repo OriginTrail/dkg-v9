@@ -2924,17 +2924,23 @@ export class DKGAgent {
     // will see them. Open CGs go to ONTOLOGY for network-wide discovery.
     const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
 
-    // Use the caller's identity when provided so non-default agents on
-    // multi-agent nodes own the CGs they create. On-chain operations
-    // (registerContextGraph, verify) still bind to the node wallet — this is
-    // a known limitation until per-agent chain signers are implemented.
-    // Downstream owner checks (isCallerOrNodeOwner, assertCallerIsOwner) accept
-    // the caller DID when callerAgentAddress is threaded through daemon routes.
-    const creatorDid = `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+    // DKG_CREATOR records the libp2p peer ID of the hosting node — this is
+    // the deterministic handle used by `resolveCuratorPeerId()` to dial the
+    // curator for meta refreshes. It must NOT be replaced with a wallet DID.
+    //
+    // DKG_CURATOR records the caller's wallet identity and is what ownership
+    // checks consult (via `getContextGraphOwner`). When a non-default local
+    // agent creates a CG, its wallet DID ends up here so later authorization
+    // — threaded through daemon routes as `callerAgentAddress` — can match.
+    //
+    // On-chain operations (registerContextGraph, verify) still bind to the
+    // node wallet; per-agent chain signers are a known future enhancement.
+    const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
+    const curatorDid = `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorDid, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
@@ -2944,7 +2950,7 @@ export class DKGAgent {
     // Store registration status and curator in _meta
     quads.push(
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: creatorDid, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
     );
 
     // Store peer allowlist for curated CGs (with validation)
@@ -5566,7 +5572,22 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const cgMetaGraph = paranetMetaGraphUri(paranetId);
     const paranetUri = `did:dkg:context-graph:${paranetId}`;
-    const result = await this.store.query(`
+    // Prefer the curator (wallet-scoped owner) so per-agent authorization
+    // works on multi-agent nodes. Fall back to the creator (libp2p peer ID)
+    // for legacy CGs created before the curator triple existed.
+    const curatorResult = await this.store.query(`
+      SELECT ?owner WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?owner .
+        }
+      }
+      LIMIT 1
+    `);
+    if (curatorResult.type === 'bindings' && curatorResult.bindings.length > 0) {
+      const owner = (curatorResult.bindings[0] as Record<string, string>)['owner'];
+      if (owner) return owner;
+    }
+    const creatorResult = await this.store.query(`
       SELECT ?owner WHERE {
         {
           GRAPH <${ontologyGraph}> {
@@ -5580,8 +5601,8 @@ export class DKGAgent {
       }
       LIMIT 1
     `);
-    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-    return (result.bindings[0] as Record<string, string>)['owner'] ?? null;
+    if (creatorResult.type !== 'bindings' || creatorResult.bindings.length === 0) return null;
+    return (creatorResult.bindings[0] as Record<string, string>)['owner'] ?? null;
   }
 
   private async listCclPolicyBindings(opts: {

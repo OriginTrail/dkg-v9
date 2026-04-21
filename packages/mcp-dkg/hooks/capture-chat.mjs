@@ -563,7 +563,7 @@ async function selfRegisterAgent(cfg, state) {
 // triples onto the just-written turn URI. This lets the agent annotate
 // "the turn I'm about to produce" race-free — no need to predict a turn
 // URI that doesn't exist yet.
-async function applyPendingAnnotations(cfg, sessionKey, turnUri) {
+async function applyPendingAnnotations(cfg, sessionKey, turnUri, promote = false) {
   if (!cfg.project) return 0;
   const sparql = `SELECT ?pending ?p ?o WHERE {
   GRAPH ?g {
@@ -662,7 +662,12 @@ async function applyPendingAnnotations(cfg, sessionKey, turnUri) {
         subGraphName: cfg.subGraph,
         quads: rewritten,
       });
-      if (cfg.autoShare) {
+      // Only promote when the caller determined this turn is
+      // promotable (cfg.autoShare AND session is not private). If the
+      // turn itself stayed WM-only, its annotations must too — otherwise
+      // the hook would gossip a chat:mentions/proposes triple that
+      // points back at a turn the team can't actually see.
+      if (promote) {
         await postJson(cfg.api, `/api/assertion/${encodeURIComponent(applyAssertion)}/promote`, cfg.token, {
           contextGraphId: cfg.project,
           subGraphName: cfg.subGraph,
@@ -758,7 +763,11 @@ async function handleSessionStart(cfg, payload) {
   try {
     await writeTriples(cfg, sessionTriples(cfg, state, payload));
     state.sessionWritten = true;
-    if (cfg.autoShare) {
+    // Same privacy gate as the turn write below — a session marked
+    // private at session-start (workspace default `capture.privacy:
+    // private`) MUST NOT have even its Session entity gossiped.
+    // Matches the `await shouldPromote` pattern in handleAfterAgentResponse.
+    if (await shouldPromote(cfg, state)) {
       await promoteEntities(cfg, [state.sessionUri]).catch((e) => log(`promote session: ${e.message}`));
     }
   } catch (err) {
@@ -866,7 +875,14 @@ async function handleAfterAgentResponse(cfg, payload) {
     state.turnIndex = idx;
     state.pendingPrompt = null;
     if (bootstrapSession) state.sessionWritten = true;
-    if (shouldPromote(cfg, state)) {
+    // Compute the promote-or-not decision ONCE per turn. `shouldPromote`
+    // is async (it may hit /api/query to read `chat:privacy`), so a
+    // bare `if (shouldPromote(...))` always-truthy the Promise and
+    // leaks private turns into SWM. Do it right with an explicit
+    // `await` and reuse the resolved boolean for annotation promote
+    // below so both gates agree.
+    const promote = await shouldPromote(cfg, state);
+    if (promote) {
       // Promote both the session and the individual turn so the team
       // sees the turn immediately and the aggregate Session is kept
       // in SWM.
@@ -878,9 +894,10 @@ async function handleAfterAgentResponse(cfg, payload) {
     // Phase 7 race-fix: apply any pending annotations queued by
     // dkg_annotate_turn(forSession=...) during this response. Best-
     // effort, non-blocking on error — pendings can also be applied
-    // later by re-running this hook on the next turn.
+    // later by re-running this hook on the next turn. Pass the same
+    // promote decision so a private turn doesn't leak via annotations.
     try {
-      const n = await applyPendingAnnotations(cfg, sessionKey, turn);
+      const n = await applyPendingAnnotations(cfg, sessionKey, turn, promote);
       if (n > 0) log(`applied ${n} pending annotation${n === 1 ? '' : 's'} to ${turn}`);
     } catch (err) {
       log(`pending-annotation apply failed: ${err?.message ?? err}`);

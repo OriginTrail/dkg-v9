@@ -260,6 +260,26 @@ export async function publishManifest(
 
   const assertion = opts.assertionName ?? 'project-manifest';
   await opts.client.ensureSubGraph(opts.contextGraphId, 'meta');
+  // Republish semantics: clear the existing assertion graph before
+  // writing the fresh quads. `assertionWrite` is append-only (the
+  // daemon's `store.insert` is set-merge, not replace), so without the
+  // discard step a second publish would leave stale predicate values
+  // alongside the new ones — e.g. the manifest entity would end up
+  // with N `publishedAt` timestamps and every previously-supported
+  // tool lingering in `supportedTools`. `assertionDiscard` is idempotent
+  // (no-op on an assertion that was never written), so we can always
+  // call it. Template entities live under the SAME assertion name, so
+  // a single discard clears them too.
+  await opts.client
+    .discardAssertion({
+      contextGraphId: opts.contextGraphId,
+      assertionName: assertion,
+      subGraphName: 'meta',
+    })
+    .catch(() => {
+      // Swallow: discard on a first-publish CG will 404 from the
+      // `_meta` cleanup path. The subsequent write is still correct.
+    });
   await opts.client.writeAssertion({
     contextGraphId: opts.contextGraphId,
     assertionName: assertion,

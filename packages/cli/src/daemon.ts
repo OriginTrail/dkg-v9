@@ -285,6 +285,8 @@ function buildManifestInstallContext(
         ? body.daemonTokenFile
         : `${osModule.homedir()}/.dkg/auth.token`,
       mcpDkgDistAbsPath: resolve(repoRoot, 'packages/mcp-dkg/dist/index.js'),
+      mcpDkgPackageDir: resolve(repoRoot, 'packages/mcp-dkg'),
+      mcpDkgSrcAbsPath: resolve(repoRoot, 'packages/mcp-dkg/src/index.ts'),
       captureScriptPath: resolve(repoRoot, 'packages/mcp-dkg/hooks/capture-chat.mjs'),
       tools,
       agentNickname: rawNickname,
@@ -6893,20 +6895,47 @@ async function handleRequest(
         job.result = result;
         job.status = "done";
 
+        // Compute the "at least one peer gave us a clean response"
+        // signal once, up front. We use it for two different gates:
+        //
+        //   (1) the "denied" gate below — a mixed pool of one denying
+        //       peer + one authorised-but-empty peer is NOT a denial,
+        //       so we must NOT flip to `denied` if ANY peer sent a
+        //       clean empty/meta-only response.
+        //   (2) the "synced" flip further down — we only promote the
+        //       subscription to `synced=true` on concrete evidence,
+        //       never on "no peer threw" (transport death is silent).
+        //
+        // "Clean response" = we either ingested triples, or at least
+        // one peer responded with the empty-result / meta-only signal
+        // (`emptyResponses`, `metaOnlyResponses`). Non-ACL failures
+        // (timeout, reset) land in `diagnostics.durable.failedPeers`
+        // and do NOT qualify as clean here.
+        const d = result.diagnostics?.durable;
+        const s = result.diagnostics?.sharedMemory;
+        const cleanResponse =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0 ||
+          (d?.emptyResponses ?? 0) > 0 ||
+          (d?.metaOnlyResponses ?? 0) > 0 ||
+          (s?.emptyResponses ?? 0) > 0;
+
         // Authoritative ACL denial: at least one peer explicitly denied
         // the sync (via the SYNC_ACCESS_DENIED_MARKER sentinel surfaced
-        // by syncContextGraphFromConnectedPeers) and no peer returned
-        // any data. Transport timeouts / unreachable peers do NOT
-        // increment accessDeniedPeers, so an open CG with slow/offline
-        // peers won't be misclassified as denied.
+        // by syncContextGraphFromConnectedPeers) and NO peer returned a
+        // clean response of any shape. Transport timeouts / unreachable
+        // peers do NOT increment accessDeniedPeers, so an open CG with
+        // slow/offline peers won't be misclassified as denied.
         //
-        // We also check sharedMemorySynced — an authorised peer that
-        // only returned SWM (with durable data empty) is not a denial.
-        if (
-          result.accessDeniedPeers > 0 &&
-          result.dataSynced === 0 &&
-          result.sharedMemorySynced === 0
-        ) {
+        // Corner case the earlier guard missed: an authorised peer that
+        // responded empty or meta-only (legitimate — CG exists but has
+        // no durable data yet) alongside a denying peer on the same CG.
+        // With the previous `dataSynced===0 && sharedMemorySynced===0`
+        // test, that pool would flip to "denied" even though we heard
+        // from a peer that's happy to serve us. Gating on
+        // `cleanResponse` makes the classification symmetric with the
+        // synced-flip below.
+        if (result.accessDeniedPeers > 0 && !cleanResponse) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
           // Only unsubscribe if the CG was only known via auto-discovery,
@@ -6926,22 +6955,7 @@ async function handleRequest(
         // died mid-sync (timeout, reset, truncated stream), the agent
         // catches the errors internally, returns dataSynced=0, and the
         // UI ends up showing "synced" with an empty graph.
-        //
-        // "Clean response" = we either inserted triples, or at least
-        // one peer responded with the empty-result / meta-only signal
-        // (`emptyResponses`, `metaOnlyResponses`). Non-ACL failures are
-        // now counted in `diagnostics.durable.failedPeers`; if every
-        // peer-CG pair landed in the failure counter and nothing
-        // succeeded, leave the sub in its pre-catchup state.
         if (job.status === "done") {
-          const d = result.diagnostics?.durable;
-          const s = result.diagnostics?.sharedMemory;
-          const cleanResponse =
-            result.dataSynced > 0 ||
-            result.sharedMemorySynced > 0 ||
-            (d?.emptyResponses ?? 0) > 0 ||
-            (d?.metaOnlyResponses ?? 0) > 0 ||
-            (s?.emptyResponses ?? 0) > 0;
           if (cleanResponse) {
             const subMap = (agent as any).subscribedContextGraphs as
               | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>

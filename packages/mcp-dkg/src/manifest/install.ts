@@ -59,8 +59,26 @@ export interface InstallContext {
   daemonApiUrl: string;
   /** Relative path (from `<workspace>/.dkg/config.yaml`) to the daemon's auth.token. */
   daemonTokenFile: string;
-  /** Absolute path to packages/mcp-dkg/dist/index.js (so Cursor can spawn the server). */
+  /**
+   * Absolute path to `packages/mcp-dkg/dist/index.js`. LEGACY: older
+   * generated `.cursor/mcp.json` templates spawned `node <dist>` here;
+   * current templates run the TS source via `pnpm exec tsx` (see
+   * `mcpDkgPackageDir` / `mcpDkgSrcAbsPath`) because `dist/` is
+   * gitignored and a fresh clone would 404. Kept on the context so
+   * older in-flight manifests still substitute cleanly.
+   */
   mcpDkgDistAbsPath: string;
+  /**
+   * Absolute path to the `packages/mcp-dkg` directory on THIS machine.
+   * `pnpm --dir <this>` uses it to resolve the package-local `tsx`
+   * devDependency when spawning the MCP server.
+   */
+  mcpDkgPackageDir: string;
+  /**
+   * Absolute path to `packages/mcp-dkg/src/index.ts`. Handed to `tsx`
+   * as an absolute path so the spawn works regardless of Cursor's CWD.
+   */
+  mcpDkgSrcAbsPath: string;
   /** Absolute path to the capture-chat.mjs hook script. */
   captureScriptPath: string;
   /** Override $HOME for tests; defaults to os.homedir(). */
@@ -133,6 +151,8 @@ function buildSubstitutionValues(
     daemonTokenFile: ctx.daemonTokenFile,
     workspaceAbsPath: ctx.workspaceAbsPath,
     mcpDkgDistAbsPath: ctx.mcpDkgDistAbsPath,
+    mcpDkgPackageDir: ctx.mcpDkgPackageDir,
+    mcpDkgSrcAbsPath: ctx.mcpDkgSrcAbsPath,
     captureScriptPath: ctx.captureScriptPath,
     network: ctx.manifest.network,
   };

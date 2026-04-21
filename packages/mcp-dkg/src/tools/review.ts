@@ -95,6 +95,8 @@ export function registerReviewTools(
           daemonApiUrl: apiUrl,
           daemonTokenFile: '../.devnet/node1/auth.token',
           mcpDkgDistAbsPath: path.resolve(HERE, '..', 'index.js'),
+          mcpDkgPackageDir: path.resolve(HERE, '..', '..'),
+          mcpDkgSrcAbsPath: path.resolve(HERE, '..', '..', 'src', 'index.ts'),
           captureScriptPath: path.resolve(HERE, '..', '..', 'hooks', 'capture-chat.mjs'),
           homedir: os.homedir(),
         });

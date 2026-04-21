@@ -83,7 +83,9 @@ export const MANIFEST_PLACEHOLDERS = [
   'daemonApiUrl',       // local daemon API (default http://localhost:9201)
   'daemonTokenFile',    // relative path to auth.token (e.g. ../.devnet/node1/auth.token)
   'workspaceAbsPath',   // absolute path of the operator's workspace
-  'mcpDkgDistAbsPath',  // absolute path to packages/mcp-dkg/dist/index.js
+  'mcpDkgDistAbsPath',  // absolute path to packages/mcp-dkg/dist/index.js (LEGACY — kept for older templates)
+  'mcpDkgPackageDir',   // absolute path to packages/mcp-dkg — used to run `pnpm --dir … exec tsx src/index.ts` on the TS source (dist/ is gitignored)
+  'mcpDkgSrcAbsPath',   // absolute path to packages/mcp-dkg/src/index.ts — passed to tsx so we don't depend on CWD
   'captureScriptPath',  // absolute path to packages/mcp-dkg/hooks/capture-chat.mjs
   'network',            // testnet / mainnet / devnet
 ] as const;

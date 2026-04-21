@@ -284,6 +284,8 @@ async function cmdJoin(args: string[]): Promise<number> {
     daemonApiUrl: opts.daemonUrl,
     daemonTokenFile: opts.tokenFile,
     mcpDkgDistAbsPath: path.resolve(HERE, '..', 'index.js'),
+    mcpDkgPackageDir: path.resolve(HERE, '..', '..'),
+    mcpDkgSrcAbsPath: path.resolve(HERE, '..', '..', 'src', 'index.ts'),
     captureScriptPath: path.resolve(HERE, '..', '..', 'hooks', 'capture-chat.mjs'),
     homedir: os.homedir(),
   };

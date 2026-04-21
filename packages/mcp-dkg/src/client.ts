@@ -199,9 +199,16 @@ export class DkgClient {
 
   /**
    * Write a set of triples to `assertionName` under `contextGraphId`. The
-   * daemon replaces the full assertion contents atomically — callers that
-   * want to merge with existing data MUST choose unique assertion names
-   * per write (the canonical pattern in `scripts/import-*`.mjs).
+   * daemon's assertion write is **additive** (`store.insert` is set-merge,
+   * not replace) — two writes with the same `assertionName` land in the
+   * same graph and their triples union. Callers that want *replace*
+   * semantics should either:
+   *   (a) mint a unique `assertionName` per write (the canonical pattern
+   *       in `scripts/import-*.mjs`, where each import is a new named
+   *       snapshot), or
+   *   (b) call `discardAssertion` first to wipe the existing graph, then
+   *       write — use this when the assertion name itself is the stable
+   *       lookup key (e.g. `project-manifest`).
    */
   async writeAssertion(args: {
     contextGraphId: string;
@@ -224,6 +231,32 @@ export class DkgClient {
     await this.request(
       'POST',
       `/api/assertion/${encodeURIComponent(args.assertionName)}/write`,
+      body,
+    );
+  }
+
+  /**
+   * Discard an assertion graph entirely (idempotent — a no-op on an
+   * assertion that doesn't exist yet). Use this before re-writing an
+   * assertion whose name you want to KEEP stable but whose contents
+   * you want to *replace* rather than *merge*. Without this, the
+   * daemon's `assertionWrite` is an append-only insert so predicates
+   * with changing values (e.g. `publishedAt`, `supportedTools`) would
+   * accumulate stale triples across republishes. See the top-of-file
+   * comment on `writeAssertion`.
+   */
+  async discardAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+  }): Promise<void> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+    };
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    await this.request(
+      'POST',
+      `/api/assertion/${encodeURIComponent(args.assertionName)}/discard`,
       body,
     );
   }

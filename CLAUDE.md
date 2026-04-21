@@ -340,11 +340,32 @@ pnpm scope:status | scope:validate | scope:test
 ```
 
 Manifest format is in `agent-scope/README.md`. Never edit a protected path
-(`.cursor/hooks/**`, `agent-scope/lib/**`, etc.) without user-granted
-bootstrap. Never improvise around a denial.
+(`.cursor/hooks/**`, `.claude/hooks/**`, `agent-scope/lib/**`, `AGENTS.md`,
+`GEMINI.md`, `.cursorrules`, etc.) without user-granted bootstrap. Never
+improvise around a denial.
 
 The guard restricts **agent** actions only. Humans committing, pushing, or
 editing through their own terminal are not restricted — there are no git
 hooks and no CI enforcement layer. That distinction matters if a user edits
 a protected file by hand: they can commit and push normally.
+
+### Cross-agent coverage
+
+This system supports multiple agents:
+
+| Agent | Enforcement | Wired via |
+|---|---|---|
+| Cursor | hard hooks (block writes physically) | `.cursor/hooks/`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc` |
+| Claude Code | hard hooks (block writes physically) | `.claude/hooks/`, `.claude/settings.json`, `CLAUDE.md` |
+| Codex CLI | soft (no hook system available) | `AGENTS.md` — agent self-enforces |
+| Gemini CLI | soft | `GEMINI.md` — agent self-enforces |
+| Continue / Cline / older Cursor | soft | `.cursorrules` (legacy) |
+
+Coworkers should run `pnpm task check-agent` after pulling to verify their
+agent is wired up correctly. The same task manifests, same CLI, same
+denial menus apply across all agents — only the enforcement layer differs.
+
+When you're running under Claude Code, the first time the user opens this
+repo Claude Code will prompt them to **trust** the project hooks. They
+must approve — that's how the enforcement attaches.
 

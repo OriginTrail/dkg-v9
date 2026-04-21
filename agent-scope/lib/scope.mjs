@@ -37,12 +37,17 @@ export const PROTECTED_PATTERNS = [
   '.cursor/hooks/**',
   '.cursor/hooks.json',
   '.cursor/rules/agent-scope.mdc',
+  '.claude/hooks/**',
+  '.claude/settings.json',
   'agent-scope/lib/**',
   'agent-scope/bin/**',
   'agent-scope/schema/**',
   'agent-scope/tasks/**',
   'agent-scope/active',
   'agent-scope/.bootstrap-token',
+  'AGENTS.md',
+  'GEMINI.md',
+  '.cursorrules',
 ];
 
 function bootstrapActive(root) {

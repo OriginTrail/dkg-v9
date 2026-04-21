@@ -79,10 +79,15 @@ test('checkProtected: matches a known protected path', () => {
   try {
     assert.equal(checkProtected('.cursor/hooks.json', isolated), 'deny');
     assert.equal(checkProtected('.cursor/hooks/scope-guard.mjs', isolated), 'deny');
+    assert.equal(checkProtected('.claude/hooks/scope-guard.mjs', isolated), 'deny');
+    assert.equal(checkProtected('.claude/settings.json', isolated), 'deny');
     assert.equal(checkProtected('agent-scope/lib/scope.mjs', isolated), 'deny');
     assert.equal(checkProtected('agent-scope/tasks/base.json', isolated), 'deny');
     assert.equal(checkProtected('agent-scope/active', isolated), 'deny');
     assert.equal(checkProtected('agent-scope/.bootstrap-token', isolated), 'deny');
+    assert.equal(checkProtected('AGENTS.md', isolated), 'deny');
+    assert.equal(checkProtected('GEMINI.md', isolated), 'deny');
+    assert.equal(checkProtected('.cursorrules', isolated), 'deny');
   } finally { rmSync(isolated, { recursive: true, force: true }); }
 });
 
@@ -153,19 +158,25 @@ test('coversProtected: bootstrap bypasses', () => {
 });
 
 test('PROTECTED_PATTERNS: covers all system surfaces', () => {
-  // Sanity: make sure nothing is forgotten. The guard only protects its own
-  // live surfaces (Cursor hooks + rule + scope library + bin CLI + task
-  // manifests + active-task pointer + the bootstrap token itself).
+  // Sanity: make sure nothing is forgotten. The guard protects its own live
+  // surfaces across every supported agent (Cursor hooks + rule, Claude Code
+  // hooks + settings, the agent-scope library + bin CLI + task manifests +
+  // active-task pointer + bootstrap token, and the cross-agent rule files).
   const required = [
     '.cursor/hooks/**',
     '.cursor/hooks.json',
     '.cursor/rules/agent-scope.mdc',
+    '.claude/hooks/**',
+    '.claude/settings.json',
     'agent-scope/lib/**',
     'agent-scope/bin/**',
     'agent-scope/schema/**',
     'agent-scope/tasks/**',
     'agent-scope/active',
     'agent-scope/.bootstrap-token',
+    'AGENTS.md',
+    'GEMINI.md',
+    '.cursorrules',
   ];
   for (const p of required) assert.ok(PROTECTED_PATTERNS.includes(p), `missing protection: ${p}`);
 });

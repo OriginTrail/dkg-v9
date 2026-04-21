@@ -17,6 +17,7 @@ import {
   writeOnboardingMarker,
   copyToClipboard,
 } from '../lib/onboarding.mjs';
+import { detectAgents, statusGlyph, summary } from '../lib/check-agent.mjs';
 
 try { checkNodeVersion(); }
 catch (e) { console.error(e.message); process.exit(3); }
@@ -396,6 +397,34 @@ function audit(args) {
   console.log(`\n(${tail.length} of ${lines.length} entries)`);
 }
 
+function checkAgent() {
+  console.log('agent-scope: checking per-agent setup');
+  console.log('');
+  const results = detectAgents(root);
+  for (const r of results) {
+    console.log(`${r.name}  ${statusGlyph(r.status)}`);
+    console.log(`  enforcement: ${r.enforcement}`);
+    for (const d of r.details) console.log(d);
+    if (r.setup.length) {
+      console.log('  setup:');
+      for (const s of r.setup) console.log(s);
+    }
+    console.log('');
+  }
+  const c = summary(results);
+  console.log(
+    `Summary: ${c.ok} hard-enforced, ${c.partial} soft-rule only, ` +
+    `${c.warn} need attention, ${c.missing} not configured.`
+  );
+  if (c.warn > 0) {
+    console.log('');
+    console.log('Action: at least one agent has issues — see [! check] entries above.');
+    process.exit(1);
+  }
+  console.log('');
+  console.log('Tip: run `pnpm task show` to see the active task scope (if any).');
+}
+
 function resolveDebug() {
   console.log(`repo root:   ${root}`);
   console.log(`env:         AGENT_SCOPE_TASK=${process.env.AGENT_SCOPE_TASK || '(unset)'}`);
@@ -426,6 +455,8 @@ try {
     case 'validate': validate(rest[0]); break;
     case 'audit':    audit(rest); break;
     case 'resolve':  resolveDebug(); break;
+    case 'check-agent':
+    case 'check-agents': checkAgent(); break;
     case '-h': case '--help': case 'help':
       console.log([
         'usage: task <command> [args]',
@@ -441,6 +472,7 @@ try {
         '  validate [<id>]    validate one or all manifests',
         '  audit [--since N]  show recent denials from the audit log',
         '  resolve            debug: show how the active task is resolved',
+        '  check-agent        verify per-agent setup (Cursor/Claude Code/Codex/...)',
       ].join('\n'));
       break;
     default:

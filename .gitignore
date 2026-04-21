@@ -21,7 +21,13 @@ packages/evm-module/typechain/
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 snapshots/_cache_phase1_neuroweb_epoch16.json
-.claude/
+# Claude Code: ignore everything per-developer EXCEPT the project config
+# (settings.json) and the agent-scope hooks. Both are needed across the
+# whole team for hard enforcement to attach in Claude Code.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 
 # agent-scope: never commit the bootstrap override, local audit logs, the
 # per-developer active-task pointer, or the one-shot onboarding marker

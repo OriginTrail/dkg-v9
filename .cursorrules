@@ -1,0 +1,30 @@
+# Legacy Cursor / generic agent rules — agent-scope
+
+This file is the legacy fallback rule format that older Cursor versions and
+several VS Code AI extensions (Continue, Cline, Roo) read. Modern Cursor
+uses `.cursor/rules/agent-scope.mdc` (auto-applied). Claude Code uses
+`CLAUDE.md`. Codex CLI uses `AGENTS.md`. Gemini CLI uses `GEMINI.md`.
+
+For the full task-scoped-write rules see [`AGENTS.md`](./AGENTS.md).
+
+Quick summary:
+
+- This repo has an `agent-scope` system. Read `AGENTS.md` first.
+- You can READ anything. You can only WRITE files matching the active
+  task's `allowed` globs (run `pnpm task show` to see the scope; if there
+  is no active task, all writes are allowed except hardcoded protected
+  paths).
+- Hardcoded protected paths (the agent-scope system itself, across all
+  agents):
+  - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
+  - `.claude/hooks/**`, `.claude/settings.json`
+  - `agent-scope/**` (lib, bin, schema, tasks, active, .bootstrap-token)
+  - `AGENTS.md`, `GEMINI.md`, `.cursorrules`
+- If the user runs `pnpm task start`, a one-shot marker at
+  `agent-scope/.pending-onboarding` is dropped. On your first action of any
+  turn with no active task, check the marker — if present, delete it and
+  pivot to the onboarding protocol in `AGENTS.md`.
+- Never invent menu options when surfacing a denial; reuse the JSON
+  `options` array verbatim and add your reasoning + recommendation.
+- Hook-supporting agents (Cursor, Claude Code) physically block out-of-scope
+  writes. Agents without hooks self-enforce.

@@ -4,8 +4,10 @@ Task-scoped write permissions for AI coding agents.
 
 An agent can **read** the whole repo, but can only **write** files that are
 listed in the active task's manifest. Attempts to write out-of-scope files
-are blocked by a stack of Cursor hooks and must be explicitly approved by a
-human (by editing the manifest).
+are blocked by a stack of agent hooks (per-agent — Cursor, Claude Code) and
+must be explicitly approved by a human (by editing the manifest). Agents
+without a hook system (Codex CLI, Gemini CLI, etc.) get the same rules
+delivered as instruction files and self-enforce.
 
 The guard restricts **agent** actions only. Humans committing, pushing, or
 editing through their own terminal are never restricted — there are no git
@@ -67,16 +69,84 @@ or deleted afterwards.
 | **Bootstrap env** | `AGENT_SCOPE_BOOTSTRAP=1` | Same as above but per-process |
 | **Webhook sink** | `AGENT_SCOPE_WEBHOOK=<url>` | POSTs each denial to the URL (opt-in) |
 
+## Supported agents
+
+| Agent | Enforcement | Wired via |
+|---|---|---|
+| Cursor | **hard hooks** — physical block | `.cursor/hooks/`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc` |
+| Claude Code | **hard hooks** — physical block | `.claude/hooks/`, `.claude/settings.json`, `CLAUDE.md` |
+| Codex CLI (OpenAI) | soft — agent self-enforces | `AGENTS.md` |
+| Gemini CLI | soft — agent self-enforces | `GEMINI.md` |
+| Continue / Cline / older Cursor | soft (varies) | `.cursorrules` |
+
+**Hard enforcement** means the hook process physically rejects out-of-scope
+writes before they hit disk, regardless of what the agent decides to do.
+**Soft enforcement** means the agent reads the rule files at session start
+and is expected to comply — this is the best we can do for agents that
+don't expose a hook API yet.
+
+The same task manifests, the same CLI (`pnpm task ...`), the same denial
+menu structure apply across all agents — only the enforcement layer
+differs.
+
 ## One-time setup
 
-There is no setup. The Cursor hooks are configured via `.cursor/hooks.json`
-and activate automatically in any Cursor session opened on this repo. Sanity
-checks:
+There is no setup. Each agent loads its own config files (`.cursor/...`,
+`.claude/...`, `AGENTS.md`, etc.) automatically when you open the repo.
+
+After pulling the repo, run this once to verify your agent is wired up:
+
+```bash
+pnpm scope:check-agent       # or:  pnpm task check-agent
+```
+
+It prints a per-agent green/yellow/red status and tells you exactly what
+(if anything) you need to do. Sample output:
+
+```
+Cursor                              [✓ active]
+  enforcement: hard hooks
+  ✓ .cursor/hooks.json present
+  ✓ .cursor/hooks/scope-guard.mjs executable
+  ...
+
+Claude Code                         [✓ active]
+  enforcement: hard hooks
+  ✓ .claude/settings.json present
+  ✓ .claude/hooks/scope-guard.mjs executable
+  ...
+  setup:
+    First-run note: Claude Code will prompt you to TRUST the project hooks
+    the first time you open this repo. Approve them — that's how
+    enforcement attaches.
+
+Codex CLI                           [~ soft]
+  enforcement: soft (no hook system available)
+  ✓ AGENTS.md present (Codex CLI reads this on every session)
+  ! Hard blocks DO NOT apply here — Codex self-enforces.
+```
+
+Other sanity checks:
 
 ```bash
 pnpm scope:test          # runs the scope library unit tests
 pnpm scope:validate      # validates every manifest
 ```
+
+### Per-agent setup notes
+
+- **Cursor**: hooks load automatically from `.cursor/hooks.json` next time
+  you open the repo. No prompt, no action needed.
+- **Claude Code**: the first time you open this repo, Claude Code will
+  prompt you to **trust the project hooks**. You must approve — that's how
+  the enforcement attaches. After that it's automatic.
+- **Codex CLI**: reads `AGENTS.md` automatically. No installation step.
+  Caveat — Codex CLI has no hook API today, so blocking out-of-scope
+  writes depends on the agent obeying the rules.
+- **Gemini CLI**: reads `GEMINI.md` automatically. Same self-enforcement
+  caveat as Codex.
+- **Other agents** (Continue, Cline, Roo, older Cursor): pick up
+  `.cursorrules`. Coverage varies — treat as best-effort.
 
 ## Quick start
 
@@ -242,9 +312,11 @@ edit them, the whole thing would be worthless. These paths are **always
 denied** regardless of active task, unless bootstrap mode is active:
 
 - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
+- `.claude/hooks/**`, `.claude/settings.json`
 - `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/schema/**`
 - `agent-scope/tasks/**`, `agent-scope/active`,
   `agent-scope/.bootstrap-token`
+- `AGENTS.md`, `GEMINI.md`, `.cursorrules`
 
 (This list applies to **agent** writes only. A human editing any of these
 files through their own terminal/IDE is not restricted.)

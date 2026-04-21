@@ -1,0 +1,241 @@
+---
+description: Task-scoped write permissions. Invisible by default; engaged via `pnpm task start` or an active task. All denials surface a plan-mode AskQuestion menu.
+alwaysApply: true
+---
+
+# agent-scope — task-scoped writes
+
+The repo ships a task-scoping guard but it stays **invisible** unless the user
+engages it. If no active task is set and bootstrap is off, the system is a
+no-op for you — behave normally. The hardcoded protected paths (the guard's
+own files) are still defended, but that only matters if you try to touch them.
+
+The user turns the system on in one of two ways:
+
+1. **CLI** — they run `pnpm task start`. That prints a line they paste into
+   chat beginning with `agent-scope: start task onboarding`. When you see that
+   line, follow the **Task onboarding protocol** below.
+2. **Existing active task** — the session-start hook injects a context block
+   naming the active task. From that moment on, writes are task-scoped and
+   every denial must be surfaced via the plan-mode denial protocol below.
+
+## Task onboarding protocol — when the user wants to start a new scoped task
+
+Triggered by any of:
+
+- The trigger line from `pnpm task start` (paste from the user's terminal).
+- The user typing "start a scoped task", "scope me", "agent-scope: start", or
+  similar intent.
+
+Follow these steps exactly:
+
+1. **Ask for the task description.** Send a plain chat message:
+   > "OK, let's scope a new task. Describe in detail what we're building or
+   > fixing — the more specific, the better the scope I can propose. Which
+   > packages, which behaviors, which tests, any files you already know about?"
+
+2. **Wait for the user's reply.** Do not explore yet.
+
+3. **Explore the codebase.** Use the DKG SPARQL queries in the top of this
+   file, plus `Glob`, `Grep`, and `Read`, to find:
+   - The package(s) the task touches
+   - The specific source files implementing the mentioned behavior
+   - Sibling test files that cover them
+   - Related schemas / contracts / migrations if the task mentions them
+
+4. **Draft a scope.** Aim for a set of globs that:
+   - Covers everything you reasonably expect to touch
+   - Errs slightly broad (under-scoping causes constant denials mid-work;
+     over-scoping just gives you rope the user can see via `pnpm task show`)
+   - Includes matching test files
+   - Always appends `!**/secrets.*`, `!**/.env*` as safety denies
+   - Inherits `base` unless there is a reason not to (base supplies the
+     standard exemptions: `**/dist/**`, lockfiles, build artifacts)
+
+5. **Propose the scope via `AskQuestion`.** The prompt **must** include:
+   - A one-sentence rephrasing of the user's task description
+   - The list of allowed globs you're proposing, bullet-pointed
+   - Your recommendation ("I recommend `approve`")
+   - The suggested task id (kebab-case, short)
+
+   Options:
+   - `approve` — "Create the manifest with these globs and activate it."
+   - `show_globs` — "Let me see the full manifest JSON first."
+   - `edit` — "I want to tweak the globs before approving."
+   - `cancel` — "Don't start a task; I'll work unscoped."
+   - `custom_instruction` — "Let me type my own instruction."
+
+6. **On `approve`:** print a code block with the **exact** command for the user
+   to run in their own terminal. The user must run it (not you) because the
+   `afterShellExecution` hook would delete an untracked file in
+   `agent-scope/tasks/` if you ran it yourself:
+
+   ```bash
+   pnpm task create <id> \
+     --description "<one-line description>" \
+     --allowed "<glob-1>" \
+     --allowed "<glob-2>" \
+     ...
+     --inherits base \
+     --activate
+   ```
+
+   Then say "Let me know when you've run that and I'll start." Wait for the
+   user to confirm with any short acknowledgement ("done", "go", "ok").
+
+7. **On `show_globs`:** print the JSON you're about to propose, then re-ask
+   `AskQuestion` with the same options.
+
+8. **On `edit`:** ask the user which globs to change, then loop back to step 5.
+
+9. **On `cancel`:** acknowledge and continue working without a task (system
+   stays invisible).
+
+10. **On `custom_instruction`:** ask the user in plain chat what they want
+    instead, then do that.
+
+From step 6 onward, the active task is set and the plan-mode denial protocol
+(below) governs every future write.
+
+## Plan-mode denial protocol — MANDATORY once a task is active
+
+Every denial message from agent-scope carries a structured menu. You must
+**stop**, parse it, and surface it via `AskQuestion`. Do not retry, rewrite,
+or work around a denial — the defense-in-depth layers will revert or delete
+anything that slips through anyway.
+
+### Detecting a denial
+
+- `preToolUse` returned `{ permission: "deny" }` where `agent_message` starts
+  with `OUT OF TASK SCOPE` or `PROTECTED PATH`.
+- `beforeShellExecution` returned `{ permission: "deny" }` whose
+  `agent_message` starts with `Destructive shell command blocked`.
+- `afterShellExecution` returned an `additional_context` starting with
+  `agent-scope: shell command modified`.
+
+### Parsing the menu
+
+Every such message contains a fenced JSON block:
+
+```
+<!-- agent-scope-menu:begin -->
+{ JSON payload here }
+<!-- agent-scope-menu:end -->
+```
+
+The JSON has this shape (TypeScript for clarity):
+
+```ts
+{
+  version: 1,
+  hook: "preToolUse" | "beforeShellExecution" | "afterShellExecution",
+  reason: "out-of-scope" | "protected" | "manifest-load-error" | "unknown",
+  deniedPath?: string,       // preToolUse
+  command?: string,          // shell hooks
+  activeTask: string | null,
+  suggestedGlob?: string,
+  alternativeTasks?: { id: string, description: string }[],
+  violations?: { cmd, path, decision }[],   // shell-precheck
+  reverted?: string[],                      // after-shell
+  deleted?: string[],                       // after-shell
+  options: {
+    id: string,
+    label: string,
+    action: {
+      kind: "add_to_manifest" | "switch_task" | "skip" | "cancel"
+          | "bootstrap" | "fix_manifest" | "clear_task" | "custom",
+      task?: string, patterns?: string[], instruction?: string, error?: string,
+    }
+  }[],
+  recommendedOptionId: string,          // suggested default (out-of-scope → add_glob, protected → cancel, load-error → fix_manifest)
+  agentReasoning: null,                 // placeholder — you fill this in via the AskQuestion prompt, see below
+}
+```
+
+### What you must do when you see a denial
+
+1. **Stop.** Do not retry the operation with another tool or command form.
+2. **Extract the JSON** from between `agent-scope-menu:begin` and `:end`.
+3. **Call `AskQuestion`** with a single question whose prompt **must include**:
+   - The denied path (or command).
+   - **Your reasoning** in 1–2 sentences: why you wanted to touch this file,
+     what you were trying to accomplish. This is the plan-mode "here's what I
+     was thinking" that the user needs to make an informed decision.
+   - Your **recommendation**: which option you'd pick if you were the user,
+     and why. Lead with the JSON's `recommendedOptionId` unless you have a
+     concrete reason to override it.
+   - The options array, verbatim from the JSON — use each entry's `id` as the
+     option id and `label` as the display label.
+4. **Act on the user's choice** using the matching `action` object:
+   - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append the
+     listed patterns to `allowed`, save, then retry the original operation.
+   - `switch_task` → run `pnpm task set <task>`, then retry.
+   - `bootstrap` → print `action.instruction` verbatim. Wait for the user to
+     enable bootstrap. After the protected work is done, remind them to
+     `rm agent-scope/.bootstrap-token` to re-lock.
+   - `fix_manifest` → open the referenced manifest, fix the reported error,
+     re-run `pnpm task validate <task>`.
+   - `clear_task` → run `pnpm task clear`.
+   - `skip` → acknowledge; move on to other in-scope work.
+   - `cancel` → stop the turn; summarise what got done and what didn't.
+   - `custom` → ask the user in plain chat: "OK, what should I do instead?"
+     Wait for their free-text reply, then carry out whatever they say.
+5. **Never invent options.** If none of the presets match and `custom` isn't
+   present (shouldn't happen — it's in every menu), pick `cancel`.
+
+## What counts as a write
+
+The guard blocks `Write`, `StrReplace`, `Delete`, `EditNotebook`, `MultiEdit`,
+and `Edit`. Shell commands are inspected **before** they run — destructive
+verbs (`rm`, `mv`, `cp`, `chmod`, `chown`, `truncate`, `ln -sf`, `sed -i`,
+`>`, `>>`, `tee`, `find -delete`, `find -exec rm`, `xargs rm`), nested shells
+(`bash -c "..."`), and opaque evaluators (`node -e`, `python -c`, `perl -e`)
+that touch protected or out-of-scope paths are denied. Anything that still
+slips through is reverted after the command runs, and untracked files in
+denied paths are deleted.
+
+## Hardcoded protected paths
+
+Always denied regardless of task, unless a human has enabled bootstrap
+(`touch agent-scope/.bootstrap-token` or `AGENT_SCOPE_BOOTSTRAP=1`):
+
+- `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
+- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/hooks/**`
+- `agent-scope/schema/**`, `agent-scope/tasks/**`, `agent-scope/active`,
+  `agent-scope/.bootstrap-token`
+- `.git/hooks/**`, `.github/workflows/agent-scope.yml`
+
+If one of these needs to change, use the `bootstrap` option from the denial
+menu — do not try to bypass (no shell redirection, no `node -e`, no alternate
+tooling). The `afterShell` hook will delete any untracked files in these paths
+even if the bypass succeeded, so retry attempts are wasted.
+
+## Manifest cheat sheet
+
+```json
+{
+  "id": "example",
+  "description": "...",
+  "inherits": ["base"],
+  "allowed": [
+    "packages/foo/**/*.ts",
+    "!packages/foo/**/secrets.*"
+  ],
+  "exemptions": ["**/dist/**", "pnpm-lock.yaml"]
+}
+```
+
+- Patterns support `*`, `**`, `?`.
+- Prefix with `!` for an explicit deny that overrides everything else.
+- `inherits` pulls `allowed` + `exemptions` from a parent manifest (e.g. `base`).
+- Default-deny: anything not matched is blocked.
+
+## Don't
+
+- Don't edit `agent-scope/active` yourself — ask the user to switch tasks via
+  the menu's `switch_task` action, or via `pnpm task set`.
+- Don't add patterns to a manifest to unblock yourself — always confirm via
+  the plan-mode menu first.
+- Don't run `pnpm task create` yourself for a new task — the user runs it, so
+  the manifest is human-authored and the afterShell backstop doesn't wipe it.
+- Don't retry a blocked operation with a different tool or command form.

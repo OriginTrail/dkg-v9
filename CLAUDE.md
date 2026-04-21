@@ -181,3 +181,117 @@ All classes and properties use the `devgraph:` namespace (`https://ontology.dkg.
 | `Contract` | A Solidity smart contract |
 
 The full ontology is at `packages/mcp-server/schema/dev-paranet.ttl`.
+
+---
+
+## Task-scoped writes (`agent-scope`) — MANDATORY behaviour
+
+This repo ships an opt-in task-scoping guard. It stays **invisible** unless
+engaged. Default behaviour: write normally, read anything. The guard only
+kicks in when:
+
+1. The user pastes a line starting with `agent-scope: start task onboarding`
+   (output of `pnpm task start`), OR
+2. An active task is set (session-start hook injects a context block naming
+   it), OR
+3. You try to touch one of the hardcoded protected paths that defend the
+   guard itself — those are always blocked unless the user has enabled
+   bootstrap mode.
+
+### Task onboarding protocol (triggered by `pnpm task start` / "start a scoped task")
+
+1. Acknowledge in plain chat and ask the user to describe the task in detail
+   (which packages, which behaviours, which tests, any specific files).
+2. Wait for the description.
+3. Explore the codebase with DKG queries + `Glob` + `Grep` + `Read` to find
+   the files the task will touch.
+4. Draft a set of globs that covers those files plus their tests. Err
+   slightly broad; inherit `base`; always append `!**/secrets.*`,
+   `!**/.env*`.
+5. Propose the scope via `AskQuestion`. The prompt must include a one-line
+   rephrase of the task, the list of proposed globs, and your recommendation.
+   Options: `approve`, `show_globs`, `edit`, `cancel`, `custom_instruction`.
+6. On `approve`, print a fenced bash block with the **exact** command for the
+   user to run in their terminal (not you — the `afterShellExecution` hook
+   would delete a new manifest file you created yourself):
+
+   ```bash
+   pnpm task create <id> \
+     --description "..." \
+     --allowed "<glob-1>" \
+     --allowed "<glob-2>" \
+     --inherits base \
+     --activate
+   ```
+
+   Wait for them to confirm ("done"/"go"), then start the actual work.
+7. On `show_globs`, print the manifest JSON, then re-ask with the same options.
+8. On `edit`, ask which globs to change, loop back to step 5.
+9. On `cancel`, acknowledge and keep working without a task.
+10. On `custom_instruction`, ask in plain chat what they want instead.
+
+### Plan-mode denial protocol (runs for every agent-scope denial)
+
+When any of these happen, stop and surface a menu. Do NOT retry, rewrite, or
+work around the denial — the defense-in-depth layers revert tracked changes
+and delete untracked files in denied paths anyway:
+
+- `preToolUse` returned `{ permission: "deny" }` with `OUT OF TASK SCOPE` or
+  `PROTECTED PATH` in the message.
+- `beforeShellExecution` returned `{ permission: "deny" }` with
+  `Destructive shell command blocked` in the message.
+- `afterShellExecution` returned `additional_context` starting with
+  `agent-scope: shell command modified`.
+
+Every such message contains a fenced JSON block:
+
+```
+<!-- agent-scope-menu:begin -->
+{ ... JSON payload ... }
+<!-- agent-scope-menu:end -->
+```
+
+The JSON has `options[]` and `recommendedOptionId`. It also has a placeholder
+`agentReasoning: null` — you fill this in by including your reasoning in the
+AskQuestion prompt (see below).
+
+**Protocol:**
+
+1. **Stop.** Do not retry via another tool or command form.
+2. **Extract the JSON.** Parse between the fences.
+3. **Call `AskQuestion`** with ONE question whose prompt **must include**:
+   - The denied path / command.
+   - **Your reasoning in 1–2 sentences** — why you wanted to touch this file,
+     what you were trying to accomplish. This is the "here's what I was
+     thinking" that the user needs to make an informed decision.
+   - **Your recommendation** — lead with the JSON's `recommendedOptionId`
+     unless you have a concrete reason to override it.
+   - The full `options` array, verbatim — use each entry's `id`/`label`.
+4. **Act on the user's choice** by matching the `action.kind`:
+   - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append patterns
+     to `allowed`, retry.
+   - `switch_task` → `pnpm task set <task>`, retry.
+   - `bootstrap` → print `action.instruction` verbatim, wait for the user.
+     Remind them to `rm agent-scope/.bootstrap-token` when done.
+   - `fix_manifest` → open the manifest, fix the error, validate.
+   - `clear_task` → `pnpm task clear`.
+   - `skip` → acknowledge, move on.
+   - `cancel` → stop the turn, summarise.
+   - `custom` → ask the user in plain chat "what should I do instead?", do
+     what they say.
+5. **Never invent options.** If nothing fits and no `custom` is listed (it
+   always is), pick `cancel`.
+
+### CLI quick reference
+
+```
+pnpm task start                   # begin guided onboarding (prints chat trigger)
+pnpm task create <id> [flags]     # non-interactive manifest build — USER runs this
+pnpm task list | show | set <id> | clear | check <path> | audit | resolve
+pnpm scope:status | scope:validate | scope:test
+```
+
+Manifest format is in `agent-scope/README.md`. Never edit a protected path
+(`.cursor/hooks/**`, `agent-scope/lib/**`, etc.) without user-granted
+bootstrap. Never improvise around a denial.
+

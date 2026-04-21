@@ -136,7 +136,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // After the fix, all gossip data should be stored as tentative first.
     // We simulate what the gossip handler does and verify the output is tentative.
 
-    const entity = 'did:dkg:agent:QmGossipEntity';
+    const entity = 'did:dkg:agent:0x2222222222222222222222222222222222222222';
     const triples = [
       q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${PARANET}`),
     ];
@@ -232,7 +232,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   }, 30000);
 
   it('proto round-trips full gossip message with on-chain proof fields', () => {
-    const entity = 'did:dkg:agent:QmRoundTrip';
+    const entity = 'did:dkg:agent:0x3333333333333333333333333333333333333333';
     const ntriples = `<${entity}> <http://schema.org/name> "RoundTrip" .`;
     const txHash = '0x' + 'ff'.repeat(32);
 
@@ -325,7 +325,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   }, 30000);
 
   it('merkle verification detects tampered gossip data', () => {
-    const entity = 'did:dkg:agent:QmTampered';
+    const entity = 'did:dkg:agent:0x4444444444444444444444444444444444444444';
     const legitimateTriples = [
       q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${PARANET}`),
       q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),

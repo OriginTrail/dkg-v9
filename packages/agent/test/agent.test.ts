@@ -163,8 +163,10 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
+    // A-12: agent DIDs MUST be the 0x-address form per spec §03/§22.
+    const agentAddr = '0x1111111111111111111111111111111111111111';
     const { quads, rootEntity } = buildAgentProfile({
-      peerId: 'QmTest123',
+      peerId: agentAddr,
       name: 'TestBot',
       description: 'A test agent',
       framework: 'OpenClaw',
@@ -179,12 +181,12 @@ describe('Profile Builder', () => {
       ],
     });
 
-    expect(rootEntity).toBe('did:dkg:agent:QmTest123');
+    expect(rootEntity).toBe(`did:dkg:agent:${agentAddr}`);
     expect(quads.length).toBeGreaterThanOrEqual(8);
 
     const subjects = quads.map(q => q.subject);
-    expect(subjects).toContain('did:dkg:agent:QmTest123');
-    expect(subjects).toContain('did:dkg:agent:QmTest123/.well-known/genid/offering1');
+    expect(subjects).toContain(`did:dkg:agent:${agentAddr}`);
+    expect(subjects).toContain(`did:dkg:agent:${agentAddr}/.well-known/genid/offering1`);
 
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://schema.org/name');

@@ -339,36 +339,33 @@ describe('[A-4] Finalization promotes ONLY when merkle matches', () => {
   }, 15_000);
 });
 
-describe('[A-7] ENDORSE signature + replay posture', () => {
-  it('endorsement quads carry no inline signature or nonce (prod-bug: relies entirely on outer publish envelope)', () => {
+describe('[A-7] ENDORSE signature + replay posture (FIXED)', () => {
+  it('endorsement quads carry an inline signature/proof AND a nonce (fix for A-7)', () => {
     const agentAddress = '0x' + '1'.repeat(40);
     const ual = 'did:dkg:knowledge-asset:0xabc/1';
     const quads = buildEndorsementQuads(agentAddress, ual, CG);
 
-    // The endorsement structurally includes exactly two triples: the
-    // endorsement edge and the timestamp. No signature, no nonce.
-    expect(quads.length).toBe(2);
+    // After the A-7 fix, buildEndorsementQuads emits four quads:
+    //   ENDORSES, ENDORSED_AT, ENDORSEMENT_NONCE, ENDORSEMENT_SIGNATURE.
+    expect(quads.length).toBe(4);
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://dkg.network/ontology#endorses');
     expect(predicates).toContain('https://dkg.network/ontology#endorsedAt');
 
     const hasSignature = quads.some(q => /signature|sig|proof/i.test(q.predicate));
     const hasNonce = quads.some(q => /nonce|replay/i.test(q.predicate));
-    // PROD-BUG (audit A-7): no inline cryptographic binding; replay
-    // protection is delegated to the PUBLISH protocol envelope that
-    // carries these quads. Test pins this behavior so any future
-    // addition of an inline signature triple is noticed.
-    expect(hasSignature).toBe(false);
-    expect(hasNonce).toBe(false);
+    expect(hasSignature).toBe(true);
+    expect(hasNonce).toBe(true);
 
-    // Two back-to-back builds with the same (agent, ual) produce
-    // STRUCTURALLY IDENTICAL triples modulo timestamp — proving there
-    // is no per-call replay-resistance nonce on the quad level.
+    // Two back-to-back builds produce distinct nonces → distinct proofs,
+    // proving per-call replay-resistance.
     const quads2 = buildEndorsementQuads(agentAddress, ual, CG);
-    expect(quads2.length).toBe(2);
-    expect(quads2[0].subject).toBe(quads[0].subject);
-    expect(quads2[0].predicate).toBe(quads[0].predicate);
-    expect(quads2[0].object).toBe(quads[0].object);
+    expect(quads2.length).toBe(4);
+    const nonce1 = quads.find(q => /nonce/i.test(q.predicate))?.object;
+    const nonce2 = quads2.find(q => /nonce/i.test(q.predicate))?.object;
+    expect(nonce1).toBeDefined();
+    expect(nonce2).toBeDefined();
+    expect(nonce1).not.toBe(nonce2);
   });
 });
 
@@ -436,9 +433,17 @@ describe('[A-12] DID format drift in agent.endorse', () => {
     const { join } = await import('node:path');
     const testDir = fileURLToPath(new URL('.', import.meta.url));
     const entries = await readdir(testDir);
+    // Files that intentionally reference the legacy peer-ID form as
+    // *negative* fixtures (i.e. documenting the A-12 drift itself). They
+    // must not count as offenders in this scan.
+    const NEGATIVE_FIXTURES = new Set<string>([
+      'agent-audit-extra.test.ts',
+      'did-format-extra.test.ts',
+      'ack-eip191-agent-extra.test.ts',
+    ]);
     const offenders: string[] = [];
     for (const f of entries) {
-      if (!f.endsWith('.ts') || f === 'agent-audit-extra.test.ts') continue;
+      if (!f.endsWith('.ts') || NEGATIVE_FIXTURES.has(f)) continue;
       const body = await readFile(join(testDir, f), 'utf8');
       // Match `did:dkg:agent:X` where X is not `0x...` and not a template
       // expression like `${addr}`. Catches peer-ID form (Qm…, 12D3KooW…)

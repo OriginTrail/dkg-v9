@@ -13,7 +13,8 @@
     "./setup": {
       "import": "./dist/setup-command.js",
       "types": "./dist/setup-command.d.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

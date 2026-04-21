@@ -271,23 +271,26 @@ function isDkgMonorepoRoot(dir: string): boolean {
  * Resolve candidate directories where repo-root files (project.json,
  * network/*.json) may live, in priority order.
  *
- * The package-local root (`thisDir/..` in an npm install) is preferred
- * over any ancestor, so a published package never accidentally reads
- * a consumer's own `project.json` under `node_modules`. Ancestor
- * candidates are only included when they look like the DKG monorepo
- * itself.
+ * Ordering rationale:
+ *   - In a monorepo checkout the DKG root is the single source of
+ *     truth, so any detected monorepo ancestor MUST win. Otherwise,
+ *     once `packages/cli/build` has copied `project.json` and
+ *     `network/*.json` into `packages/cli/`, those stale artifacts
+ *     would shadow edits made to the root files until the next
+ *     rebuild — breaking the intended "edit root config, rerun" dev
+ *     flow.
+ *   - In a published npm install there is no monorepo ancestor, so
+ *     we fall back to the package-local root (identified unambiguously
+ *     by its `package.json.name`). This also guarantees we never
+ *     accidentally read a consumer's own `project.json` from
+ *     `node_modules/..`.
  */
 function candidateRoots(): string[] {
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const out: string[] = [];
 
-  // Package-local root first — in an npm install this is the only
-  // location that should ever win, and it's unambiguous.
-  const pkgRoot = join(thisDir, '..');
-  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
-
-  // Monorepo ancestors (dev / source checkout). `dist/` and `src/`
-  // live at different depths so both paths are tried.
+  // Monorepo ancestors first (dev / source checkout). `dist/` and
+  // `src/` live at different depths, so both paths are tried.
   const monorepoCandidates = [
     join(thisDir, '..', '..', '..'),        // from dist/
     join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
@@ -295,6 +298,11 @@ function candidateRoots(): string[] {
   for (const dir of monorepoCandidates) {
     if (isDkgMonorepoRoot(dir)) out.push(dir);
   }
+
+  // Package-local root as the fallback — the only location that ever
+  // wins in a published install, and unambiguous via its package.json.
+  const pkgRoot = join(thisDir, '..');
+  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
 
   return out;
 }

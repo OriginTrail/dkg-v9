@@ -35,8 +35,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 function loadDefaultReleaseRepo() {
+  // From packages/cli/scripts/:
+  //   ..        → packages/cli/           (post-build artifact copy; lives here only in the published tarball or after a `pnpm --filter dkg build`)
+  //   ../../..  → <repo root>             (monorepo source of truth)
+  // Prefer the monorepo root so source edits to project.json always
+  // take effect in a fresh checkout; fall back to the package-local
+  // copy for published installs where the repo root is absent.
   const scriptDir = __dirname;
-  for (const base of [resolve(scriptDir, '..'), resolve(scriptDir, '..', '..', '..', '..')]) {
+  for (const base of [resolve(scriptDir, '..', '..', '..'), resolve(scriptDir, '..')]) {
     try {
       const proj = JSON.parse(readFileSync(join(base, 'project.json'), 'utf-8'));
       if (proj.repo) return proj.repo;

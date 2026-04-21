@@ -627,7 +627,11 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
  * flow on it would strand users who removed or relocated OpenClaw.
  */
 export function unmergeOpenClawConfig(openclawConfigPath: string): void {
-  if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
+  // Fall back to the default `~/.openclaw/openclaw.json` ONLY when no path was
+  // supplied. If the caller passed an explicit path that happens to be missing
+  // (e.g. the user relocated OpenClaw), never swap to the default home —
+  // that would unmerge the wrong config and corrupt the user's real setup.
+  if (!openclawConfigPath || !openclawConfigPath.trim()) {
     openclawConfigPath = join(openclawDir(), 'openclaw.json');
   }
   if (!existsSync(openclawConfigPath)) {

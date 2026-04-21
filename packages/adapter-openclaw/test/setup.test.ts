@@ -538,6 +538,52 @@ describe('unmergeOpenClawConfig', () => {
       readdirSync(testDir).some((f: string) => f.startsWith('openclaw.json.bak.')),
     ).toBe(false);
   });
+
+  // PR #228 Codex R4-N1 — when a caller supplies an explicit openclaw.json
+  // path that doesn't exist, we must NOT silently fall back to the default
+  // `~/.openclaw/openclaw.json`. Doing so would unmerge the wrong config for
+  // users who relocated OpenClaw (data-corruption path).
+  it('does NOT fall back to the default home when an explicit missing path is supplied', () => {
+    // The explicit path the caller passes: a directory that doesn't contain openclaw.json.
+    const relocated = join(testDir, 'relocated-openclaw');
+    mkdirSync(relocated, { recursive: true });
+    const explicitMissingPath = join(relocated, 'openclaw.json');
+
+    // The default home we want left untouched — a fully-merged config that
+    // would be visibly mutated if unmerge fell through to it.
+    const defaultHome = join(testDir, 'default-openclaw');
+    mkdirSync(defaultHome, { recursive: true });
+    const defaultConfigPath = join(defaultHome, 'openclaw.json');
+    writeFileSync(defaultConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
+    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter');
+    const defaultContentBefore = readFileSync(defaultConfigPath, 'utf-8');
+    const defaultBackupsBefore = readdirSync(defaultHome).filter(
+      (f: string) => f.startsWith('openclaw.json.bak.'),
+    ).length;
+
+    // Point OPENCLAW_HOME at `defaultHome` — this is what setup.ts's
+    // `openclawDir()` would consult if the explicit-path guard fell through.
+    const originalEnv = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = defaultHome;
+    try {
+      expect(() => unmergeOpenClawConfig(explicitMissingPath)).not.toThrow();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = originalEnv;
+      }
+    }
+
+    // The default home's config must be byte-identical and no new `.bak`.
+    expect(readFileSync(defaultConfigPath, 'utf-8')).toBe(defaultContentBefore);
+    const defaultBackupsAfter = readdirSync(defaultHome).filter(
+      (f: string) => f.startsWith('openclaw.json.bak.'),
+    ).length;
+    expect(defaultBackupsAfter).toBe(defaultBackupsBefore);
+    // And the explicit path didn't get a freshly-created file either.
+    expect(existsSync(explicitMissingPath)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -653,6 +699,49 @@ describe('verifyUnmergeInvariants', () => {
 
     const result = verifyUnmergeInvariants(configPath);
     expect(result).toMatch(/Could not parse/);
+  });
+
+  // PR #228 Codex R4-N1 — `verifyUnmergeInvariants` must never read the
+  // default `~/.openclaw/openclaw.json` when the caller supplied an explicit
+  // path. Even when the default home holds a dirty/still-merged config, an
+  // explicit missing path should be reported as already-disconnected.
+  it('does NOT read the default home when an explicit missing path is supplied', () => {
+    const explicitMissingPath = join(testDir, 'relocated', 'openclaw.json');
+
+    // Seed OPENCLAW_HOME with a config whose invariants would FAIL if it
+    // were accidentally consulted — slot still elected, adapter still in allow.
+    const defaultHome = join(testDir, 'default-openclaw');
+    mkdirSync(defaultHome, { recursive: true });
+    writeFileSync(
+      join(defaultHome, 'openclaw.json'),
+      JSON.stringify(
+        {
+          plugins: {
+            allow: ['adapter-openclaw'],
+            slots: { memory: 'adapter-openclaw' },
+            load: { paths: [] },
+            entries: { 'adapter-openclaw': { enabled: true } },
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    const originalEnv = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = defaultHome;
+    try {
+      // Returns null because the explicit path is missing; invariants hold
+      // trivially. If the fn fell through to the default, it would return a
+      // descriptive failure string for one of the three dirty invariants.
+      expect(verifyUnmergeInvariants(explicitMissingPath)).toBeNull();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = originalEnv;
+      }
+    }
   });
 });
 

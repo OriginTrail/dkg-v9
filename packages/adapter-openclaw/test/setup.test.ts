@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1712,4 +1712,179 @@ describe('runSetup workspace migration', () => {
       process.env.OPENCLAW_HOME = originalOpenclaw;
     }
   });
+
+  // Codex PR #234 R6-3: migration cleanup silently swallows unlink errors.
+  // When the old SKILL.md cannot be removed (file locked, permissions,
+  // replaced by a directory, etc.) verifySkillRemoved must detect the
+  // residue and surface it as a loud warning — otherwise the orphan is
+  // invisible and Disconnect (which only knows about the new
+  // entry.installedWorkspace) can never clean it up.
+  it('warns loudly when migration cleanup silently fails to remove the prior SKILL.md (R6-3)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const dirA = join(testDir, 'workspace-a');
+    const dirB = join(testDir, 'workspace-b');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      // First install lands at dirA.
+      await runSetup({ workspace: dirA, start: false, verify: false });
+      const skillA = join(dirA, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillA)).toBe(true);
+
+      // Sabotage the prior SKILL.md so unlinkSync fails: replace the FILE
+      // with a DIRECTORY. unlinkSync on a directory throws EISDIR/EPERM on
+      // every platform. removeCanonicalNodeSkill catches the throw + warns
+      // + returns (best-effort), which is the exact silent-miss scenario
+      // R6-3 flags. The R6-3 guard must then catch the residue via
+      // verifySkillRemoved and surface a second, explicit warn.
+      unlinkSync(skillA);
+      mkdirSync(skillA, { recursive: true });
+
+      // Manual console.warn hook (vi.spyOn sometimes misses calls routed
+      // via the exported `warn` helper in setup.ts under ESM — swapping the
+      // reference directly is what setup.ts's `console.warn(...)` dispatches
+      // through, and the swap reliably captures both the inner
+      // removeCanonicalNodeSkill warn and the outer R6-3 residue warn).
+      const originalWarn = console.warn;
+      const warnMessages: string[] = [];
+      console.warn = (...args: any[]) => {
+        warnMessages.push(args.map((a) => String(a)).join(' '));
+      };
+      try {
+        // Second install targets dirB → migration fires → removeCanonicalNodeSkill
+        // silent-fails on dirA's SKILL.md-as-directory → R6-3 warn fires.
+        await runSetup({ workspace: dirB, start: false, verify: false });
+      } finally {
+        console.warn = originalWarn;
+      }
+
+      // New install landed regardless of cleanup failure — the warning is
+      // advisory, not a blocker.
+      expect(existsSync(join(dirB, 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
+      // Residue at the prior workspace is still there (as a dir) — user
+      // must clean up manually.
+      expect(existsSync(skillA)).toBe(true);
+
+      // Verify the R6-3 warn surfaced the orphan path + cleanup command.
+      const migrationResidueWarn = warnMessages.find((m) =>
+        m.includes('Migration cleanup did not remove the old SKILL.md'),
+      );
+      expect(migrationResidueWarn).toBeDefined();
+      expect(migrationResidueWarn).toContain(skillA);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup openclaw.json preflight (Codex PR #234 R6-2)
+// Before step 5 copies SKILL.md to disk, runSetup must preflight the
+// openclaw.json that step 6 will merge into. If the preflight throws,
+// step 5 never runs — so `mergeOpenClawConfig` can never fail AFTER
+// `installCanonicalNodeSkill` has left an orphan on disk.
+// ---------------------------------------------------------------------------
+
+describe('runSetup openclaw.json preflight (R6-2)', () => {
+  it('throws when openclaw.json is invalid JSON and does NOT install SKILL.md', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    // Invalid JSON: empty braces with a trailing stray token.
+    writeFileSync(join(openclawHome, 'openclaw.json'), '{ not valid json ,,,\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/not valid JSON/i);
+
+      // Step 5 was gated behind the preflight throw → no SKILL.md landed.
+      expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('throws when openclaw.json is missing entirely and does NOT install SKILL.md', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    // No openclaw.json written — preflight's existsSync gate must fire.
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/openclaw\.json not found/);
+
+      expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  // Unix-only — Windows chmod semantics do not reliably block writes for
+  // the owning process. The preflight still runs on Windows, just that this
+  // specific failure mode (non-writable file) can't be simulated portably.
+  const writabilityFailureModeSupported = process.platform !== 'win32';
+  (writabilityFailureModeSupported ? it : it.skip)(
+    'throws when openclaw.json is not writable and does NOT install SKILL.md',
+    async () => {
+      const { chmodSync } = await import('node:fs');
+      const dkgHome = join(testDir, '.dkg');
+      const openclawHome = join(testDir, '.openclaw');
+      const ws = join(testDir, 'workspace');
+      mkdirSync(ws, { recursive: true });
+      mkdirSync(openclawHome, { recursive: true });
+      const configPath = join(openclawHome, 'openclaw.json');
+      writeFileSync(configPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
+      chmodSync(configPath, 0o400); // read-only, no write bit for anyone.
+
+      const originalDkg = process.env.DKG_HOME;
+      const originalOpenclaw = process.env.OPENCLAW_HOME;
+      process.env.DKG_HOME = dkgHome;
+      process.env.OPENCLAW_HOME = openclawHome;
+
+      try {
+        await expect(
+          runSetup({ workspace: ws, start: false, verify: false }),
+        ).rejects.toThrow(/not writable/i);
+
+        expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+      } finally {
+        // Restore perms so afterEach cleanup can unlink.
+        try { chmodSync(configPath, 0o600); } catch { /* best-effort */ }
+        process.env.DKG_HOME = originalDkg;
+        process.env.OPENCLAW_HOME = originalOpenclaw;
+      }
+    },
+  );
 });

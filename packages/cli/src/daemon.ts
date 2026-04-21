@@ -1356,6 +1356,28 @@ async function runDaemonInner(
     }
   });
 
+  agent.eventBus.on(DKGEvent.JOIN_REJECTED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: "join_rejected",
+        title: "Join request rejected",
+        message: `Your request to join project ${shortId(data.contextGraphId)} was declined by the curator.`,
+        source: "access-control",
+        meta: JSON.stringify({
+          contextGraphId: data.contextGraphId,
+          agentAddress: data.agentAddress,
+        }),
+      });
+      sseBroadcast("join_rejected", {
+        contextGraphId: data.contextGraphId,
+        agentAddress: data.agentAddress,
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
   agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
     try {
       sseBroadcast("project_synced", {
@@ -6847,6 +6869,42 @@ async function handleRequest(
         );
         job.result = result;
         job.status = "done";
+
+        // Authoritative ACL denial: at least one peer explicitly denied
+        // the sync (via the SYNC_ACCESS_DENIED_MARKER sentinel surfaced
+        // by syncContextGraphFromConnectedPeers) and no peer returned
+        // any data. Transport timeouts / unreachable peers do NOT
+        // increment accessDeniedPeers, so an open CG with slow/offline
+        // peers won't be misclassified as denied.
+        if (result.accessDeniedPeers > 0 && result.dataSynced === 0) {
+          job.status = "denied";
+          job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
+          // Only unsubscribe if the CG was only known via auto-discovery,
+          // not via explicit creation or a prior legit subscription.
+          const exists = await agent.contextGraphExists(paranetId);
+          if (!exists) {
+            (agent as any).subscribedContextGraphs?.delete(paranetId);
+          }
+        }
+
+        // If catch-up ended in "done", flip the subscription's synced flag.
+        // syncContextGraphFromConnectedPeers only emits an event; without
+        // this update the UI never leaves the "syncing" state for curated
+        // CGs we've just legitimately joined.
+        if (job.status === "done") {
+          const subMap = (agent as any).subscribedContextGraphs as
+            | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
+            | undefined;
+          const sub = subMap?.get(paranetId);
+          if (sub) {
+            sub.synced = true;
+            // Meta is considered synced iff we have _any_ local content;
+            // otherwise we might have talked to peers that hold the CG's
+            // declaration but couldn't give us the _meta graph yet.
+            const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+            if (hasContent) sub.metaSynced = true;
+          }
+        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";

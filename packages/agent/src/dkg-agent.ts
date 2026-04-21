@@ -94,6 +94,31 @@ const SYNC_ROUTER_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const SYNC_AUTH_MAX_AGE_MS = 90_000;
+
+/**
+ * Wire-level sentinel returned by the sync responder when ACL authorization
+ * fails for a request. Distinguishes an explicit denial from an empty page
+ * (peer is up but has no data) and a transport error (peer unreachable).
+ * Chosen to never collide with nquads output (nquads lines always contain
+ * `<…>` tokens and end with `.`; this is a `#`-comment string).
+ */
+const SYNC_ACCESS_DENIED_MARKER = '#DKG-SYNC-ACCESS-DENIED';
+
+/**
+ * Thrown by `fetchSyncPages` when the remote responder returned
+ * SYNC_ACCESS_DENIED_MARKER. Caught by `syncFromPeer` and surfaced as a
+ * per-CG denial observation to the caller via its `onAccessDenied` hook,
+ * so higher-level flows (catch-up job) can distinguish ACL denial from
+ * transport errors without heuristics.
+ */
+class SyncAccessDeniedError extends Error {
+  readonly contextGraphId: string;
+  constructor(contextGraphId: string) {
+    super(`Sync access denied for context graph "${contextGraphId}"`);
+    this.name = 'SyncAccessDeniedError';
+    this.contextGraphId = contextGraphId;
+  }
+}
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -689,7 +714,9 @@ export class DKGAgent {
 
       if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
         this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        return new TextEncoder().encode(SYNC_DENIED_RESPONSE);
+        // Emit the explicit denial sentinel (vs. empty body which would
+        // be indistinguishable from "peer has no data for this CG").
+        return new TextEncoder().encode(`${SYNC_ACCESS_DENIED_MARKER}\n`);
       }
 
       if (isWorkspace) {
@@ -884,6 +911,38 @@ export class DKGAgent {
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
+            });
+          }
+          return new TextEncoder().encode(JSON.stringify({ ok: true }));
+        }
+
+        // Handle "join-rejected" notifications from curator → requester.
+        // Symmetric to join-approved: filter by localAgents and emit an
+        // event so the UI can surface a notification instead of leaving
+        // the invitee's Join modal stuck on "Join request sent…" forever.
+        //
+        // IMPORTANT: this payload is NOT signed by the curator (same as
+        // join-approved today), so we deliberately do NOT mutate any
+        // local subscription/ACL state here — a malicious or stale peer
+        // could otherwise forge a rejection to hide a project the user
+        // has legitimately been approved for. We only surface a UI
+        // notification; cleanup of any phantom auto-discovery entry is
+        // left to the normal catch-up denial path (daemon), which is
+        // gated on the curator's actual ACL response. Proper signing is
+        // tracked as a follow-up for the whole approve/reject pair.
+        if (payload.type === 'join-rejected') {
+          const { contextGraphId, agentAddress: rejectedAddr } = payload;
+          if (contextGraphId) {
+            const isLocalAgent = rejectedAddr && [...this.localAgents.keys()].some(
+              (addr) => addr.toLowerCase() === rejectedAddr.toLowerCase(),
+            );
+            if (rejectedAddr && !isLocalAgent) {
+              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+            }
+            this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
+            this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
+              contextGraphId,
+              agentAddress: rejectedAddr,
             });
           }
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
@@ -1172,8 +1231,9 @@ export class DKGAgent {
     remotePeerId: string,
     contextGraphIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
+    onAccessDenied?: (contextGraphId: string) => void,
   ): Promise<number> {
-    const result = await this.syncFromPeerDetailed(remotePeerId, contextGraphIds, onPhase);
+    const result = await this.syncFromPeerDetailed(remotePeerId, contextGraphIds, onPhase, onAccessDenied);
     return result.insertedTriples;
   }
 
@@ -1181,6 +1241,7 @@ export class DKGAgent {
     remotePeerId: string,
     contextGraphIds: string[],
     onPhase?: PhaseCallback,
+    onAccessDenied?: (contextGraphId: string) => void,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
     const summary: DurableSyncResult = {
@@ -1197,7 +1258,10 @@ export class DKGAgent {
     };
 
     try {
+      // Loop per CG so one CG's ACL denial (or transport error) doesn't
+      // abort syncing of the others in the same peer session.
       for (const [index, pid] of contextGraphIds.entries()) {
+        try {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
         const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
@@ -1253,6 +1317,14 @@ export class DKGAgent {
           this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
           summary.rejectedKcs += verified.rejected;
         }
+      } catch (err) {
+        if (err instanceof SyncAccessDeniedError) {
+          this.log.info(ctx, `Sync for "${pid}" from ${remotePeerId} denied by ACL`);
+          onAccessDenied?.(pid);
+          continue;
+        }
+        this.log.warn(ctx, `Sync from ${remotePeerId} for "${pid}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
       }
       if (summary.insertedTriples > 0) {
         this.log.info(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
@@ -1316,6 +1388,14 @@ export class DKGAgent {
         throw new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
       }
       if (!nquadsText) break;
+
+      // Explicit ACL denial from the responder. Throwing here lets
+      // syncFromPeer distinguish denial from an empty page / transport
+      // error instead of having higher-level code guess from a 0-triple
+      // result.
+      if (nquadsText === SYNC_ACCESS_DENIED_MARKER) {
+        throw new SyncAccessDeniedError(contextGraphId);
+      }
 
       const quads = parseNQuads(nquadsText);
       if (quads.length === 0) break;
@@ -1506,6 +1586,7 @@ export class DKGAgent {
     peersTried: number;
     dataSynced: number;
     sharedMemorySynced: number;
+    accessDeniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
@@ -1582,44 +1663,88 @@ export class DKGAgent {
       },
     };
 
+    // Resolve sync-capable peers first (sequential metadata lookup is cheap)
+    const syncCapable: string[] = [];
     for (const pid of peers) {
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
         noProtocolPeers++;
         continue;
       }
+      syncCapable.push(pid.toString());
+    }
+    syncCapablePeers = syncCapable.length;
+    peersTried = syncCapable.length;
 
-      syncCapablePeers++;
-      peersTried++;
-      const remotePeerId = pid.toString();
-      const durableResult = await this.syncFromPeerDetailed(remotePeerId, [contextGraphId]);
-      dataSynced += durableResult.insertedTriples;
-      diagnostics.durable.fetchedMetaTriples += durableResult.fetchedMetaTriples;
-      diagnostics.durable.fetchedDataTriples += durableResult.fetchedDataTriples;
-      diagnostics.durable.insertedMetaTriples += durableResult.insertedMetaTriples;
-      diagnostics.durable.insertedDataTriples += durableResult.insertedDataTriples;
-      diagnostics.durable.emptyResponses += durableResult.emptyResponses;
-      diagnostics.durable.metaOnlyResponses += durableResult.metaOnlyResponses;
-      diagnostics.durable.dataRejectedMissingMeta += durableResult.dataRejectedMissingMeta;
-      diagnostics.durable.rejectedKcs += durableResult.rejectedKcs;
-      diagnostics.durable.failedPeers += durableResult.failedPeers;
-      if (includeSharedMemory) {
-        const sharedResult = await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]);
-        sharedMemorySynced += sharedResult.insertedTriples;
-        diagnostics.sharedMemory.fetchedMetaTriples += sharedResult.fetchedMetaTriples;
-        diagnostics.sharedMemory.fetchedDataTriples += sharedResult.fetchedDataTriples;
-        diagnostics.sharedMemory.insertedMetaTriples += sharedResult.insertedMetaTriples;
-        diagnostics.sharedMemory.insertedDataTriples += sharedResult.insertedDataTriples;
-        diagnostics.sharedMemory.emptyResponses += sharedResult.emptyResponses;
-        diagnostics.sharedMemory.droppedDataTriples += sharedResult.droppedDataTriples;
-        diagnostics.sharedMemory.failedPeers += sharedResult.failedPeers;
+    // Run per-peer syncs in parallel. Without parallelism a curated CG
+    // denial walks the whole peer set sequentially with 30s+ timeouts
+    // each, causing the /api/subscribe catchup job to take minutes to
+    // report denial and the UI to give up. Uses the *Detailed variants
+    // so we can still feed HEAD's CatchupSyncDiagnostics counters.
+    const emptyDurable = (): DurableSyncResult => ({
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+      failedPeers: 1,
+    });
+    const emptyShared = (): SharedMemorySyncResult => ({
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      emptyResponses: 0,
+      droppedDataTriples: 0,
+      failedPeers: 1,
+    });
+    const results = await Promise.all(syncCapable.map(async (remotePeerId) => {
+      let denied = false;
+      const durable = await this.syncFromPeerDetailed(
+        remotePeerId,
+        [contextGraphId],
+        undefined,
+        () => { denied = true; },
+      ).catch(emptyDurable);
+      const shared = includeSharedMemory
+        ? await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]).catch(emptyShared)
+        : null;
+      return { durable, shared, denied };
+    }));
+    let accessDeniedPeers = 0;
+    for (const r of results) {
+      dataSynced += r.durable.insertedTriples;
+      diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
+      diagnostics.durable.fetchedDataTriples += r.durable.fetchedDataTriples;
+      diagnostics.durable.insertedMetaTriples += r.durable.insertedMetaTriples;
+      diagnostics.durable.insertedDataTriples += r.durable.insertedDataTriples;
+      diagnostics.durable.emptyResponses += r.durable.emptyResponses;
+      diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
+      diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
+      diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
+      diagnostics.durable.failedPeers += r.durable.failedPeers;
+      if (r.shared) {
+        sharedMemorySynced += r.shared.insertedTriples;
+        diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
+        diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
+        diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
+        diagnostics.sharedMemory.insertedDataTriples += r.shared.insertedDataTriples;
+        diagnostics.sharedMemory.emptyResponses += r.shared.emptyResponses;
+        diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
+        diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
       }
+      if (r.denied) accessDeniedPeers++;
     }
     diagnostics.noProtocolPeers = noProtocolPeers;
 
     this.log.info(
       ctx,
-      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
+      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced} denied=${accessDeniedPeers}`,
     );
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -1638,6 +1763,7 @@ export class DKGAgent {
       peersTried,
       dataSynced,
       sharedMemorySynced,
+      accessDeniedPeers,
       diagnostics,
     };
   }
@@ -2743,6 +2869,14 @@ export class DKGAgent {
         return true;
       }
     } catch { /* identity lookup failed — continue to deny */ }
+
+    // Legacy peer-ID allowlist: `inviteToContextGraph` writes `DKG_ALLOWED_PEER`
+    // quads. Honor them for local reads so a peer-ID-invited node can query
+    // the data it just synced.
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    if (allowedPeers?.includes(this.peerId)) {
+      return true;
+    }
 
     // Edge nodes without an on-chain identity (identityId 0n) fall back to
     // subscription-based access — the subscription itself is an authorization
@@ -3853,6 +3987,48 @@ export class DKGAgent {
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Rejected join request from ${agentAddress} for "${contextGraphId}"`);
+
+    // Notify the requester via P2P so their UI can flip from the stale
+    // "Join request sent, awaiting approval" state to a clear denied
+    // state. Non-fatal: if the invitee is unreachable they'll just
+    // re-learn on their next subscribe attempt.
+    this.notifyJoinRejection(contextGraphId, agentAddress).catch((err) => {
+      this.log.warn(ctx, `Failed to notify ${agentAddress} of rejection: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  /**
+   * Send a P2P notification to the rejected agent. Mirror of
+   * notifyJoinApproval — broadcast the rejection to all connected peers
+   * so the invitee's node (wherever it is) can surface a notification
+   * and clean up its stale "pending" state.
+   */
+  private async notifyJoinRejection(contextGraphId: string, agentAddress: string): Promise<void> {
+    const payload = JSON.stringify({
+      type: 'join-rejected',
+      contextGraphId,
+      agentAddress,
+    });
+    const payloadBytes = new TextEncoder().encode(payload);
+    const ctx = createOperationContext('system');
+
+    const peers = this.node.libp2p.getPeers();
+    let delivered = 0;
+    for (const pid of peers) {
+      const remotePeerId = pid.toString();
+      if (remotePeerId === this.peerId) continue;
+      try {
+        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+        delivered++;
+      } catch {
+        // Peer doesn't support protocol or timed out — skip
+      }
+    }
+    if (delivered === 0) {
+      this.log.warn(ctx, `Could not deliver join-rejection notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
+    } else {
+      this.log.info(ctx, `Broadcasted join-rejection for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
+    }
   }
 
   /**
@@ -4909,6 +5085,52 @@ export class DKGAgent {
     return storedContextGraphs.includes(contextGraphId);
   }
 
+  /**
+   * Check whether the context graph has any actual content locally — i.e.,
+   * at least one triple in the paranet's own data graph. A paranet declaration
+   * triple in the ontology graph (from auto-discovery via chain registry or
+   * ontology sync) does NOT count as content; it only indicates the paranet
+   * was announced, not that we have access to its data. This predicate is
+   * used to distinguish "genuinely synced / has access" from "declaration
+   * only / probably denied".
+   */
+  async contextGraphHasLocalContent(contextGraphId: string): Promise<boolean> {
+    const dataGraph = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+    );
+    if (result.type === 'boolean') return result.value;
+    return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  /**
+   * Check whether a context graph is declared as curated (private/allowlist)
+   * locally. Reads the DKG accessPolicy predicate from either the ontology
+   * graph (public CGs) or the CG's _meta graph (curated CGs). Returns false
+   * when no declaration is present locally (caller should treat that as
+   * "unknown, assume public" — this predicate is only used to gate
+   * optimistic denial inference, not access control decisions).
+   */
+  async contextGraphIsCurated(contextGraphId: string): Promise<boolean> {
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    try {
+      const res = await this.store.query(
+        `SELECT ?ap WHERE {
+          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          UNION
+          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+        } LIMIT 1`,
+      );
+      if (res.type !== 'bindings' || res.bindings.length === 0) return false;
+      const ap = res.bindings[0]?.['ap']?.replace(/^"|"$/g, '');
+      return ap === 'private';
+    } catch {
+      return false;
+    }
+  }
+
   private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
     const text = new TextDecoder().decode(data).trim();
     if (text.startsWith('{')) {
@@ -5135,6 +5357,19 @@ export class DKGAgent {
       (requesterIdentityId > 0n && p === String(requesterIdentityId)),
     ) ?? false;
 
+    // Legacy peer-ID allowlist: `inviteToContextGraph` (the path behind
+    // `POST /api/context-graph/invite`) writes `DKG_ALLOWED_PEER` quads.
+    // Honor them here so peer-ID invites actually unblock sync. The
+    // libp2p transport has already authenticated `remotePeerId`, and we
+    // validated `request.requesterPeerId === remotePeerId` above, so
+    // matching the peer ID against the allowlist is a trusted comparison.
+    if (!allowed) {
+      const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+      if (allowedPeers?.includes(remotePeerId)) {
+        allowed = true;
+      }
+    }
+
     // Requester has valid on-chain identity but is not in our local participant
     // list. The curator may have invited them after our last meta sync — try
     // refreshing the meta graph from the curator before denying.
@@ -5146,6 +5381,13 @@ export class DKGAgent {
           p.toLowerCase() === recoveredAddress.toLowerCase() ||
           p === String(requesterIdentityId),
         ) ?? false;
+
+        if (!allowed) {
+          const freshPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+          if (freshPeers?.includes(remotePeerId)) {
+            allowed = true;
+          }
+        }
       }
     }
 
@@ -5517,16 +5759,41 @@ export class DKGAgent {
           subscribed: sub.subscribed,
           synced: sub.synced,
         });
-      } else {
-        seen.set(uri, {
-          id,
-          uri,
-          name: sub.name ?? id,
-          isSystem: false,
-          subscribed: sub.subscribed,
-          synced: sub.synced,
-        });
+        continue;
       }
+
+      // No declaration in ontology, agents, or _meta graphs. Two cases:
+      //
+      //  1. Chain-attested but not-yet-synced (sub.onChainId set):
+      //     auto-discovery from the on-chain registry found this CG and
+      //     subscribed us. Surface it as subscribed+synced=false so the
+      //     UI can show a legitimate "waiting for sync" state. Any
+      //     genuinely inaccessible curated CG will be removed from
+      //     `subscribedContextGraphs` by the daemon's authoritative
+      //     denial path (accessDeniedPeers > 0) before we get here.
+      //
+      //  2. Not chain-attested AND no local content: a truly phantom
+      //     entry (pre-discovery subscribe that never resolved). Hide
+      //     it to avoid polluting the UI. If the user legitimately
+      //     subscribes later, the next catch-up writes _meta or data
+      //     and the entry will appear on the next refresh.
+      if (!sub.onChainId) {
+        const dataGraph = paranetDataGraphUri(id);
+        const hasAnyContent = await this.store.query(
+          `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+        );
+        const hasContent = hasAnyContent.type === 'boolean' && hasAnyContent.value;
+        if (!hasContent) continue;
+      }
+
+      seen.set(uri, {
+        id,
+        uri,
+        name: sub.name ?? id,
+        isSystem: false,
+        subscribed: sub.subscribed,
+        synced: sub.synced,
+      });
     }
 
     const graphManager = new GraphManager(this.store);

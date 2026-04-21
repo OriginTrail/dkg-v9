@@ -1156,16 +1156,49 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 effStake = raw + rewardsSnapshot;
             }
 
-            // Score computation (unchanged from Phase 5) — then score→TRAC
-            // conversion added by Phase 11.  `scorePerStake36` is PER-EPOCH,
-            // not cumulative — no `[e] - [e-1]` subtraction needed.
+            // Score computation — then score→TRAC conversion added by
+            // Phase 11. `scorePerStake36` is PER-EPOCH (not cumulative);
+            // the walker composes two contributions per epoch:
+            //
+            //   settled   — `getEpochNodeDelegatorScore(e, id, key)` is the
+            //               score persisted by `_prepareForStakeChangeV10`
+            //               whenever the position was mutated DURING epoch
+            //               e (e.g., a stake/relock/redelegate while e was
+            //               still the current epoch). It captures the
+            //               delegator's pre-mutation contribution for that
+            //               epoch at the EFFECTIVE STAKE that prevailed
+            //               before the mutation.
+            //   unsettled — `effStake * (nodeEpochIndex - lastSettledIndex)`
+            //               is the leftover contribution from the last
+            //               in-epoch settlement point up to the epoch's
+            //               final index, priced at the CURRENT effStake.
+            //
+            // For claim-window epochs strictly greater than the
+            // `_requireFullyClaimed` boundary, the effStake is guaranteed
+            // constant (no mutations without a prior claim-catch-up), so
+            // `settled == 0`, `lastSettledIndex == 0`, and the formula
+            // collapses to `effStake * scorePerStake36 / SCALE18` — the
+            // simple walker. For the boundary epoch only, the split
+            // prevents over/under-payment on mid-epoch mutations that
+            // would otherwise mispricing the pre-mutation portion at the
+            // post-mutation effStake.
             uint256 scorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(
                 e,
                 identityId
             );
-
-            // Step 1: delegator's score for this epoch
-            uint256 delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
+            uint256 settledDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+                e,
+                identityId,
+                delegatorKey
+            );
+            uint256 lastSettledIndex36 = randomSamplingStorage
+                .getDelegatorLastSettledNodeEpochScorePerStake(e, identityId, delegatorKey);
+            uint256 unsettledDelegatorScore18 = 0;
+            if (scorePerStake36 > lastSettledIndex36) {
+                unsettledDelegatorScore18 =
+                    (effStake * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
+            }
+            uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
             uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
 

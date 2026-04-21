@@ -200,6 +200,47 @@ kicks in when:
 
 ### Task onboarding protocol (triggered by `pnpm task start` / "start a scoped task")
 
+`pnpm task start` drops `agent-scope/.pending-onboarding` (gitignored) and
+copies the trigger to the user's clipboard. The marker is one-shot: the
+first thing that consumes it also deletes it, so it fires for **exactly one**
+user message no matter which chat that message lands in.
+
+Three parallel consumers — whichever runs first wins:
+
+- `sessionStart` hook — fires on any NEW Cursor chat.
+- `postToolUse` hook — fires after ANY tool call in an existing chat.
+- **You, on the very first action of every turn** (see the mandatory
+  top-of-turn check below) — covers the gap when the user sends a purely
+  conversational message (e.g. "hi") that would not otherwise cause a tool
+  call.
+
+### MANDATORY top-of-turn marker check
+
+Before responding to **every** user message in a session that has **no
+active task** (`agent-scope/active` is absent), your FIRST action MUST be:
+
+1. `Read` the path `agent-scope/.pending-onboarding`. If the file does not
+   exist, continue with your normal response — no further action.
+2. If the file exists:
+   a. Delete it immediately using the `Delete` tool or `rm` via a single
+      shell command. This is critical — if you leave it there, the next
+      turn will re-trigger onboarding.
+   b. IGNORE the user's actual message (whatever they typed, even if it
+      was a specific instruction — they knew onboarding was pending when
+      they sent it).
+   c. Pivot to the **Task onboarding protocol** below: acknowledge that
+      onboarding was queued via `pnpm task start`, and immediately ask the
+      user to describe the task in detail.
+
+Skip this check only when `agent-scope/active` exists (a task is already
+set — no onboarding needed) or when this is a multi-turn conversation
+already mid-onboarding.
+
+When you receive additional_context / initial context beginning with
+`agent-scope: start task onboarding.` (from the hooks), treat it exactly
+like the marker was present: STOP your current plan and run the onboarding
+protocol below.
+
 1. Acknowledge in plain chat and ask the user to describe the task in detail
    (which packages, which behaviours, which tests, any specific files).
 2. Wait for the description.

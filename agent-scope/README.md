@@ -37,10 +37,11 @@ default.
 ## Architecture (defense in depth)
 
 ```
-Agent  → Cursor sessionStart hook       → injects active-task context (silent when idle)
+Agent  → Cursor sessionStart hook       → injects active-task context + consumes any pending onboarding marker
 Agent  → Cursor preToolUse hook         → blocks out-of-scope Write/Edit/Delete
 Agent  → Cursor beforeShellExecution    → blocks destructive shell cmds on denied paths
 Agent  → Cursor afterShellExecution     → reverts out-of-scope shell writes, deletes untracked files in denied paths
+Agent  → Cursor postToolUse hook        → injects pending onboarding trigger in already-open chats (additive, never denies)
 System → hardcoded protected paths      → always blocks agent writes to agent-scope itself
 Ops    → optional webhook sink          → forwards denials to DKG/Slack/etc.
 ```
@@ -119,18 +120,29 @@ pnpm task clear
 
 ## Onboarding flow
 
-The `pnpm task start` command is the paved path. It prints a trigger line
-like:
+The `pnpm task start` command is the paved path. It does three things:
 
-```
-agent-scope: start task onboarding. Please follow the Task onboarding
-protocol in CLAUDE.md: ask me to describe the task, explore the codebase,
-propose a scope via AskQuestion, and print the `pnpm task create` command
-for me to run once I approve.
-```
+1. Drops a one-shot marker file at `agent-scope/.pending-onboarding`
+   (gitignored).
+2. Copies the onboarding trigger to your clipboard (best-effort, via
+   `pbcopy` / `wl-copy` / `xclip` / `clip` depending on OS).
+3. Prints a short message explaining the three equivalent paths to trigger
+   the agent.
 
-When you paste that into your Cursor chat, the agent follows a fixed protocol
-(defined in `.cursor/rules/agent-scope.mdc` and `CLAUDE.md`):
+Any of these will start the onboarding — pick whichever is easiest:
+
+- **New chat (Cmd+L / "new chat" button)** — the `sessionStart` hook
+  detects the marker, injects the trigger as initial context, deletes the
+  marker. The agent immediately asks you to describe the task.
+- **Current chat, any message** — the next tool the agent calls triggers
+  the `postToolUse` hook, which injects the trigger as
+  `additional_context`. The agent sees it on the very next turn and
+  pivots to onboarding.
+- **Manual paste (Cmd+V / Ctrl+V)** — the trigger is already in your
+  clipboard. Paste into any chat and send.
+
+Whichever path fires, the agent then follows a fixed protocol (defined in
+`.cursor/rules/agent-scope.mdc` and `CLAUDE.md`):
 
 1. Asks you to describe what you're building or fixing.
 2. Explores the codebase (Grep / Glob / DKG) to find relevant files.
@@ -144,6 +156,9 @@ When you paste that into your Cursor chat, the agent follows a fixed protocol
 
 From here, every attempted write to an out-of-scope file triggers a plan-mode
 AskQuestion menu — see **Escalation** below.
+
+The marker is one-shot: the first hook that consumes it also deletes it, so
+the trigger fires exactly once per `pnpm task start`.
 
 ## Manifest format
 
@@ -204,11 +219,17 @@ Four agent-facing layers, all running inside Cursor:
    out-of-scope/protected modifications, and **deletes** untracked files in
    denied paths (so an agent cannot establish persistent state like a new
    hook file via a pre-shell bypass).
+5. **`postToolUse` hook** (`.cursor/hooks/post-tool-use.mjs`) exists only to
+   consume a pending onboarding marker (written by `pnpm task start`) in an
+   already-open chat. It never denies anything — it just injects the
+   onboarding trigger as `additional_context` after the next tool call, so
+   the agent pivots to the Task onboarding protocol on its next turn.
 
 If no active task is set (no env, no file, no matching branch, no git-config)
 **and** bootstrap is off, layer 1 is silent and layers 2–4 only trigger on
 the hardcoded protected paths. Everything else is a no-op — you can do
-ad-hoc work without changing the workflow.
+ad-hoc work without changing the workflow. Layer 5 only emits anything when
+`agent-scope/.pending-onboarding` is present.
 
 No layer restricts **humans**. You can `git commit`, `git push`, and edit
 anything manually through your terminal or IDE without interacting with the

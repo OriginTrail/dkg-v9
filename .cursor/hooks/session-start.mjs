@@ -11,9 +11,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const scopeUrl = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/scope.mjs')).href;
+const onboardUrl = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/onboarding.mjs')).href;
 const {
   resolveRepoRoot, resolveActiveTaskId, loadTask, checkNodeVersion, isBootstrapActive,
 } = await import(scopeUrl);
+const { consumeOnboardingMarker } = await import(onboardUrl);
 
 try { checkNodeVersion(); } catch (e) {
   process.stderr.write(e.message + '\n');
@@ -37,7 +39,14 @@ async function main() {
   const { id: taskId, source } = resolveActiveTaskId(root);
   const bootstrap = isBootstrapActive(root);
 
+  // If the user ran `pnpm task start`, consume the marker (one-shot) and
+  // prepend the onboarding trigger to whatever else this hook would emit.
+  const onboarding = !taskId ? consumeOnboardingMarker(root) : null;
+
   const header = [];
+  if (onboarding) {
+    header.push(onboarding, '');
+  }
   if (bootstrap) {
     header.push(
       '# agent-scope: BOOTSTRAP MODE ACTIVE',
@@ -53,12 +62,12 @@ async function main() {
   }
 
   if (!taskId) {
-    // No task + no bootstrap → the system is fully invisible. The agent
-    // behaves like agent-scope doesn't exist. Protected paths still guard
-    // themselves via preToolUse/beforeShell, but that only fires if the
-    // agent actually tries to touch them, so there's no need to announce
-    // anything up front. If bootstrap is on, do surface the warning.
-    if (!bootstrap) return emit(null);
+    // No task + no bootstrap + no pending onboarding → the system is fully
+    // invisible. The agent behaves like agent-scope doesn't exist.
+    if (!bootstrap && !onboarding) return emit(null);
+    // Pending onboarding but no bootstrap → emit only the onboarding
+    // trigger so the agent's focus lands on the onboarding protocol.
+    if (onboarding && !bootstrap) return emit(header.join('\n').trim());
     return emit(header.concat([
       '# agent-scope: no active task',
       '',

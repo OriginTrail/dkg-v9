@@ -12,12 +12,51 @@ own files) are still defended, but that only matters if you try to touch them.
 
 The user turns the system on in one of two ways:
 
-1. **CLI** — they run `pnpm task start`. That prints a line they paste into
-   chat beginning with `agent-scope: start task onboarding`. When you see that
-   line, follow the **Task onboarding protocol** below.
+1. **CLI** — they run `pnpm task start`. That drops a one-shot marker file
+   (`agent-scope/.pending-onboarding`, gitignored) and copies the trigger
+   text to their clipboard. THREE parallel consumers compete for the marker
+   — whichever runs first wins, because consumption is atomic read-and-delete:
+   - `sessionStart` hook — injects the trigger as initial context in any
+     NEW chat.
+   - `postToolUse` hook — injects it as `additional_context` after ANY
+     tool call in an existing chat.
+   - **YOU, via the mandatory top-of-turn marker check below** — guarantees
+     onboarding triggers even for purely conversational messages (e.g. "hi")
+     in an existing chat.
+   Result: the next user message in any chat, new or existing, triggers
+   onboarding exactly once. After that the marker is gone and everything
+   else behaves normally.
 2. **Existing active task** — the session-start hook injects a context block
    naming the active task. From that moment on, writes are task-scoped and
    every denial must be surfaced via the plan-mode denial protocol below.
+
+## MANDATORY: top-of-turn marker check
+
+Before responding to **every** user message in a session with **no active
+task** (`agent-scope/active` is absent), your FIRST action MUST be:
+
+1. Check whether `agent-scope/.pending-onboarding` exists. Use the `Read`
+   tool on that path. If the file does not exist, the tool will report so
+   — continue with your normal response.
+2. If the file exists:
+   a. Delete it immediately (`Delete` tool, or a single `rm` via `Shell`).
+      This is critical — leaving it behind would re-trigger onboarding next
+      turn.
+   b. IGNORE the user's actual message (whatever they typed, they knew
+      onboarding was pending when they sent it).
+   c. Pivot straight into the **Task onboarding protocol** below — ask the
+      user to describe the task in detail.
+
+Skip this check only when:
+- `agent-scope/active` exists (a task is already set; onboarding is done), OR
+- You are already mid-onboarding (already asked "describe the task" and are
+  waiting for the description, or proposing a scope, etc.).
+
+If you receive initial context / additional_context beginning with
+`agent-scope: start task onboarding.` (injected by the sessionStart or
+postToolUse hooks), treat it the same as finding the marker: pivot to the
+onboarding protocol immediately. The hooks already delete the marker for
+you in that case; do not double-delete — just follow the protocol.
 
 ## Task onboarding protocol — when the user wants to start a new scoped task
 

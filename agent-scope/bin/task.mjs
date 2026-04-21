@@ -12,6 +12,11 @@ import {
   normalizeToRepoPath, listTasks, validateManifest, checkNodeVersion,
   isBootstrapActive,
 } from '../lib/scope.mjs';
+import {
+  ONBOARDING_TRIGGER_TEXT,
+  writeOnboardingMarker,
+  copyToClipboard,
+} from '../lib/onboarding.mjs';
 
 try { checkNodeVersion(); }
 catch (e) { console.error(e.message); process.exit(3); }
@@ -190,12 +195,6 @@ async function init(id) {
 // wiped by the afterShellExecution backstop.
 // ---------------------------------------------------------------------------
 
-const ONBOARD_TRIGGER =
-  'agent-scope: start task onboarding. Please follow the Task onboarding ' +
-  'protocol in CLAUDE.md: ask me to describe the task, explore the codebase, ' +
-  'propose a scope via AskQuestion, and print the `pnpm task create` command ' +
-  'for me to run once I approve.';
-
 function start() {
   const { id: activeId } = resolveActiveTaskId(root);
   if (activeId) {
@@ -205,20 +204,46 @@ function start() {
     bootstrapWarning();
     return;
   }
-  console.log('agent-scope task onboarding');
+
+  // Drop the one-shot marker. Three parallel consumers (sessionStart hook /
+  // postToolUse hook / agent top-of-turn rule check) all compete for it;
+  // whoever reads it also deletes it, so onboarding triggers for exactly
+  // ONE user message after this call.
+  const markerPath = writeOnboardingMarker(root);
+
+  // Best-effort clipboard copy so the user can paste into the current chat
+  // without selecting the trigger text by hand.
+  const clip = copyToClipboard(ONBOARDING_TRIGGER_TEXT);
+
+  console.log('agent-scope: task onboarding primed.');
   console.log('');
-  console.log('Paste this line into your Cursor chat to begin:');
+  console.log('The NEXT message you send in any Cursor chat (new or existing)');
+  console.log('will pivot the agent into onboarding. Then the marker is');
+  console.log('deleted, so it only triggers once.');
   console.log('');
-  console.log('  ' + ONBOARD_TRIGGER);
+  console.log('Paths that work (pick whichever is easiest):');
   console.log('');
-  console.log('The agent will:');
-  console.log('  1. ask you to describe the task in detail');
-  console.log('  2. explore the codebase for relevant files');
-  console.log('  3. propose a scope via AskQuestion (plan-mode style)');
-  console.log('  4. on approval, print the exact `pnpm task create` command');
-  console.log('     for you to run here so the manifest is human-authored');
+  console.log('  (1) Open a NEW chat (Cmd+L / "new chat" button) and say');
+  console.log('      anything — the sessionStart hook will inject the trigger.');
+  console.log('  (2) In your CURRENT chat, send any message — the agent\'s');
+  console.log('      always-on rule checks for the marker at the top of every');
+  console.log('      turn, so even "hi" will kick off onboarding.');
+  if (clip.ok) {
+    console.log(`  (3) Paste (Cmd+V) — the trigger is already in your clipboard`);
+    console.log(`      (via ${clip.method}).`);
+  } else {
+    console.log(`  (3) Paste the trigger below into chat manually`);
+    console.log(`      (clipboard copy unavailable: ${clip.reason}):`);
+    console.log('');
+    for (const line of ONBOARDING_TRIGGER_TEXT.split('\n')) {
+      console.log('      ' + line);
+    }
+  }
   console.log('');
-  console.log('If you already know the scope, skip the dance:');
+  console.log(`Marker file: ${markerPath}`);
+  console.log('(Auto-deleted the first time any consumer reads it.)');
+  console.log('');
+  console.log('Already know the scope? Skip the dance and run directly:');
   console.log('  pnpm task create <id> --description "..." \\');
   console.log('    --allowed "packages/foo/**" --allowed "packages/bar/baz.ts" \\');
   console.log('    --inherits base --activate');

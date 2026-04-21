@@ -16,6 +16,13 @@
         "timeout": 5
       }
     ],
+    "postToolUse": [
+      {
+        "command": ".cursor/hooks/post-tool-use.mjs",
+        "failClosed": false,
+        "timeout": 5
+      }
+    ],
     "beforeShellExecution": [
       {
         "command": ".cursor/hooks/shell-precheck.mjs",

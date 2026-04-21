@@ -8,6 +8,8 @@ import {
   discoverAgentName,
   writeDkgConfig,
   mergeOpenClawConfig,
+  unmergeOpenClawConfig,
+  verifyUnmergeInvariants,
   writeWorkspaceConfig,
   installCanonicalNodeSkill,
   openclawConfigPath,
@@ -377,6 +379,246 @@ describe('mergeOpenClawConfig', () => {
 
     expect(secondRun).toBe(firstRun);
     expect(secondBackupCount).toBe(firstBackupCount);
+  });
+
+  // PR #228 Codex N2 — persist prior slot owner so disconnect can restore it.
+  it('captures a prior non-adapter plugins.slots.memory owner into the adapter entry', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(config.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+  });
+
+  it('on a second merge, does NOT overwrite previousMemorySlotOwner with the adapter id (first-wins)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    // First merge captures "memory-core" into the entry.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+
+    // Second merge: slot is already the adapter, so the capture branch won't
+    // fire — and even if it did, the first-wins guard keeps the original.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unmergeOpenClawConfig (PR #228 Codex N2 — restore prior memory-slot owner)
+// ---------------------------------------------------------------------------
+
+describe('unmergeOpenClawConfig', () => {
+  it('restores plugins.slots.memory to the previous owner when the merge persisted one', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    // Merge → captures "memory-core" as previousMemorySlotOwner.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+
+    // Unmerge → restores "memory-core" and strips the metadata.
+    unmergeOpenClawConfig(configPath);
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.slots.memory).toBe('memory-core');
+    expect(afterUnmerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+    expect(afterUnmerge.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+  });
+
+  it('clears plugins.slots.memory when no prior owner was persisted', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // Merge on a clean config — no previousMemorySlotOwner is captured.
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+
+    unmergeOpenClawConfig(configPath);
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.slots.memory).toBeUndefined();
+  });
+
+  it('merge→unmerge round-trip from a clean openclaw.json restores the original memory-slot state', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // "clean" here means: plugins object exists but no slot is set; mimics a
+    // fresh install that hasn't configured a memory provider yet.
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    unmergeOpenClawConfig(configPath);
+
+    const final = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // plugins.slots.memory is unset again — same as before the merge/unmerge cycle.
+    expect(final.plugins.slots?.memory).toBeUndefined();
+  });
+
+  it('is idempotent — a second unmerge on an already-disconnected config writes nothing', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    unmergeOpenClawConfig(configPath);
+    const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+    const firstContent = readFileSync(configPath, 'utf-8');
+
+    unmergeOpenClawConfig(configPath);
+    const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+    const secondContent = readFileSync(configPath, 'utf-8');
+
+    expect(secondContent).toBe(firstContent);
+    expect(secondBackupCount).toBe(firstBackupCount);
+  });
+
+  it('leaves plugins.slots.memory alone when the user has externally re-owned the slot between merge and unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    // Simulate external modification: user swaps in a different memory plugin.
+    const intermediate = JSON.parse(readFileSync(configPath, 'utf-8'));
+    intermediate.plugins.slots.memory = 'some-other-memory-plugin';
+    writeFileSync(configPath, JSON.stringify(intermediate, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    const final = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // We don't clobber the user's new choice, and we clean up our marker.
+    expect(final.plugins.slots.memory).toBe('some-other-memory-plugin');
+    expect(final.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifyUnmergeInvariants (PR #228 Codex N3 — full reverse-merge check)
+// ---------------------------------------------------------------------------
+
+describe('verifyUnmergeInvariants', () => {
+  it('returns null when every field `mergeOpenClawConfig` writes has been unwound', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            allow: [],
+            load: { paths: [] },
+            entries: { 'adapter-openclaw': { enabled: false } },
+            slots: {},
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toBeNull();
+  });
+
+  it('returns a descriptive string when plugins.slots.memory is still elected', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: { memory: 'adapter-openclaw' },
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(/plugins\.slots\.memory is still "adapter-openclaw"/);
+  });
+
+  it('returns a descriptive string when plugins.allow still contains the adapter', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: ['adapter-openclaw'],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: {},
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(/plugins\.allow still contains "adapter-openclaw"/);
+  });
+
+  it('returns a descriptive string when plugins.load.paths still contains an adapter load path', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: ['/home/me/packages/adapter-openclaw'] },
+          entries: { 'adapter-openclaw': { enabled: false } },
+          slots: {},
+        },
+      }),
+    );
+
+    const result = verifyUnmergeInvariants(configPath);
+    expect(result).toMatch(/plugins\.load\.paths still contains adapter path/);
+    expect(result).toContain('/home/me/packages/adapter-openclaw');
+  });
+
+  it('returns a descriptive string when plugins.entries["adapter-openclaw"].enabled is still true', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: { 'adapter-openclaw': { enabled: true } },
+          slots: {},
+        },
+      }),
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toMatch(
+      /plugins\.entries\["adapter-openclaw"\]\.enabled is still true/,
+    );
+  });
+
+  it('does not throw on a missing config file — returns a descriptive string', () => {
+    const configPath = join(testDir, 'does-not-exist.json');
+
+    const result = verifyUnmergeInvariants(configPath);
+    expect(result).toMatch(/openclaw\.json not found/);
+  });
+
+  it('does not throw on an unparseable config file — returns a descriptive string', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, '{ not-valid-json');
+
+    const result = verifyUnmergeInvariants(configPath);
+    expect(result).toMatch(/Could not parse/);
   });
 });
 

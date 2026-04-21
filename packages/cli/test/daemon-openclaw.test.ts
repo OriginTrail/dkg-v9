@@ -1610,6 +1610,60 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(after.plugins.entries['adapter-openclaw'].enabled).toBe(false);
   });
 
+  it('scenario 2c: reverse-setup surfaces non-slot invariant failures via verifyUnmergeInvariants (Codex N3)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3118294850
+    // Earlier versions of reverseLocalAgentSetupForUi only post-checked
+    // `plugins.slots.memory !== 'adapter-openclaw'`. If a future regression in
+    // unmergeOpenClawConfig left the adapter in `plugins.allow`, `plugins.load.paths`, or
+    // `plugins.entries[...].enabled === true`, the daemon would still report a successful
+    // disconnect while the gateway kept loading the adapter on restart. The helper now
+    // defers to the adapter's `verifyUnmergeInvariants`, which covers all four invariants.
+
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(before.plugins.allow).toContain('adapter-openclaw');
+
+    // Stub unmergeOpenClawConfig to do a PARTIAL cleanup — clears the slot and the load
+    // path (so the old single-check invariant would pass) but leaves the adapter listed
+    // in plugins.allow. verifyUnmergeInvariants should flag the latter.
+    const partialUnmerge = (configPath: string) => {
+      const raw = readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      if (cfg?.plugins?.slots?.memory === 'adapter-openclaw') {
+        delete cfg.plugins.slots.memory;
+      }
+      if (Array.isArray(cfg?.plugins?.load?.paths)) {
+        cfg.plugins.load.paths = cfg.plugins.load.paths.filter(
+          (p: string) => !/adapter-openclaw/.test(p),
+        );
+      }
+      if (cfg?.plugins?.entries?.['adapter-openclaw']) {
+        cfg.plugins.entries['adapter-openclaw'].enabled = false;
+      }
+      // Intentionally does NOT remove 'adapter-openclaw' from plugins.allow.
+      writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+    };
+
+    // Load the real verifier from the adapter barrel so we exercise the actual invariant.
+    const { verifyUnmergeInvariants } = await import('@origintrail-official/dkg-adapter-openclaw');
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        unmergeOpenClawConfig: partialUnmerge,
+        verifyUnmergeInvariants,
+      }),
+    ).rejects.toThrow(/plugins\.allow still contains/);
+
+    // The partial cleanup did happen on disk — this asserts the invariant check fired
+    // specifically on the allow-list regression, not on some earlier failure.
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).toContain('adapter-openclaw');
+  });
+
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
     const config = makeConfig({
       localAgentIntegrations: {

@@ -569,8 +569,20 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     );
   }
   if (config.plugins.slots.memory !== pluginId) {
-    if (config.plugins.slots.memory && config.plugins.slots.memory !== pluginId) {
-      log(`plugins.slots.memory was "${config.plugins.slots.memory}" — overwriting with "${pluginId}"`);
+    // Capture the prior non-adapter owner so `unmergeOpenClawConfig` can
+    // restore it on disconnect. First-wins: if the entry already carries a
+    // `previousMemorySlotOwner` from an earlier merge, keep it rather than
+    // overwriting with whatever's currently in the slot. This guards against
+    // losing the original owner if the slot gets manipulated between merges.
+    const currentOwner = config.plugins.slots.memory;
+    if (currentOwner && currentOwner !== pluginId) {
+      const adapterEntry = config.plugins.entries[pluginId];
+      if (adapterEntry && typeof adapterEntry === 'object' && !adapterEntry.previousMemorySlotOwner) {
+        adapterEntry.previousMemorySlotOwner = currentOwner;
+        log(`plugins.slots.memory was "${currentOwner}" — saved as previousMemorySlotOwner for restoration on disconnect`);
+      } else if (adapterEntry && typeof adapterEntry === 'object') {
+        log(`plugins.slots.memory was "${currentOwner}" — existing previousMemorySlotOwner="${adapterEntry.previousMemorySlotOwner}" preserved (first-wins)`);
+      }
     }
     config.plugins.slots.memory = pluginId;
     log(`Set plugins.slots.memory = "${pluginId}"`);
@@ -598,7 +610,10 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
  *   - removes `"adapter-openclaw"` from `plugins.allow`
  *   - filters `plugins.load.paths` by the same `isAdapterLoadPath` predicate
  *   - flips `plugins.entries["adapter-openclaw"].enabled = false` (keeps other fields)
- *   - clears `plugins.slots.memory` iff it currently equals `"adapter-openclaw"`
+ *   - restores `plugins.slots.memory` to the prior owner captured during merge
+ *     (`entries["adapter-openclaw"].previousMemorySlotOwner`), or clears it
+ *     when no prior owner was persisted. Either way, strips the
+ *     `previousMemorySlotOwner` metadata so a future merge re-captures fresh.
  *
  * Leaves `tools.alsoAllow` (shared with other plugins), workspace `config.json`
  * (user-owned), and any workspace `SKILL.md` copies alone. Idempotent — a
@@ -640,19 +655,42 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
     }
   }
 
-  // Flip entry.enabled to false (preserve other plugin-specific fields)
+  // Read the prior memory-slot owner that `mergeOpenClawConfig` persisted
+  // (before we mutate the entry). A string value means we should restore the
+  // slot on disconnect; anything else means the slot was empty at merge time.
+  let previousMemorySlotOwner: string | undefined;
+  const entry = config.plugins?.entries?.[pluginId];
+  if (entry && typeof entry === 'object' && typeof entry.previousMemorySlotOwner === 'string') {
+    previousMemorySlotOwner = entry.previousMemorySlotOwner;
+  }
+
+  // Flip entry.enabled to false (preserve other plugin-specific fields) and
+  // strip the previousMemorySlotOwner marker so a future merge re-captures
+  // whatever's in the slot at that point rather than restoring stale state.
   if (config.plugins && config.plugins.entries) {
-    const entry = config.plugins.entries[pluginId];
-    if (entry && typeof entry === 'object' && entry.enabled !== false) {
-      entry.enabled = false;
-      log(`Disabled ${pluginId} in plugins.entries`);
+    const entryForWrite = config.plugins.entries[pluginId];
+    if (entryForWrite && typeof entryForWrite === 'object') {
+      if (entryForWrite.enabled !== false) {
+        entryForWrite.enabled = false;
+        log(`Disabled ${pluginId} in plugins.entries`);
+      }
+      if ('previousMemorySlotOwner' in entryForWrite) {
+        delete entryForWrite.previousMemorySlotOwner;
+      }
     }
   }
 
-  // Clear slots.memory iff it still points at the adapter
+  // Restore or clear slots.memory iff it still points at the adapter. If the
+  // user has externally re-owned the slot between merge and unmerge we leave
+  // it untouched — only the adapter's own claim gets reversed.
   if (config.plugins && config.plugins.slots && config.plugins.slots.memory === pluginId) {
-    delete config.plugins.slots.memory;
-    log(`Cleared plugins.slots.memory (was "${pluginId}")`);
+    if (previousMemorySlotOwner) {
+      config.plugins.slots.memory = previousMemorySlotOwner;
+      log(`Restored plugins.slots.memory to "${previousMemorySlotOwner}" (was "${pluginId}")`);
+    } else {
+      delete config.plugins.slots.memory;
+      log(`Cleared plugins.slots.memory (was "${pluginId}")`);
+    }
   }
 
   const updated = JSON.stringify(config, null, 2) + '\n';
@@ -667,6 +705,64 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
 
   writeFileSync(openclawConfigPath, updated);
   log(`Unmerged adapter from ${openclawConfigPath} (backed up original)`);
+}
+
+/**
+ * Post-unmerge invariant check, counterpart to `verifyMemorySlotInvariants`
+ * but for the Disconnect flow. Confirms every field `mergeOpenClawConfig`
+ * writes has been unwound by `unmergeOpenClawConfig`:
+ *   - `plugins.slots.memory !== "adapter-openclaw"`.
+ *   - `plugins.allow` does not contain `"adapter-openclaw"`.
+ *   - `plugins.load.paths` contains no entry matching `isAdapterLoadPath`.
+ *   - `plugins.entries["adapter-openclaw"]?.enabled` is not `true`.
+ *
+ * Returns `null` when all invariants hold (disconnect is clean). Returns a
+ * descriptive string naming the first failed invariant otherwise — callers
+ * (e.g. the DKG daemon's PUT `/api/local-agent-integrations/:id` handler in
+ * `packages/cli/src/daemon.ts`) surface the string as `runtime.lastError` and
+ * refuse to transition the integration to `disconnected`.
+ *
+ * Non-throwing by design: a missing/unparseable config file yields a
+ * descriptive string instead of an exception so the daemon can decide what
+ * to do (in most scenarios, if the file vanished between unmerge and verify
+ * the disconnect is effectively complete and a dedicated error line is the
+ * right surface).
+ */
+export function verifyUnmergeInvariants(configPath: string): string | null {
+  if (!existsSync(configPath)) {
+    return `openclaw.json not found at ${configPath}`;
+  }
+
+  let config: any;
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch (err: any) {
+    return `Could not parse ${configPath}: ${err?.message ?? err}`;
+  }
+
+  const pluginId = ADAPTER_PLUGIN_ID;
+  const plugins = config?.plugins;
+
+  if (plugins?.slots?.memory === pluginId) {
+    return `plugins.slots.memory is still "${pluginId}"`;
+  }
+  if (Array.isArray(plugins?.allow) && plugins.allow.includes(pluginId)) {
+    return `plugins.allow still contains "${pluginId}"`;
+  }
+  if (Array.isArray(plugins?.load?.paths)) {
+    const stragglers = plugins.load.paths.filter(
+      (p: unknown) => typeof p === 'string' && isAdapterLoadPath(p),
+    );
+    if (stragglers.length > 0) {
+      return `plugins.load.paths still contains adapter path "${stragglers[0]}"`;
+    }
+  }
+  const entry = plugins?.entries?.[pluginId];
+  if (entry && typeof entry === 'object' && entry.enabled === true) {
+    return `plugins.entries["${pluginId}"].enabled is still true`;
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------

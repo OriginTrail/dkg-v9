@@ -20,8 +20,8 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { openclawConfigPath as adapterOpenclawConfigPath } from '@origintrail-official/dkg-adapter-openclaw';
 import { ethers } from 'ethers';
 
 const execAsync = promisify(exec);
@@ -2281,10 +2281,19 @@ export async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
   await runSetup({ start: false, verify: false, signal });
 }
 
+// KEEP IN SYNC with adapter's openclawConfigPath() — see packages/adapter-openclaw/src/setup.ts.
+// Intentionally duplicated to avoid a top-level static import of the adapter barrel, which would
+// break `dkg` startup in fresh workspace checkouts where the adapter's `dist/` has not been built
+// yet. The DI shape around `verifyMemorySlot` is synchronous, so a dynamic import is not an option
+// either — the fallback path has to be callable without awaiting.
+function localOpenclawConfigPath(): string {
+  return join(process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw'), 'openclaw.json');
+}
+
 export function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
   const configPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
-    : adapterOpenclawConfigPath();
+    : localOpenclawConfigPath();
   if (!existsSync(configPath)) return false;
   try {
     const raw = readFileSync(configPath, 'utf-8');
@@ -2566,17 +2575,28 @@ export async function connectLocalAgentIntegrationFromUi(
  * 'disconnected'. The adapter's `unmergeOpenClawConfig` is symmetric to
  * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
  */
+export type ReverseLocalAgentSetupDeps = {
+  unmergeOpenClawConfig?: (configPath: string) => void;
+  verifyUnmergeInvariants?: (configPath: string) => string | null;
+};
+
 export async function reverseLocalAgentSetupForUi(
   _config: DkgConfig,
   openclawConfigPath?: string,
+  deps: ReverseLocalAgentSetupDeps = {},
 ): Promise<void> {
   const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
-    : adapterOpenclawConfigPath();
-  const { unmergeOpenClawConfig } = await import('@origintrail-official/dkg-adapter-openclaw');
+    : localOpenclawConfigPath();
+  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants)
+    ? { unmergeOpenClawConfig: deps.unmergeOpenClawConfig, verifyUnmergeInvariants: deps.verifyUnmergeInvariants }
+    : await import('@origintrail-official/dkg-adapter-openclaw');
+  const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
+  const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
   unmergeOpenClawConfig(resolvedPath);
-  if (isOpenClawMemorySlotElected(resolvedPath)) {
-    throw new Error('OpenClaw disconnect failed: adapter-openclaw still elected to plugins.slots.memory after reverse-merge');
+  const failure = verifyUnmergeInvariants(resolvedPath);
+  if (failure) {
+    throw new Error(failure);
   }
 }
 

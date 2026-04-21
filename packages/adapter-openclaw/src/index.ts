@@ -7,6 +7,7 @@ export {
   runSetup,
   unmergeOpenClawConfig,
   verifyMemorySlotInvariants,
+  verifyUnmergeInvariants,
   type SetupOptions,
 } from './setup.js';
 // Codex Bug B24: the `DkgMemoryPlugin` class no longer exposes the legacy

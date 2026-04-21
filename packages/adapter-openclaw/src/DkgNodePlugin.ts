@@ -257,6 +257,10 @@ export class DkgNodePlugin {
       metadata: Record<string, unknown>;
     };
     reason: string;
+    runtime?: {
+      status: 'connecting' | 'ready' | 'degraded' | 'error';
+      ready: boolean;
+    };
   }): Promise<void> {
     try {
       await this.client.updateLocalAgentIntegration('openclaw', {
@@ -266,8 +270,8 @@ export class DkgNodePlugin {
           semanticEnrichment: false,
         },
         runtime: {
-          status: 'error',
-          ready: false,
+          status: args.runtime?.status ?? 'error',
+          ready: args.runtime?.ready ?? false,
           lastError: args.reason,
         },
       });
@@ -771,6 +775,10 @@ export class DkgNodePlugin {
         api,
         basePayload,
         reason: semanticWorkerStartError ?? 'Semantic enrichment worker unavailable after integration sync',
+        runtime: {
+          status: bridgeAlreadyReady ? 'degraded' : 'connecting',
+          ready: bridgeAlreadyReady,
+        },
       });
     }
 
@@ -784,9 +792,11 @@ export class DkgNodePlugin {
         transport: this.buildOpenClawTransport(existing?.transport, api),
         capabilities: this.withSemanticCapability(basePayload.capabilities, this.channelPlugin?.isSemanticEnrichmentActive() === true),
         runtime: {
-          status: 'ready',
+          status: this.channelPlugin?.isSemanticEnrichmentActive() === true ? 'ready' : 'degraded',
           ready: true,
-          lastError: null,
+          lastError: this.channelPlugin?.isSemanticEnrichmentActive() === true
+            ? null
+            : (semanticWorkerStartError ?? 'Semantic enrichment worker unavailable after integration sync'),
         },
       }))
       .catch(async (err: any) => {

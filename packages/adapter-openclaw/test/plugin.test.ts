@@ -169,9 +169,9 @@ describe('DkgNodePlugin', () => {
       expect(readyBody.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
       expect(readyBody.transport.wakeAuth).toBe('bridge-token');
       expect(readyBody.runtime).toMatchObject({
-        status: 'ready',
+        status: 'degraded',
         ready: true,
-        lastError: null,
+        lastError: 'Semantic enrichment worker unavailable after integration sync',
       });
     } finally {
       await plugin?.stop();
@@ -1745,6 +1745,7 @@ describe('DkgNodePlugin', () => {
       expect(updateBodies.length).toBeGreaterThan(0);
       expect(updateBodies.some((body) => body.capabilities?.semanticEnrichment === false)).toBe(true);
       expect(updateBodies.every((body) => body.capabilities?.semanticEnrichment !== true)).toBe(true);
+      expect(updateBodies.some((body) => body.runtime?.status === 'degraded')).toBe(true);
     } finally {
       startSpy.mockRestore();
       await plugin?.stop();

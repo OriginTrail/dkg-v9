@@ -212,13 +212,13 @@ describe('SemanticEnrichmentWorker', () => {
     expect(deleteSession).toHaveBeenCalledTimes(1);
     expect(run.mock.calls[0]?.[0]?.message).toContain('Return JSON only. Do not wrap the answer in markdown fences.');
     expect(run.mock.calls[0]?.[0]?.message).toContain(
-      'Schema: {"triples":[{"subject":"scheme:prefixed-iri","predicate":"scheme:prefixed-iri","object":"scheme:prefixed-iri or quoted N-Triples literal"}]}',
+      'Schema: {"triples":[{"subject":"absolute-or-native-iri","predicate":"absolute-or-native-iri","object":"absolute-or-native-iri or quoted N-Triples literal"}]}',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
       'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
-      'Use only safe bare scheme-prefixed IRIs for subject and predicate. Do not wrap IRIs in angle brackets.',
+      'Use only full absolute IRIs or native DKG IRIs (for example `https://...`, `urn:...`, or `did:...`) for subject and predicate. Do not use compact prefixes like `schema:name`, and do not wrap IRIs in angle brackets.',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
       'For literal objects, return the object field as a JSON string containing a quoted N-Triples literal. Examples: `\\"Acme\\"` and `\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>`.',
@@ -411,6 +411,84 @@ describe('SemanticEnrichmentWorker', () => {
     expect(fail).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith('evt-stop-quiesce', expect.any(String));
     expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('absorbs late waitForRun rejections after stop wins the race', async () => {
+    let rejectWaitForRun!: (error: unknown) => void;
+    let notifyWaitForRunStarted!: () => void;
+    const waitForRunStarted = new Promise<void>((resolve) => {
+      notifyWaitForRunStarted = resolve;
+    });
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-stop-late-reject',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-stop-late-reject',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-stop-late-reject',
+            userMessage: 'Track Alice.',
+            assistantReply: 'Noted.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn();
+    const fail = vi.fn();
+    const unhandled = vi.fn();
+    process.once('unhandledRejection', unhandled);
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-stop-late-reject' }),
+          waitForRun: vi.fn(() => {
+            notifyWaitForRunStarted();
+            return new Promise((_, reject) => {
+              rejectWaitForRun = reject;
+            });
+          }),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-stop-late-reject',
+      triggerSource: 'daemon',
+    });
+
+    await waitForRunStarted;
+    await worker.stop();
+    rejectWaitForRun(new Error('late timeout'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    process.removeListener('unhandledRejection', unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
   });
 
   it('includes the attempt number in the subagent session key for retries', async () => {
@@ -775,7 +853,7 @@ describe('SemanticEnrichmentWorker', () => {
     );
   });
 
-  it('drops unsafe IRIs from subagent output before appending triples', async () => {
+  it('drops compact-prefixed and malformed IRIs from subagent output before appending triples', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
         event: {
@@ -823,7 +901,7 @@ describe('SemanticEnrichmentWorker', () => {
             messages: [
               {
                 role: 'assistant',
-                text: '{"triples":[{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"https://schema.org/about","object":"https://schema.org/Person"},{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"https://schema.org/knows","object":"https://schema.org/Person bad"}]}',
+                text: '{"triples":[{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"https://schema.org/about","object":"https://schema.org/Person"},{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"schema:knows","object":"schema:Person"}]}',
               },
             ],
           }),
@@ -854,6 +932,71 @@ describe('SemanticEnrichmentWorker', () => {
         },
       ],
     );
+  });
+
+  it('skips file-import subagent execution when no markdown or text-like source is available', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-binary-skip',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-42',
+            assertionName: 'imported-spec',
+            assertionUri: 'did:dkg:context-graph:project-42/assertion/peer/imported-spec',
+            fileHash: 'keccak256:file-binary-skip',
+            detectedContentType: 'application/pdf',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const fetchFileText = vi.fn();
+    const run = vi.fn();
+    const append = vi.fn().mockResolvedValue({
+      applied: false,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-file-binary-skip',
+        status: 'completed',
+        semanticTripleCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn(),
+          getSessionMessages: vi.fn(),
+          deleteSession: vi.fn(),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-binary-skip',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(fetchFileText).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    expect(append).toHaveBeenCalledWith('evt-file-binary-skip', worker.getWorkerInstanceId(), []);
   });
 
   it('treats already-applied semantic append responses as successful no-ops', async () => {
@@ -1198,7 +1341,7 @@ describe('SemanticEnrichmentWorker', () => {
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain('File-import guidance:');
     expect(run.mock.calls[0]?.[0]?.message).toContain(
-      'Inspect this markdown chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
+      'Inspect this document-text chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
       'Do not turn every sentence into a paraphrase; focus on durable facts and relationships that improve retrieval, linking, and downstream reasoning.',
@@ -1310,8 +1453,8 @@ describe('SemanticEnrichmentWorker', () => {
     expect(run).toHaveBeenCalledTimes(2);
     expect(run.mock.calls[0]?.[0]?.sessionKey).toContain(':chunk-1');
     expect(run.mock.calls[1]?.[0]?.sessionKey).toContain(':chunk-2');
-    expect(run.mock.calls[0]?.[0]?.message).toContain('- Markdown chunk: 1 of 2');
-    expect(run.mock.calls[1]?.[0]?.message).toContain('- Markdown chunk: 2 of 2');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('- Source chunk: 1 of 2');
+    expect(run.mock.calls[1]?.[0]?.message).toContain('- Source chunk: 2 of 2');
     expect(run.mock.calls[0]?.[0]?.message).toContain('# Overview');
     expect(run.mock.calls.map((call) => String(call?.[0]?.message ?? '')).join('\n')).toContain('# Appendix Marker');
     expect(run.mock.calls[0]?.[0]?.message).not.toContain('...[truncated]');

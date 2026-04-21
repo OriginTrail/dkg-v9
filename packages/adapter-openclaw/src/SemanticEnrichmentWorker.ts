@@ -270,8 +270,26 @@ function truncateInline(value: string, maxLength: number): string {
   return truncate(value.replace(/\s+/g, ' ').trim(), maxLength);
 }
 
+function canUseRawFileAsSemanticText(contentType: string | undefined): boolean {
+  if (!contentType) return false;
+  const normalized = contentType.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.startsWith('text/')
+    || normalized === 'application/json'
+    || normalized === 'application/ld+json'
+    || normalized === 'application/xml'
+    || normalized === 'application/javascript'
+    || normalized.endsWith('+json')
+    || normalized.endsWith('+xml');
+}
+
 function isIriLike(value: string): boolean {
   return isSafeIri(value);
+}
+
+function isCanonicalSemanticIri(value: string): boolean {
+  if (!isSafeIri(value)) return false;
+  return value.includes('://') || value.startsWith('urn:') || value.startsWith('did:');
 }
 
 function looksLikeSchemePrefixedIri(value: string): boolean {
@@ -296,7 +314,7 @@ function unwrapBracketedIri(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
     const inner = trimmed.slice(1, -1).trim();
-    if (isIriLike(inner)) return inner;
+    if (isCanonicalSemanticIri(inner)) return inner;
   }
   return trimmed;
 }
@@ -304,7 +322,7 @@ function unwrapBracketedIri(value: string): string {
 function toObjectTerm(value: string): string {
   const trimmed = unwrapBracketedIri(value);
   if (!trimmed) return '';
-  if (isIriLike(trimmed) || isSafeLiteral(trimmed)) return trimmed;
+  if (isCanonicalSemanticIri(trimmed) || isSafeLiteral(trimmed)) return trimmed;
   if (looksLikeSchemePrefixedIri(trimmed)) return '';
   if (isQuotedLiteral(trimmed)) return '';
   const literal = JSON.stringify(trimmed);
@@ -320,7 +338,7 @@ function normalizeTriples(raw: unknown): SemanticTripleInput[] {
     const subject = typeof entry.subject === 'string' ? unwrapBracketedIri(entry.subject) : '';
     const predicate = typeof entry.predicate === 'string' ? unwrapBracketedIri(entry.predicate) : '';
     const object = typeof entry.object === 'string' ? toObjectTerm(entry.object) : '';
-    if (!isIriLike(subject) || !isIriLike(predicate) || !object) continue;
+    if (!isCanonicalSemanticIri(subject) || !isCanonicalSemanticIri(predicate) || !object) continue;
     const key = `${subject}\u0000${predicate}\u0000${object}`;
     if (dedup.has(key)) continue;
     dedup.add(key);
@@ -690,6 +708,9 @@ export class SemanticEnrichmentWorker {
       const waitResult = await this.waitForRunUntilLeaseLoss(runId, subagent, leaseHeartbeat);
       if (waitResult.kind === 'lease-lost') return 'lease-lost';
       if (waitResult.kind === 'stopped') return 'stopped';
+      if (waitResult.kind === 'wait-error') {
+        throw waitResult.error;
+      }
       if (syncLeaseState()) return 'lease-lost';
       if (syncStopState()) return 'stopped';
       const waitStatus = typeof waitResult.value?.status === 'string' ? waitResult.value.status.trim().toLowerCase() : '';
@@ -722,6 +743,7 @@ export class SemanticEnrichmentWorker {
     leaseHeartbeat: LeaseHeartbeatController,
   ): Promise<
     | { kind: 'wait'; value: { status?: string } }
+    | { kind: 'wait-error'; error: Error }
     | { kind: 'lease-lost' }
     | { kind: 'stopped' }
   > {
@@ -729,7 +751,13 @@ export class SemanticEnrichmentWorker {
       subagent.waitForRun({
         runId,
         timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
-      }).then((value) => ({ kind: 'wait' as const, value })),
+      }).then(
+        (value) => ({ kind: 'wait' as const, value }),
+        (error: unknown) => ({
+          kind: 'wait-error' as const,
+          error: error instanceof Error ? error : new Error(String(error)),
+        }),
+      ),
       leaseHeartbeat.waitForLoss().then(() => ({ kind: 'lease-lost' as const })),
       this.stopSignal.promise.then(() => ({ kind: 'stopped' as const })),
     ]);
@@ -824,8 +852,11 @@ export class SemanticEnrichmentWorker {
     }
 
     const fileSource = await this.loadFileImportSource(event.payload);
-    const ontologyContext = await this.loadOntologyContext(event.payload, fileSource.markdown);
-    const chunks = splitTextIntoChunks(fileSource.markdown, MAX_SOURCE_TEXT_CHARS);
+    if (!fileSource) {
+      return [];
+    }
+    const ontologyContext = await this.loadOntologyContext(event.payload, fileSource.text);
+    const chunks = splitTextIntoChunks(fileSource.text, MAX_SOURCE_TEXT_CHARS);
     return chunks.map((chunk, index) => ({
       sessionKey: this.buildSubagentSessionKey(event, `chunk-${index + 1}`),
       prompt: this.renderSubagentPrompt(
@@ -850,7 +881,7 @@ export class SemanticEnrichmentWorker {
       'You are an expert semantic extraction subagent for a DKG graph.',
       'Goal: produce as many grounded, semantically useful triples as the source directly supports while staying faithful to the provided ontology guidance.',
       'Return JSON only. Do not wrap the answer in markdown fences.',
-      'Schema: {"triples":[{"subject":"scheme:prefixed-iri","predicate":"scheme:prefixed-iri","object":"scheme:prefixed-iri or quoted N-Triples literal"}]}',
+      'Schema: {"triples":[{"subject":"absolute-or-native-iri","predicate":"absolute-or-native-iri","object":"absolute-or-native-iri or quoted N-Triples literal"}]}',
       'Core rules:',
       ...this.buildSharedPromptGuidance().map((line) => `- ${line}`),
       '',
@@ -878,7 +909,7 @@ export class SemanticEnrichmentWorker {
 
   private buildSharedPromptGuidance(): string[] {
     return [
-      'Use only safe bare scheme-prefixed IRIs for subject and predicate. Do not wrap IRIs in angle brackets.',
+      'Use only full absolute IRIs or native DKG IRIs (for example `https://...`, `urn:...`, or `did:...`) for subject and predicate. Do not use compact prefixes like `schema:name`, and do not wrap IRIs in angle brackets.',
       'For literal objects, return the object field as a JSON string containing a quoted N-Triples literal. Examples: `\\"Acme\\"` and `\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>`.',
       'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
       'Extend the existing graph in place and reuse the provided source URIs, message URIs, root entities, and attachment/file URIs whenever relevant.',
@@ -904,7 +935,7 @@ export class SemanticEnrichmentWorker {
 
   private buildFileImportPromptGuidance(): string[] {
     return [
-      'Inspect this markdown chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
+      'Inspect this document-text chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
       'Extract the important entities and connections described by the document, including people, organizations, products, projects, requirements, milestones, risks, decisions, claims, processes, dependencies, metrics, dates, and locations when explicitly supported.',
       'Prefer triples that capture the structure and meaning of the document, such as what the document is about, which entities participate in key events or processes, and how requirements, decisions, or claims relate to one another.',
       'Reuse the provided root entity and document-related URIs whenever they fit, so semantic output expands the imported assertion instead of creating detached parallel document graphs.',
@@ -990,41 +1021,61 @@ export class SemanticEnrichmentWorker {
 
   private async loadFileImportSource(payload: FileImportSemanticEventPayload): Promise<{
     metadataLines: string[];
-    markdown: string;
-  }> {
-    const markdownHash = payload.mdIntermediateHash ?? payload.fileHash;
-    const markdown = await this.client.fetchFileText(markdownHash, 'text/markdown');
+    text: string;
+    textLabel: string;
+  } | null> {
+    const markdownHash = payload.mdIntermediateHash?.trim();
+    const sourceDescriptor = markdownHash
+      ? {
+          hash: markdownHash,
+          contentType: 'text/markdown',
+          textLabel: 'Markdown source chunk',
+          extraMetadataLine: `- Markdown intermediate hash: ${markdownHash}`,
+        }
+      : canUseRawFileAsSemanticText(payload.detectedContentType)
+        ? {
+            hash: payload.fileHash,
+            contentType: payload.detectedContentType,
+            textLabel: 'Document text chunk',
+            extraMetadataLine: '- Semantic extraction is using original text-like file content because no markdown intermediate was produced.',
+          }
+        : null;
+    if (!sourceDescriptor) {
+      return null;
+    }
+    const text = await this.client.fetchFileText(sourceDescriptor.hash, sourceDescriptor.contentType);
     const explicitOntologyRef = this.normalizeOntologyRefHint(payload.ontologyRef);
     return {
       metadataLines: [
-      `- Context graph: ${payload.contextGraphId}`,
-      `- Assertion graph: ${payload.assertionUri}`,
-      ...(payload.rootEntity ? [`- Root entity: ${payload.rootEntity}`] : []),
-      `- File hash: ${payload.fileHash}`,
-      ...(payload.mdIntermediateHash ? [`- Markdown intermediate hash: ${payload.mdIntermediateHash}`] : []),
-      `- Detected content type: ${payload.detectedContentType}`,
-      ...(payload.sourceFileName ? [`- Source file name: ${payload.sourceFileName}`] : []),
-      ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${this.renderPromptLiteral(explicitOntologyRef)}`] : []),
+        `- Context graph: ${payload.contextGraphId}`,
+        `- Assertion graph: ${payload.assertionUri}`,
+        ...(payload.rootEntity ? [`- Root entity: ${payload.rootEntity}`] : []),
+        `- File hash: ${payload.fileHash}`,
+        sourceDescriptor.extraMetadataLine,
+        `- Detected content type: ${payload.detectedContentType}`,
+        ...(payload.sourceFileName ? [`- Source file name: ${payload.sourceFileName}`] : []),
+        ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${this.renderPromptLiteral(explicitOntologyRef)}`] : []),
       ],
-      markdown,
+      text,
+      textLabel: sourceDescriptor.textLabel,
     };
   }
 
   private buildFileImportChunkSection(
-    source: { metadataLines: string[]; markdown: string },
-    markdownChunk: string,
+    source: { metadataLines: string[]; text: string; textLabel: string },
+    textChunk: string,
     chunkIndex: number,
     chunkCount: number,
   ): string {
     return [
       'Source material:',
       ...source.metadataLines,
-      `- Markdown chunk: ${chunkIndex + 1} of ${chunkCount}`,
+      `- Source chunk: ${chunkIndex + 1} of ${chunkCount}`,
       ...(chunkCount > 1
         ? ['- Note: the full document is being processed across multiple chunked passes; other chunks may contain additional grounded context.']
         : ['- Note: this chunk covers the full document source.']),
-      '- Markdown source chunk:',
-      markdownChunk,
+      `- ${source.textLabel}:`,
+      textChunk,
     ].join('\n');
   }
 

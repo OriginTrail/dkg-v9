@@ -784,24 +784,14 @@ export class OriginTrailGameCoordinator {
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
 
-    const msg: proto.ExpeditionLaunchedMsg = {
-      app: proto.APP_ID,
-      type: 'expedition:launched',
-      swarmId,
-      peerId: this.myPeerId,
-      timestamp: now,
-      gameStateJson,
-      partyOrder: swarm.players.map(p => p.peerId),
-      contextGraphId: swarm.contextGraphId,
-      requiredSignatures: swarm.requiredSignatures,
-    };
-    await this.broadcast(msg);
-    this.log(`Expedition launched for ${swarmId}`);
-
-    // Install CCL turn-validation policy. If the agent supports CCL evaluation
-    // and installation fails, the expedition is aborted — we cannot silently
-    // skip governance since followers will expect CCL enforcement and reject
-    // proposals when they fail to resolve the policy.
+    // Install CCL turn-validation policy BEFORE broadcasting expedition:launched.
+    // Followers must learn the leader's authoritative cclPolicyInstalled state
+    // from the launch message; otherwise they would optimistically assume the
+    // policy exists, fail to resolve it locally, and reject every proposal —
+    // deadlocking turn advancement (G-2). If installation fails on a real chain
+    // we still abort, but the noChainOwner fallback keeps no-chain dev/E2E
+    // working with cclPolicyInstalled=false on every node.
+    swarm.cclPolicyInstalled = false;
     if (this.agent.publishCclPolicy && this.agent.approveCclPolicy) {
       try {
         const published = await this.agent.publishCclPolicy({
@@ -818,15 +808,8 @@ export class OriginTrailGameCoordinator {
         swarm.cclPolicyInstalled = true;
         this.log(`CCL turn-validation policy installed for ${swarmId}`);
       } catch (err: any) {
-        // If the agent supports CCL evaluation, installation failure is normally
-        // fatal because evaluateCclPolicy is invoked later and followers will
-        // independently attempt to resolve the policy. However, a paranet with
-        // no registered on-chain owner (e.g. tests / dev without chain identity)
-        // cannot manage policies at all — in that case degrade gracefully and
-        // proceed without CCL rather than bricking every launch. Followers in
-        // the same mode will hit the identical failure and also skip CCL.
-        const msg = String(err?.message ?? err);
-        const noChainOwner = /no registered owner|cannot manage policies|identity not yet provisioned|Identity not set/i.test(msg);
+        const installErrMsg = String(err?.message ?? err);
+        const noChainOwner = /no registered owner|cannot manage policies|identity not yet provisioned|Identity not set/i.test(installErrMsg);
         if (this.agent.evaluateCclPolicy && !noChainOwner) {
           this.swarms.delete(swarmId);
           throw new Error(
@@ -838,6 +821,21 @@ export class OriginTrailGameCoordinator {
         this.log(`CCL policy installation failed: ${err.message} — CCL governance not available, proceeding without`);
       }
     }
+
+    const msg: proto.ExpeditionLaunchedMsg = {
+      app: proto.APP_ID,
+      type: 'expedition:launched',
+      swarmId,
+      peerId: this.myPeerId,
+      timestamp: now,
+      gameStateJson,
+      partyOrder: swarm.players.map(p => p.peerId),
+      contextGraphId: swarm.contextGraphId,
+      requiredSignatures: swarm.requiredSignatures,
+      cclPolicyInstalled: swarm.cclPolicyInstalled,
+    };
+    await this.broadcast(msg);
+    this.log(`Expedition launched for ${swarmId}`);
 
     return swarm;
   }
@@ -1622,10 +1620,16 @@ export class OriginTrailGameCoordinator {
     swarm.turnDeadline = Date.now() + 30_000;
     if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
     if (msg.requiredSignatures != null) swarm.requiredSignatures = msg.requiredSignatures;
-    // Followers assume CCL is installed if the agent supports it and a context graph exists.
-    // The leader publishes the policy via gossip; followers will resolve it at evaluation time.
-    // If the policy isn't found, the evaluation catch block will handle it gracefully.
-    swarm.cclPolicyInstalled = !!this.agent.evaluateCclPolicy && !!swarm.contextGraphId;
+    // Honor the leader's authoritative cclPolicyInstalled flag (G-2).
+    // Followers MUST NOT optimistically infer "installed" from the local
+    // capabilities; if the leader couldn't install the policy we'd reject
+    // every subsequent proposal in evaluateCclPolicy and deadlock the game.
+    // Legacy launch payloads omit the flag — treat that as "not installed"
+    // since we have no on-chain policy to resolve against.
+    swarm.cclPolicyInstalled =
+      !!this.agent.evaluateCclPolicy &&
+      !!swarm.contextGraphId &&
+      msg.cclPolicyInstalled === true;
 
     this.pushNotification({
       type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,

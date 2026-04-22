@@ -61,6 +61,16 @@ export interface ExpeditionLaunchedMsg extends BaseMessage {
   partyOrder?: string[];
   contextGraphId?: string;
   requiredSignatures?: number;
+  /**
+   * Authoritative leader signal for whether the CCL turn-validation policy
+   * was successfully installed on-chain for this expedition. Followers MUST
+   * use this flag (instead of inferring it locally) to decide whether to
+   * gate every proposal on `evaluateCclPolicy`. Without this signal,
+   * followers would optimistically assume the policy exists, fail to
+   * resolve it, and reject every proposal — deadlocking turn advancement
+   * (G-2). Defaults to `false` when omitted (legacy / unknown leader).
+   */
+  cclPolicyInstalled?: boolean;
 }
 
 export interface VoteCastMsg extends BaseMessage {

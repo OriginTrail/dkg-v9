@@ -406,9 +406,29 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
 /**
  * Wrap a query so it runs over a union of named graphs in a single execution,
  * preserving LIMIT/ORDER BY/DISTINCT/aggregate semantics.
+ *
+ * Bot review (PR #229 L-follow-up): the previous revision injected
+ * `VALUES ?_viewGraph { <g1> <g2> … } GRAPH ?_viewGraph { inner }` directly
+ * into the caller's WHERE block. Two failure modes:
+ *
+ *   1. Scope leak — `SELECT *` (or any projection that includes the graph
+ *      variable) over a multi-graph view emitted an extra `_viewGraph`
+ *      column, so downstream consumers saw a mystery binding they didn't
+ *      ask for.
+ *   2. Name collision — a user query that legitimately binds
+ *      `?_viewGraph` (rare but valid) would silently intersect with the
+ *      helper's VALUES list and clamp to the helper's graph URIs.
+ *
+ * The fix is to use an explicit UNION over each graph instead of a
+ * single GRAPH ?var binding. That keeps the inner block's variables
+ * (and only those) in scope — no helper var is introduced at all, so
+ * neither SELECT * leakage nor variable-name collisions can happen.
+ * Single-graph views skip the UNION wrapper entirely and use a plain
+ * `GRAPH <uri>` block.
  */
 function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
   if (sparql.toLowerCase().includes('graph ')) return sparql;
+  if (graphUris.length === 0) return sparql;
 
   const whereIdx = sparql.search(/WHERE\s*\{/i);
   if (whereIdx === -1) return sparql;
@@ -429,8 +449,14 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
   const inner = sparql.slice(braceStart + 1, braceEnd);
   const after = sparql.slice(braceEnd);
 
-  const valuesClause = graphUris.map((g) => `<${g}>`).join(' ');
-  return `${before} VALUES ?_viewGraph { ${valuesClause} } GRAPH ?_viewGraph { ${inner} } ${after}`;
+  if (graphUris.length === 1) {
+    return `${before} GRAPH <${graphUris[0]}> { ${inner} } ${after}`;
+  }
+
+  const unionBranches = graphUris
+    .map((g) => `{ GRAPH <${g}> { ${inner} } }`)
+    .join(' UNION ');
+  return `${before} ${unionBranches} ${after}`;
 }
 
 /**

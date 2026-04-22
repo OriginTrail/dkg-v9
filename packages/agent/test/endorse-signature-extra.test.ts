@@ -287,4 +287,39 @@ describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer'
     expect(tsQuad.object).toContain(fixedNow.toISOString());
     expect(nonceQuad.object).toContain(fixedNonce);
   });
+
+  // PR #229 D1 (2nd follow-up, bot review): the signer MUST match the
+  // `agentAddress` embedded in the quads, otherwise recovery yields a
+  // different address than the one peers see in the payload and the
+  // endorsement is unverifiable (or worse, silently attributed to the
+  // wrong identity). This test pins that mismatch mode explicitly.
+  it('is NOT verifiable when the signer wallet does not match the embedded agentAddress', async () => {
+    const agentWallet = ethers.Wallet.createRandom();
+    const wrongWallet = ethers.Wallet.createRandom();
+    expect(agentWallet.address).not.toBe(wrongWallet.address);
+    const fixedNow = new Date('2026-05-05T05:05:05.555Z');
+    const fixedNonce = '0x' + '55'.repeat(16);
+    const quads = await buildEndorsementQuadsAsync(
+      agentWallet.address,
+      'ual:mismatch',
+      'cg-mismatch',
+      {
+        signer: (d) => wrongWallet.signMessage(d),
+        now: fixedNow,
+        nonce: fixedNonce,
+      },
+    );
+    const sigQuad = quads.find((q) => q.predicate === DKG_ENDORSEMENT_SIGNATURE)!;
+    const sigHex = sigQuad.object.replace(/^"/, '').replace(/"$/, '');
+    const digest = canonicalEndorseDigest(
+      agentWallet.address,
+      'ual:mismatch',
+      'cg-mismatch',
+      fixedNow.toISOString(),
+      fixedNonce,
+    );
+    const recovered = ethers.verifyMessage(digest, sigHex);
+    expect(recovered.toLowerCase()).toBe(wrongWallet.address.toLowerCase());
+    expect(recovered.toLowerCase()).not.toBe(agentWallet.address.toLowerCase());
+  });
 });

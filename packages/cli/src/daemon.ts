@@ -75,7 +75,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, enforceSignedRequestPostBody, SignedRequestRejectedError } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
 import {
@@ -1565,6 +1565,7 @@ async function runDaemonInner(
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;
+          if (err instanceof SignedRequestRejectedError) throw err;
           return jsonResponse(res, 500, {
             error: err.message ?? "Failed to update shared memory TTL",
           });
@@ -1631,7 +1632,25 @@ async function runDaemonInner(
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
-      if (err instanceof PayloadTooLargeError) {
+      if (err instanceof SignedRequestRejectedError) {
+        // PR #229 F2 follow-up: the body-reading helpers throw this when
+        // the post-body HMAC verification fails for a request that opted
+        // into signed mode. Map to 401 with the same wire shape as the
+        // pre-body signed-mode rejections in httpAuthGuard so clients see
+        // a single consistent error surface.
+        const status = err.reason === 'missing-fields' ? 400 : 401;
+        const extraHeaders: Record<string, string> =
+          status === 401
+            ? {
+                'WWW-Authenticate': 'Bearer realm="dkg-node"',
+              }
+            : {};
+        res.writeHead(status, {
+          'Content-Type': 'application/json',
+          ...extraHeaders,
+        });
+        res.end(JSON.stringify({ error: `Signed request rejected: ${err.reason}` }));
+      } else if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
       } else if (err instanceof SyntaxError) {
         jsonResponse(res, 400, { error: err.message });
@@ -4963,6 +4982,7 @@ async function handleRequest(
       body = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
     } catch (err: any) {
       if (err instanceof PayloadTooLargeError) throw err;
+      if (err instanceof SignedRequestRejectedError) throw err;
       return jsonResponse(res, 400, {
         error: `Failed to read request body: ${err.message}`,
       });
@@ -8100,7 +8120,23 @@ function readBody(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString());
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // PR #229 F2 follow-up (bot review): enforce the post-body
+      // signed-request HMAC check here, centrally, so every route that
+      // reads a body automatically validates the signature against the
+      // actual bytes. Previously httpAuthGuard only pre-validated the
+      // headers and stashed `__dkgSignedAuth`, but no caller invoked
+      // verifyHttpSignedRequestAfterBody — which meant a valid bearer
+      // token plus an arbitrary x-dkg-signature still reached the
+      // handler with the body-binding guarantee silently disabled.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf.toString());
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);
@@ -8135,7 +8171,18 @@ function readBodyBuffer(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks));
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // See readBody() for the rationale — the signed-request post-body
+      // check must run here too so multipart / binary routes cannot be
+      // used to bypass the HMAC / body-binding check.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf);
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);

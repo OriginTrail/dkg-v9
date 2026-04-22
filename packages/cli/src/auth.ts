@@ -673,6 +673,12 @@ export interface SignedAuthPending {
  * When the verification succeeds the nonce is committed to the seen-nonce
  * cache, so subsequent replays are rejected even after process restart
  * (bounded by the freshness window).
+ *
+ * NOTE: Prefer {@link enforceSignedRequestPostBody} from daemon (and any
+ * other HTTP surface that reads request bodies) so the enforcement is
+ * driven centrally from the body-reading helper instead of each route
+ * having to remember to call it. This function is retained because it is
+ * still the lowest-level primitive.
  */
 export function verifyHttpSignedRequestAfterBody(
   req: IncomingMessage,
@@ -690,6 +696,57 @@ export function verifyHttpSignedRequestAfterBody(
     signature: pending.signature,
     token: pending.token,
   });
+}
+
+/**
+ * Thrown by {@link enforceSignedRequestPostBody} when the signed-request
+ * post-body HMAC verification fails. The HTTP layer maps this to 401.
+ *
+ * Bot review (PR #229 F2 follow-up): the previous revision of
+ * {@link httpAuthGuard} pre-validated the signed-request HEADERS, stashed
+ * `__dkgSignedAuth`, and returned `true`. No call site actually invoked
+ * `verifyHttpSignedRequestAfterBody` — so any request with a fresh
+ * timestamp / nonce and an arbitrary `x-dkg-signature` reached the
+ * handler as long as the bearer token was valid, completely defeating
+ * the body-binding guarantee the HMAC is supposed to provide. The fix
+ * is to enforce the post-body check inside the daemon's body-reading
+ * helpers so EVERY buffered-body route automatically validates.
+ */
+export class SignedRequestRejectedError extends Error {
+  readonly reason: Exclude<SignedRequestOutcome, { ok: true }>['reason'];
+  constructor(reason: Exclude<SignedRequestOutcome, { ok: true }>['reason']) {
+    super(`Signed request rejected: ${reason}`);
+    this.name = 'SignedRequestRejectedError';
+    this.reason = reason;
+  }
+}
+
+/**
+ * Enforce the post-body signed-request HMAC check. Call this from the
+ * shared body-reading code path after the full body has been buffered
+ * and before the handler sees it.
+ *
+ * No-op when the request did NOT opt into signed-request mode (i.e.
+ * {@link httpAuthGuard} did not stash `__dkgSignedAuth`). When signed
+ * mode is active, throws {@link SignedRequestRejectedError} on any
+ * failure reason — the HTTP layer is expected to catch it and emit a
+ * 401 response. Once a request's signature has been verified it is
+ * marked on `__dkgSignedAuth.verified = true` so subsequent body-
+ * reads (e.g. multipart handlers that call readBody more than once)
+ * are idempotent.
+ */
+export function enforceSignedRequestPostBody(
+  req: IncomingMessage,
+  body: Buffer | string,
+): void {
+  const pending = (req as unknown as { __dkgSignedAuth?: SignedAuthPending & { verified?: boolean } }).__dkgSignedAuth;
+  if (!pending || pending.verified) return;
+  const outcome = verifyHttpSignedRequestAfterBody(req, body);
+  if (outcome.ok) {
+    pending.verified = true;
+    return;
+  }
+  throw new SignedRequestRejectedError(outcome.reason);
 }
 
 /**

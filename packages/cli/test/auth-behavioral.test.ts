@@ -29,6 +29,9 @@ import {
   loadTokens,
   _clearReplayCacheForTesting,
   SIGNED_REQUEST_FRESHNESS_WINDOW_MS,
+  enforceSignedRequestPostBody,
+  SignedRequestRejectedError,
+  verifyHttpSignedRequestAfterBody,
 } from '../src/auth.js';
 
 function sigFor(
@@ -426,5 +429,99 @@ describe('httpAuthGuard — advanced branches', () => {
       headers: { Authorization: `Bearer ${VALID}` },
     });
     expect(retry.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #229 F2 follow-up: enforceSignedRequestPostBody must reject tampered /
+// missing / stale signatures once the body is buffered. The previous revision
+// pre-validated the headers and trusted the request if the bearer token was
+// valid — this test pins the NEW enforcement path.
+// ---------------------------------------------------------------------------
+
+describe('enforceSignedRequestPostBody — centralised body-binding enforcement', () => {
+  const TOKEN = 'post-body-secret';
+  const freshNonce = () => `n-${randomBytes(8).toString('hex')}`;
+
+  function makeReqWithPending(
+    method: string,
+    url: string,
+    timestamp: string,
+    nonce: string,
+    signature: string,
+  ): IncomingMessage {
+    const req = {
+      method,
+      url,
+      headers: { host: 'localhost' },
+    } as unknown as IncomingMessage;
+    (req as unknown as { __dkgSignedAuth?: unknown }).__dkgSignedAuth = {
+      token: TOKEN,
+      timestamp,
+      nonce,
+      signature,
+    };
+    return req;
+  }
+
+  it('is a no-op when the request did not opt into signed mode', () => {
+    const req = { method: 'POST', url: '/x', headers: { host: 'localhost' } } as unknown as IncomingMessage;
+    expect(() => enforceSignedRequestPostBody(req, '{"x":1}')).not.toThrow();
+  });
+
+  it('throws SignedRequestRejectedError when body has been tampered', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const realBody = '{"x":1}';
+    const sig = sigFor(TOKEN, 'POST', '/api/query', ts, nonce, realBody);
+    const req = makeReqWithPending('POST', '/api/query', ts, nonce, sig);
+    const tamperedBody = '{"x":2}';
+    expect(() => enforceSignedRequestPostBody(req, tamperedBody)).toThrow(SignedRequestRejectedError);
+    try {
+      enforceSignedRequestPostBody(req, tamperedBody);
+    } catch (err) {
+      expect((err as SignedRequestRejectedError).reason).toBe('bad-signature');
+    }
+  });
+
+  it('accepts a correctly-signed body and marks the request verified (idempotent)', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const body = Buffer.from('{"x":1}');
+    const sig = sigFor(TOKEN, 'POST', '/api/query', ts, nonce, body);
+    const req = makeReqWithPending('POST', '/api/query', ts, nonce, sig);
+    expect(() => enforceSignedRequestPostBody(req, body)).not.toThrow();
+    const pending = (req as unknown as { __dkgSignedAuth?: { verified?: boolean } }).__dkgSignedAuth;
+    expect(pending?.verified).toBe(true);
+    // A second call with *different* bytes must NOT re-verify (idempotent);
+    // this is important for routes that read the body more than once
+    // (multipart sub-reads). The first verification is the authoritative
+    // one, and the stashed auth context is marked accordingly.
+    expect(() => enforceSignedRequestPostBody(req, 'tampered')).not.toThrow();
+  });
+
+  it('throws with reason=stale-timestamp when the signature is old', () => {
+    const staleTs = new Date(Date.now() - SIGNED_REQUEST_FRESHNESS_WINDOW_MS - 60_000).toISOString();
+    const nonce = freshNonce();
+    const body = '{}';
+    const sig = sigFor(TOKEN, 'POST', '/api/x', staleTs, nonce, body);
+    const req = makeReqWithPending('POST', '/api/x', staleTs, nonce, sig);
+    try {
+      enforceSignedRequestPostBody(req, body);
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SignedRequestRejectedError);
+      expect((err as SignedRequestRejectedError).reason).toBe('stale-timestamp');
+    }
+  });
+
+  it('verifyHttpSignedRequestAfterBody remains exported for legacy callers', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const body = 'payload';
+    const sig = sigFor(TOKEN, 'POST', '/api/legacy', ts, nonce, body);
+    const req = makeReqWithPending('POST', '/api/legacy', ts, nonce, sig);
+    const out = verifyHttpSignedRequestAfterBody(req, body);
+    expect(out).toEqual({ ok: true });
   });
 });

@@ -1923,8 +1923,24 @@ export class DKGAgent {
   getDefaultPublisherWallet(): ethers.Wallet | undefined {
     const addr = this.defaultAgentAddress;
     if (!addr) return undefined;
+    return this.getLocalAgentWallet(addr);
+  }
+
+  /**
+   * Return an `ethers.Wallet` for the registered local agent whose
+   * `agentAddress` matches `addr` (case-insensitive), or `undefined` if
+   * no such agent is registered or its private key is not held locally
+   * (self-sovereign agents). Used by endorse() and any other signing
+   * path that MUST sign with the exact key that matches the address
+   * embedded in the payload — otherwise recovery yields a different
+   * address than the one peers see in the quad (bot review PR #229 D1
+   * follow-up).
+   */
+  getLocalAgentWallet(addr: string): ethers.Wallet | undefined {
+    if (!addr) return undefined;
+    const want = addr.toLowerCase();
     for (const r of this.localAgents.values()) {
-      if (r.agentAddress.toLowerCase() === addr.toLowerCase() && r.privateKey) {
+      if (r.agentAddress.toLowerCase() === want && r.privateKey) {
         try {
           return new ethers.Wallet(r.privateKey);
         } catch {
@@ -4373,20 +4389,54 @@ export class DKGAgent {
     // reject it. The previous sync `buildEndorsementQuads` path silently
     // ignored any `signer` option and always emitted the unsigned digest.
     const { buildEndorsementQuadsAsync } = await import('./endorse.js');
-    // Bot review D1 follow-up: `DKGAgentWallet` does NOT expose an `ethWallet`
-    // field, so the previous `(this.wallet as { ethWallet }).ethWallet` cast
-    // always resolved to `undefined` in production and the EIP-191 signer was
-    // never wired. The correct source of an `ethers.Wallet` for the registered
-    // local agent identity is `getDefaultPublisherWallet()`, which walks
-    // `this.localAgents` and instantiates a Wallet from the matching
-    // `privateKey`. This is the same wallet used everywhere else for on-chain
-    // signing (paranet registration, ontology root, etc.), so endorsements now
-    // recover to the same address as the rest of the agent's signed traffic.
-    const walletForEndorsement = this.getDefaultPublisherWallet();
+    // Bot review D1 (2nd follow-up, PR #229): the signer MUST match the
+    // `agentAddress` we embed in the endorsement quad, otherwise peers
+    // recover a different address from the EIP-191 signature than the
+    // one they see in the payload and reject the endorsement (or worse,
+    // accept it as coming from the wrong identity on a multi-agent node).
+    // Two concrete bugs the previous revision hit:
+    //   1. Multi-agent nodes: `getDefaultPublisherWallet()` always
+    //      returned the *default* local agent's wallet. Endorsing with
+    //      `agentAddress=A` on a node whose default agent is B signed
+    //      A's endorsement with B's key — recovery yields B, mismatch.
+    //   2. Omitted `agentAddress` fell back to `this.peerId`, which is
+    //      a libp2p peer id (base58 CID). No ethers.Wallet can ever
+    //      recover to a libp2p peer id via EIP-191, so the signature
+    //      was structurally unverifiable even when it was present.
+    // The fix: pick a concrete EVM address (caller-supplied OR the
+    // default agent address, never `peerId`), look up the Wallet whose
+    // stored private key matches THAT address, and refuse to emit an
+    // unsigned-digest-only endorsement for a locally-registered agent
+    // whose key we DO hold — that would be a silent downgrade.
+    const agentAddress = opts.agentAddress ?? this.defaultAgentAddress;
+    if (!agentAddress) {
+      throw new Error(
+        'endorse: no agentAddress provided and no default agent registered. ' +
+        'Register a local agent with registerAgent() or pass opts.agentAddress explicitly.',
+      );
+    }
+    const walletForEndorsement = this.getLocalAgentWallet(agentAddress);
+    if (!walletForEndorsement) {
+      // We know the address is registered locally iff localAgents has an
+      // entry for it WITHOUT a private key (self-sovereign). In that
+      // case the caller is expected to sign externally — not supported
+      // here. Fall back to unsigned digest only when the endorsing
+      // address is genuinely external (remote agent endorsing on-chain).
+      const localRecord = [...this.localAgents.values()].find(
+        (r) => r.agentAddress.toLowerCase() === agentAddress.toLowerCase(),
+      );
+      if (localRecord && !localRecord.privateKey) {
+        throw new Error(
+          `endorse: local agent ${agentAddress} is self-sovereign (no private key held). ` +
+          `Pre-sign the endorsement digest externally or register the wallet's private key.`,
+        );
+      }
+      // else: external agentAddress → emit unsigned-digest endorsement
+      // (verifiers requiring non-repudiation will reject).
+    }
     const signer = walletForEndorsement
       ? (digest: Uint8Array) => walletForEndorsement.signMessage(digest)
       : undefined;
-    const agentAddress = opts.agentAddress ?? this.peerId;
     const quads = await buildEndorsementQuadsAsync(
       agentAddress,
       opts.knowledgeAssetUal,

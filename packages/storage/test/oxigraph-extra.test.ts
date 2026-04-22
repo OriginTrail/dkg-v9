@@ -92,6 +92,45 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
     ).rejects.toThrow(/oxigraph-persistent requires options\.path/);
   });
 
+  // PR #229 M-follow-up (bot review): the numeric-subtype side-table used
+  // to live only in memory, so `oxigraph-persistent` lost every publisher-
+  // declared `xsd:long` / `xsd:int` / `xsd:short` / `xsd:byte` on restart
+  // and `restoreOriginalDatatype*()` collapsed them back to Oxigraph's
+  // canonical `xsd:integer`. The fix persists the side-table to a
+  // `<persistPath>.numeric-datatypes.json` sidecar and hydrates it on
+  // startup — this test pins that contract.
+  it('numeric-subtype declarations survive a restart (xsd:long/xsd:int/xsd:short preserved)', async () => {
+    try {
+      const LONG = 'http://www.w3.org/2001/XMLSchema#long';
+      const INT = 'http://www.w3.org/2001/XMLSchema#int';
+      const SHORT = 'http://www.w3.org/2001/XMLSchema#short';
+      const g = 'urn:dkg:subtype:graph';
+      const s1 = new OxigraphStore(persistPath);
+      await s1.insert([
+        { subject: 'urn:num:a', predicate: 'http://ex.org/v', object: `"9223372036854775807"^^<${LONG}>`, graph: g },
+        { subject: 'urn:num:b', predicate: 'http://ex.org/v', object: `"123456"^^<${INT}>`, graph: g },
+        { subject: 'urn:num:c', predicate: 'http://ex.org/v', object: `"777"^^<${SHORT}>`, graph: g },
+      ]);
+      await s1.close();
+
+      // Fresh instance — must rebuild the side-table from the sidecar.
+      const s2 = new OxigraphStore(persistPath);
+      const r = await s2.query(
+        `SELECT ?s ?o WHERE { GRAPH <${g}> { ?s <http://ex.org/v> ?o } } ORDER BY ?s`,
+      );
+      expect(r.type).toBe('bindings');
+      if (r.type !== 'bindings') return;
+      const byS: Record<string, string> = {};
+      for (const row of r.bindings) byS[row['s'] as string] = row['o'] as string;
+      expect(byS['urn:num:a']).toBe(`"9223372036854775807"^^<${LONG}>`);
+      expect(byS['urn:num:b']).toBe(`"123456"^^<${INT}>`);
+      expect(byS['urn:num:c']).toBe(`"777"^^<${SHORT}>`);
+      await s2.close();
+    } finally {
+      cleanup();
+    }
+  });
+
   it('delete then close also flushes — reopen shows deletion', async () => {
     try {
       const s1 = new OxigraphStore(persistPath);

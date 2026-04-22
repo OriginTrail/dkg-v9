@@ -82,6 +82,20 @@ export class OxigraphStore implements TripleStore {
     this.originalNumericDatatype.set(key, dtype);
   }
 
+  /**
+   * Companion sidecar path that persists the numeric-subtype metadata
+   * across restarts. The main N-Quads dump cannot carry it because
+   * Oxigraph canonicalises `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte`
+   * to `xsd:integer` BEFORE the dump is emitted — so by the time we
+   * read the file back the original declared type is gone. Writing it
+   * alongside the dump (and reading it on {@link hydrateSync}) is the
+   * only way to keep the side-table useful in `oxigraph-persistent`
+   * across restarts (bot review PR #229 M-follow-up).
+   */
+  private static numericDatatypeSidecarPath(persistPath: string): string {
+    return `${persistPath}.numeric-datatypes.json`;
+  }
+
   private hydrateSync(filePath: string): void {
     try {
       if (!existsSync(filePath)) return;
@@ -91,6 +105,33 @@ export class OxigraphStore implements TripleStore {
       }
     } catch {
       // File missing or corrupt — start empty.
+    }
+    // Bot review (PR #229 M-follow-up): `originalNumericDatatype` used
+    // to only be populated by live `insert()` calls, so after a process
+    // restart every `oxigraph-persistent` store lost all numeric-subtype
+    // metadata and `restoreOriginalDatatype*()` collapsed the literals
+    // back to Oxigraph's canonical `xsd:integer`. Hydrate the side-table
+    // from the companion sidecar written by {@link flushNow} so restart
+    // round-trips preserve the publisher-declared subtype.
+    try {
+      const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(filePath);
+      if (!existsSync(sidecarPath)) return;
+      const raw = readFileSync(sidecarPath, 'utf-8');
+      if (!raw.trim()) return;
+      const parsed = JSON.parse(raw) as { entries?: Array<[string, string]> };
+      const entries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
+      for (const entry of entries) {
+        if (
+          Array.isArray(entry) &&
+          entry.length === 2 &&
+          typeof entry[0] === 'string' &&
+          typeof entry[1] === 'string'
+        ) {
+          this.originalNumericDatatype.set(entry[0], entry[1]);
+        }
+      }
+    } catch {
+      // Sidecar missing or corrupt — fall back to lexical-only restore.
     }
   }
 
@@ -112,6 +153,17 @@ export class OxigraphStore implements TripleStore {
       await mkdir(dirname(this.persistPath), { recursive: true });
       const nquads = this.store.dump({ format: 'application/n-quads' });
       await writeFile(this.persistPath, nquads, 'utf-8');
+      // Bot review (PR #229 M-follow-up): persist the numeric-subtype
+      // side-table alongside the dump so hydrateSync() can restore it on
+      // the next boot. Without this sidecar every restart re-canonicalises
+      // `xsd:long`/`xsd:int`/... back to `xsd:integer` on read-back because
+      // Oxigraph has already collapsed the subtype by the time it dumps.
+      const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(this.persistPath);
+      const sidecar = JSON.stringify({
+        version: 1,
+        entries: Array.from(this.originalNumericDatatype.entries()),
+      });
+      await writeFile(sidecarPath, sidecar, 'utf-8');
     } catch {
       // Best-effort persistence.
     } finally {

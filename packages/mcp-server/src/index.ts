@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { DkgClient } from './connection.js';
+import { probeStatus, probeAuth } from './auth-probe.js';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
 const CONTEXT_GRAPH = 'dev-coordination';
@@ -457,12 +458,27 @@ server.registerTool(
         );
       }
 
+      // Bot review (PR #229): `/api/status` is on the daemon's public
+      // allowlist (no auth required), so probing it only reports
+      // reachability — it says nothing about whether the configured
+      // bearer token is actually accepted. `mcp_auth status` used to
+      // print "OK" even when the credential was wrong or absent, which
+      // is actively misleading for a tool whose whole purpose is to let
+      // the host verify the active auth state. Probe an authenticated
+      // endpoint (`/api/agents`) in addition to the liveness probe and
+      // report the two results independently. `auth probe = OK` now
+      // requires the credential to be accepted; a 401/403 from the
+      // authenticated probe surfaces as `auth probe = FAILED (401)`
+      // even when the node is reachable.
       const status = await probeStatus(url, cred);
+      const authProbe = await probeAuth(url, cred);
       return ok(
         `node = ${url}\n` +
           `credential fingerprint = ${fingerprint}\n` +
-          `status probe = ${status.ok ? 'OK' : 'FAILED'} ${status.code ? `(${status.code})` : ''}\n` +
-          (status.body ? `body = ${status.body}\n` : ''),
+          `liveness probe = ${status.ok ? 'OK' : 'FAILED'}${status.code ? ` (${status.code})` : ''}\n` +
+          `auth probe = ${authProbe.ok ? 'OK' : 'FAILED'}${authProbe.code ? ` (${authProbe.code})` : ''}\n` +
+          (status.body ? `liveness body = ${status.body}\n` : '') +
+          (authProbe.body ? `auth body = ${authProbe.body}\n` : ''),
       );
     } catch (e) {
       return err(`mcp_auth error: ${formatError(e)}`);
@@ -479,21 +495,6 @@ const esc = escapeSparqlLiteral;
 function fingerprintCredential(token: string): string {
   const hash = createHash('sha256').update(token, 'utf8').digest('hex');
   return `sha256:${hash.slice(0, 12)}…`;
-}
-
-async function probeStatus(
-  url: string,
-  token: string,
-): Promise<{ ok: boolean; code?: number; body?: string }> {
-  try {
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(`${url.replace(/\/$/, '')}/api/status`, { headers });
-    const text = await res.text().catch(() => '');
-    return { ok: res.ok, code: res.status, body: text.slice(0, 240) };
-  } catch (e) {
-    return { ok: false, body: e instanceof Error ? e.message : String(e) };
-  }
 }
 
 // ---------------------------------------------------------------------------

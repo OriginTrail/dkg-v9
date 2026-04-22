@@ -16,7 +16,12 @@
  *   DKG_AGENT_URI    — this operator's agent URI
  *
  * Anything declared in YAML beats the env defaults; anything passed as a
- * tool argument beats both.
+ * tool argument beats both. This matters on machines with long-running
+ * shells: a stale `DKG_PROJECT=foo` exported from last week's session
+ * must NOT override today's workspace `.dkg/config.yaml` and silently
+ * point the MCP server at the wrong project. If you actually want env
+ * to win, unset the file value or launch the server outside a
+ * `.dkg`-bearing workspace.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -147,8 +152,12 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
   const agent = (fromFile.agent && typeof fromFile.agent === 'object') ? fromFile.agent as Record<string, unknown> : {};
   const capture = (fromFile.capture && typeof fromFile.capture === 'object') ? fromFile.capture as Record<string, unknown> : {};
 
-  // Token resolution priority:
-  //   env DKG_TOKEN → .dkg/config.yaml node.tokenFile → fail-open (null)
+  // Token resolution priority (file wins):
+  //   .dkg/config.yaml node.token (literal)
+  //   → .dkg/config.yaml node.tokenFile (path; `~/…` expanded,
+  //     relative resolved against the config's dir)
+  //   → env DKG_TOKEN / DEVNET_TOKEN / DKG_AUTH
+  //   → fail-open (empty token)
   //
   // tokenFile path expansion: `~/...` → `<homedir>/...`, then absolute paths
   // are taken verbatim, then relative paths are resolved against the
@@ -157,7 +166,7 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
   // `<workspace>/.dkg/~/.dkg/auth.token` and silently fails (token=empty
   // → every write 401s). The capture-chat hook had the same bug; fixed
   // there too.
-  let token = envToken ?? asString(node.token);
+  let token: string | null = asString(node.token);
   if (!token) {
     const tokenFileRaw = asString(node.tokenFile);
     if (tokenFileRaw && sourcePath) {
@@ -168,17 +177,22 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
       token = resolveTokenFromFile(abs);
     }
   }
+  if (!token) token = envToken;
 
-  const project = envProject
-    ?? asString(fromFile.contextGraph)
+  // File wins over env for project/api/agent too — env is only used as
+  // a fallback when the workspace file doesn't pin the value. This
+  // prevents a stale `DKG_PROJECT` export from silently overriding the
+  // on-disk workspace binding.
+  const project = asString(fromFile.contextGraph)
     ?? asString(fromFile.project)
+    ?? envProject
     ?? null;
 
   return {
-    api: envApi ?? asString(node.api) ?? DEFAULT_API,
+    api: asString(node.api) ?? envApi ?? DEFAULT_API,
     token: token ?? '',
     defaultProject: project,
-    agentUri: envAgent ?? asString(agent.uri) ?? null,
+    agentUri: asString(agent.uri) ?? envAgent ?? null,
     capture: {
       autoShare: asBool(fromFile.autoShare ?? capture.autoShare, true),
       defaultPrivacy: asPrivacy(capture.privacy ?? capture.defaultPrivacy),

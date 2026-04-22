@@ -443,15 +443,20 @@ function perTurnAssertionName(cfg, sessionKey, turnIdx) {
  *      promote — the operator explicitly opted out for this thread.
  *   3. Otherwise, promote.
  *
- * Result is cached on `state` so we only hit the daemon once per
- * session lifetime; a later `dkg_set_session_privacy` call will see
- * the next hook invocation reload this via the session state file.
+ * **No caching.** Re-reading the privacy triple each turn costs one
+ * cheap SPARQL query but is the only way to respect a mid-session
+ * `dkg_set_session_privacy` flip: the store is authoritative, and
+ * hooks run in a short-lived Node process whose `state` is loaded
+ * fresh from disk each turn but not round-tripped through the daemon
+ * between turns. An earlier version cached `state.privacyCached` on
+ * first hit, but that cache never invalidated — once a session's first
+ * turn observed e.g. `team`, every subsequent flip to `private` was
+ * ignored for the rest of the session lifetime, leaking turns into
+ * SWM. One query per turn is well within budget (the hook already
+ * makes multiple `/api/*` calls per turn).
  */
 async function shouldPromote(cfg, state) {
   if (!cfg.autoShare) return false;
-  if (state.privacyChecked && state.privacyCached) {
-    return state.privacyCached !== 'private';
-  }
   try {
     const q = `
       SELECT ?p WHERE {
@@ -466,8 +471,6 @@ async function shouldPromote(cfg, state) {
     const row = body?.result?.bindings?.[0];
     const raw = row ? String(row.p ?? '') : '';
     const privacy = raw.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '').replace(/"@.+$/, '') || 'team';
-    state.privacyChecked = true;
-    state.privacyCached = privacy;
     return privacy !== 'private';
   } catch (err) {
     log(`shouldPromote: privacy query failed (${err?.message ?? err}); falling back to cfg.autoShare=${cfg.autoShare}`);

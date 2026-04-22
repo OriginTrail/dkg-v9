@@ -235,11 +235,13 @@ function nicknameToSlug(s: string): string {
  * naturally skips its templates (mirroring the legacy --skip-claude flag).
  */
 function buildManifestInstallContext(
-  req: IncomingMessage,
+  _req: IncomingMessage,
   body: Record<string, unknown>,
   _contextGraphId: string,
   _requestToken: string | null | undefined,
   requestAgentAddress: string | undefined | null,
+  daemonApiHost: string,
+  daemonApiPort: number,
 ):
   | { ok: true; context: Omit<InstallContext, 'manifest'> & { tools: SupportedTool[]; agentNickname: string }; }
   | { ok: false; error: string } {
@@ -270,8 +272,16 @@ function buildManifestInstallContext(
   }
 
   const repoRoot = manifestRepoRoot();
-  const host = req.headers.host ?? `localhost:9200`;
-  const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
+  // `daemonApiUrl` must come from the daemon's own trusted listening
+  // socket, NOT from `req.headers.host` / `x-forwarded-proto`. Those
+  // headers are attacker-controlled on any direct HTTP request: a
+  // crafted Host header would get baked into the generated
+  // `.dkg/config.yaml` and hooks config, so subsequent MCP/hook calls
+  // would send the local bearer token to whatever origin the attacker
+  // chose. Plain HTTP over loopback is what the daemon actually serves
+  // by default, so this is also more accurate than trusting proxies.
+  const loopbackHost =
+    daemonApiHost === '0.0.0.0' || daemonApiHost === '::' ? '127.0.0.1' : daemonApiHost;
   const wallet = requestAgentAddress.toLowerCase();
   const agentUri = `urn:dkg:agent:${wallet}`;
   return {
@@ -283,7 +293,7 @@ function buildManifestInstallContext(
       // still substitute sensibly. Everything new uses {{agentNickname}}
       // (free-form) or {{agentUri}} (wallet-based).
       agentSlug: nicknameToSlug(rawNickname),
-      daemonApiUrl: `${proto}://${host}`,
+      daemonApiUrl: `http://${loopbackHost}:${daemonApiPort}`,
       // Absolute default (the daemon's auth.token always lives at
       // <homedir>/.dkg/auth.token unless overridden). Avoids the ~/...
       // expansion-bug class entirely; still overridable by the operator.
@@ -6757,7 +6767,7 @@ async function handleRequest(
     catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
 
     try {
-      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
       const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
       // Strip supportedTools the operator didn't pick — planner uses
@@ -6809,7 +6819,7 @@ async function handleRequest(
     catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
 
     try {
-      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
       const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
       const manifest = {

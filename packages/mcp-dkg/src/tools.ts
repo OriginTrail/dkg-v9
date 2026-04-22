@@ -464,15 +464,19 @@ LIMIT ${Math.max(1, Math.min(limit ?? 25, 200))}`;
         // Step 1: resolve to a URI if only a handle was given.
         let resolved = agentUri ?? '';
         if (!resolved && nameOrHandle) {
+          // No explicit `GRAPH ?g { … }` wrapper: `client.query` only scopes
+          // to `contextGraphId` when the engine is allowed to inject the
+          // graph. A `GRAPH ?g` pattern matches across ALL named graphs on
+          // the node, which would let this handler resolve agents from
+          // other projects on the same local daemon. See the matching
+          // comment in the `GET dkg_list_agents` handler above (line ~216).
           const findQ = `${PREFIXES}
 SELECT DISTINCT ?a ?name WHERE {
-  GRAPH ?g {
-    ?a a <${NS.agent}Agent> .
-    OPTIONAL { ?a schema:name ?name }
-    OPTIONAL { ?a rdfs:label ?name }
-    FILTER(CONTAINS(LCASE(STR(?a)), LCASE("${escapeSparqlLiteral(nameOrHandle)}"))
-        || CONTAINS(LCASE(STR(COALESCE(?name, ""))), LCASE("${escapeSparqlLiteral(nameOrHandle)}")))
-  }
+  ?a a <${NS.agent}Agent> .
+  OPTIONAL { ?a schema:name ?name }
+  OPTIONAL { ?a rdfs:label ?name }
+  FILTER(CONTAINS(LCASE(STR(?a)), LCASE("${escapeSparqlLiteral(nameOrHandle)}"))
+      || CONTAINS(LCASE(STR(COALESCE(?name, ""))), LCASE("${escapeSparqlLiteral(nameOrHandle)}")))
 } LIMIT 1`;
           const r = await client.query({
             sparql: findQ,
@@ -486,9 +490,10 @@ SELECT DISTINCT ?a ?name WHERE {
           return err('Could not resolve an agent. Pass `agentUri` or a narrower `nameOrHandle`.');
         }
 
-        // Step 2: profile properties
+        // Step 2: profile properties — no GRAPH wrapper, same reason as
+        // `findQ` above (cross-project leak on shared daemons).
         const profileQ = `${PREFIXES}
-SELECT ?p ?o WHERE { GRAPH ?g { <${resolved}> ?p ?o } }`;
+SELECT ?p ?o WHERE { <${resolved}> ?p ?o }`;
         const profile = await client.query({
           sparql: profileQ,
           contextGraphId: pid,
@@ -496,13 +501,11 @@ SELECT ?p ?o WHERE { GRAPH ?g { <${resolved}> ?p ?o } }`;
           includeSharedMemory: true,
         });
 
-        // Step 3: counts by type
+        // Step 3: counts by type — no GRAPH wrapper (cross-project leak).
         const statsQ = `${PREFIXES}
 SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE {
-  GRAPH ?g {
-    ?s prov:wasAttributedTo <${resolved}> ;
-       a ?t .
-  }
+  ?s prov:wasAttributedTo <${resolved}> ;
+     a ?t .
 } GROUP BY ?t ORDER BY DESC(?n)`;
         const stats = await client.query({
           sparql: statsQ,
@@ -583,16 +586,18 @@ SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE {
         filters.push(`OPTIONAL { ?t dcterms:created ?when }`);
         filters.push(`FILTER(!BOUND(?when) || ?when >= "${escapeSparqlLiteral(sinceIso)}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)`);
       }
+      // No `GRAPH ?g` wrapper — the client scopes to `contextGraphId` +
+      // `subGraphName` only when the engine is free to inject the graph.
+      // An explicit `GRAPH ?g { … }` pattern would match chat turns in
+      // other projects' `chat` sub-graphs on the same local daemon.
       const sparql = `${PREFIXES}
 SELECT DISTINCT ?t ?when ?sess ?author ?userText ?asstText WHERE {
-  GRAPH ?g {
-    ${filters.join('\n    ')}
-    OPTIONAL { ?t <${NS.chat}inSession> ?sess }
-    OPTIONAL { ?t dcterms:created ?when }
-    OPTIONAL { ?t prov:wasAttributedTo ?author }
-    OPTIONAL { ?t <${NS.chat}userPrompt> ?userText }
-    OPTIONAL { ?t <${NS.chat}assistantResponse> ?asstText }
-  }
+  ${filters.join('\n  ')}
+  OPTIONAL { ?t <${NS.chat}inSession> ?sess }
+  OPTIONAL { ?t dcterms:created ?when }
+  OPTIONAL { ?t prov:wasAttributedTo ?author }
+  OPTIONAL { ?t <${NS.chat}userPrompt> ?userText }
+  OPTIONAL { ?t <${NS.chat}assistantResponse> ?asstText }
 }
 ORDER BY DESC(?when)
 LIMIT ${Math.max(1, Math.min(limit ?? 20, 100))}`;

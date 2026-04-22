@@ -146,7 +146,14 @@ function parseJoinArgs(args: string[]): JoinOptions {
     agentSlug: values['agent-slug'],
     daemonUrl: values.daemon ?? process.env.DKG_API ?? 'http://localhost:9201',
     token: values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN,
-    tokenFile: values['token-file'] ?? '../.devnet/node1/auth.token',
+    // Default to the daemon's canonical token location
+    // (`~/.dkg/auth.token`) — the one that `dkgd` itself writes. The old
+    // `../.devnet/node1/auth.token` default only made sense when joining
+    // from inside the monorepo's devnet setup; a normal `dkg-mcp join`
+    // on a user workstation would generate a `.dkg/config.yaml` pointing
+    // at a file that doesn't exist, so the first MCP/hook calls 401'd
+    // until the user noticed and edited the YAML by hand.
+    tokenFile: values['token-file'] ?? path.join(os.homedir(), '.dkg', 'auth.token'),
     yes: values.yes,
     dryRun: values['dry-run'],
     noSubscribe: values['no-subscribe'],

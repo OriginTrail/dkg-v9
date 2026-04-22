@@ -156,8 +156,17 @@ function buildOntologyTriples(
 
 /**
  * Install a starter ontology into the given context graph. Idempotent —
- * re-running with the same starter replaces the assertion (the daemon's
- * /write endpoint is destructive-replace per assertion).
+ * re-running with the same starter replaces the assertion.
+ *
+ * IMPORTANT: `/api/assertion/:name/write` is **append-only**, not
+ * destructive-replace, despite how the old docstring read. Re-running
+ * `installOntology` without the `discard` call below would accumulate
+ * stale `schema:text`, `dcterms:created`, etc. on the same `project-ontology`
+ * assertion (e.g. a switch from `coding-project` to `book-research` would
+ * leave both starters' text co-resident). We therefore discard the
+ * existing assertion before writing the new quads, the same way
+ * `packages/mcp-dkg/src/manifest/publish.ts` does for `project-manifest`.
+ * A 404 on first install is expected and swallowed.
  */
 export async function installOntology(
   contextGraphId: string,
@@ -169,7 +178,6 @@ export async function installOntology(
     throw new Error(`Starter '${starterSlug}' is missing ontology.ttl or agent-guide.md.`);
   }
 
-  // Ensure the meta sub-graph exists (idempotent).
   await post<{ created?: boolean }>('/api/sub-graph/create', {
     contextGraphId,
     subGraphName: 'meta',
@@ -183,6 +191,14 @@ export async function installOntology(
     starter.ttl,
     starter.guide,
   );
+
+  await post('/api/assertion/project-ontology/discard', {
+    contextGraphId,
+    subGraphName: 'meta',
+  }).catch((err) => {
+    const msg = String(err?.message ?? err);
+    if (!/404|not found/i.test(msg)) throw err;
+  });
 
   await post('/api/assertion/project-ontology/write', {
     contextGraphId,

@@ -139,13 +139,18 @@ async function resolveLatestTurn(
   contextGraphId: string,
   agentUri: string,
 ): Promise<string | null> {
+  // No `GRAPH ?g` wrapper: `client.query()` only scopes to
+  // `contextGraphId` + `subGraphName` when the engine is free to inject
+  // the graph itself. With an explicit `GRAPH ?g { … }` the engine
+  // matches across ALL named graphs on the local daemon, so the
+  // fallback `dkg_annotate_turn` path could attach the pending
+  // annotation to the latest turn from some other project on the same
+  // node. Let the daemon bind the graph for us.
   const sparql = `${PREFIXES}
 SELECT ?t WHERE {
-  GRAPH ?g {
-    ?t a <${NS.chat}Turn> ;
-       <${NS.prov}wasAttributedTo> <${agentUri}> ;
-       <${NS.dcterms}created> ?ts .
-  }
+  ?t a <${NS.chat}Turn> ;
+     <${NS.prov}wasAttributedTo> <${agentUri}> ;
+     <${NS.dcterms}created> ?ts .
 }
 ORDER BY DESC(?ts) LIMIT 1`;
   try {
@@ -191,13 +196,13 @@ export function registerAnnotationTools(
       if (!pid) return projectErr();
       const ontologyUri = `urn:dkg:project:${pid}:ontology`;
       const guideUri = `${ontologyUri}:agent-guide`;
+      // No `GRAPH ?g` wrapper — cross-project leak guard; see
+      // `resolveLatestTurn` above.
       const sparql = `${PREFIXES}
 SELECT ?subject ?text ?fmt WHERE {
-  GRAPH ?g {
-    ?subject <${NS.schema}text> ?text ;
-             <${NS.schema}encodingFormat> ?fmt .
-    FILTER(?subject = <${ontologyUri}> || ?subject = <${guideUri}>)
-  }
+  ?subject <${NS.schema}text> ?text ;
+           <${NS.schema}encodingFormat> ?fmt .
+  FILTER(?subject = <${ontologyUri}> || ?subject = <${guideUri}>)
 }`;
       try {
         const result = await client.query({

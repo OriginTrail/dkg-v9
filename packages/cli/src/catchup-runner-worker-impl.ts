@@ -50,6 +50,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let peersTried = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
+  let denied = false;
   let noProtocolPeers = 0;
 
   const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
@@ -59,6 +60,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       fetchedDataTriples: 0,
       insertedMetaTriples: 0,
       insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
@@ -70,6 +73,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       fetchedDataTriples: 0,
       insertedMetaTriples: 0,
       insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 0,
@@ -92,11 +97,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
     diagnostics.durable.insertedMetaTriples += durable.insertedMetaTriples;
     diagnostics.durable.insertedDataTriples += durable.insertedDataTriples;
+    diagnostics.durable.bytesReceived += durable.bytesReceived;
+    diagnostics.durable.resumedPhases += durable.resumedPhases;
     diagnostics.durable.emptyResponses += durable.emptyResponses;
     diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
+    denied = denied || durable.deniedPhases > 0;
 
     if (request.includeSharedMemory) {
       const shared = await invoke<any>('syncSharedMemory', peerId, request.contextGraphId);
@@ -105,9 +113,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
       diagnostics.sharedMemory.insertedMetaTriples += shared.insertedMetaTriples;
       diagnostics.sharedMemory.insertedDataTriples += shared.insertedDataTriples;
+      diagnostics.sharedMemory.bytesReceived += shared.bytesReceived;
+      diagnostics.sharedMemory.resumedPhases += shared.resumedPhases;
       diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
+      denied = denied || shared.deniedPhases > 0;
     }
   }
 
@@ -120,6 +131,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried,
     dataSynced,
     sharedMemorySynced,
+    denied,
     diagnostics,
   };
 }

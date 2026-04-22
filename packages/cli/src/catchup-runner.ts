@@ -10,6 +10,7 @@ export interface CatchupJobResult {
   peersTried: number;
   dataSynced: number;
   sharedMemorySynced: number;
+  denied: boolean;
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -17,6 +18,8 @@ export interface CatchupJobResult {
       fetchedDataTriples: number;
       insertedMetaTriples: number;
       insertedDataTriples: number;
+      bytesReceived: number;
+      resumedPhases: number;
       emptyResponses: number;
       metaOnlyResponses: number;
       dataRejectedMissingMeta: number;
@@ -28,6 +31,8 @@ export interface CatchupJobResult {
       fetchedDataTriples: number;
       insertedMetaTriples: number;
       insertedDataTriples: number;
+      bytesReceived: number;
+      resumedPhases: number;
       emptyResponses: number;
       droppedDataTriples: number;
       failedPeers: number;
@@ -184,7 +189,7 @@ class InlineCatchupRunner implements CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
-    });
+    }) as Promise<CatchupJobResult>;
   }
 
   async close(): Promise<void> {

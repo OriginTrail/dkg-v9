@@ -64,6 +64,7 @@ function cursorAgent(root) {
     'shell-precheck.mjs',
     'shell-diff-check.mjs',
     'post-tool-use.mjs',
+    'stop.mjs',
   ];
   for (const f of requiredHooks) {
     const p = resolve(hooksDir, f);

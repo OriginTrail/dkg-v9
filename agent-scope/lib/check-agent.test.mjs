@@ -40,7 +40,7 @@ test('detectAgents: full Cursor wiring → ok', () => {
     mkdirSync(join(root, '.cursor/rules'), { recursive: true });
     writeFileSync(join(root, '.cursor/hooks.json'), '{}');
     writeFileSync(join(root, '.cursor/rules/agent-scope.mdc'), '');
-    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs']) {
+    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs', 'stop.mjs']) {
       touchHook(root, '.cursor', f);
     }
     const cursor = detectAgents(root).find(a => a.name === 'Cursor');
@@ -54,7 +54,7 @@ test('detectAgents: Cursor hook not executable → warn', () => {
     mkdirSync(join(root, '.cursor/rules'), { recursive: true });
     writeFileSync(join(root, '.cursor/hooks.json'), '{}');
     writeFileSync(join(root, '.cursor/rules/agent-scope.mdc'), '');
-    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs']) {
+    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs', 'stop.mjs']) {
       touchHook(root, '.cursor', f);
     }
     chmodSync(join(root, '.cursor/hooks/scope-guard.mjs'), 0o644);

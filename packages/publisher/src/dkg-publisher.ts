@@ -57,7 +57,8 @@ export interface PreBroadcastJournalEntry {
   publishDigest: string;
   ackCount: number;
   kaCount: number;
-  publicByteSize: number;
+  /** Stringified bigint to keep entries JSON-serializable. */
+  publicByteSize: string;
   /** Stringified bigint to keep entries JSON-serializable. */
   tokenAmount: string;
   createdAt: number;
@@ -1384,7 +1385,7 @@ export class DKGPublisher implements Publisher {
             publishDigest: ethers.hexlify(pubMsgHash),
             ackCount: v10ACKs.length,
             kaCount,
-            publicByteSize,
+            publicByteSize: publicByteSize.toString(),
             tokenAmount: tokenAmount.toString(),
             createdAt: Date.now(),
           };

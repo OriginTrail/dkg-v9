@@ -272,20 +272,64 @@ export interface DKGAgentConfig {
    */
   strictWmCrossAgentAuth?: boolean;
   /**
-   * When true, ingress gossip on context-graph topics MUST arrive wrapped
-   * in a signed `GossipEnvelope` whose (a) signature recovers, (b) type
-   * matches the subscription label, and (c) `contextGraphId` matches the
-   * subscription's context graph. Raw (un-enveloped) bytes are dropped.
+   * When true (the default), ingress gossip on context-graph topics MUST
+   * arrive wrapped in a signed `GossipEnvelope` whose (a) signature
+   * recovers, (b) type matches the subscription label, and (c)
+   * `contextGraphId` matches the subscription's context graph. Raw
+   * (un-enveloped) bytes are dropped.
    *
-   * Default (false) mirrors the rolling-upgrade strategy used for
-   * `strictWmCrossAgentAuth`: raw gossip is still accepted so peers mid
-   * upgrade don't go dark, but every raw message is logged and counted,
-   * and forged/tampered envelopes are always rejected regardless of this
-   * flag. Enable via config or `DKG_STRICT_GOSSIP_ENVELOPE=1` once every
-   * peer in the mesh has been upgraded (spec §08_PROTOCOL_WIRE, PR #229
-   * bot review round 6).
+   * PR #229 bot review round 14 (r14-1): previously the default was
+   * `false` (lenient-with-warn) to ease rolling upgrades. That made
+   * the new signing layer opt-in rather than protective — an attacker
+   * could simply omit the envelope and their payload would be treated
+   * as legacy gossip and dispatched anyway. The fix: strict mode is
+   * now the fail-closed default, matching the same flip we made for
+   * `strictWmCrossAgentAuth` in round 12 (r12-1).
+   *
+   * Operators still on a partially-upgraded mesh can opt OUT via
+   * `strictGossipEnvelope: false` or `DKG_STRICT_GOSSIP_ENVELOPE=0`
+   * (temporarily, with a loud warning). Forged / tampered envelopes
+   * are always rejected regardless of this flag.
+   *
+   * Precedence (mirrors r12-1):
+   *   1. Explicit env var `DKG_STRICT_GOSSIP_ENVELOPE=1` → strict.
+   *   2. Explicit env var `DKG_STRICT_GOSSIP_ENVELOPE=0` → lenient.
+   *   3. Config `strictGossipEnvelope === false` → lenient.
+   *   4. Otherwise → strict (the new safe default).
    */
   strictGossipEnvelope?: boolean;
+}
+
+/**
+ * Resolve whether ingress gossip MUST be a signed `GossipEnvelope`.
+ *
+ * Exported for unit tests (PR #229 bot review round 14 — r14-1) so the
+ * precedence can be exercised without instantiating a real DKGAgent.
+ *
+ * Precedence (highest to lowest):
+ *   1. Env var `DKG_STRICT_GOSSIP_ENVELOPE` explicitly ON (`1` / `true` /
+ *      `yes`) → strict mode even if the config opts out.
+ *   2. Env var explicitly OFF (`0` / `false` / `no`) → lenient mode even
+ *      if the config says strict.
+ *   3. Config value `false` → lenient mode (explicit opt-out).
+ *   4. Otherwise (config is `true` or missing) → strict mode.
+ *
+ * The fail-closed default closes the r14-1 bypass: before this change,
+ * `false` was the default and a malicious peer could strip the envelope
+ * entirely, fall into the `raw` bucket, and have their payload
+ * dispatched. Now the `raw` bucket is rejected unless an operator
+ * explicitly opts out (typically during a rolling upgrade).
+ */
+export function resolveStrictGossipEnvelopeMode(input: {
+  configValue?: boolean;
+  envValue?: string;
+}): boolean {
+  const envV = (input.envValue ?? '').toLowerCase();
+  const envExplicitOn = envV === '1' || envV === 'true' || envV === 'yes';
+  const envExplicitOff = envV === '0' || envV === 'false' || envV === 'no';
+  if (envExplicitOn) return true;
+  if (envExplicitOff) return false;
+  return input.configValue !== false;
 }
 
 /**
@@ -3001,11 +3045,26 @@ export class DKGAgent {
       finalization: new Set(['FINALIZATION']),
     };
 
-    const strictEnvelope = this.config.strictGossipEnvelope === true
-      || (() => {
-        const v = (process.env.DKG_STRICT_GOSSIP_ENVELOPE ?? '').toLowerCase();
-        return v === '1' || v === 'true' || v === 'yes';
-      })();
+    // PR #229 bot review round 14 (r14-1): resolve strict mode via the
+    // exported `resolveStrictGossipEnvelopeMode` helper so the precedence
+    // is testable without spinning up a full DKGAgent. See the helper's
+    // docstring for the exact rules — mirrors the r12-1 flip for
+    // `strictWmCrossAgentAuth`: fail-closed by default, explicit opt-out
+    // via env/config for rolling upgrades.
+    const strictEnvelope = resolveStrictGossipEnvelopeMode({
+      configValue: this.config.strictGossipEnvelope,
+      envValue: process.env.DKG_STRICT_GOSSIP_ENVELOPE,
+    });
+    if (!strictEnvelope) {
+      const ctx = createOperationContext('system');
+      this.log.warn(
+        ctx,
+        `strictGossipEnvelope=false: raw un-enveloped gossip will be accepted on cg=${contextGraphId}. ` +
+          `This is a temporary rolling-upgrade opt-out; forged envelopes are still rejected, but a ` +
+          `peer that omits the envelope entirely will bypass the signing layer. Re-enable strict mode ` +
+          `(DKG_STRICT_GOSSIP_ENVELOPE=1 or strictGossipEnvelope: true) once every peer has upgraded.`,
+      );
+    }
 
     const dispatchIngress = (label: string, data: Uint8Array): {
       payload: Uint8Array;

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   dkgPlugin,
   dkgPublish,
@@ -80,6 +80,93 @@ describe('dkgPlugin.hooks wiring', () => {
 
     for (const hook of [p.hooks.onChatTurn, p.hooks.onAssistantReply, p.chatPersistenceHook]) {
       await expect(hook(runtime, msg)).rejects.toThrow(/DKG node not started/);
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// PR #229 bot review round 14 — r14-2: onAssistantReply MUST plumb an
+// explicit `userTurnPersisted` signal when the caller doesn't.
+// -----------------------------------------------------------------------
+describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing', () => {
+  it('defaults userTurnPersisted to false when the caller does not set it', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r' } as any;
+
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, msg, {}, {});
+      expect(spy).toHaveBeenCalledTimes(1);
+      const opts = spy.mock.calls[0][3] as any;
+      expect(opts.mode).toBe('assistant-reply');
+      // The key r14-2 invariant: the handler must set userTurnPersisted
+      // explicitly so persistChatTurnImpl's legacy inference (presence of
+      // userMessageId == "persisted") cannot be reached by accident.
+      expect(opts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('defaults userTurnPersisted to false EVEN when userMessageId is inferred from message.replyTo', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const msg = {
+        content: { text: 'hi' },
+        id: 'm', userId: 'u', roomId: 'r',
+        // Runtime provides the parent id — this is exactly the case the
+        // bot flagged: under the old inference, persistChatTurnImpl
+        // would see `userMessageId` present and take the append-only
+        // branch even though the user turn was never persisted.
+        replyTo: 'parent-123',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, msg, {}, {});
+      expect(spy).toHaveBeenCalledTimes(1);
+      const opts = spy.mock.calls[0][3] as any;
+      expect(opts.userMessageId).toBe('parent-123');
+      expect(opts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('honours an explicit userTurnPersisted:true from the caller (well-known chain opt-in)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r', replyTo: 'p' } as any;
+
+      await (dkgPlugin as any).hooks.onAssistantReply(
+        runtime, msg, {}, { userTurnPersisted: true },
+      );
+      const opts = spy.mock.calls[0][3] as any;
+      // Caller opt-in wins — they know their hook chain ordered
+      // onChatTurn before onAssistantReply in-process.
+      expect(opts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('honours an explicit userTurnPersisted:false from the caller', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r', replyTo: 'p' } as any;
+
+      await (dkgPlugin as any).hooks.onAssistantReply(
+        runtime, msg, {}, { userTurnPersisted: false },
+      );
+      const opts = spy.mock.calls[0][3] as any;
+      expect(opts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
     }
   });
 });

@@ -73,6 +73,35 @@ async function onAssistantReplyHandler(
     mode: 'assistant-reply' as const,
   };
   if (userMessageId) opts.userMessageId = String(userMessageId);
+  // PR #229 bot review round 14 (r14-2): previously we only passed
+  // `userMessageId` here and relied on `persistChatTurnImpl`'s legacy
+  // inference — presence of `userMessageId` => "user turn is already
+  // persisted" => cheap append-only branch. That's unsafe from this
+  // boundary: the hook that fires this handler has NO way to know
+  // whether `onChatTurn` ran (it could be disabled, have errored, or
+  // the runtime might re-emit `onAssistantReply` on reconnect without
+  // a matching `onChatTurn`). If we take the append-only branch on
+  // a turnUri that was never typed as `dkg:ChatTurn`, the chat-memory
+  // reader drops the reply entirely.
+  //
+  // Fix: plumb an explicit `userTurnPersisted` signal up to the impl.
+  //   - If the CALLER (the ElizaOS runtime / user code) set
+  //     `userTurnPersisted` on `options` explicitly, honour it — the
+  //     caller knows their hook wiring.
+  //   - Otherwise default to `false` so the impl emits the full
+  //     `dkg:ChatTurn` envelope (user stub + both edges). The
+  //     emission is idempotent on the turnUri; when onChatTurn DID
+  //     run and wrote the real user message, the store already has
+  //     that subject and the stub quads never clobber real content
+  //     (different sub-URIs — stub is keyed on the assistant memory
+  //     id, real user on the user memory id).
+  //
+  // Well-known callers that chain `onChatTurn → onAssistantReply`
+  // in-process with guaranteed ordering can opt into the cheap
+  // append-only path by passing `userTurnPersisted: true` on options.
+  if (typeof (options as any)?.userTurnPersisted !== 'boolean') {
+    opts.userTurnPersisted = false;
+  }
   return dkgService.persistChatTurn(runtime, message, state, opts);
 }
 

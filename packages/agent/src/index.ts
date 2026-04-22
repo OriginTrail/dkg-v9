@@ -62,6 +62,7 @@ export {
 } from './ccl-policy.js';
 export {
   DKGAgent,
+  resolveStrictGossipEnvelopeMode,
   type DKGAgentConfig,
   type ContextGraphSub,
   type ParanetSub,

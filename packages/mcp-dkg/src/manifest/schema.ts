@@ -172,13 +172,30 @@ export function shellSingleQuote(value: string): string {
 }
 
 /**
+ * JSON string-literal encoding: `JSON.stringify(v)` produces a
+ * double-quoted, fully-escaped string that is valid in both JSON and
+ * YAML (YAML accepts JSON scalars as "flow" scalars). Used by the
+ * `{{json:...}}` placeholder form for free-form values like
+ * `agentNickname` that operators can set to arbitrary UTF-8 and could
+ * otherwise break the generated `.cursor/mcp.json` or
+ * `.dkg/config.yaml`. The placeholder itself emits the surrounding
+ * quotes, so the containing template MUST NOT pre-quote it — e.g.
+ *   YAML:  `nickname: {{json:agentNickname}}`   ✅
+ *   JSON:  `"DKG_AGENT_NICKNAME": {{json:agentNickname}}`  ✅
+ */
+export function jsonStringLiteral(value: string): string {
+  return JSON.stringify(value);
+}
+
+/**
  * Apply {{placeholder}} substitution to a template body. Unknown
  * placeholders are left as literal text — fail-soft, by design.
  *
- * Two placeholder forms are supported:
+ * Three placeholder forms are supported:
  *   `{{name}}`       — raw substitution; the template is responsible
- *                      for its own quoting (suitable for non-shell
- *                      contexts like markdown/YAML string values).
+ *                      for its own quoting (suitable for values we
+ *                      control, like absolute paths / CG ids / URIs
+ *                      that don't carry YAML-special chars).
  *   `{{sh:name}}`    — POSIX-shell-safe substitution; the value is
  *                      single-quoted and embedded single quotes are
  *                      escaped. Use this for every placeholder that
@@ -188,6 +205,14 @@ export function shellSingleQuote(value: string): string {
  *                      who controls e.g. `workspaceAbsPath` or
  *                      `daemonApiUrl` could inject arbitrary commands
  *                      into the hook that runs on every Cursor session.
+ *   `{{json:name}}`  — JSON-string-literal substitution (emits its own
+ *                      surrounding double-quotes). Use this for every
+ *                      free-form value that lands inside a JSON or
+ *                      YAML scalar — currently `agentNickname`. Raw
+ *                      substitution of e.g. `Brana "laptop"` into
+ *                      `"DKG_AGENT_NICKNAME": "{{agentNickname}}"`
+ *                      would produce `"Brana "laptop""` and break the
+ *                      JSON parser.
  */
 export function substitutePlaceholders(
   body: string,
@@ -197,7 +222,11 @@ export function substitutePlaceholders(
   for (const ph of MANIFEST_PLACEHOLDERS) {
     const v = values[ph];
     if (v == null) continue;
+    // Order matters: replace the most specific form first so
+    // `{{sh:name}}` doesn't get eaten by the `{{name}}` pass when the
+    // raw value itself contains the literal substring `{{sh:name}}`.
     out = out.split(`{{sh:${ph}}}`).join(shellSingleQuote(v));
+    out = out.split(`{{json:${ph}}}`).join(jsonStringLiteral(v));
     out = out.split(`{{${ph}}}`).join(v);
   }
   return out;

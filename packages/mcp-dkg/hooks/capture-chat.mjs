@@ -201,19 +201,40 @@ function loadConfig() {
     }
   }
 
+  // Precedence: project-scoped `.dkg/config.yaml` WINS over shell env
+  // vars. A `dkg-mcp join` installation writes the authoritative
+  // values to the workspace's config.yaml; the env vars (DKG_API,
+  // DKG_TOKEN, DKG_PROJECT, DKG_AGENT_URI, DKG_AGENT_NICKNAME) exist
+  // for bootstrapping (e.g. devnet scripts that run BEFORE a config
+  // file exists) and for .cursor/mcp.json wiring — neither of those
+  // should silently shadow a checked-in per-project config. That is:
+  // the user who committed `agent.nickname: "Brana laptop 2"` expects
+  // that label to appear on the graph even if their shell still has
+  // DKG_AGENT_NICKNAME exported from an earlier session.
+  //
+  // Reversing this was an accidental regression caught by Codex. Same
+  // precedence ordering is mirrored in packages/mcp-dkg/src/config.ts
+  // (the TS-side loader) so runtime and hook agree.
   return {
-    api: envApi ?? fromFile.node?.api ?? DEFAULT_API,
+    api: fromFile.node?.api ?? envApi ?? DEFAULT_API,
     token,
-    project: envProject ?? fromFile.contextGraph ?? fromFile.project ?? null,
-    agent: envAgent ?? fromFile.agent?.uri ?? null,
+    project: fromFile.contextGraph ?? fromFile.project ?? envProject ?? null,
+    agent: fromFile.agent?.uri ?? envAgent ?? null,
     // Free-form human label rendered as rdfs:label / schema:name on the
     // agent entity. Falls back to the URI tail for legacy slug-only configs.
-    nickname: envNickname ?? fromFile.agent?.nickname ?? null,
+    nickname: fromFile.agent?.nickname ?? envNickname ?? null,
     subGraph: fromFile.capture?.subGraph ?? 'chat',
     assertion: fromFile.capture?.assertion ?? 'chat-log',
     privacy: fromFile.capture?.privacy ?? 'team',
     autoShare: fromFile.autoShare !== false,
-    tool: fromFile.capture?.tool ?? process.env.DKG_CAPTURE_TOOL ?? 'cursor',
+    // `tool` intentionally prefers DKG_CAPTURE_TOOL when the per-tool
+    // hook script exports it — each tool's hook command line wires
+    // `cursor` or `claude-code` explicitly, and that runtime signal
+    // must win over any static config.yaml value (otherwise a user
+    // with both Cursor + Claude installed records every turn as the
+    // tool they happened to put in their yaml). See the long comment
+    // in templates.ts CONFIG_YAML_TEMPLATE.
+    tool: process.env.DKG_CAPTURE_TOOL ?? fromFile.capture?.tool ?? 'cursor',
     sourcePath: cfgPath,
   };
 }

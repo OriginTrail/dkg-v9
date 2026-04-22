@@ -394,7 +394,13 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       for (const d of args.proposedDecisions ?? []) {
         const slug = normaliseSlug(d.title);
         if (!slug) { skippedEmptyLabels.push(d.title); continue; }
-        const decUri = `urn:dkg:decision:${slug}-${rand(4)}`;
+        // NO random suffix: same-slug decisions across agents/turns
+        // MUST converge on the same URI so subsequent `mentions` /
+        // `concludes` edges land on one canonical node. The caller is
+        // expected to have run the look-before-mint check (dkg_search
+        // by title) and either reuse an existing URI or commit to this
+        // slug. See agent-guide §convergence-rule.
+        const decUri = `urn:dkg:decision:${slug}`;
         const decStatus = d.status ?? 'proposed';
         emit(triples, U(decUri), U(TypeP), U(NS.decisions + 'Decision'));
         emit(triples, U(decUri), U(NameP), L(d.title));
@@ -413,7 +419,10 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       for (const t of args.proposedTasks ?? []) {
         const slug = normaliseSlug(t.title);
         if (!slug) { skippedEmptyLabels.push(t.title); continue; }
-        const taskUri = `urn:dkg:task:${slug}-${rand(4)}`;
+        // NO random suffix — see decUri comment above. Same-slug tasks
+        // across agents converge on one canonical task node; that's how
+        // the `Open tasks:` list in hooks_context stays deduplicated.
+        const taskUri = `urn:dkg:task:${slug}`;
         emit(triples, U(taskUri), U(TypeP), U(NS.tasks + 'Task'));
         emit(triples, U(taskUri), U(NameP), L(t.title));
         emit(triples, U(taskUri), U(LabelP), L(t.title));
@@ -505,8 +514,19 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
           subGraphName: 'chat',
           triples,
         });
+        // Deferred (forSession) annotations MUST NOT be promoted here:
+        // the capture hook is the authority on per-session privacy (it
+        // consults `chat:sessionPrivacy` on every turn), and it decides
+        // whether to promote the ALREADY-REWRITTEN annotation triples
+        // when it replays the pending onto the real turn URI. Promoting
+        // from here would leak sugared entities to shared memory for
+        // sessions the operator has flipped to private.
+        //
+        // Non-deferred annotations target an existing turn URI (chosen
+        // by the caller) and are expected to follow the daemon-wide
+        // autoShare setting — same policy as non-annotation writes.
         let shared = false;
-        if (config.capture.autoShare) {
+        if (config.capture.autoShare && !deferredForSession) {
           try {
             await client.promoteAssertion({
               contextGraphId: pid,

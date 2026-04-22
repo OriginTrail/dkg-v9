@@ -42,16 +42,35 @@ export interface ChatTurnPersistResult {
  * Options shape for the ASSISTANT-REPLY path.
  *
  * PR #229 bot review round 18 (r18-2): the assistant-reply path takes
- * a plain `Memory` (the Elizia-side assistant message may not have a
+ * a plain `Memory` (the ElizaOS-side assistant message may not have a
  * stable `id`), but it MUST carry `options.userMessageId` so the
  * persister can reconstruct the same `turnUri`/`userMsgUri` the
  * preceding user-turn hook emitted. Expressing that as a narrow type
  * lets the compiler catch the missing id instead of letting
  * `persistChatTurnImpl` throw at runtime.
+ *
+ * PR #229 bot review round 19 (r19-2): `userTurnPersisted` is also
+ * MANDATORY on this overload. `persistChatTurnImpl` infers the flag
+ * from "does `userMessageId` exist?" when it's omitted (see the
+ * `legacyInference` branch in actions.ts), which is exactly the
+ * unsafe shortcut round-13 introduced `ChatTurnPersistOptions.userTurnPersisted`
+ * to close: a caller can know the parent id without knowing the
+ * corresponding user-turn write succeeded (hook disabled, earlier
+ * write failed, reconnect replay), and the cheap-append-only path
+ * produces unreadable assistant replies. Requiring the boolean on
+ * the TYPED overload forces the caller to think about whether the
+ * user turn really made it to disk before taking the append path.
+ *
+ * Callers that genuinely don't know whether the user turn was
+ * persisted (e.g. external integrations restarting mid-session)
+ * should pass `userTurnPersisted: false` — that routes the
+ * persister through the safe full-envelope branch, which always
+ * produces a readable reply.
  */
 export interface AssistantReplyChatTurnOptions extends ChatTurnPersistOptions {
   readonly mode: 'assistant-reply';
   readonly userMessageId: string;
+  readonly userTurnPersisted: boolean;
 }
 
 /**

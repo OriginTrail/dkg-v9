@@ -83,49 +83,97 @@ describe('r18-2: DKGService overload contract', () => {
     const userMsg = makePersistableMemory();
     const userOpts: UserTurnChatTurnOptions = { mode: 'user-turn' };
 
-    // This compiles — the caller passed a PersistableMemory + a
-    // UserTurnChatTurnOptions bag. If the overload resolution ever
-    // regresses to accept plain `Memory` on the user-turn path, the
-    // `@ts-expect-error` below will stop being an error and this
-    // file will fail to build.
-    //
-    // The runtime rejection (no agent initialized) is expected and
-    // awaited — we're only pinning the type contract here.
+    // Positive control: well-typed user-turn call compiles and
+    // routes through to the persister (which then rejects because
+    // no agent is wired up — expected).
     await expect(
       dkgService.persistChatTurn(runtime, userMsg, {} as State, userOpts),
     ).rejects.toThrow(/DKG node not started/);
 
-    // @ts-expect-error r18-2: a plain Memory WITHOUT a stable `id`
-    // must NOT satisfy the user-turn overload. If TS stops rejecting
-    // this call, the overload has regressed — the persister would
-    // throw at runtime with "missing stable message identifier".
-    const typeOnly: (m: Memory) => unknown = (m) =>
-      dkgService.persistChatTurn(runtime, m, {} as State, userOpts);
-    expect(typeof typeOnly).toBe('function');
+    // r18-2 negative control: a plain `Memory` WITHOUT a stable
+    // `id` must NOT be assignable to `PersistableMemory`. This is
+    // the one-line type assertion — the directive is on the line
+    // immediately above the offending assignment, which is how
+    // `@ts-expect-error` is scoped.
+    const plainMemory: Memory = makePlainMemoryWithoutId();
+    // @ts-expect-error r18-2: plain `Memory` cannot be assigned to
+    // `PersistableMemory` because `id` is optional on the former
+    // and required on the latter. If TS stops flagging this, the
+    // type narrowing has regressed.
+    const shouldFail: PersistableMemory = plainMemory;
+    expect(shouldFail).toBeDefined();
   });
 
   it('the assistant-reply overload requires options.userMessageId at COMPILE TIME', async () => {
     const runtime = makeRuntime();
     const assistantMsg = makePlainMemoryWithoutId();
+    // r19-2: `userTurnPersisted` is now mandatory on the typed
+    // assistant-reply overload. Explicit `false` is the safe default
+    // a caller should pick when it genuinely doesn't know whether
+    // the user-turn hook succeeded — it routes the persister
+    // through the full-envelope branch which produces a readable
+    // reply regardless.
     const replyOpts: AssistantReplyChatTurnOptions = {
       mode: 'assistant-reply',
       userMessageId: 'msg-r18-2-user-parent',
+      userTurnPersisted: false,
     };
 
-    // Happy path: mode + userMessageId both present. Compiles,
-    // rejects at runtime because no agent is wired up — expected.
+    // Happy path: mode + userMessageId + userTurnPersisted all
+    // present. Compiles, rejects at runtime because no agent is
+    // wired up — expected.
     await expect(
       dkgService.persistChatTurn(runtime, assistantMsg, {} as State, replyOpts),
     ).rejects.toThrow(/DKG node not started/);
 
     // @ts-expect-error r18-2: mode='assistant-reply' WITHOUT
-    // userMessageId is rejected because the persister cannot
-    // reconstruct the parent turn key without it — it would either
-    // fabricate an id or throw. The type system now prevents that
-    // footgun.
+    // userMessageId (and userTurnPersisted) is rejected because the
+    // persister cannot reconstruct the parent turn key without it.
     const missingUserMsgId: AssistantReplyChatTurnOptions = { mode: 'assistant-reply' };
     // Reference the value so TS doesn't elide the check.
     expect(missingUserMsgId).toBeDefined();
+  });
+
+  it('r19-2: the assistant-reply overload ALSO requires options.userTurnPersisted at COMPILE TIME', () => {
+    // PR #229 bot review round 19 (r19-2). Pre-r19-2 the typed
+    // assistant-reply overload made `userMessageId` mandatory but
+    // left `userTurnPersisted` optional. That reintroduced the
+    // unreadable-reply footgun r13-1 closed: if a caller knew the
+    // parent id but didn't know whether the user-turn hook
+    // actually persisted, `persistChatTurnImpl` would infer
+    // `userTurnPersisted=true` from the presence of `userMessageId`
+    // alone (the legacyInference branch) and take the cheap
+    // append-only path — which produces an orphan
+    // `hasAssistantMessage` edge on a turn URI whose type quads
+    // were never written, so the reader silently drops the reply.
+    //
+    // @ts-expect-error r19-2: the typed overload MUST reject this
+    // call. If TS stops flagging it, the overload has regressed
+    // and the append-only bug is back.
+    const missingUserTurnPersisted: AssistantReplyChatTurnOptions = {
+      mode: 'assistant-reply',
+      userMessageId: 'msg-r19-2-user-parent',
+    };
+    expect(missingUserTurnPersisted).toBeDefined();
+
+    // Positive control: explicit `false` compiles cleanly and
+    // signals the safe full-envelope path.
+    const safeDefault: AssistantReplyChatTurnOptions = {
+      mode: 'assistant-reply',
+      userMessageId: 'msg-r19-2-user-parent',
+      userTurnPersisted: false,
+    };
+    expect(safeDefault.userTurnPersisted).toBe(false);
+
+    // Positive control: explicit `true` also compiles (the in-process
+    // ElizaOS hook chain that round 16 introduced knows the user
+    // turn just persisted and opts into the cheap append path).
+    const inProcessOptimised: AssistantReplyChatTurnOptions = {
+      mode: 'assistant-reply',
+      userMessageId: 'msg-r19-2-user-parent',
+      userTurnPersisted: true,
+    };
+    expect(inProcessOptimised.userTurnPersisted).toBe(true);
   });
 
   it('onChatTurn mirrors persistChatTurn overloads (user-turn narrowing holds here too)', async () => {
@@ -139,13 +187,13 @@ describe('r18-2: DKGService overload contract', () => {
       dkgService.onChatTurn(runtime, userMsg),
     ).rejects.toThrow(/DKG node not started/);
 
-    // @ts-expect-error r18-2: onChatTurn (the user-turn hook) must
-    // reject plain Memory-without-id exactly the same way
-    // persistChatTurn does. If this line stops being an error the
-    // alias has drifted from the primary overload.
-    const typeOnly: (m: Memory) => unknown = (m) =>
-      dkgService.onChatTurn(runtime, m);
-    expect(typeof typeOnly).toBe('function');
+    // r18-2 negative control: the `onChatTurn` hook alias must
+    // share the narrowed user-turn contract. Asserting the alias
+    // signature is `typeof dkgService.persistChatTurn` locks the
+    // two in lockstep so a future refactor that loosens one can't
+    // silently leave the other with stricter types (or vice versa).
+    const persistChatTurn: typeof dkgService.persistChatTurn = dkgService.onChatTurn;
+    expect(typeof persistChatTurn).toBe('function');
   });
 
   it('the catch-all overload still accepts legacy `Record<string, unknown>` options for backwards compat', async () => {

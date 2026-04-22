@@ -2,8 +2,59 @@ import { contextGraphDataUri, keccak256 } from '@origintrail-official/dkg-core';
 import { randomBytes } from 'node:crypto';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
-/** Ontology predicate: agent endorses a Knowledge Asset */
+/**
+ * Ontology predicate: endorsement → knowledge asset.
+ *
+ * PR #229 bot review round 19 (r19-3): previously this predicate
+ * was emitted as `<agent> dkg:endorses <ual>`. Combined with the
+ * agent-keyed `endorsedAt`/`endorsementNonce`/`endorsementSignature`
+ * quads that also sat on `<agent>`, two endorsements by the same
+ * agent in one context graph produced FOUR timestamps, FOUR nonces,
+ * FOUR signatures on the same subject — with no way to pair a
+ * signature with its UAL. That made A-7 signatures unverifiable
+ * once more than one endorsement existed.
+ *
+ * Fix: introduce a per-event endorsement resource (a deterministic
+ * URN derived from the canonical digest), and hang the UAL,
+ * timestamp, nonce, and signature off that subject. The full shape
+ * is now:
+ *
+ *   <urn:dkg:endorsement:HEX>  rdf:type              dkg:Endorsement .
+ *   <urn:dkg:endorsement:HEX>  dkg:endorses          <ual> .
+ *   <urn:dkg:endorsement:HEX>  dkg:endorsedBy        <did:dkg:agent:0x…> .
+ *   <urn:dkg:endorsement:HEX>  dkg:endorsedAt        "ts"^^xsd:dateTime .
+ *   <urn:dkg:endorsement:HEX>  dkg:endorsementNonce  "nonce" .
+ *   <urn:dkg:endorsement:HEX>  dkg:endorsementSignature "sig" .
+ *
+ * Verifiers reconstruct the canonical digest from the four
+ * properties on a single endorsement subject, recover the signer,
+ * and check it matches `<agent>` — no ambiguity possible.
+ */
 export const DKG_ENDORSES = 'https://dkg.network/ontology#endorses';
+
+/**
+ * Ontology predicate: endorsement → agent.
+ *
+ * PR #229 bot review round 19 (r19-3). The round-18-and-earlier
+ * shape had no link back from the endorsement resource to the
+ * endorsing agent because there WAS no endorsement resource — all
+ * quads were agent-keyed. Introducing this predicate lets
+ * consumers answer "which agent produced this signature?" without
+ * guessing from co-occurring agent-keyed quads.
+ */
+export const DKG_ENDORSED_BY = 'https://dkg.network/ontology#endorsedBy';
+
+/**
+ * Ontology predicate: rdf:type hint for endorsement resources.
+ *
+ * Emitting an explicit `rdf:type dkg:Endorsement` triple gives
+ * verifiers a stable SPARQL hook to enumerate every endorsement in
+ * a context graph, regardless of which predicates they happen to
+ * carry, and makes shape-matching (SHACL / schema guards) trivial.
+ */
+export const DKG_ENDORSEMENT_CLASS = 'https://dkg.network/ontology#Endorsement';
+
+export const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 /** Ontology predicate: timestamp of endorsement */
 export const DKG_ENDORSED_AT = 'https://dkg.network/ontology#endorsedAt';
@@ -89,10 +140,29 @@ function toHex(bytes: Uint8Array): string {
 
 interface EndorsementCore {
   agentUri: string;
+  knowledgeAssetUal: string;
+  endorsementUri: string;
   graph: string;
   now: string;
   nonce: string;
   digest: Uint8Array;
+}
+
+/**
+ * Deterministic per-event endorsement URN.
+ *
+ * Derived from the keccak256 digest of the canonical preimage, so
+ * retrying the same logical endorsement (same agent, UAL, CG, ts,
+ * nonce) regenerates byte-identical quads — idempotence across
+ * retries is the whole point. Different UAL / ts / nonce → different
+ * digest → different URN.
+ *
+ * PR #229 bot review round 19 (r19-3).
+ */
+export function endorsementUri(digest: Uint8Array): string {
+  // Drop the 0x-prefix for a compact URN — the digest is always a
+  // 32-byte keccak output so the hex length is fixed at 64 chars.
+  return `urn:dkg:endorsement:${Buffer.from(digest).toString('hex')}`;
 }
 
 function prepareEndorsementCore(
@@ -112,15 +182,62 @@ function prepareEndorsementCore(
     now,
     nonce,
   );
-  return { agentUri, graph, now, nonce, digest };
+  return {
+    agentUri,
+    knowledgeAssetUal,
+    endorsementUri: endorsementUri(digest),
+    graph,
+    now,
+    nonce,
+    digest,
+  };
 }
 
 function buildQuadsFromCore(core: EndorsementCore, proofValue: string): Quad[] {
+  // PR #229 bot review round 19 (r19-3): every proof quad is now
+  // keyed on the per-event `core.endorsementUri` instead of the
+  // agent URI, so multiple endorsements by the same agent in the
+  // same context graph no longer collide on a single subject. The
+  // rdf:type + dkg:endorses + dkg:endorsedBy triples tie the four
+  // pieces of the verifiable tuple (UAL, signer, timestamp, nonce,
+  // signature) together under one SPARQL-enumerable resource.
   return [
-    { subject: core.agentUri, predicate: DKG_ENDORSES, object: '', graph: core.graph }, // placeholder, replaced below
-    { subject: core.agentUri, predicate: DKG_ENDORSED_AT, object: `"${core.now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: core.graph },
-    { subject: core.agentUri, predicate: DKG_ENDORSEMENT_NONCE, object: `"${core.nonce}"`, graph: core.graph },
-    { subject: core.agentUri, predicate: DKG_ENDORSEMENT_SIGNATURE, object: `"${proofValue}"`, graph: core.graph },
+    {
+      subject: core.endorsementUri,
+      predicate: RDF_TYPE,
+      object: `<${DKG_ENDORSEMENT_CLASS}>`,
+      graph: core.graph,
+    },
+    {
+      subject: core.endorsementUri,
+      predicate: DKG_ENDORSES,
+      object: core.knowledgeAssetUal,
+      graph: core.graph,
+    },
+    {
+      subject: core.endorsementUri,
+      predicate: DKG_ENDORSED_BY,
+      object: core.agentUri,
+      graph: core.graph,
+    },
+    {
+      subject: core.endorsementUri,
+      predicate: DKG_ENDORSED_AT,
+      object: `"${core.now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
+      graph: core.graph,
+    },
+    {
+      subject: core.endorsementUri,
+      predicate: DKG_ENDORSEMENT_NONCE,
+      object: `"${core.nonce}"`,
+      graph: core.graph,
+    },
+    {
+      subject: core.endorsementUri,
+      predicate: DKG_ENDORSEMENT_SIGNATURE,
+      object: `"${proofValue}"`,
+      graph: core.graph,
+    },
   ];
 }
 
@@ -139,9 +256,7 @@ export function buildEndorsementQuads(
   options: BuildEndorsementQuadsOptions = {},
 ): Quad[] {
   const core = prepareEndorsementCore(agentAddress, knowledgeAssetUal, contextGraphId, options);
-  const quads = buildQuadsFromCore(core, toHex(core.digest));
-  quads[0].object = knowledgeAssetUal;
-  return quads;
+  return buildQuadsFromCore(core, toHex(core.digest));
 }
 
 /**
@@ -168,7 +283,5 @@ export async function buildEndorsementQuadsAsync(
   } else {
     proofValue = toHex(core.digest);
   }
-  const quads = buildQuadsFromCore(core, proofValue);
-  quads[0].object = knowledgeAssetUal;
-  return quads;
+  return buildQuadsFromCore(core, proofValue);
 }

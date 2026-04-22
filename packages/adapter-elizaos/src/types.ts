@@ -71,8 +71,16 @@ export interface Memory {
  *   }
  *
  *   // assistant-reply path (onAssistantReply):
+ *   // r19-2: `userTurnPersisted` is MANDATORY on the typed
+ *   // assistant-reply options — callers that don't know whether
+ *   // the preceding user-turn hook persisted should pass `false`
+ *   // to route through the safe full-envelope branch.
  *   async function persistReply(runtime: IAgentRuntime, m: Memory, userMessageId: string) {
- *     await hooks.onAssistantReply(runtime, m, state, { userMessageId, mode: 'assistant-reply' });
+ *     await hooks.onAssistantReply(runtime, m, state, {
+ *       mode: 'assistant-reply',
+ *       userMessageId,
+ *       userTurnPersisted: false,
+ *     });
  *   }
  */
 export type PersistableMemory = Memory & { readonly id: string };

@@ -265,11 +265,98 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
 }
 
 /**
- * Revoke a single token in-process. Useful for operators that want to
- * surgically kill a leaked credential without rewriting the whole
- * token file.
+ * Revoke a single token. Returns `true` if the token was previously
+ * known to this auth surface (in-memory or file-backed) and has now
+ * been invalidated; returns `false` if the token was not present at
+ * all.
+ *
+ * PR #229 bot review round 19 (r19-4): the previous revision was a
+ * synchronous `validTokens.delete(token)` only — but `verifyToken()`
+ * calls `reconcileFileTokens()` on every invocation, and that
+ * reconciliation re-adds any token that still appears on disk in
+ * `auth.token`. So calling `revokeToken()` against a file-derived
+ * credential was a no-op the very next request: the in-memory set
+ * was reset from the still-unchanged file. The contract advertised
+ * by the JSDoc ("surgically kill a leaked credential") was therefore
+ * broken for the most common case (the file-backed admin token).
+ *
+ * Fix: persist the removal. If the token was loaded from
+ * `auth.token`, rewrite the file to exclude it (and its snapshot
+ * entry) BEFORE deleting from the in-memory set, so the next
+ * reconcile sees a file that no longer contains the revoked token
+ * and leaves it out. Tokens that were never file-backed (e.g.
+ * config-pinned via `loadTokens({ tokens: [...] })`) take the
+ * original purely-in-memory path — those are not at risk of being
+ * re-added by reconciliation because they are not in the snapshot's
+ * `fileTokens`.
  */
-export function revokeToken(token: string, validTokens: Set<string>): boolean {
+export async function revokeToken(
+  token: string,
+  validTokens: Set<string>,
+): Promise<boolean> {
+  // Snapshot the file-backed tokens BEFORE we mutate the in-memory
+  // set so we can decide whether the rewrite is needed. The snapshot
+  // is the source of truth for what reconcileFileTokens will treat
+  // as "file-derived" on the next call.
+  const snapshot = lastFileSnapshot.get(validTokens);
+  const wasFileToken = snapshot?.fileTokens.has(token) ?? false;
+
+  if (wasFileToken) {
+    const filePath = tokenFilePath();
+    let raw: string;
+    try {
+      raw = readFileSync(filePath).toString('utf-8');
+    } catch (err: any) {
+      // File vanished between the snapshot and now — there is
+      // nothing to rewrite. Drop the snapshot so the next reconcile
+      // takes the ENOENT branch and removes any stragglers, then
+      // fall through to the in-memory delete below.
+      if (err && err.code === 'ENOENT') {
+        lastFileSnapshot.delete(validTokens);
+        return validTokens.delete(token);
+      }
+      throw err;
+    }
+    // Preserve comments and any other tokens; only strip lines that
+    // exactly match the revoked token. Empty lines and `#`-prefixed
+    // comment lines are kept so operators don't lose their notes.
+    const lines = raw.split('\n');
+    const kept: string[] = [];
+    let removedAny = false;
+    for (const line of lines) {
+      const t = line.trim();
+      if (t.length > 0 && !t.startsWith('#') && t === token) {
+        removedAny = true;
+        continue;
+      }
+      kept.push(line);
+    }
+    if (removedAny) {
+      // Atomic-ish rewrite: same path, mode preserved at 0o600 so
+      // the file stays operator-only readable. We deliberately do
+      // NOT re-add a `# ...` header here because we are PRESERVING
+      // whatever header (if any) was already on disk — the rewrite
+      // is purely a delete-by-content.
+      let next = kept.join('\n');
+      // Guarantee a trailing newline so future appends don't end up
+      // on the same line as the last surviving token.
+      if (!next.endsWith('\n')) next = `${next}\n`;
+      await writeFile(filePath, next, { mode: 0o600 });
+      try {
+        await chmod(filePath, 0o600);
+      } catch {
+        // chmod is best-effort on platforms (e.g. Windows) that
+        // don't enforce POSIX modes. The writeFile mode hint above
+        // is already authoritative on those that do.
+      }
+      // Drop the cached snapshot so the next reconcile re-reads the
+      // (now strictly smaller) file and rebuilds `fileTokens` —
+      // otherwise the snapshot's old `fileTokens` would still claim
+      // the revoked token was file-backed and skip the removal.
+      lastFileSnapshot.delete(validTokens);
+    }
+  }
+
   return validTokens.delete(token);
 }
 
@@ -739,8 +826,30 @@ export function httpAuthGuard(
       // actually body-less (GET/HEAD/OPTIONS are semantically body-less
       // for HMAC binding; everything else must trip the explicit
       // Content-Length/Transfer-Encoding check).
+      //
+      // PR #229 bot review round 19 (r19-1): pre-r19-1 `isFramingBodyless`
+      // required an *explicit* `Content-Length: 0`. That let a signed
+      // client omit the header entirely and — per HTTP/1.1 RFC 9112
+      // §6.1, a non-chunked request with no `Content-Length` also has
+      // no body — hit an auth-gated empty-body route like
+      // `POST /api/local-agent-integrations/:id/refresh`. Those routes
+      // never call `readBodyOrNull()`, so the deferred
+      // `verifyHttpSignedRequestAfterBody` hook never runs and the
+      // HMAC is never checked. Any `x-dkg-signature` (even a stale or
+      // forged one) was accepted.
+      //
+      // Fix: treat MISSING `Content-Length` (with no
+      // `Transfer-Encoding`) the same as `Content-Length: 0` and bind
+      // the HMAC to the empty body here. A caller that actually wants
+      // to stream a body MUST frame it (Content-Length > 0 or
+      // Transfer-Encoding: chunked); that's the only way to signal
+      // body presence on the wire without ambiguity anyway.
+      const clHeaderPresent = typeof clRaw === 'string' && clRaw.length > 0;
       const isFramingBodyless =
-        !isChunked && Number.isFinite(clNum) && clNum <= 0;
+        !isChunked && (
+          (clHeaderPresent && Number.isFinite(clNum) && clNum <= 0) ||
+          !clHeaderPresent
+        );
       const isZeroBody =
         method === 'GET' ||
         method === 'HEAD' ||

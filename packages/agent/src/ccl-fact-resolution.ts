@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DKG_ONTOLOGY, contextGraphDataUri, contextGraphSharedMemoryUri, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
-import { DKG_ENDORSES } from './endorse.js';
+import { DKG_ENDORSES, DKG_ENDORSED_BY } from './endorse.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { CclFactTuple } from './ccl-evaluator.js';
 
@@ -252,10 +252,23 @@ async function resolveEndorsementFacts(
   // view's named-graph URI (e.g. contextGraphVerifiedMemoryUri). The view
   // value is included in factQueryHash via the caller, ensuring snapshot
   // determinism. Full view-graph filtering deferred to CCL v1.0.
+  // PR #229 bot review round 19 (r19-3): endorsement quads moved
+  // from `<agent> dkg:endorses <ual>` to a per-event subject so that
+  // two endorsements by the same agent can't collide on the
+  // signature / nonce / timestamp tuple. CCL fact resolution now
+  // has to do the two-hop join through the endorsement resource:
+  //
+  //   ?endorsement dkg:endorses   ?ual
+  //   ?endorsement dkg:endorsedBy ?endorser
+  //
+  // Verifiers that need the full proof tuple can fetch the remaining
+  // three predicates off `?endorsement` — they are no longer spread
+  // across the agent subject and are no longer ambiguous.
   const query = `
     SELECT ?endorser ?ual WHERE {
       GRAPH <${graph}> {
-        ?endorser <${DKG_ENDORSES}> ?ual .
+        ?endorsement <${DKG_ENDORSES}>   ?ual .
+        ?endorsement <${DKG_ENDORSED_BY}> ?endorser .
         ${snapshotJoin}
         ${filters.join('\n        ')}
       }

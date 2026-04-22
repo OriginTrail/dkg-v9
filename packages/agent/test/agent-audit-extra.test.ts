@@ -340,32 +340,48 @@ describe('[A-4] Finalization promotes ONLY when merkle matches', () => {
 });
 
 describe('[A-7] ENDORSE signature + replay posture (FIXED)', () => {
-  it('endorsement quads carry an inline signature/proof AND a nonce (fix for A-7)', () => {
+  it('endorsement quads carry an inline signature/proof AND a nonce (fix for A-7 + r19-3)', () => {
     const agentAddress = '0x' + '1'.repeat(40);
     const ual = 'did:dkg:knowledge-asset:0xabc/1';
     const quads = buildEndorsementQuads(agentAddress, ual, CG);
 
-    // After the A-7 fix, buildEndorsementQuads emits four quads:
-    //   ENDORSES, ENDORSED_AT, ENDORSEMENT_NONCE, ENDORSEMENT_SIGNATURE.
-    expect(quads.length).toBe(4);
+    // A-7 fix (original): buildEndorsementQuads now emits the
+    //   ENDORSES + ENDORSED_AT + ENDORSEMENT_NONCE + ENDORSEMENT_SIGNATURE
+    // predicates. r19-3 extended the shape with rdf:type +
+    // ENDORSED_BY on a per-event endorsement resource so two
+    // endorsements by the same agent can't collide on the proof
+    // tuple. Net predicate count is now six.
+    expect(quads.length).toBe(6);
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://dkg.network/ontology#endorses');
     expect(predicates).toContain('https://dkg.network/ontology#endorsedAt');
+    // r19-3: endorsedBy ties the endorsement resource back to the
+    // agent so consumers can still query "who endorsed ual X?" with
+    // a deterministic two-hop join.
+    expect(predicates).toContain('https://dkg.network/ontology#endorsedBy');
 
     const hasSignature = quads.some(q => /signature|sig|proof/i.test(q.predicate));
     const hasNonce = quads.some(q => /nonce|replay/i.test(q.predicate));
     expect(hasSignature).toBe(true);
     expect(hasNonce).toBe(true);
 
-    // Two back-to-back builds produce distinct nonces → distinct proofs,
-    // proving per-call replay-resistance.
+    // Two back-to-back builds produce distinct nonces → distinct
+    // proofs → distinct per-event endorsement subjects, proving
+    // per-call replay-resistance AND the r19-3 "no-collision"
+    // invariant.
     const quads2 = buildEndorsementQuads(agentAddress, ual, CG);
-    expect(quads2.length).toBe(4);
+    expect(quads2.length).toBe(6);
     const nonce1 = quads.find(q => /nonce/i.test(q.predicate))?.object;
     const nonce2 = quads2.find(q => /nonce/i.test(q.predicate))?.object;
     expect(nonce1).toBeDefined();
     expect(nonce2).toBeDefined();
     expect(nonce1).not.toBe(nonce2);
+
+    // r19-3 invariant: subjects differ between the two endorsements
+    // even though the agent + UAL + CG are identical.
+    const subj1 = quads.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
+    const subj2 = quads2.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
+    expect(subj1).not.toBe(subj2);
   });
 });
 
@@ -398,29 +414,51 @@ describe('[A-9] Storage-ACK transport protocol ID', () => {
 
 describe('[A-12] DID format drift in agent.endorse', () => {
   it('accepts an ETH-address agentAddress (spec form)', () => {
+    // PR #229 bot review round 19 (r19-3): post-r19-3 every quad subject
+    // is now the per-event endorsement URN (`urn:dkg:endorsement:HEX`),
+    // not the agent DID. The agent DID moved into the OBJECT of the
+    // `dkg:endorsedBy` quad. Update this test to enforce the spec-form
+    // 0x-address shape there instead, and to verify the new
+    // endorsement-URN subject shape — the original drift this test
+    // pinned (peer-id leaking into the quads) would still surface as
+    // either a non-0x `endorsedBy` object or a malformed URN subject.
     const addr = '0x' + '1'.repeat(40);
     const quads = buildEndorsementQuads(addr, 'did:dkg:ka:0x1/1', CG);
+    expect(quads.length).toBeGreaterThan(0);
     for (const q of quads) {
-      expect(q.subject).toBe(`did:dkg:agent:${addr}`);
-      expect(q.subject).toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
+      expect(q.subject).toMatch(/^urn:dkg:endorsement:[0-9a-f]{64}$/);
     }
+    const endorsedByQuad = quads.find(
+      (q) => q.predicate === 'https://dkg.network/ontology#endorsedBy',
+    );
+    expect(endorsedByQuad).toBeDefined();
+    expect(endorsedByQuad!.object).toBe(`did:dkg:agent:${addr}`);
+    expect(endorsedByQuad!.object).toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
   });
 
   it('PROD-BUG: passing a libp2p PeerId to buildEndorsementQuads yields a non-spec did:dkg:agent: URI', () => {
-    // dkg-agent.ts:4056 passes `this.peerId` (a libp2p Peer ID string like
-    // `12D3KooW…`) into `buildEndorsementQuads`, producing
-    //   did:dkg:agent:12D3KooW…
-    // which violates spec §5 (agent DIDs MUST be the 0x-address form).
-    // This test pins the prod-bug so any code change silently "fixing"
-    // this path without updating the caller also flips this assertion.
+    // PR #229 bot review round 19 (r19-3): the regression target moved
+    // from the quad SUBJECT to the `dkg:endorsedBy` quad OBJECT (see
+    // sibling test above). The A-12 drift still manifests there if the
+    // caller passes a peer-id string instead of the 0x-address form —
+    // dkg-agent.ts:4056 still passes `this.peerId` into
+    // `buildEndorsementQuads`, which now produces
+    //   <urn:dkg:endorsement:…> dkg:endorsedBy <did:dkg:agent:12D3KooW…>
+    // violating spec §5. Pin that exact shape so any silent fix on one
+    // side without updating the caller flips this assertion.
     const peerIdStr = '12D3KooWFakePeerIdDoesNotMatterForShapeAssertion';
     const quads = buildEndorsementQuads(peerIdStr, 'did:dkg:ka:0x1/1', CG);
 
     for (const q of quads) {
-      expect(q.subject.startsWith(`did:dkg:agent:${peerIdStr}`)).toBe(true);
-      // Spec-form regex must FAIL here — the produced URI is NOT 0x-form.
-      expect(q.subject).not.toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
+      expect(q.subject).toMatch(/^urn:dkg:endorsement:[0-9a-f]{64}$/);
     }
+    const endorsedByQuad = quads.find(
+      (q) => q.predicate === 'https://dkg.network/ontology#endorsedBy',
+    );
+    expect(endorsedByQuad).toBeDefined();
+    expect(endorsedByQuad!.object.startsWith(`did:dkg:agent:${peerIdStr}`)).toBe(true);
+    // Spec-form regex must FAIL here — the produced agent URI is NOT 0x-form.
+    expect(endorsedByQuad!.object).not.toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
   });
 
   it('PROD-BUG: agent test fixtures hard-code non-spec did:dkg:agent: URIs (drift scan)', async () => {

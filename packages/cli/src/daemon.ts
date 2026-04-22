@@ -3427,13 +3427,7 @@ async function handleRequest(
 
     const allConns = agent.node.libp2p.getConnections();
     const peerConns = allConns.filter((c) => c.remotePeer.toString() === peerId);
-    let protocols: string[] = [];
-    try {
-      const peer = await agent.node.libp2p.peerStore.get({ toString: () => peerId } as any);
-      protocols = [...(peer.protocols ?? [])];
-    } catch {
-      protocols = [];
-    }
+    const protocols = await agent.getPeerProtocols(peerId);
 
     const health = agent.getPeerHealth().get(peerId);
     return jsonResponse(res, 200, {

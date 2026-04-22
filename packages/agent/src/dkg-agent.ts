@@ -5601,6 +5601,17 @@ export class DKGAgent {
     return this.peerHealth;
   }
 
+  async getPeerProtocols(peerId: string): Promise<string[]> {
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const pid = peerIdFromString(peerId);
+      const peer = await this.node.libp2p.peerStore.get(pid);
+      return [...(peer.protocols ?? [])];
+    } catch {
+      return [];
+    }
+  }
+
   /**
    * Ping all known peers to check liveness. Updates the peerHealth map with
    * latency and last-seen timestamps. Returns the number of peers that responded.

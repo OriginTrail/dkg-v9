@@ -435,7 +435,10 @@ async function cmdJoin(args: string[]): Promise<number> {
   }
 
   console.log(`\n[join] ✔ Installed ${results.length} file${results.length === 1 ? '' : 's'} for project ${invite.contextGraphId}.`);
-  console.log(`[join]   agent URI: urn:dkg:agent:${agentSlug}`);
+  // Mirror what planInstall actually templated in — agentUri wins when
+  // we successfully resolved a wallet from /api/agent/identity; fall
+  // back to the slug-based form only when we had to.
+  console.log(`[join]   agent URI: ${agentUri ?? `urn:dkg:agent:${agentSlug}`}`);
   console.log(`[join]   workspace: ${opts.workspace}`);
   console.log(`[join]   next: open Cursor in ${opts.workspace} — your agent is wired and will start capturing turns.`);
   return 0;

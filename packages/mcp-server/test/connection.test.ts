@@ -167,21 +167,17 @@ describe('DkgClient', () => {
         expect(calls[0].url).toBe('http://127.0.0.1:9999/api/status');
       });
 
-      it('connect ignores a malformed DKG_NODE_URL and falls back to file port', async () => {
+      it('r18-1: connect rejects a malformed DKG_NODE_URL instead of silently falling back to the local daemon', async () => {
+        // PR #229 bot review round 18 (r18-1). Pre-r18 an unusable
+        // `DKG_NODE_URL` (malformed, wrong scheme, reverse-proxy
+        // path prefix) silently fell through to the local
+        // `daemon.port` file — so a misconfigured operator ended up
+        // talking to 127.0.0.1 while the logs claimed the override
+        // was honoured. Now we fail fast with a diagnostic URL.
         process.env.DKG_NODE_URL = 'not-a-url';
         process.env.DKG_API_PORT = '9201';
         await writeFile(join(tempDir, 'auth.token'), 'tok\n');
-        const c = await DkgClient.connect();
-
-        const { fn, calls } = createTrackingFetch([
-          jsonRes({
-            name: 'n', peerId: 'p', uptimeMs: 1,
-            connectedPeers: 0, relayConnected: false, multiaddrs: [],
-          }),
-        ]);
-        globalThis.fetch = fn;
-        await c.status();
-        expect(calls[0].url).toBe('http://127.0.0.1:9201/api/status');
+        await expect(DkgClient.connect()).rejects.toThrow(/DKG_NODE_URL.*"not-a-url".*cannot be used/i);
       });
     });
 
@@ -305,17 +301,45 @@ describe('DkgClient', () => {
       expect(r.urlSource).toBe('env');
     });
 
-    it('r17-4: DKG_NODE_URL with a non-root pathname is rejected (falls back to file-derived port)', async () => {
+    it('r18-1: DKG_NODE_URL with a non-root pathname throws instead of silently falling back to the local daemon', async () => {
+      // Pre-r18-1 this fell through to the file-port path and the
+      // operator's reverse-proxy URL was silently ignored — a
+      // classic configuration footgun. Now the resolver throws a
+      // diagnostic error naming the offending URL and the expected
+      // shape, so the misconfiguration surfaces in `dkg mcp_auth
+      // status` and in every MCP tool invocation.
       process.env.DKG_NODE_URL = 'https://remote.example:8443/dkg';
       process.env.DKG_NODE_TOKEN = 'env-tok';
       process.env.DKG_API_PORT = '9201';
       await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
+      await expect(
+        resolveDaemonEndpoint({ requireReachable: true }),
+      ).rejects.toThrow(/DKG_NODE_URL.*"https:\/\/remote\.example:8443\/dkg".*cannot be used/i);
+    });
+
+    it('r18-1: DKG_NODE_URL rejection also surfaces in requireReachable=false so the display UI cannot lie', async () => {
+      // Even the lenient "just render a status line" path must NOT
+      // silently claim the local daemon when the operator asked for
+      // a remote one. Surfacing the error in the tool UI is strictly
+      // better than showing "http://127.0.0.1:..." under a caller
+      // who set `DKG_NODE_URL=https://proxy/dkg`.
+      process.env.DKG_NODE_URL = 'ftp://remote.example:21';
+      await expect(
+        resolveDaemonEndpoint({ requireReachable: false }),
+      ).rejects.toThrow(/DKG_NODE_URL.*"ftp:\/\/remote\.example:21".*cannot be used/i);
+    });
+
+    it('r18-1: empty DKG_NODE_URL (the default) still falls back to the local file-port path', async () => {
+      // Guard against over-reach: the r18-1 fail-fast only applies
+      // to non-empty-but-unparseable inputs. Unset / empty should
+      // still work as before and route to the local daemon.
+      delete process.env.DKG_NODE_URL;
+      process.env.DKG_API_PORT = '9201';
+      await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
       const r = await resolveDaemonEndpoint({ requireReachable: true });
-      // Origin is unusable → helper falls through to the file-port
-      // path. The env token is STILL honoured (token vs URL are
-      // independent), so tokenSource stays `env`.
       expect(r.baseOrPort).toBe(9201);
       expect(r.urlSource).toBe('file');
+      expect(r.tokenSource).toBe('file');
     });
 
     it('falls back to the file-derived port + token on a normal install', async () => {

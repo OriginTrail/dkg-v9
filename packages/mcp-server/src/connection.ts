@@ -199,6 +199,31 @@ export async function resolveDaemonEndpoint(options: {
     baseOrPort = envBaseUrl;
     displayUrl = envBaseUrl;
     urlSource = 'env';
+  } else if (envUrl) {
+    // PR #229 bot review round 18 (r18-1): if the operator SET
+    // `DKG_NODE_URL` but we couldn't normalize it (malformed URL,
+    // non-http(s) scheme, reverse-proxy path prefix rejected by
+    // r17-4, unusable port, missing hostname), the pre-r18-1 code
+    // silently fell through to the local-daemon discovery path
+    // below. That was the exact footgun r17-4 meant to close: an
+    // operator who configured `DKG_NODE_URL=https://proxy/dkg`
+    // ended up connecting to their LOCAL `127.0.0.1:<port>` daemon
+    // and every request looked like it worked (wrong data,
+    // inconsistent state) instead of surfacing the misconfiguration.
+    //
+    // Non-empty-but-unsupported `DKG_NODE_URL` is an explicit
+    // operator intent; fail fast with a diagnostic that tells them
+    // exactly what the resolver saw and how to fix it. Callers that
+    // only want a display string (e.g. `mcp_auth status` with
+    // `requireReachable: false`) still surface the error — silently
+    // lying about the endpoint would be worse than crashing the UI.
+    throw new Error(
+      `DKG_NODE_URL is set to "${envUrl}" but cannot be used as a daemon endpoint: ` +
+        `expected an origin-only http(s) URL with an explicit or default port and no path ` +
+        `(e.g. "https://host.example" or "https://host.example:8443"). ` +
+        `Reverse-proxy path prefixes are not supported — point DKG_NODE_URL at the ` +
+        `daemon's bare origin or unset it to use the local daemon.`,
+    );
   } else {
     const port = await readDkgApiPort();
     if (!port) {

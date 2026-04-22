@@ -73,7 +73,7 @@ export interface StarterOption {
 
 /** Human-readable metadata for the starter picker. Order matters — first
  *  entry is the default for the 'agent' picker mode. */
-export const STARTER_OPTIONS: StarterOption[] = [
+const STARTER_OPTIONS: StarterOption[] = [
   { slug: 'coding-project', displayName: 'Coding project',
     description: 'Software projects: decisions, tasks, code, GitHub. The v1 reference ontology.' },
   { slug: 'book-research', displayName: 'Book / paper research',
@@ -92,7 +92,7 @@ export function listStarters(): StarterOption[] {
 }
 
 /** Get the (ttl, agentGuide) for a starter. */
-export function getStarter(slug: string): { ttl: string; guide: string } | null {
+function getStarter(slug: string): { ttl: string; guide: string } | null {
   return STARTERS[slug] ?? null;
 }
 

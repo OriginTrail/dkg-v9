@@ -88,7 +88,6 @@ export const fetchTelemetrySettings = () => get<{ enabled: boolean }>('/api/sett
 export const updateTelemetrySettings = (enabled: boolean) =>
   put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
-export const connectToPeer = (multiaddr: string) => post<{ connected?: boolean }>('/api/connect', { multiaddr });
 export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =>
   fetchWithTimeout(`${BASE}/api/connect`, {
     method: 'POST',
@@ -390,16 +389,6 @@ export const executeQuery = (
 ) =>
   post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
 
-/** Scoped SPARQL query — hits a specific sub-graph only. Returns raw bindings rows. */
-export const executeSubGraphQuery = async (
-  sparql: string,
-  contextGraphId: string,
-  subGraphName: string,
-): Promise<Array<Record<string, string>>> => {
-  const r = await post<{ result: any }>('/api/query', { sparql, contextGraphId, subGraphName });
-  return r?.result?.bindings ?? [];
-};
-
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
   await post<any>('/api/shared-memory/write', { contextGraphId, quads });
@@ -632,21 +621,6 @@ export interface MemorySession {
     attachmentRefs?: LocalAgentChatAttachmentRef[];
   }>;
 }
-export interface MemorySessionPublicationStatus {
-  sessionId: string;
-  sharedMemoryTripleCount: number;
-  dataTripleCount: number;
-  scope: 'shared_memory_only' | 'published' | 'published_with_pending' | 'empty';
-  rootEntityCount: number;
-}
-export interface MemorySessionPublishResult {
-  sessionId: string;
-  rootEntityCount: number;
-  status: string;
-  tripleCount: number;
-  ual?: string;
-  publication: MemorySessionPublicationStatus;
-}
 export interface MemorySessionGraphDeltaWatermark {
   baseTurnId: string | null;
   previousTurnId: string | null;
@@ -696,36 +670,12 @@ export const fetchMemorySessionGraphDelta = (
     `/api/memory/sessions/${encodeURIComponent(sessionId)}/graph-delta?${params.toString()}`,
   );
 };
-export const fetchMemorySessionPublication = (sessionId: string) =>
-  get<MemorySessionPublicationStatus>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/publication`);
-export const publishMemorySession = (
-  sessionId: string,
-  opts: { rootEntities?: string[]; clearAfter?: boolean } = {},
-) =>
-  post<MemorySessionPublishResult>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/publish`, opts);
-export const fetchMemoryStats = () =>
-  get<{ contextGraphId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
 // IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
 // importMemories were retired with the /api/memory/import V9 relic as
 // part of the openclaw-dkg-primary-memory work. Agents write memory via
 // the adapter's dkg_memory_import tool, and file-import flows go through
 // /api/assertion/:name/import-file directly.
-
-// --- Peer-to-peer messaging ---
-export const sendPeerMessage = (to: string, text: string) =>
-  post<{ delivered: boolean; error?: string }>('/api/chat', { to, text });
-
-export const fetchMessages = (opts: { peer?: string; since?: number; limit?: number } = {}) => {
-  const params = new URLSearchParams();
-  if (opts.peer) params.set('peer', opts.peer);
-  if (opts.since) params.set('since', String(opts.since));
-  if (opts.limit) params.set('limit', String(opts.limit));
-  const qs = params.toString();
-  return get<{ messages: Array<{ ts: number; direction: 'in' | 'out'; peer: string; peerName?: string; text: string }> }>(
-    `/api/messages${qs ? '?' + qs : ''}`,
-  );
-};
 
 // --- OpenClaw agents ---
 export interface OpenClawAgent {
@@ -1363,8 +1313,6 @@ export const shutdownNode = () =>
   post<{ ok: boolean }>('/api/shutdown', {});
 
 // --- Integrations ---
-export const fetchIntegrations = () =>
-  get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; contextGraphs: any[] }>('/api/integrations');
 export const subscribeToContextGraph = (contextGraphId: string) =>
   post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
 

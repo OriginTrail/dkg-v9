@@ -37,7 +37,7 @@ import type { Triple } from './useMemoryEntities.js';
 /** Namespace for synthetic visualisation triples — unique to VM decoration
  *  so downstream code (SubGraphBar bucketing, counts) never mistakes them
  *  for real data. */
-export const VIZ_NS = 'http://dkg.io/viz/';
+const VIZ_NS = 'http://dkg.io/viz/';
 export const VIZ_ANCHOR_TYPE = `${VIZ_NS}OnChainAnchor`;
 export const VIZ_AGENT_TYPE = `${VIZ_NS}AgentIdentity`;
 export const VIZ_PRED_ANCHORED_IN = `${VIZ_NS}anchoredIn`;

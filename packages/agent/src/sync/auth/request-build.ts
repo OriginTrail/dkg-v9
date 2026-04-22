@@ -59,8 +59,9 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   } = params;
 
   if (!needsAuth) {
+    const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
     const phaseSuffix = phase === 'meta' ? '|meta' : '';
-    return new TextEncoder().encode(`${contextGraphId}|${offset}|${limit}${phaseSuffix}`);
+    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
   }
 
   const request: SyncRequestEnvelope = {

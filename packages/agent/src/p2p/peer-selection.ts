@@ -7,7 +7,9 @@ export function orderCatchupPeers(
 
   if (privateOnly) {
     const preferredPeer = peers.find((peer) => peer.toString() === preferredPeerId);
-    if (preferredPeer) return [preferredPeer];
+    if (preferredPeer) {
+      return [preferredPeer, ...peers.filter((peer) => peer.toString() !== preferredPeerId)];
+    }
   }
 
   return [...peers].sort((a, b) => {

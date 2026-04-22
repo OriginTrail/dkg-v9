@@ -256,9 +256,21 @@ export class DKGNode {
     // libp2p has at least one live circuit reservation somewhere. Recent
     // js-libp2p circuit-relay-v2 defaults to holding a single reservation
     // at a time, so we treat the reservation set as a pool, not per-relay.
-    const selfAddrs = node.getMultiaddrs().map(ma => ma.toString());
-    const circuitSelfAddrs = selfAddrs.filter(a => a.includes('/p2p-circuit'));
-    const haveAnyReservation = circuitSelfAddrs.length > 0;
+    // `haveAnyReservation` is evaluated per-iteration from a mutable
+    // snapshot (`refreshReservationSnapshot`), not once before the loop.
+    // A successful redial can restore a reservation mid-tick and every
+    // remaining relay must see that fresh state — otherwise a healthy
+    // idle relay gets torn down by the `transportUp && !haveAnyReservation`
+    // branch just because it was scanned after the recovery. Codex
+    // tier-4l finding at packages/core/src/node.ts:351. We keep the
+    // first snapshot so the "this relay currently holds the reservation"
+    // hint stays accurate within a single iteration.
+    let circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
+    let haveAnyReservation = circuitSelfAddrs.length > 0;
+    const refreshReservationSnapshot = () => {
+      circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
+      haveAnyReservation = circuitSelfAddrs.length > 0;
+    };
     const now = Date.now();
 
     for (const { peerId, addr } of this.relayTargets) {
@@ -350,6 +362,10 @@ export class DKGNode {
       try {
         await node.dial(addr);
         console.log(`[${ts()}] Relay watchdog: reconnected to ${short(relayPidStr)}`);
+        // Reservation may have been restored by this dial; refresh the
+        // snapshot so the next iteration doesn't tear down another
+        // healthy relay on stale state.
+        refreshReservationSnapshot();
       } catch (err: any) {
         console.log(`[${ts()}] Relay watchdog: redial failed for ${short(relayPidStr)}: ${err.message}`);
       }

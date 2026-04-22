@@ -5224,19 +5224,35 @@ export class DKGAgent {
   }
 
   /**
-   * Check whether the context graph has any actual content locally — i.e.,
-   * at least one triple in the paranet's own data graph. A paranet declaration
-   * triple in the ontology graph (from auto-discovery via chain registry or
-   * ontology sync) does NOT count as content; it only indicates the paranet
-   * was announced, not that we have access to its data. This predicate is
-   * used to distinguish "genuinely synced / has access" from "declaration
-   * only / probably denied".
+   * Check whether the context graph has any actual content locally. A
+   * paranet declaration triple in the ontology graph (from auto-discovery
+   * via chain registry or ontology sync) does NOT count as content; it
+   * only indicates the paranet was announced, not that we have access to
+   * its data. This predicate is used to distinguish "genuinely synced /
+   * has access" from "declaration only / probably denied".
+   *
+   * Looks for at least one triple in ANY graph under the context-graph
+   * prefix (`did:dkg:context-graph:<cg>`, `…/<sg>`, `…/assertion/…`,
+   * `…/_shared_memory`, …) except the `_meta` bookkeeping graphs. Tier-4l
+   * Codex feedback: the previous check only inspected the root data
+   * graph, so a project whose content was synced into sub-graphs
+   * (`/tasks`, `/chat`, assertion graphs, SWM) looked like "no local
+   * content" and the denial-cleanup path would unsubscribe it. Sub-graph
+   * content is the normal state for any non-trivial project so the root
+   * data graph is routinely empty.
    */
   async contextGraphHasLocalContent(contextGraphId: string): Promise<boolean> {
-    const dataGraph = paranetDataGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
-    );
+    const prefix = `did:dkg:context-graph:${contextGraphId}`;
+    // ASK is cheap on Oxigraph; the FILTER keeps us inside this CG's
+    // namespace and excludes `_meta` / `_shared_memory_meta` bookkeeping
+    // which is written even for declaration-only discoveries.
+    const sparql = `ASK WHERE {
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(STRSTARTS(STR(?g), "${prefix}"))
+      FILTER(!STRENDS(STR(?g), "/_meta"))
+      FILTER(!STRENDS(STR(?g), "/_shared_memory_meta"))
+    }`;
+    const result = await this.store.query(sparql);
     if (result.type === 'boolean') return result.value;
     return result.type === 'bindings' && result.bindings.length > 0;
   }

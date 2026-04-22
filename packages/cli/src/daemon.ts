@@ -246,6 +246,103 @@ function resolveMcpDkgAssets(): McpDkgAssets {
 }
 
 /**
+ * Read the installed @origintrail-official/dkg-mcp package version from
+ * its package.json. Used by the manifest install/plan-install routes to
+ * enforce `requiresMcpDkgVersion`. Returns null when the package can't
+ * be located (caller should treat this as "unknown" and skip gating
+ * rather than block).
+ */
+function readMcpDkgVersion(): string | null {
+  try {
+    const pkgJsonPath = daemonRequire.resolve('@origintrail-official/dkg-mcp/package.json');
+    const raw = readFileSync(pkgJsonPath, 'utf8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.length > 0) return parsed.version;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse an "X.Y.Z[-pre]" semver into comparable tuple; returns null on
+ * malformed input so callers can bail cleanly.
+ */
+function parseSemver(v: string): [number, number, number, string] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(v.trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ''];
+}
+
+// NOTE: we use a local variant (`cmpSemverForRange`) rather than the
+// exported `compareSemver` below because the exported one is also used
+// by the auto-update path and its prerelease ordering is slightly
+// looser than the range-checking semantics we need here.
+function cmpSemverForRange(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] as number) - (pb[i] as number);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  if (pa[3] === pb[3]) return 0;
+  if (pa[3] === '') return 1;
+  if (pb[3] === '') return -1;
+  return pa[3] < pb[3] ? -1 : 1;
+}
+
+/**
+ * Minimal `requiresMcpDkgVersion` range check. Understands the range
+ * forms the mcp-dkg ecosystem actually publishes today: exact version,
+ * `>=a.b.c`, `>a.b.c`, `<=a.b.c`, `<a.b.c`, `^a.b.c` (compatible within
+ * major), `~a.b.c` (compatible within minor), space-separated `AND`
+ * conjunctions, and ` || ` disjunctions. Unparseable ranges resolve to
+ * `true` — we'd rather let an install proceed with a warning than block
+ * it on a syntax we don't recognise. Codex tier-4k N30.
+ */
+function versionSatisfiesRange(version: string, range: string): boolean {
+  if (!range || range.trim() === '*' || range.trim() === 'latest') return true;
+  const alts = range.split('||').map((s) => s.trim()).filter(Boolean);
+  for (const alt of alts) {
+    const comparators = alt.split(/\s+/).filter(Boolean);
+    let ok = true;
+    for (const c of comparators) {
+      let passed = true;
+      if (c.startsWith('>=')) passed = cmpSemverForRange(version, c.slice(2)) >= 0;
+      else if (c.startsWith('<=')) passed = cmpSemverForRange(version, c.slice(2)) <= 0;
+      else if (c.startsWith('>')) passed = cmpSemverForRange(version, c.slice(1)) > 0;
+      else if (c.startsWith('<')) passed = cmpSemverForRange(version, c.slice(1)) < 0;
+      else if (c.startsWith('^')) {
+        const base = parseSemver(c.slice(1));
+        const cur = parseSemver(version);
+        if (!base || !cur) { passed = true; break; }
+        const upper: [number, number, number] =
+          base[0] > 0 ? [base[0] + 1, 0, 0]
+          : base[1] > 0 ? [base[0], base[1] + 1, 0]
+          : [base[0], base[1], base[2] + 1];
+        passed = cmpSemverForRange(version, `${base[0]}.${base[1]}.${base[2]}`) >= 0 &&
+          cmpSemverForRange(version, `${upper[0]}.${upper[1]}.${upper[2]}`) < 0;
+      } else if (c.startsWith('~')) {
+        const base = parseSemver(c.slice(1));
+        if (!base) { passed = true; break; }
+        const upper: [number, number, number] = [base[0], base[1] + 1, 0];
+        passed = cmpSemverForRange(version, `${base[0]}.${base[1]}.${base[2]}`) >= 0 &&
+          cmpSemverForRange(version, `${upper[0]}.${upper[1]}.${upper[2]}`) < 0;
+      } else if (/^\d/.test(c)) {
+        passed = cmpSemverForRange(version, c) === 0;
+      } else {
+        // Unrecognised comparator — give up on this alt rather than block.
+        return true;
+      }
+      if (!passed) { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+/**
  * Map the loaded `network.networkName` to the canonical label used
  * in the manifest schema. Anything that doesn't smell like testnet
  * or mainnet falls through to devnet.
@@ -7093,6 +7190,28 @@ async function handleRequest(
             `"supportedTools".`,
         });
       }
+      // Enforce `requiresMcpDkgVersion` before planning (Codex tier-4k N30).
+      // A manifest can declare the minimum mcp-dkg version its wiring needs
+      // (e.g. new capture-hook format, new schema fields). Without this
+      // check an operator on an older local @origintrail-official/dkg-mcp
+      // gets a plan that looks fine but fails the moment Cursor/Claude
+      // tries to invoke the bundled entry. We skip gating when the range
+      // is absent OR when we can't read the local mcp-dkg version — the
+      // latter is very rare (no resolution path) and erring-permissive
+      // keeps existing deployments working.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
+      }
       const manifest = {
         ...fetched,
         supportedTools: filteredSupportedTools,
@@ -7157,6 +7276,23 @@ async function handleRequest(
             `"tools", or ask the curator to republish the manifest with broader ` +
             `"supportedTools".`,
         });
+      }
+      // Same `requiresMcpDkgVersion` gate as /manifest/plan-install
+      // (Codex tier-4k N30). Blocking here prevents the writeInstallImpl
+      // step from spraying incompatible wiring onto disk that the local
+      // mcp-dkg can't actually service.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
       }
       const manifest = {
         ...fetched,

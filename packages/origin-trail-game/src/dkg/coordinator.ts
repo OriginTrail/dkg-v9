@@ -1136,7 +1136,12 @@ export class OriginTrailGameCoordinator {
         { rootEntities },
         { contextGraphId: swarm.contextGraphId, contextGraphSignatures },
       );
-      this.log(`${label} published from shared memory to context graph ${swarm.contextGraphId}`);
+      // Log phrasing is observed by the e2e suite (`leader log shows
+      // complete context graph lifecycle` / `turn 1: votes resolve and
+      // data is published to context graph`) — keep the substring
+      // "published to context graph" intact so the assertions don't
+      // false-fail when the message is reworded.
+      this.log(`${label} published to context graph ${swarm.contextGraphId} (from shared memory)`);
       return result;
     }
 

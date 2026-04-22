@@ -70,7 +70,7 @@ function createInProcessAgent(peerId = 'test-peer-1') {
     registerContextGraphOnChain: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
       contextGraphs.push(params);
-      return { contextGraphId: id, txHash: '0xcg' + id.toString() };
+      return { contextGraphId: id, txHash: '0xcg' + id.toString(), success: true };
     },
     signContextGraphDigest: async (_contextGraphId: bigint, _merkleRoot: Uint8Array) => ({
       identityId: 0n,

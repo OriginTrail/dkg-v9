@@ -53,7 +53,10 @@ function makeMockAgent(peerId: string, identityId = 1n) {
     registerContextGraphOnChain: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
       contextGraphs.push(params);
-      return { contextGraphId: id, txHash: '0xcg' + id.toString() };
+      // Must include `success: true` to match the real EVM/Mock adapter
+      // TxResult contract — coordinator's K1 guard rejects results without it
+      // to avoid binding a swarm to a 0n sentinel contextGraphId.
+      return { contextGraphId: id, txHash: '0xcg' + id.toString(), success: true };
     },
     signContextGraphDigest: async (_contextGraphId: bigint, _merkleRoot: Uint8Array) => ({
       identityId,

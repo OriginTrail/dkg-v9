@@ -5,7 +5,7 @@
  * running (via DKGService) before actions are invoked.
  */
 import { requireAgent } from './service.js';
-import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from './types.js';
+import type { Action, ChatTurnPersistOptions, IAgentRuntime, Memory, State, HandlerCallback } from './types.js';
 
 function hasSetting(runtime: IAgentRuntime, key: string): boolean {
   return !!runtime.getSetting(key);
@@ -454,20 +454,36 @@ function buildAssistantMessageQuads(
  */
 function buildHeadlessUserStubQuads(
   userMsgUri: string,
-  sessionUri: string,
+  _sessionUri: string,
   ts: string,
   turnKey: string,
 ): ChatQuad[] {
+  // PR #229 bot review round 13 (r13-2): deliberately NO
+  // `schema:isPartOf` edge. The previous stub declared itself a
+  // `schema:Message` partitioned into the session, which caused
+  // `ChatMemoryManager.getSession()` to enumerate it alongside the
+  // real user/assistant messages and the node-ui mapped it to an
+  // "assistant" bubble (non-`user` author → assistant). That
+  // inflated message counts and surfaced blank assistant turns in
+  // every headless reply.
+  //
+  // The stub still needs to be a typed subject so the turn
+  // envelope's `dkg:hasUserMessage` edge has something to point at
+  // (the reader requires both edges to resolve a turn), but it must
+  // NOT participate in session enumeration. Dropping `isPartOf`
+  // achieves that while keeping the reader contract intact. We
+  // also keep the explicit `dkg:headlessUserMessage "true"` marker
+  // so any code path that does discover the stub via a turnId join
+  // can filter it out.
   return [
     { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
-    { subject: userMsgUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
-    // Distinct system actor so UIs don't render a blank user bubble.
+    // Distinct system actor so UIs that DO discover the stub via
+    // some other path don't render a blank user bubble.
     { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: `${DKG_ONT_NS}agent:system`, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     // Explicit empty text — readers that concatenate "user: …" skip it.
     { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(''), graph: '' },
     { subject: userMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
-    // Headless marker — consumers that want to filter these out can.
     { subject: userMsgUri, predicate: `${DKG_ONT_NS}headlessUserMessage`, object: rdfString('true'), graph: '' },
   ];
 }
@@ -695,58 +711,45 @@ export async function persistChatTurnImpl(
   state: State,
   options: Record<string, unknown>,
 ): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
-  const optsAny = options as Record<string, unknown> & {
-    contextGraphId?: string;
-    assistantText?: string;
-    assistantReply?: { text?: string };
-    assertionName?: string;
-    /**
-     * Routing flag set by the dedicated `onAssistantReply` hook handler
-     * in `index.ts`. When `'assistant-reply'`, the impl skips re-emitting
-     * the user-message + turn-envelope quads and only writes the assistant
-     * message + the link onto the existing turn. Default `'user-turn'`.
-     */
-    mode?: 'user-turn' | 'assistant-reply';
-    /**
-     * Optional override for the source-of-truth message id when the
-     * assistant-reply hook fires with a different memory id than the
-     * user-turn hook. Lets onAssistantReply target the same `turnUri`.
-     */
-    userMessageId?: string;
-    /**
-     * Optional stable timestamp override — bot review PR #229 follow-up
-     * on actions.ts:539. When the hook is re-fired for the same memory
-     * (network retry, ElizaOS re-emitting an event on reconnect, test
-     * harness repeating a call) callers can pin the timestamp so the
-     * rewritten quads are byte-identical with the originals. Accepts
-     * either `ts` or `timestamp` (alias) for DX parity with the hook
-     * payload types. If neither is supplied we derive a stable value
-     * from the underlying message; see `resolveStableTurnTimestamp`.
-     */
-    ts?: string;
-    timestamp?: string;
-  };
+  // r13-3: the full runtime surface lives in the public
+  // `ChatTurnPersistOptions` type. We still accept `Record<string,
+  // unknown>` at the entry point (matches ElizaOS' loose `options`
+  // contract) but type the internal alias so every property access
+  // below is compile-checked against the documented surface.
+  const optsAny = options as Record<string, unknown> & ChatTurnPersistOptions;
 
   const mode = optsAny.mode ?? 'user-turn';
   const userId = (message as any).userId ?? 'anonymous';
   const roomId = (message as any).roomId ?? 'default';
-  // For assistant-reply mode, prefer the user message id if the caller
-  // passed it explicitly so we hit the same turnUri. Otherwise fall back
-  // to the assistant memory's own id — in which case the 'assistant-
-  // reply' code path below emits the FULL ChatTurn envelope (not just
-  // the hasAssistantMessage link) so the reply is discoverable by
-  // readers that filter on `?turn a dkg:ChatTurn` even without a
-  // matching user-turn hook.
+  // PR #229 bot review round 13 (r13-1): whether the preceding
+  // user-turn envelope (dkg:ChatTurn subject + real user Message +
+  // hasUserMessage edge) has ALREADY been persisted. Previously this
+  // was inferred from `!optsAny.userMessageId` alone, which conflates
+  // two different things:
   //
-  // Bot review (PR #229 follow-up, actions.ts:517): the previous revision
-  // fell through to the append-only path on this fallback, which wrote
-  // ONLY the assistant message + `dkg:hasAssistantMessage` link onto a
-  // turnUri that had no ChatTurn / dkg:hasUserMessage quads — the
-  // ChatMemoryManager queries that filter `?turn a dkg:ChatTurn` then
-  // dropped the reply entirely. We now track whether we're on that
-  // fallback so the write path below can emit the turn envelope.
-  const headlessAssistantReply =
-    mode === 'assistant-reply' && !optsAny.userMessageId;
+  //   1. "do we know the parent user message id?" (addressing)
+  //   2. "did the matching onChatTurn write succeed?" (durability)
+  //
+  // A caller can legitimately know (1) — typically the ElizaOS
+  // runtime forwards the parent id automatically — while (2) failed
+  // because the hook was disabled, the user-turn write errored, or a
+  // reconnect replayed the assistant hook without a matching user
+  // hook. Under the old rule we took the cheap append-only path,
+  // wrote a lone `hasAssistantMessage` onto a turn URI that never got
+  // typed, and the reader dropped the reply entirely.
+  //
+  // The new contract prefers the explicit `userTurnPersisted` signal
+  // from ChatTurnPersistOptions. If unset we fall back to the legacy
+  // inference (presence of `userMessageId`) for backwards compat,
+  // but callers are strongly encouraged to set the flag explicitly
+  // — the safer *full-envelope* path is the default when ambiguous.
+  const explicitUserTurnPersisted = typeof optsAny.userTurnPersisted === 'boolean'
+    ? optsAny.userTurnPersisted
+    : undefined;
+  const legacyInference = typeof optsAny.userMessageId === 'string'
+    && optsAny.userMessageId.length > 0;
+  const userTurnPersisted = explicitUserTurnPersisted ?? legacyInference;
+  const headlessAssistantReply = mode === 'assistant-reply' && !userTurnPersisted;
   // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
   // fallback is NOT stable: two separate calls for the same logical
   // message (e.g. retry, rebroadcast) would fabricate different turn

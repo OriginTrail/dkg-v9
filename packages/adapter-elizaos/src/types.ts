@@ -11,11 +11,83 @@ export interface IAgentRuntime {
   character?: { name?: string };
 }
 
+/**
+ * Minimal subset of the ElizaOS `Memory` message surface that the DKG
+ * adapter needs at runtime. Fields outside `{ userId, agentId, roomId,
+ * content }` are optional because the upstream ElizaOS type doesn't
+ * model them, but the DKG chat-persistence code *does* read them:
+ *
+ *   - `id`         → stable turn source id (required by
+ *                    `persistChatTurnImpl` in the user-turn path; the
+ *                    function throws loudly if missing so the caller
+ *                    boundary surfaces the violation instead of
+ *                    silently fabricating a time-based id).
+ *   - `createdAt`  → preferred source for `schema:dateCreated` so
+ *                    retries produce byte-identical quads.
+ *   - `timestamp`, `date`, `ts` → legacy aliases accepted for the
+ *                    same purpose (matches adapter callers in the
+ *                    wild — we normalise via `coerceToIsoDateTime`).
+ *   - `inReplyTo`  → link from an assistant reply back to its user
+ *                    turn so downstream consumers can reconstruct
+ *                    threading even without running through the chat
+ *                    memory reader.
+ *
+ * Exposing these on the PUBLIC adapter type (PR #229 bot review
+ * round 13, r13-3) means downstream TypeScript consumers can't satisfy
+ * `Memory` and still deterministically throw at runtime — the
+ * contract is enforced at compile time.
+ */
 export interface Memory {
   userId: string;
   agentId: string;
   roomId: string;
   content: { text: string; action?: string };
+  readonly id?: string;
+  readonly createdAt?: number | string;
+  readonly timestamp?: number | string;
+  readonly date?: string;
+  readonly ts?: string;
+  readonly inReplyTo?: string;
+}
+
+/**
+ * Options recognised by `persistChatTurnImpl` and the
+ * `dkgService.persistChatTurn` / `hooks.onChatTurn` /
+ * `hooks.onAssistantReply` surfaces. Exposed as a named type so
+ * callers get full type checking on every field they rely on.
+ *
+ * See PR #229 bot review round 13 (r13-1, r13-3).
+ */
+export interface ChatTurnPersistOptions {
+  readonly contextGraphId?: string;
+  readonly assistantText?: string;
+  readonly assistantReply?: { readonly text?: string };
+  readonly assertionName?: string;
+  readonly mode?: 'user-turn' | 'assistant-reply';
+  readonly userMessageId?: string;
+  /**
+   * Explicit signal from the caller that the user-turn envelope (the
+   * `dkg:ChatTurn` subject + user message Message + `hasUserMessage`
+   * edge) has ALREADY been persisted by a prior `onChatTurn` / user
+   * path. When this flag is `true` the assistant-reply path takes the
+   * cheap append-only branch (just adds the assistant message +
+   * `hasAssistantMessage` link). When `false` or undefined it emits
+   * the full headless envelope so the reply is discoverable even if
+   * the matching user-turn hook never ran.
+   *
+   * r13-1 rationale: pre-round-13 this was INFERRED from the presence
+   * of `userMessageId` alone — which is unsafe because the caller can
+   * legitimately know the parent id without knowing the user-turn
+   * write succeeded (hook disabled, earlier write failed, reconnect
+   * replay). Preferring an explicit boolean defaults the ambiguous
+   * case to the safer full-envelope behaviour while still letting
+   * well-known callers (the ElizaOS hooks that chain
+   * onChatTurn → onAssistantReply in-process) opt into the cheap
+   * path.
+   */
+  readonly userTurnPersisted?: boolean;
+  readonly ts?: string;
+  readonly timestamp?: string;
 }
 
 export interface State {

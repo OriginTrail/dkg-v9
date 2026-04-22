@@ -709,3 +709,190 @@ describe('dkgKnowledgeProvider — keyword extraction branches', () => {
     expect(out === null || typeof out === 'string').toBe(true);
   });
 });
+
+// ===========================================================================
+// PR #229 bot review round 13 — r13-1 + r13-2 behavioral pins
+// ===========================================================================
+
+describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted explicit signal', () => {
+  // -------------------------------------------------------------------
+  // r13-1: the previous revision inferred `headlessAssistantReply` ONLY
+  // from `!optsAny.userMessageId`. That conflated two different things
+  // (do we know the parent id vs. did the user-turn write succeed) and
+  // let the append-only path win when the user-turn envelope had never
+  // been emitted — the assistant reply then dangled under a turnUri
+  // that wasn't typed as `dkg:ChatTurn`, and the chat-memory reader
+  // dropped it. The new contract takes `userTurnPersisted: boolean`
+  // from the options bag and falls back to the full envelope when
+  // ambiguous.
+  // -------------------------------------------------------------------
+  it('userTurnPersisted=false + userMessageId present → FULL envelope (even with parent id)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('belated reply', { id: 'asst-2', roomId: 'r' } as any),
+      {} as State,
+      // Caller KNOWS the parent id but explicitly signals the user-turn
+      // was never persisted (e.g. onChatTurn hook was disabled / errored).
+      { mode: 'assistant-reply', userMessageId: 'mem-1', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:mem-1';
+    // Full envelope must be present so the reader resolves the turn.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri,
+    }));
+    // Headless markers present so downstream can filter if desired.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
+    }));
+  });
+
+  it('userTurnPersisted=true → append-only even without userMessageId (well-known caller opt-in)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('cheap append', { id: 'asst-3', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userTurnPersisted: true },
+    );
+    const quads = publishes[0].quads;
+    // No user Message subject re-emitted.
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:asst-3';
+    expect(quads.some((q) => q.subject === userMsgUri)).toBe(false);
+    // No ChatTurn type re-emitted.
+    const turnUri = 'urn:dkg:chat:turn:r:asst-3';
+    expect(quads.some((q) =>
+      q.subject === turnUri && q.predicate === RDF_TYPE && q.object === `${DKG_ONT}ChatTurn`,
+    )).toBe(false);
+  });
+
+  it('legacy caller (only userMessageId, no userTurnPersisted) → append-only (backwards compat)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('legacy path', { id: 'asst-4', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'mem-1' },
+    );
+    const quads = publishes[0].quads;
+    // Legacy inference preserved: presence of `userMessageId` implies the
+    // user-turn was persisted, so the cheap path still wins.
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:mem-1';
+    expect(quads.some((q) => q.subject === userMsgUri)).toBe(false);
+  });
+
+  it('no userTurnPersisted, no userMessageId → FULL headless envelope (ambiguous → safe)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('unsolicited', { id: 'asst-5', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:asst-5';
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
+    }));
+  });
+});
+
+describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub does NOT leak into session', () => {
+  // -------------------------------------------------------------------
+  // r13-2: `ChatMemoryManager.getSession()` enumerates every
+  // `?msg schema:isPartOf <session>` subject. Before this round the
+  // headless user stub carried that edge, so it was listed alongside
+  // real messages — and node-ui maps any non-`user` author to
+  // "assistant", producing a blank assistant bubble in the UI. We
+  // drop the edge on the stub (only); the reader contract still holds
+  // because the `dkg:ChatTurn` envelope links to the stub via
+  // `dkg:hasUserMessage`, which is what node-ui uses to resolve a turn.
+  // -------------------------------------------------------------------
+  it('headless user stub does NOT carry schema:isPartOf (prevents session enumeration)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('unsolicited', { id: 'asst-stub-1', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const quads = publishes[0].quads;
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:asst-stub-1';
+    // Stub exists and is typed as a Message so the envelope edge resolves…
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: userMsgUri, predicate: RDF_TYPE, object: `${SCHEMA}Message`,
+    }));
+    // …but it is NOT partOf the session (no blank assistant in the UI).
+    expect(quads.some((q) =>
+      q.subject === userMsgUri && q.predicate === `${SCHEMA}isPartOf`,
+    )).toBe(false);
+  });
+
+  it('headless turn envelope still carries schema:isPartOf so the TURN itself is discoverable', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('unsolicited', { id: 'asst-stub-2', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:asst-stub-2';
+    // The ChatTurn itself IS partOf the session (turn enumeration works).
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${SCHEMA}isPartOf`, object: 'urn:dkg:chat:session:r',
+    }));
+  });
+
+  it('headless turn STILL exposes dkg:hasUserMessage so the reader contract holds', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('unsolicited', { id: 'asst-stub-3', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:asst-stub-3';
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:asst-stub-3';
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri,
+    }));
+  });
+});
+
+describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required fields', () => {
+  // -------------------------------------------------------------------
+  // r13-3: the public `Memory` type previously exposed only
+  // `{ userId, agentId, roomId, content }` — `persistChatTurnImpl`
+  // relied on `id`, `createdAt`, `timestamp`, etc. at runtime, so
+  // downstream TypeScript consumers could satisfy the contract at
+  // compile time and still throw at runtime. The new type exposes
+  // every field actually consulted. This compile-time check doubles
+  // as a behavioral pin: if any listed field is ever removed, TS will
+  // fail the build here long before callers hit a runtime surprise.
+  // -------------------------------------------------------------------
+  it('exported Memory type accepts id / createdAt / timestamp / date / ts / inReplyTo', () => {
+    const m: Memory = {
+      userId: 'u',
+      agentId: 'a',
+      roomId: 'r',
+      content: { text: 'x' },
+      id: 'mem-1',
+      createdAt: 1700000000000,
+      timestamp: 1700000000000,
+      date: '2023-11-14T00:00:00.000Z',
+      ts: '2023-11-14T00:00:00.000Z',
+      inReplyTo: 'mem-0',
+    };
+    expect(m.id).toBe('mem-1');
+  });
+});

@@ -122,4 +122,5 @@ export type {
   Memory,
   State,
   HandlerCallback,
+  ChatTurnPersistOptions,
 } from './types.js';

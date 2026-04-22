@@ -210,28 +210,22 @@ async function init(id) {
 async function start() {
   const { id: activeId } = resolveActiveTaskId(root);
   if (activeId) {
-    console.log(`A task is already active: ${activeId}`);
-    console.log(`Run \`pnpm task clear\` first if you want to start a new one.`);
-    console.log(`Run \`pnpm task show\` to see its scope.`);
+    console.log(`You already have a task going: ${activeId}`);
+    console.log(`Run \`pnpm task clear\` to drop it, or \`pnpm task show\` to see it.`);
     bootstrapWarning();
     return;
   }
 
   if (!process.stdin.isTTY) {
-    console.error('error: `pnpm task start` requires an interactive terminal.');
-    console.error('');
-    console.error('For non-interactive / CI use, call `pnpm task create` directly:');
-    console.error('  pnpm task create <id> --description "..." \\');
-    console.error('    --allowed "packages/foo/**" --inherits base --activate');
+    console.error('Run `pnpm task start` in a real terminal — it asks you a question.');
+    console.error('For CI or scripts, use `pnpm task create` directly.');
     process.exit(2);
   }
 
   const prompter = createPrompter();
   let description = '';
   try {
-    console.log('What are you working on?');
-    console.log('(One or two sentences is plenty. Paste longer briefs if you have them.)');
-    console.log('Press Enter to send.');
+    console.log('What are you working on? One or two sentences is fine.');
     console.log('');
     description = await prompter.askPasteableDescription('> ');
   } finally {
@@ -240,31 +234,21 @@ async function start() {
 
   const trimmed = description.trim();
   if (!trimmed || trimmed.length < 10) {
-    bail('description is too short — give me at least a sentence of context');
+    bail('Give me at least a sentence so I know what you\'re doing.');
   }
 
   const trigger = buildOnboardingTrigger({ description: trimmed });
-  const markerPath = writeOnboardingMarker(root, trigger);
+  writeOnboardingMarker(root, trigger);
   const clip = copyToClipboard(trigger);
 
   console.log('');
-  console.log(`Got it — captured ${trimmed.split(/\s+/).length} words.`);
-  console.log('');
-  console.log('Now open any chat and send any message ("go", "hi", whatever).');
-  console.log('Your agent will read the description, explore the repo, and');
-  console.log('ask you one quick question to approve the proposed scope.');
-  console.log('');
+  console.log('Got it. Open any chat and say hi.');
+  console.log('I\'ll read what you wrote, look around the repo, and ask you');
+  console.log('to OK a scope before I touch anything.');
   if (clip.ok) {
-    console.log(`(Trigger also copied to clipboard via ${clip.method}.)`);
-  } else {
-    console.log(`(Clipboard copy unavailable: ${clip.reason}. No paste needed —`);
-    console.log(` any message triggers onboarding because of the marker file.)`);
+    console.log('');
+    console.log('(Also copied to your clipboard, just in case.)');
   }
-  console.log('');
-  console.log(`Marker file: ${markerPath}`);
-  console.log('(Auto-deleted the moment the agent reads it; one-shot.)');
-  console.log('');
-  console.log('Change your mind? `rm agent-scope/.pending-onboarding` and start over.');
   bootstrapWarning();
 }
 

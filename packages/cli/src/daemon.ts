@@ -6989,9 +6989,31 @@ async function handleRequest(
         requestedNetwork === 'testnet' || requestedNetwork === 'mainnet' || requestedNetwork === 'devnet'
           ? requestedNetwork
           : manifestNetworkLabel(network?.networkName);
-      const supportedTools: ('cursor' | 'claude-code')[] = Array.isArray(body.supportedTools) && body.supportedTools.length
-        ? body.supportedTools.filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code')
-        : ['cursor', 'claude-code'];
+      // Codex tier-4h finding N11: the prior `Array.isArray(...) && .length
+      // ? filter : defaults` chain accepted the request when `body.supportedTools`
+      // contained ONLY values the filter throws away (e.g. `['codex']`). The
+      // filter would return `[]`, `publishManifestImpl` would happily publish
+      // a manifest with zero supported tools, and then `fetchManifest()`'s Zod
+      // schema would reject the manifest because it requires at least one —
+      // so the project would be un-installable until someone republishes.
+      // Fail fast at the route when the caller supplied a non-empty array
+      // but nothing in it survives the filter; fall back to the default
+      // ONLY when the caller didn't specify anything.
+      let supportedTools: ('cursor' | 'claude-code')[];
+      if (Array.isArray(body.supportedTools) && body.supportedTools.length) {
+        supportedTools = body.supportedTools
+          .filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code');
+        if (supportedTools.length === 0) {
+          return jsonResponse(res, 400, {
+            error:
+              `"supportedTools" contained none of the supported values. ` +
+              `Pass one or more of ["cursor", "claude-code"], or omit the ` +
+              `field entirely to publish the default set.`,
+          });
+        }
+      } else {
+        supportedTools = ['cursor', 'claude-code'];
+      }
       // Always derive the publisher from the authenticated caller. Accepting
       // `publisherAgentUri` from the request body let any client forge
       // `prov:wasAttributedTo` on the manifest entities, impersonating another
@@ -7287,25 +7309,45 @@ async function handleRequest(
         // `cleanResponse` makes the classification symmetric with the
         // synced-flip below.
         //
-        // Codex tier-4g finding (curated CG catch-up, 15:14:16): for
-        // curated context graphs, `cleanResponse` is NOT proof of
-        // authorisation. A non-curator peer that simply doesn't have
-        // this graph yet will return `emptyResponses=1`, and a
-        // requester who genuinely isn't on the allowlist would then
-        // end up with `cleanResponse=true` alongside `denied=true` and
-        // silently get a `done` status. For curated CGs, an explicit
-        // `denied` signal from any peer must always win — the requester
-        // cannot infer access from a non-curator's "I don't have it".
-        // `localAllowed.length > 0` at route entry is our curated
-        // signal (captured in scope by this async IIFE).
-        const isCurated = localAllowed.length > 0;
+        // Codex tier-4g (curated CG catch-up, 15:14:16) and tier-4h
+        // (N12, on this line): for curated context graphs, `cleanResponse`
+        // is NOT proof of authorisation — a non-curator peer that
+        // simply doesn't have this graph yet returns `emptyResponses=1`
+        // legitimately, so a requester who genuinely isn't on the
+        // allowlist could land on `done` alongside `denied=true` and
+        // silently think they synced. For curated CGs, any explicit
+        // `denied` signal must win.
+        //
+        // The tier-4g fix used `localAllowed.length > 0` as the "is
+        // curated" proxy. Codex tier-4h N12 pointed out that's unreliable
+        // in both directions: a first-time invitee usually doesn't have
+        // the allowlist locally yet (so `localAllowed` is empty even
+        // though the CG IS curated, and a curator denial can still be
+        // masked by another peer's empty response); and once the
+        // allowlist is present, a stale participant's denial wins even
+        // if the curator actually returned data.
+        //
+        // Use `agent.contextGraphIsCurated(paranetId)` instead — it
+        // reads the CG's declared accessPolicy from ontology / _meta
+        // graph (widely synced via gossip), which is the authoritative
+        // "is this a private/curated project?" signal. `localAllowed`
+        // stays as the rapid early-rejection gate at route entry; this
+        // post-sync check uses the stronger predicate.
+        const isCurated = await agent.contextGraphIsCurated(paranetId).catch(() => false);
         if (result.denied && (isCurated || !cleanResponse)) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
-          // Only unsubscribe if the CG was only known via auto-discovery,
-          // not via explicit creation or a prior legit subscription.
-          const exists = await agent.contextGraphExists(paranetId);
-          if (!exists) {
+          // Only unsubscribe if the CG was only known via auto-discovery
+          // (N13): `contextGraphExists()` flips to true the moment we
+          // have the CG's ontology/_meta declaration, which is ALSO
+          // true for auto-discovered projects, so the earlier guard
+          // never cleaned them up. Use `contextGraphHasLocalContent`
+          // instead — that's only true when we've stored actual data
+          // for the CG (local creation or a prior legitimate sync),
+          // which is the "the operator actually wanted this project"
+          // signal we meant all along.
+          const hasLocal = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+          if (!hasLocal) {
             (agent as any).subscribedContextGraphs?.delete(paranetId);
           }
         }

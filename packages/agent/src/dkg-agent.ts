@@ -1002,19 +1002,26 @@ export class DKGAgent {
         // tracked as a follow-up for the whole approve/reject pair.
         if (payload.type === 'join-rejected') {
           const { contextGraphId, agentAddress: rejectedAddr } = payload;
-          if (contextGraphId) {
-            const isLocalAgent = rejectedAddr && [...this.localAgents.keys()].some(
-              (addr) => addr.toLowerCase() === rejectedAddr.toLowerCase(),
-            );
-            if (rejectedAddr && !isLocalAgent) {
-              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
-            }
-            this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
-            this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
-              contextGraphId,
-              agentAddress: rejectedAddr,
-            });
+          // Codex tier-4h N14: `agentAddress` was effectively optional
+          // before, so any peer could forge `{ type: 'join-rejected',
+          // contextGraphId: '…' }` and every recipient emitted a UI
+          // rejection notification — even for CGs they never applied
+          // to join. Require an explicit `agentAddress` matching one
+          // of THIS node's local agents; drop otherwise.
+          if (!contextGraphId || !rejectedAddr) {
+            return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
+          const isLocalAgent = [...this.localAgents.keys()].some(
+            (addr) => addr.toLowerCase() === rejectedAddr.toLowerCase(),
+          );
+          if (!isLocalAgent) {
+            return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+          }
+          this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
+          this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
+            contextGraphId,
+            agentAddress: rejectedAddr,
+          });
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
 

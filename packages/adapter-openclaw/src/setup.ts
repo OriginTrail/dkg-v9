@@ -604,15 +604,6 @@ export function mergeOpenClawConfig(
   // `entry.config.daemonUrl`).
   const entryForConfig = config.plugins.entries[pluginId];
 
-  // Clean up any root-level `installedWorkspace` from earlier builds of
-  // this PR that wrote it at the entry root — it trips OpenClaw's strict
-  // schema validator and blocks config reload. Safe to delete
-  // unconditionally: nothing else ever reads or writes this field at root.
-  if ('installedWorkspace' in entryForConfig) {
-    delete entryForConfig.installedWorkspace;
-    log(`Removed stale root-level installedWorkspace from plugins.entries.${pluginId} (moved into entry.config)`);
-  }
-
   const hadConfig = entryForConfig.config && typeof entryForConfig.config === 'object';
   const existingEntryConfig: Record<string, any> = hadConfig ? { ...entryForConfig.config } : {};
   if (options?.overrideDaemonUrl) {

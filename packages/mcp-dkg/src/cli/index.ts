@@ -79,7 +79,7 @@ JOIN OPTIONS
   --agent-slug=<slug>      Your agent slug for this machine
                            (e.g. branarakic-laptop2). Will be prompted if
                            not provided.
-  --daemon=<url>           Local daemon URL (default: http://localhost:9201,
+  --daemon=<url>           Local daemon URL (default: http://localhost:9200,
                            or DKG_API env var)
   --token=<token>          Daemon auth token (default: DKG_TOKEN env)
   --token-file=<rel-path>  Path to auth.token, relative to .dkg/config.yaml
@@ -144,7 +144,7 @@ function parseJoinArgs(args: string[]): JoinOptions {
     inviteCode: positionals.join(' '),
     workspace: path.resolve(values.workspace ?? process.cwd()),
     agentSlug: values['agent-slug'],
-    daemonUrl: values.daemon ?? process.env.DKG_API ?? 'http://localhost:9201',
+    daemonUrl: values.daemon ?? process.env.DKG_API ?? 'http://localhost:9200',
     token: values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN,
     // Default to the daemon's canonical token location
     // (`~/.dkg/auth.token`) — the one that `dkgd` itself writes. The old
@@ -455,7 +455,7 @@ async function cmdStatus(args: string[]): Promise<number> {
       token:   { type: 'string' },
     },
   });
-  const daemonUrl = values.daemon ?? process.env.DKG_API ?? 'http://localhost:9201';
+  const daemonUrl = values.daemon ?? process.env.DKG_API ?? 'http://localhost:9200';
   const token = values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN ?? '';
   const config = loadConfig();
   const client = new DkgClient({

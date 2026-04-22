@@ -80,7 +80,7 @@ export const MANIFEST_PLACEHOLDERS = [
   'agentAddress',       // raw wallet address (lowercase, 0x-prefixed) — convenience for tools that prefer it
   'agentSlug',          // BACK-COMPAT alias for agentNickname (slug-shaped, e.g. "brana-laptop-1")
   'contextGraphId',     // the project's CG ID (e.g. dkg-code-project)
-  'daemonApiUrl',       // local daemon API (default http://localhost:9201)
+  'daemonApiUrl',       // local daemon API (default http://localhost:9200)
   'daemonTokenFile',    // relative path to auth.token (e.g. ../.devnet/node1/auth.token)
   'workspaceAbsPath',   // absolute path of the operator's workspace
   'mcpDkgDistAbsPath',  // absolute path to packages/mcp-dkg/dist/index.js (LEGACY — kept for older templates)

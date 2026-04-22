@@ -48,7 +48,7 @@ import { fileURLToPath } from 'node:url';
 const EVENT = process.argv[2] ?? 'unknown';
 const LOG_FILE = process.env.DKG_CAPTURE_LOG ?? '/tmp/dkg-capture.log';
 const STATE_DIR = path.join(os.homedir(), '.cache', 'dkg-mcp', 'sessions');
-const DEFAULT_API = 'http://localhost:9201';
+const DEFAULT_API = 'http://localhost:9200';
 
 const NS = {
   rdf:     'http://www.w3.org/1999/02/22-rdf-syntax-ns#',

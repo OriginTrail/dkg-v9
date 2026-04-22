@@ -31,7 +31,7 @@ const sessionId = `phase7-annotate-smoke-${Date.now()}`;
 console.log(`\x1b[1;36m[seed]\x1b[0m writing chat turn (session ${sessionId})...`);
 const seedRes = await runOnce('node', [
   path.join(REPO_ROOT, 'scripts', 'send-test-chat-turn.mjs'),
-  '--api=http://localhost:9201',
+  '--api=http://localhost:9200',
   '--node-id=1',
   '--agent=cursor-branarakic',
   `--session=${sessionId}`,

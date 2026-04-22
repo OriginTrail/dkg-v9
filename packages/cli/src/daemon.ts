@@ -7309,32 +7309,38 @@ async function handleRequest(
         // `cleanResponse` makes the classification symmetric with the
         // synced-flip below.
         //
-        // Codex tier-4g (curated CG catch-up, 15:14:16) and tier-4h
-        // (N12, on this line): for curated context graphs, `cleanResponse`
-        // is NOT proof of authorisation — a non-curator peer that
-        // simply doesn't have this graph yet returns `emptyResponses=1`
-        // legitimately, so a requester who genuinely isn't on the
-        // allowlist could land on `done` alongside `denied=true` and
-        // silently think they synced. For curated CGs, any explicit
-        // `denied` signal must win.
+        // Codex tier-4g (curated CG catch-up, 15:14:16) and tier-4h/4i
+        // (N12 / N17, on this line): for curated context graphs,
+        // `cleanResponse` is NOT proof of authorisation — a non-curator
+        // peer that simply doesn't have this graph yet returns
+        // `emptyResponses=1` legitimately, so a requester who genuinely
+        // isn't on the allowlist could land on `done` alongside
+        // `denied=true` and silently think they synced. Any explicit
+        // `denied` must therefore win unless we have positive evidence
+        // a peer actually served us this CG.
         //
-        // The tier-4g fix used `localAllowed.length > 0` as the "is
-        // curated" proxy. Codex tier-4h N12 pointed out that's unreliable
-        // in both directions: a first-time invitee usually doesn't have
-        // the allowlist locally yet (so `localAllowed` is empty even
-        // though the CG IS curated, and a curator denial can still be
-        // masked by another peer's empty response); and once the
-        // allowlist is present, a stale participant's denial wins even
-        // if the curator actually returned data.
+        // Earlier attempts — `localAllowed.length > 0` (4g) and
+        // `agent.contextGraphIsCurated(paranetId)` (4h) — both keyed off
+        // *local* knowledge of the CG's access policy. Codex 4i rightly
+        // pointed out that for a first-time invitee neither source is
+        // populated yet: a curator can deny us while another peer
+        // returns a clean empty response, `isCurated` stays false,
+        // `cleanResponse` stays true, and the denial slips through.
         //
-        // Use `agent.contextGraphIsCurated(paranetId)` instead — it
-        // reads the CG's declared accessPolicy from ontology / _meta
-        // graph (widely synced via gossip), which is the authoritative
-        // "is this a private/curated project?" signal. `localAllowed`
-        // stays as the rapid early-rejection gate at route entry; this
-        // post-sync check uses the stronger predicate.
-        const isCurated = await agent.contextGraphIsCurated(paranetId).catch(() => false);
-        if (result.denied && (isCurated || !cleanResponse)) {
+        // Flip the test: denial is authoritative by default, and only
+        // the presence of a peer that actually served this CG (i.e. we
+        // have triples from them, not just "I don't know this graph"
+        // empty responses) rescues the job to "done". Meta-only
+        // responses count as served because they prove a peer knew the
+        // CG and chose to share its _meta graph with us. `d`/`s` are
+        // already captured for `cleanResponse` above.
+        const servedByPeer =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0 ||
+          (d?.insertedMetaTriples ?? 0) > 0 ||
+          (s?.insertedMetaTriples ?? 0) > 0 ||
+          (d?.metaOnlyResponses ?? 0) > 0;
+        if (result.denied && !servedByPeer) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
           // Only unsubscribe if the CG was only known via auto-discovery

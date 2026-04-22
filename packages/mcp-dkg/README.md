@@ -40,7 +40,7 @@ and edit:
 contextGraph: dkg-code-project
 
 node:
-  api: http://localhost:9201
+  api: http://localhost:9200
   tokenFile: ../.devnet/node1/auth.token   # relative to the YAML file
 
 agent:

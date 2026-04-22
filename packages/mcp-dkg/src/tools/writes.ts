@@ -132,7 +132,14 @@ export function registerWriteTools(
       if (!config.agentUri) return agentErr();
       const decStatus = status ?? 'proposed';
       const slug = slugify(title, `decision-${rand()}`);
-      const id = `urn:dkg:decision:${slug}-${rand(4)}`;
+      // Deterministic URI: drop the random suffix so two agents writing the
+      // same decision title converge on the same URI (see AGENTS.md
+      // "look-before-mint" / convergence rule). The assertion name below
+      // still carries a rand(4) to let the same slug be re-asserted with
+      // refined context/outcome/status without colliding on the write —
+      // but the subject URI stays stable so later
+      // `mentions`/`references`/`dkg_search` hit one canonical node.
+      const id = `urn:dkg:decision:${slug}`;
       const nowIso = new Date().toISOString();
       const triples: Array<{ subject: string; predicate: string; object: string }> = [];
       emit(triples, U(id), U(TypeP), U(NS.decisions + 'Decision'));
@@ -215,7 +222,10 @@ export function registerWriteTools(
       const st = status ?? 'todo';
       const pr = priority ?? 'p2';
       const slug = slugify(title, `task-${rand()}`);
-      const id = `urn:dkg:task:${slug}-${rand(4)}`;
+      // Deterministic URI (see dkg_propose_decision above) — drop the
+      // random suffix so `dkg_create_task` on the same title converges
+      // rather than fragmenting the graph into rand(4) duplicates.
+      const id = `urn:dkg:task:${slug}`;
       const nowIso = new Date().toISOString();
       const triples: Array<{ subject: string; predicate: string; object: string }> = [];
       emit(triples, U(id), U(TypeP), U(NS.tasks + 'Task'));

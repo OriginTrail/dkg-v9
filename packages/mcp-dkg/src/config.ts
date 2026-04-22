@@ -8,7 +8,7 @@
  * by environment variables so npx-style installs that live outside a
  * workspace can still point at something:
  *
- *   DKG_API          — daemon base URL    (default http://localhost:9201)
+ *   DKG_API          — daemon base URL    (default http://localhost:9200)
  *   DKG_TOKEN        — bearer token       (no default; read-only tools
  *                                          still need it in most setups)
  *   DKG_PROJECT      — contextGraphId     (fallback when .dkg/config.yaml
@@ -52,7 +52,7 @@ export interface DkgConfig {
   sourcePath: string | null;
 }
 
-const DEFAULT_API = 'http://localhost:9201';
+const DEFAULT_API = 'http://localhost:9200';
 
 /**
  * Expand a leading `~/` (or bare `~`) to the user's home directory.

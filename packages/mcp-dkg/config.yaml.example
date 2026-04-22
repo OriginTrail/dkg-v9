@@ -19,7 +19,7 @@ contextGraph: dkg-code-project
 autoShare: true
 
 node:
-  api: http://localhost:9201
+  api: http://localhost:9200
   # Relative to this file; absolute paths also accepted.
   tokenFile: ../.devnet/node1/auth.token
 

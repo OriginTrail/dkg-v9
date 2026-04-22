@@ -299,7 +299,15 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       agent, makeRuntime(),
       makeMessage('the answer is 42', { id: 'asst-mem', roomId: 'r', userId: 'agent-eliza' } as any),
       {} as State,
-      { mode: 'assistant-reply', userMessageId: 'mem-1' },
+      // PR #229 bot review round 20 (r20-1): append-only path now
+      // requires the EXPLICIT `userTurnPersisted: true` opt-in.
+      // Pre-r20 we relied on legacy inference (presence of
+      // userMessageId), but that conflated addressing with
+      // durability. Callers that genuinely know the user-turn write
+      // succeeded (the in-process `onAssistantReplyHandler` after
+      // r16-2) plumb `true` here; the public catch-all overload now
+      // fails closed to the safe full envelope when ambiguous.
+      { mode: 'assistant-reply', userMessageId: 'mem-1', userTurnPersisted: true },
     );
     const quads = publishes[0].quads;
     const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:mem-1';
@@ -781,7 +789,19 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     )).toBe(false);
   });
 
-  it('legacy caller (only userMessageId, no userTurnPersisted) → append-only (backwards compat)', async () => {
+  it('r20-1: caller passes userMessageId WITHOUT explicit userTurnPersisted → FULL safe envelope (legacy inference removed)', async () => {
+    // PR #229 bot review round 20 (r20-1). The pre-r20 revision used
+    // `presence-of-userMessageId` as a proxy for "user turn was
+    // persisted", which conflates addressing (parent id known) with
+    // durability (paired write succeeded). External callers using the
+    // public catch-all `Record<string, unknown>` overload could omit
+    // `userTurnPersisted`, hit the append-only branch, and produce
+    // unreadable replies whenever the matching `onChatTurn` write had
+    // failed. The fix requires `userTurnPersisted: true` literally;
+    // anything else fails closed to the full headless envelope. This
+    // test pins the new safe behaviour for exactly the call shape the
+    // bot finding flagged: `userMessageId` set, `userTurnPersisted`
+    // omitted → must NOT take the append-only branch.
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -790,10 +810,59 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply', userMessageId: 'mem-1' },
     );
     const quads = publishes[0].quads;
-    // Legacy inference preserved: presence of `userMessageId` implies the
-    // user-turn was persisted, so the cheap path still wins.
-    const userMsgUri = 'urn:dkg:chat:msg:user:r:mem-1';
-    expect(quads.some((q) => q.subject === userMsgUri)).toBe(false);
+    // Full envelope: a typed dkg:ChatTurn subject MUST exist, plus the
+    // headless marker (the headless branch tags the turn so readers
+    // can distinguish stub-backed envelopes from real onChatTurn
+    // writes). Both edges (`hasUserMessage` ∧ `hasAssistantMessage`)
+    // are also expected — without them the reader's two-edge join
+    // would drop the reply, which is the exact unreadable-reply bug
+    // r20-1 prevents.
+    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
+    }));
+    expect(quads.some(
+      (q) => q.subject === turnUri && q.predicate === `${DKG_ONT}hasUserMessage`,
+    )).toBe(true);
+    expect(quads.some(
+      (q) => q.subject === turnUri && q.predicate === `${DKG_ONT}hasAssistantMessage`,
+    )).toBe(true);
+  });
+
+  it('r20-1: omitted userTurnPersisted (any non-true value) takes the safe path — explicit false still works', async () => {
+    // Defence-in-depth: the new rule is `optsAny.userTurnPersisted === true`,
+    // so explicit `false` and any non-boolean (e.g. caller passes a
+    // string or a typo'd key) MUST also fall to the safe headless
+    // envelope. We exercise the two interesting non-true cases here so
+    // any future flip back to `??` semantics flips this test red.
+    const { agent, publishes } = makeCapturingAgent();
+    // explicit false
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('explicit false', { id: 'asst-r20-a', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'mem-r20-a', userTurnPersisted: false },
+    );
+    // typo'd key (string truthy, not boolean true)
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('truthy non-bool', { id: 'asst-r20-b', roomId: 'r' } as any),
+      {} as State,
+      // deliberately wrong shape — must NOT short-circuit to append-only
+      { mode: 'assistant-reply', userMessageId: 'mem-r20-b', userTurnPersisted: 'true' as unknown as boolean },
+    );
+    for (const [i, suffix] of [[0, 'mem-r20-a'], [1, 'mem-r20-b']] as const) {
+      const turnUri = `urn:dkg:chat:turn:r:${suffix}`;
+      expect(publishes[i].quads).toContainEqual(expect.objectContaining({
+        subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+      }));
+      expect(publishes[i].quads).toContainEqual(expect.objectContaining({
+        subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
+      }));
+    }
   });
 
   it('no userTurnPersisted, no userMessageId → FULL headless envelope (ambiguous → safe)', async () => {

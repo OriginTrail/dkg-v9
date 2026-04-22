@@ -738,17 +738,31 @@ export async function persistChatTurnImpl(
   // wrote a lone `hasAssistantMessage` onto a turn URI that never got
   // typed, and the reader dropped the reply entirely.
   //
-  // The new contract prefers the explicit `userTurnPersisted` signal
-  // from ChatTurnPersistOptions. If unset we fall back to the legacy
-  // inference (presence of `userMessageId`) for backwards compat,
-  // but callers are strongly encouraged to set the flag explicitly
-  // — the safer *full-envelope* path is the default when ambiguous.
-  const explicitUserTurnPersisted = typeof optsAny.userTurnPersisted === 'boolean'
-    ? optsAny.userTurnPersisted
-    : undefined;
-  const legacyInference = typeof optsAny.userMessageId === 'string'
-    && optsAny.userMessageId.length > 0;
-  const userTurnPersisted = explicitUserTurnPersisted ?? legacyInference;
+  // PR #229 bot review round 20 (r20-1): require the EXPLICIT
+  // `userTurnPersisted` signal. The previous revision still fell
+  // back to the legacy "presence of userMessageId === user turn
+  // persisted" inference when the explicit flag was absent. That
+  // conflates addressing (the runtime knows the parent id) with
+  // durability (the matching onChatTurn write actually succeeded),
+  // and the public catch-all overload
+  // `persistChatTurn(..., options?: Record<string, unknown>)` lets
+  // any external caller omit the flag and still take the append-
+  // only branch — recreating the unreadable-reply bug whenever the
+  // earlier user-turn write failed but the runtime still knew the
+  // parent id (typical case: hook disabled, write errored, replay
+  // after reconnect).
+  //
+  // New rule: append-only (`userTurnPersisted = true`) is selected
+  // ONLY when the caller PROVES it by explicitly passing
+  // `userTurnPersisted: true`. Anything else — explicit `false`,
+  // omitted, or any non-boolean — fails closed to the safe full-
+  // envelope/headless path that emits the user-stub + both edges so
+  // the reader contract (`hasUserMessage` ∧ `hasAssistantMessage`)
+  // is satisfied unconditionally. The in-process plugin caller
+  // (`onAssistantReplyHandler`, r16-2) already plumbs a real boolean
+  // here, so this only changes behaviour for ambiguous external
+  // callers — and the change is in the safe direction.
+  const userTurnPersisted = optsAny.userTurnPersisted === true;
   const headlessAssistantReply = mode === 'assistant-reply' && !userTurnPersisted;
   // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
   // fallback is NOT stable: two separate calls for the same logical

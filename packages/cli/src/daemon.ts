@@ -201,9 +201,12 @@ function manifestNetworkLabel(networkName: string | undefined | null): 'testnet'
 /**
  * Format a `host:port` pair safely for an `http://` URL, including the
  * IPv6-literal bracket rules from RFC-3986 §3.2.2 (`[::1]:9201`, not
- * `::1:9201`). We also downgrade the two "all-interfaces" binds
- * (`0.0.0.0`, `::`) to the IPv4 loopback literal so a self-call can't
- * escape the machine when the operator bound the daemon to LAN.
+ * `::1:9201`). We also downgrade the "all-interfaces" binds to their
+ * matching loopback so a self-call can't escape the machine when the
+ * operator bound the daemon to LAN: `0.0.0.0` → `127.0.0.1`, `::` →
+ * `::1`. Crucially, `::` does NOT become `127.0.0.1` — an IPv6-only
+ * listener (e.g. `bindv6only=1`) won't accept v4 loopback, and the
+ * self-client would silently point at a dead socket.
  *
  * Returned strings are always parseable as a URL authority component:
  *   127.0.0.1   → 127.0.0.1:9201
@@ -212,11 +215,20 @@ function manifestNetworkLabel(networkName: string | undefined | null): 'testnet'
  *   localhost   → localhost:9201
  */
 function formatDaemonAuthority(apiHost: string, apiPort: number): string {
-  // Downgrade the "all-interfaces" binds to the IPv4 loopback so the
-  // self-client can't escape the machine even if the operator opened
-  // the daemon to the LAN. Does NOT touch `::1` — that's already
-  // loopback and we emit it verbatim (bracketed).
-  const downgraded = apiHost === '0.0.0.0' || apiHost === '::' ? '127.0.0.1' : apiHost;
+  // Downgrade the "all-interfaces" binds to their same-family loopback
+  // so the self-client can't escape the machine even if the operator
+  // opened the daemon to the LAN. `::` MUST go to `::1`, not 127.0.0.1
+  // — on v6-only listeners (bindv6only=1) v4 loopback doesn't reach the
+  // socket and `/manifest/*` would 404 at the transport layer. `::1` is
+  // already loopback and we emit it verbatim (bracketed below).
+  let downgraded: string;
+  if (apiHost === '0.0.0.0') {
+    downgraded = '127.0.0.1';
+  } else if (apiHost === '::') {
+    downgraded = '::1';
+  } else {
+    downgraded = apiHost;
+  }
   // Bracket bare IPv6 literals. `:` only appears in IPv6 addresses for
   // anything we emit (host names and IPv4 literals never contain `:`).
   const isIpv6Literal = downgraded.includes(':') && !downgraded.startsWith('[');
@@ -245,9 +257,22 @@ function manifestSelfClient(
  * Map the requesting agent's resolved ETH address into the
  * `urn:dkg:agent:<address>` URI form used for prov:wasAttributedTo
  * on every manifest entity.
+ *
+ * `DKGAgent.resolveAgentAddress()` falls back to the node's peer ID
+ * when there's no agent token and no default wallet on the daemon.
+ * A peer ID is NOT an EVM address, so lowercasing it into
+ * `urn:dkg:agent:<peerId>` would mint an invalid, non-dereferenceable
+ * agent URI and then write it into the generated workspace config
+ * (where the chat-capture hook uses it as `agentUri`). Reject anything
+ * that isn't a canonical `0x` + 40 hex char address and emit
+ * `urn:dkg:agent:unknown` so the rest of the manifest still validates
+ * and the operator can see the misconfiguration downstream.
  */
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 function manifestPublisherUri(requestAgentAddress: string | undefined | null): string {
-  if (requestAgentAddress) return `urn:dkg:agent:${requestAgentAddress.toLowerCase()}`;
+  if (requestAgentAddress && EVM_ADDRESS_RE.test(requestAgentAddress)) {
+    return `urn:dkg:agent:${requestAgentAddress.toLowerCase()}`;
+  }
   return 'urn:dkg:agent:unknown';
 }
 
@@ -310,6 +335,23 @@ function buildManifestInstallContext(
   if (rawNickname.length > 80) return { ok: false, error: 'agentNickname must be ≤ 80 characters' };
   if (!requestAgentAddress) {
     return { ok: false, error: 'cannot derive agent URI: no wallet address resolved from the bearer token' };
+  }
+  // `DKGAgent.resolveAgentAddress()` falls back to the node's peer ID
+  // when no agent token / default wallet is configured. A peer ID is
+  // NOT a canonical EVM address, so lowercasing it here would mint a
+  // malformed `urn:dkg:agent:<peerId>` and bake it into the generated
+  // `.dkg/config.yaml` as `agentUri`. Downstream (chat-capture,
+  // manifest prov) would then emit non-dereferenceable agent URIs on
+  // every turn. Fail fast so the operator sees the misconfiguration
+  // immediately instead of silently poisoning the graph.
+  if (!EVM_ADDRESS_RE.test(requestAgentAddress)) {
+    return {
+      ok: false,
+      error:
+        'cannot derive agent URI: the daemon resolved a non-EVM identifier ' +
+        '(likely the node peer ID fallback). Configure a default wallet on the ' +
+        'daemon or use a bearer token tied to an agent wallet before installing.',
+    };
   }
 
   // Tool selection. Default to ['cursor'] when nothing's specified — the

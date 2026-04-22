@@ -15,6 +15,7 @@ import {
 import {
   buildOnboardingTrigger,
   writeOnboardingMarker,
+  deleteOnboardingMarker,
   copyToClipboard,
 } from '../lib/onboarding.mjs';
 import { detectAgents, statusGlyph, summary } from '../lib/check-agent.mjs';
@@ -97,6 +98,10 @@ function set(id) {
 
 function clear() {
   if (existsSync(activeFile)) unlinkSync(activeFile);
+  // Also clear any pending onboarding marker — if the user ran `pnpm
+  // task start` and then abandons the flow, the marker should not
+  // linger and keep triggering onboarding on future messages.
+  deleteOnboardingMarker(root);
   console.log('Active task cleared. Writes are unrestricted (except for protected paths).');
 }
 
@@ -341,6 +346,11 @@ function create(argv) {
   if (opts.activate) {
     loadTask(root, opts.id);
     writeFileSync(activeFile, `${opts.id}\n`, 'utf8');
+    // A successful activate = "the agent processed the onboarding
+    // description and is now working." The pending-onboarding marker
+    // has served its purpose and must be cleared so future turns don't
+    // keep re-injecting the onboarding protocol into context.
+    deleteOnboardingMarker(root);
     console.log(`Active task set: ${opts.id}`);
   } else {
     console.log(`Activate with:  pnpm task set ${opts.id}`);

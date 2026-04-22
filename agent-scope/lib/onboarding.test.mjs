@@ -18,6 +18,7 @@ import {
   hasOnboardingMarker,
   readOnboardingMarker,
   consumeOnboardingMarker,
+  deleteOnboardingMarker,
   copyToClipboard,
 } from './onboarding.mjs';
 
@@ -163,6 +164,49 @@ test('marker: consumeOnboardingMarker on missing file returns null without throw
   const root = mkRoot();
   try {
     assert.equal(consumeOnboardingMarker(root), null);
+  } finally { cleanup(root); }
+});
+
+test('marker: readOnboardingMarker is read-only — does NOT delete (peek semantics)', () => {
+  // This is the critical invariant for postToolUse peek hooks. If this
+  // regresses, existing-chat onboarding in Cursor breaks again because
+  // the marker gets deleted mid-turn before the agent sees it.
+  const root = mkRoot();
+  try {
+    writeOnboardingMarker(root, 'peek me');
+    assert.equal(readOnboardingMarker(root), 'peek me');
+    assert.ok(existsSync(onboardingMarkerPath(root)), 'marker must survive a read');
+    // Repeated reads must keep returning the payload until someone
+    // authoritative deletes it.
+    assert.equal(readOnboardingMarker(root), 'peek me');
+    assert.equal(readOnboardingMarker(root), 'peek me');
+    assert.ok(existsSync(onboardingMarkerPath(root)));
+  } finally { cleanup(root); }
+});
+
+test('marker: deleteOnboardingMarker removes the file and returns true', () => {
+  const root = mkRoot();
+  try {
+    writeOnboardingMarker(root, 'bye');
+    assert.equal(deleteOnboardingMarker(root), true);
+    assert.equal(existsSync(onboardingMarkerPath(root)), false);
+  } finally { cleanup(root); }
+});
+
+test('marker: deleteOnboardingMarker on missing file is a no-op returning false', () => {
+  const root = mkRoot();
+  try {
+    assert.equal(deleteOnboardingMarker(root), false);
+  } finally { cleanup(root); }
+});
+
+test('marker: delete is idempotent (safe to call twice)', () => {
+  const root = mkRoot();
+  try {
+    writeOnboardingMarker(root, 'x');
+    assert.equal(deleteOnboardingMarker(root), true);
+    assert.equal(deleteOnboardingMarker(root), false);
+    assert.equal(existsSync(onboardingMarkerPath(root)), false);
   } finally { cleanup(root); }
 });
 

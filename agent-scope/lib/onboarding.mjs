@@ -14,24 +14,36 @@
 //      description, so the agent does not need to ask "describe the
 //      task" again.
 //   2. The user sends any message in any chat.
-//   3. Multiple parallel consumers pick up the marker — whichever runs first
-//      wins, because consume is atomic (read-and-delete):
+//   3. The marker is delivered to the agent via two kinds of consumers —
+//      AUTHORITATIVE (read-and-delete) and BEST-EFFORT PEEK (read-only).
+//      Splitting them this way avoids a race where a mid-turn peek would
+//      otherwise delete the marker before the agent's visible context
+//      picked it up.
 //
+//      Authoritative (delete + inject):
 //        (a) `sessionStart` hook        — fires on a brand new chat.
 //        (b) `UserPromptSubmit` hook    — Claude Code only, fires BEFORE each
-//            user prompt reaches the agent (most reliable path).
-//        (c) `postToolUse` hook         — fires after any tool call the agent
-//            makes (Cursor + Claude Code).
-//        (d) `stop` hook                — Cursor only, fires when the agent
-//            finishes a turn. If the marker is still pending, returns it as
-//            `followup_message` so Cursor auto-submits it as the next user
-//            message. This is the safety net for existing Cursor chats where
-//            the agent replied with plain text and never triggered (c).
-//        (e) The AGENT ITSELF           — the always-applied rule requires a
-//            top-of-turn marker check so even pure conversational messages
-//            (e.g. "hi") consume the marker correctly.
+//            user prompt reaches the agent. No race.
+//        (c) `stop` hook                — Cursor only, fires at end of a
+//            turn. Returns the payload as `followup_message`, which
+//            Cursor auto-submits as the next user message. This is the
+//            safety net for existing Cursor chats where the agent
+//            replied conversationally with no tool call.
 //
-//   4. The agent follows the "Task onboarding protocol" (CLAUDE.md,
+//      Best-effort peek (read-only, NO delete):
+//        (d) `postToolUse` hook         — Cursor + Claude Code. Fires after
+//            any tool call. Fast-path injection via `additional_context`.
+//            Does NOT delete so mid-turn injection noise is harmless and
+//            the authoritative consumers remain in control of the
+//            lifecycle.
+//
+//   4. The marker is explicitly deleted by the lifecycle owners once the
+//      flow is resolved:
+//        - `pnpm task create --activate` (success = "I processed this")
+//        - `pnpm task clear`             (user abandons the flow)
+//      This is the final cleanup step.
+//
+//   5. The agent follows the "Task onboarding protocol" (CLAUDE.md,
 //      .cursor/rules/agent-scope.mdc, AGENTS.md, GEMINI.md).
 //
 // Zero runtime deps. Pure-ish (spawnSync for clipboard; filesystem for marker).
@@ -160,7 +172,9 @@ export function readOnboardingMarker(root) {
   } catch { return null; }
 }
 
-// Read-and-delete. Used by hooks so the trigger fires exactly once.
+// Read-and-delete. Used by AUTHORITATIVE consumers only (sessionStart,
+// stop, UserPromptSubmit). The postToolUse peek-hooks do NOT use this —
+// see `.cursor/hooks/post-tool-use.mjs` for the race rationale.
 export function consumeOnboardingMarker(root) {
   const p = onboardingMarkerPath(root);
   try {
@@ -169,6 +183,18 @@ export function consumeOnboardingMarker(root) {
     try { unlinkSync(p); } catch { try { rmSync(p, { force: true }); } catch {} }
     return payload;
   } catch { return null; }
+}
+
+// Idempotent delete. Used by `pnpm task create --activate` and
+// `pnpm task clear` to clean up a pending marker once the flow is
+// resolved (task activated or abandoned). No-op if the marker is absent.
+export function deleteOnboardingMarker(root) {
+  const p = onboardingMarkerPath(root);
+  try {
+    if (!existsSync(p)) return false;
+    try { unlinkSync(p); } catch { try { rmSync(p, { force: true }); } catch {} }
+    return true;
+  } catch { return false; }
 }
 
 // ---------------------------------------------------------------------------

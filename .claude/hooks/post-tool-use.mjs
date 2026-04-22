@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // Claude Code PostToolUse hook (any tool except Bash, which has its own
-// shell-diff-check). Sole purpose: detect a pending onboarding marker
-// (written by `pnpm task start`) and inject the trigger as additional
-// context. One-shot via consumeOnboardingMarker.
+// shell-diff-check). Purpose: if a pending onboarding marker exists
+// (written by `pnpm task start`), inject the trigger as additional
+// context. READ-ONLY — does NOT delete the marker.
 //
-// In Claude Code we ALSO have UserPromptSubmit (see user-prompt-submit.mjs)
-// which catches the marker before any tool runs — this hook is the
-// belt-and-suspenders for cases where the agent acts on a tool first.
+// In Claude Code, `UserPromptSubmit` (see user-prompt-submit.mjs) is the
+// authoritative consumer — it fires BEFORE the agent sees a prompt, so
+// there is no race. This hook is kept as a best-effort mid-turn
+// injection for Claude Code flows where a tool call happens before
+// UserPromptSubmit delivered anything (edge case).
+//
+// Peek semantics mirror the Cursor hook. See its header for the full
+// rationale and the list of authoritative deleters.
 
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -19,7 +24,7 @@ const scopeUrl   = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/scope
 const onboardUrl = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/onboarding.mjs')).href;
 
 const { resolveRepoRoot, resolveActiveTaskId, checkNodeVersion } = await import(scopeUrl);
-const { consumeOnboardingMarker }                                = await import(onboardUrl);
+const { readOnboardingMarker }                                   = await import(onboardUrl);
 
 try { checkNodeVersion(); } catch (e) {
   process.stderr.write(e.message + '\n');
@@ -44,7 +49,7 @@ async function main() {
 
   if (taskId) return emit({});
 
-  const payload = consumeOnboardingMarker(root);
+  const payload = readOnboardingMarker(root);
   if (!payload) return emit({});
 
   return emit({

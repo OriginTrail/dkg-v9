@@ -1290,6 +1290,20 @@ export class OriginTrailGameCoordinator {
       }
     }
 
+    // Force-resolve is meant to push through votes that did not reach
+    // quorum on their own — it is NOT meant to manufacture an empty turn
+    // when the previous turn already resolved (e.g. solo mode where a
+    // single vote satisfies M-of-1 immediately, or M-of-N games where
+    // gossip already promoted the proposal). Without this guard the
+    // caller would advance the turn counter twice for one user action
+    // and deadlock e2e flows that wait `sleep(N)` for state to settle
+    // (G-3). When there are no votes AND no pending proposal there is
+    // nothing to force, so return the current state unchanged.
+    if (swarm.votes.length === 0 && !swarm.pendingProposal) {
+      this.log(`force-resolve no-op for ${swarmId} turn ${swarm.currentTurn}: no open votes or pending proposal`);
+      return swarm;
+    }
+
     if (swarm.votes.length === 0) {
       swarm.votes = [{ peerId: this.myPeerId, action: 'syncMemory', turn: swarm.currentTurn, timestamp: Date.now() }];
     }

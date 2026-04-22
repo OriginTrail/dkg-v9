@@ -27,22 +27,31 @@ import {
 } from './actions.js';
 
 /**
- * Bot review A6: wiring `onChatTurn` AND `onAssistantReply` to the same
- * persistChatTurn handler double-publishes on frameworks that fire both
- * hooks for the same exchange. Because `persistChatTurnImpl` keys the
- * turn subject off `message.id`, the second call either:
- *   - appends a second set of metadata quads onto the same turnUri
- *     (if both hooks receive the same message), or
- *   - records the assistant message AS the `userMessage` (if the hook
- *     payload swaps user/assistant text), corrupting history retrieval.
+ * Bot review A6 + 2nd-pass follow-ups (assistant-reply corruption /
+ * duplicate-publish):
  *
- * Fix: only register `onChatTurn` (the canonical "one hook per user
- * exchange" event). `onAssistantReply` is kept on the plugin but wired
- * to a dedicated handler that merges assistant text into the matching
- * turn (keyed by the same `message.id`) rather than re-emitting the
- * whole turn. Frameworks that only fire one of the two hooks still work
- * because `onChatTurn` accepts both user-only and user+assistant
- * payloads; frameworks that fire both now deduplicate correctly.
+ *   1. Wiring `onChatTurn` AND `onAssistantReply` to the SAME
+ *      `persistChatTurn` handler used to double-publish — the second call
+ *      either re-emitted the whole turn (duplicate metadata + new
+ *      timestamp) or recorded the assistant text AS `userMessage` because
+ *      `persistChatTurnImpl` derived `userText` from `message.content.text`.
+ *   2. Fix v1 (commit ce5983a6) added a dedicated `onAssistantReplyHandler`
+ *      but still forwarded the assistant `Memory` straight through, which
+ *      meant `message.content.text` was again read as `userMessage`.
+ *   3. Fix v2 (this revision) introduces an explicit `mode:
+ *      'assistant-reply'` flag on the persist call. In that mode
+ *      `persistChatTurnImpl` skips the user-message + turn-envelope quads
+ *      and only writes the assistant `schema:Message` subject + a single
+ *      `dkg:hasAssistantMessage` link onto the existing turn. The user
+ *      message id from the matching `onChatTurn` call is forwarded via
+ *      `userMessageId` so both calls land on the SAME `urn:dkg:chat:turn:`
+ *      / `urn:dkg:chat:msg:user:` URIs (deterministic per (roomId,
+ *      messageId) tuple).
+ *
+ * Frameworks that fire only `onChatTurn` keep working — the user-turn
+ * branch already accepts both user-only and user+assistant payloads
+ * (`options.assistantText` / `state.lastAssistantReply`). Frameworks that
+ * fire both hooks no longer corrupt the turn.
  */
 async function onAssistantReplyHandler(
   runtime: Parameters<typeof dkgService.onChatTurn>[0],
@@ -50,13 +59,20 @@ async function onAssistantReplyHandler(
   state?: Parameters<typeof dkgService.onChatTurn>[2],
   options: Record<string, unknown> = {},
 ) {
-  // Merge the assistant reply into the same turnUri as the user message.
-  // `persistChatTurnImpl` is idempotent-ish by subject, so re-emitting
-  // the same message.id after the user hook appends the assistantReply
-  // quad without clobbering earlier turns. If the framework only fires
-  // onAssistantReply (never onChatTurn), this still persists a complete
-  // turn (userMessage will be empty, assistantReply populated).
-  const opts = { ...options, assistantText: (message as any)?.content?.text ?? '' };
+  // ElizaOS conventions: when an assistant reply fires, the matching
+  // user-message id is normally on `message.replyTo` / `message.parentId`
+  // / `message.inReplyTo`. We thread it through as `userMessageId` so the
+  // assistant-reply path lands on the same turnUri as the user-turn.
+  const userMessageId =
+    (message as any)?.replyTo
+    ?? (message as any)?.parentId
+    ?? (message as any)?.inReplyTo
+    ?? (options as any)?.userMessageId;
+  const opts: Record<string, unknown> = {
+    ...options,
+    mode: 'assistant-reply' as const,
+  };
+  if (userMessageId) opts.userMessageId = String(userMessageId);
   return dkgService.persistChatTurn(runtime, message, state, opts);
 }
 

@@ -4373,7 +4373,16 @@ export class DKGAgent {
     // reject it. The previous sync `buildEndorsementQuads` path silently
     // ignored any `signer` option and always emitted the unsigned digest.
     const { buildEndorsementQuadsAsync } = await import('./endorse.js');
-    const walletForEndorsement = (this.wallet as unknown as { ethWallet?: { signMessage: (msg: Uint8Array | string) => Promise<string> } }).ethWallet;
+    // Bot review D1 follow-up: `DKGAgentWallet` does NOT expose an `ethWallet`
+    // field, so the previous `(this.wallet as { ethWallet }).ethWallet` cast
+    // always resolved to `undefined` in production and the EIP-191 signer was
+    // never wired. The correct source of an `ethers.Wallet` for the registered
+    // local agent identity is `getDefaultPublisherWallet()`, which walks
+    // `this.localAgents` and instantiates a Wallet from the matching
+    // `privateKey`. This is the same wallet used everywhere else for on-chain
+    // signing (paranet registration, ontology root, etc.), so endorsements now
+    // recover to the same address as the rest of the agent's signed traffic.
+    const walletForEndorsement = this.getDefaultPublisherWallet();
     const signer = walletForEndorsement
       ? (digest: Uint8Array) => walletForEndorsement.signMessage(digest)
       : undefined;

@@ -25,8 +25,11 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import {
   buildEndorsementQuads,
+  buildEndorsementQuadsAsync,
   DKG_ENDORSES,
   DKG_ENDORSED_AT,
+  DKG_ENDORSEMENT_NONCE,
+  DKG_ENDORSEMENT_SIGNATURE,
 } from '../src/endorse.js';
 import {
   eip191Hash,
@@ -173,5 +176,115 @@ describe('A-7: buildEndorsementQuads MUST emit a signature quad (currently fails
       hasNonce,
       'buildEndorsementQuads does not attach a nonce (BUGS_FOUND.md A-7)',
     ).toBe(true);
+  });
+});
+
+// Bot review D1 follow-up: the previous DKGAgent.endorse() implementation
+// pulled the signer from `(this.wallet as { ethWallet }).ethWallet`, but
+// `DKGAgentWallet` does not expose an `ethWallet` field, so the signer was
+// always `undefined` in production and the signature quad silently held the
+// unsigned digest hex. The fix routes through `getDefaultPublisherWallet()`
+// (an `ethers.Wallet` derived from the registered local agent's privateKey).
+//
+// The tests below pin the contract that buildEndorsementQuadsAsync MUST honour
+// when wired with a real `ethers.Wallet.signMessage` signer:
+//
+//   - the signature quad MUST be a 0x-prefixed EIP-191 personal-sign signature
+//     (132 hex chars, not the 66-char keccak digest);
+//   - `ethers.verifyMessage(canonicalDigest, signature)` MUST recover the
+//     wallet's checksummed address;
+//   - flipping any tuple field (UAL, agent, ctxGraph, timestamp, nonce)
+//     MUST cause recovery to land on a different address.
+//
+// Together with the production fix in dkg-agent.ts (which now selects the
+// signer via getDefaultPublisherWallet → ethers.Wallet.signMessage), these
+// tests catch the exact regression flagged on PR #229.
+describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer', () => {
+  it('emits a real EIP-191 signature that recovers to the signing wallet', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const ual = 'did:dkg:base:84532/0xabc/42';
+    const cg = 'ml-research';
+    const fixedNow = new Date('2026-04-22T12:00:00.000Z');
+    const fixedNonce = '0x' + '11'.repeat(16);
+
+    const quads = await buildEndorsementQuadsAsync(
+      wallet.address,
+      ual,
+      cg,
+      {
+        signer: (digest) => wallet.signMessage(digest),
+        now: fixedNow,
+        nonce: fixedNonce,
+      },
+    );
+
+    const sigQuad = quads.find((q) => q.predicate === DKG_ENDORSEMENT_SIGNATURE);
+    expect(sigQuad, 'must emit endorsementSignature quad').toBeDefined();
+
+    const sigLiteral = sigQuad!.object;
+    const sigHex = sigLiteral.replace(/^"/, '').replace(/"$/, '');
+    expect(sigHex, 'signature must be 0x-prefixed').toMatch(/^0x[0-9a-fA-F]+$/);
+    expect(sigHex.length, 'EIP-191 sig is 132 chars (0x + 65 bytes)').toBe(132);
+
+    const { canonicalEndorseDigest } = await import('../src/endorse.js');
+    const digest = canonicalEndorseDigest(wallet.address, ual, cg, fixedNow.toISOString(), fixedNonce);
+    const recovered = ethers.verifyMessage(digest, sigHex);
+    expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
+  });
+
+  it('falls back to the digest hex (NOT a signature) when no signer is wired — proves the production fix matters', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const quads = await buildEndorsementQuadsAsync(
+      wallet.address,
+      'ual:no-sig',
+      'cg-1',
+      { now: new Date('2026-01-01T00:00:00.000Z'), nonce: '0x' + '22'.repeat(16) },
+    );
+    const sigQuad = quads.find((q) => q.predicate === DKG_ENDORSEMENT_SIGNATURE)!;
+    const sigHex = sigQuad.object.replace(/^"/, '').replace(/"$/, '');
+    expect(sigHex.length, 'unsigned digest hex is 66 chars (0x + 32 bytes)').toBe(66);
+
+    let recovered: string | null = null;
+    try {
+      recovered = ethers.verifyMessage(new Uint8Array(0), sigHex);
+    } catch {
+      recovered = null;
+    }
+    expect(recovered === null || recovered.toLowerCase() !== wallet.address.toLowerCase()).toBe(true);
+  });
+
+  it('tampering with the UAL after signing breaks recovery (any tuple-field tamper does)', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const fixedNow = new Date('2026-02-02T00:00:00.000Z');
+    const fixedNonce = '0x' + '33'.repeat(16);
+    const quads = await buildEndorsementQuadsAsync(
+      wallet.address,
+      'ual:legit',
+      'cg-1',
+      { signer: (digest) => wallet.signMessage(digest), now: fixedNow, nonce: fixedNonce },
+    );
+    const sigQuad = quads.find((q) => q.predicate === DKG_ENDORSEMENT_SIGNATURE)!;
+    const sigHex = sigQuad.object.replace(/^"/, '').replace(/"$/, '');
+
+    const { canonicalEndorseDigest } = await import('../src/endorse.js');
+    const tampered = canonicalEndorseDigest(wallet.address, 'ual:tampered', 'cg-1', fixedNow.toISOString(), fixedNonce);
+    const recovered = ethers.verifyMessage(tampered, sigHex);
+    expect(recovered.toLowerCase()).not.toBe(wallet.address.toLowerCase());
+  });
+
+  it('returns the timestamp/nonce/digest tuple aligned with the canonical preimage', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const fixedNow = new Date('2026-03-03T03:33:33.333Z');
+    const fixedNonce = '0x' + '44'.repeat(16);
+    const quads = await buildEndorsementQuadsAsync(
+      wallet.address,
+      'ual:tuple',
+      'cg-tuple',
+      { signer: (d) => wallet.signMessage(d), now: fixedNow, nonce: fixedNonce },
+    );
+    const tsQuad = quads.find((q) => q.predicate === DKG_ENDORSED_AT)!;
+    const nonceQuad = quads.find((q) => q.predicate === DKG_ENDORSEMENT_NONCE)!;
+    expect(tsQuad.object).toContain(fixedNow.toISOString());
+    expect(nonceQuad.object).toContain(fixedNonce);
   });
 });

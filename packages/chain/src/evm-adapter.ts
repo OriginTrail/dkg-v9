@@ -840,44 +840,23 @@ export class EVMChainAdapter implements ChainAdapter {
           }
         }
 
-        // Bot review (KnowledgeAssetsV10 dual-emit): on V10-only deployments
-        // `knowledgeAssetsStorage` may not be registered, so the best-effort
-        // legacy-forward emit in KAV10 is skipped. KAV10 still emits its OWN
-        // KnowledgeBatchCreated (different signature → different topic hash)
-        // from the KAV10 address. Read it here too so V10-only stacks do not
-        // stay `tentative` forever waiting for an event that never arrives
-        // on KAS. Events are normalised to the same shape as the legacy one;
-        // startKAId/endKAId is synthesised from (kcId, knowledgeAssetsAmount)
-        // because V10 KA ids live in KCS's id space, not KAS's. De-duplication
-        // happens downstream by batchId+txHash.
-        const kav10 = this.contracts.knowledgeAssetsV10;
-        if (kav10) {
-          try {
-            const v10Filter = kav10.filters.KnowledgeBatchCreated();
-            const v10Logs = await kav10.queryFilter(v10Filter, filter.fromBlock ?? 0, filter.toBlock);
-            for (const log of v10Logs) {
-              const parsed = kav10.interface.parseLog({ topics: [...log.topics], data: log.data });
-              if (parsed) {
-                const batchId = parsed.args.batchId;
-                const count = parsed.args.knowledgeAssetsAmount != null ? BigInt(parsed.args.knowledgeAssetsAmount) : 1n;
-                const startKAId = BigInt(batchId);
-                const endKAId = count > 0n ? startKAId + count - 1n : startKAId;
-                yield {
-                  type: 'KnowledgeBatchCreated',
-                  blockNumber: log.blockNumber,
-                  data: {
-                    batchId: batchId.toString(),
-                    publisherAddress: undefined,
-                    merkleRoot: undefined,
-                    startKAId: startKAId.toString(),
-                    endKAId: endKAId.toString(),
-                    txHash: log.transactionHash,
-                  },
-                };
-              }
-            }
-          } catch { /* KAV10 may not support this filter on older ABIs */ }
-        }
+        // Bot review H1 follow-up: the previous revision ALSO subscribed to
+        // KAV10's OWN KnowledgeBatchCreated(batchId, contextGraphId, amount,
+        // byteSize, startEpoch, endEpoch, tokenAmount, isImmutable) and
+        // yielded a normalized event with `merkleRoot: undefined` and
+        // `publisherAddress: undefined`. That breaks downstream:
+        // `ChainEventPoller.handleBatchCreated()` calls
+        // `ethers.hexlify(merkleRoot)` (publish-handler.ts:103) which throws
+        // on undefined, and matches confirmation by exact merkleRoot equality
+        // — so the synthetic event would either crash the poller loop or
+        // never confirm any tentative publish. V10-only deployments are
+        // already covered by the `KCCreated` path below
+        // (KnowledgeCollectionStorage.KnowledgeCollectionCreated emits
+        // `merkleRoot` and `KnowledgeAssetsMinted` carries publisher +
+        // startId/endId), so re-emitting from KAV10 was both redundant and
+        // broken. The dual-indexer guarantee from H1 is now provided by
+        // KAS.emitV10KnowledgeBatchCreated() (legacy-shaped event) on
+        // deployments that have KAS, and by KCCreated everywhere else.
       }
 
       if (eventType === 'ContextGraphExpanded') {

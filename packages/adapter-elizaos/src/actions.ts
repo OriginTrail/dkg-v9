@@ -352,21 +352,135 @@ export interface ChatTurnPersistenceAgent {
   }) => Promise<void>;
 }
 
+/**
+ * Canonical chat-turn vocabulary, copied from
+ * `packages/node-ui/src/chat-memory.ts` so this adapter does NOT introduce
+ * a parallel ad-hoc shape (bot review A* second pass). Keeping the constants
+ * here avoids a hard dep on `dkg-node-ui` (which would cycle), but the
+ * IRIs MUST match `chat-memory.ts` byte-for-byte so `ChatMemoryManager` and
+ * the node-ui session view can read these turns immediately.
+ *
+ *   AGENT_CONTEXT_GRAPH      -> 'agent-context'
+ *   CHAT_TURNS_ASSERTION     -> 'chat-turns'
+ *   CHAT_NS                  -> 'urn:dkg:chat:'
+ *   SCHEMA                   -> 'http://schema.org/'
+ *   DKG_ONT                  -> 'http://dkg.io/ontology/'
+ */
+const CHAT_AGENT_CONTEXT_GRAPH = 'agent-context';
+const CHAT_TURNS_ASSERTION = 'chat-turns';
+const CHAT_NS = 'urn:dkg:chat:';
+const SCHEMA_NS = 'http://schema.org/';
+const DKG_ONT_NS = 'http://dkg.io/ontology/';
+const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const CHAT_USER_ACTOR = `${CHAT_NS}actor:user`;
+const CHAT_AGENT_ACTOR = `${CHAT_NS}actor:agent`;
+
+type ChatQuad = { subject: string; predicate: string; object: string; graph: string };
+
+function buildSessionEntityQuads(sessionUri: string, sessionId: string): ChatQuad[] {
+  return [
+    { subject: sessionUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Conversation`, graph: '' },
+    { subject: sessionUri, predicate: `${DKG_ONT_NS}sessionId`, object: rdfString(sessionId), graph: '' },
+  ];
+}
+
+function buildUserMessageQuads(userMsgUri: string, sessionUri: string, ts: string, userText: string): ChatQuad[] {
+  return [
+    { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: CHAT_USER_ACTOR, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(userText), graph: '' },
+  ];
+}
+
+function buildAssistantMessageQuads(
+  assistantMsgUri: string,
+  userMsgUri: string,
+  sessionUri: string,
+  ts: string,
+  assistantText: string,
+): ChatQuad[] {
+  return [
+    { subject: assistantMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
+    { subject: assistantMsgUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
+    { subject: assistantMsgUri, predicate: `${SCHEMA_NS}author`, object: CHAT_AGENT_ACTOR, graph: '' },
+    { subject: assistantMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    { subject: assistantMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(assistantText), graph: '' },
+    { subject: assistantMsgUri, predicate: `${DKG_ONT_NS}replyTo`, object: userMsgUri, graph: '' },
+  ];
+}
+
+function buildTurnEnvelopeQuads(
+  turnUri: string,
+  sessionUri: string,
+  turnKey: string,
+  ts: string,
+  userMsgUri: string,
+  assistantMsgUri: string | null,
+  characterName: string,
+  userId: string,
+  roomId: string,
+): ChatQuad[] {
+  const quads: ChatQuad[] = [
+    { subject: turnUri, predicate: RDF_TYPE_IRI, object: `${DKG_ONT_NS}ChatTurn`, graph: '' },
+    { subject: turnUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
+    { subject: turnUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}hasUserMessage`, object: userMsgUri, graph: '' },
+    // ElizaOS-specific provenance kept in the same DKG_ONT namespace so
+    // ChatMemoryManager queries (which only look at schema:* and dkg:*)
+    // ignore them but they remain queryable for adapter-level tooling.
+    { subject: turnUri, predicate: `${DKG_ONT_NS}elizaUserId`, object: rdfString(userId), graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}elizaRoomId`, object: rdfString(roomId), graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}agentName`, object: rdfString(characterName), graph: '' },
+  ];
+  if (assistantMsgUri) {
+    quads.push({
+      subject: turnUri,
+      predicate: `${DKG_ONT_NS}hasAssistantMessage`,
+      object: assistantMsgUri,
+      graph: '',
+    });
+  }
+  return quads;
+}
+
 /** Shared implementation used by the action AND the dkgService.persistChatTurn / hooks.onChatTurn surface.
  *
- *  Bot review A1/A2/A3/A4/A5 fixes:
+ *  Bot review A1–A7 + second-pass follow-ups:
  *    - A1/A3: writes via `agent.assertion.write` (WM path) instead of
  *             `agent.publish` (broadcast/finalization path).
  *    - A2:    lazily ensures the target CG exists locally so fresh
- *             installs with the default `chat` CG don't throw.
+ *             installs don't throw.
  *    - A3:    builds real `Quad[]` (with `graph: ''`; the publisher
- *             rewrites this to the real assertion graph URI) so
- *             serialization doesn't produce `<undefined>` named graphs.
- *    - A4:    emits the `rdf:type` object as a bare IRI — the publisher
- *             wraps non-literals in `<...>` on serialization, so the
- *             previous `'<...>'` double-wrapped to `<<...>>`.
- *    - A5:    uses `encodeURIComponent` for reversible ID encoding so
- *             `room/a` and `room:a` don't collide onto the same subject.
+ *             rewrites this to the real assertion graph URI).
+ *    - A4:    emits `rdf:type` objects as bare IRIs (publisher wraps).
+ *    - A5:    `encodeURIComponent`-based reversible turn-key encoding so
+ *             `room/a` and `room:a` don't collide.
+ *    - 2nd-pass A6: separate user-turn vs assistant-reply paths. The
+ *             previous "merge" implementation forwarded the assistant
+ *             `Memory` straight into `persistChatTurnImpl`, which read
+ *             `message.content.text` as `userMessage` — corrupting the
+ *             turn whenever `onAssistantReply` fired. The new contract is
+ *             that `options.mode === 'assistant-reply'` (set by the
+ *             onAssistantReply hook) emits ONLY the assistant message
+ *             quads + a single `dkg:hasAssistantMessage` link onto the
+ *             existing turn envelope. Repeat fires of the user hook for
+ *             the same `message.id` are also idempotent because every
+ *             quad is keyed by the deterministic `turnKey`.
+ *    - 2nd-pass A4 (RDF shape): emits the canonical
+ *             `schema:Conversation` / `schema:Message` / `dkg:ChatTurn`
+ *             shape that `node-ui/src/chat-memory.ts` reads. The previous
+ *             `https://schema.origintrail.io/dkg/v10/ChatTurn` predicates
+ *             were invisible to ChatMemoryManager / node-ui session views.
+ *    - 2nd-pass A5 (default CG): defaults to the canonical
+ *             `agent-context` context graph (the same constant
+ *             `ChatMemoryManager.AGENT_CONTEXT_GRAPH` uses) so writes are
+ *             readable out-of-the-box without setting `DKG_CHAT_CG`.
+ *             Operators that set `DKG_CHAT_CG`/`options.contextGraphId`
+ *             keep their explicit override.
  */
 export async function persistChatTurnImpl(
   agent: ChatTurnPersistenceAgent,
@@ -380,47 +494,97 @@ export async function persistChatTurnImpl(
     assistantText?: string;
     assistantReply?: { text?: string };
     assertionName?: string;
+    /**
+     * Routing flag set by the dedicated `onAssistantReply` hook handler
+     * in `index.ts`. When `'assistant-reply'`, the impl skips re-emitting
+     * the user-message + turn-envelope quads and only writes the assistant
+     * message + the link onto the existing turn. Default `'user-turn'`.
+     */
+    mode?: 'user-turn' | 'assistant-reply';
+    /**
+     * Optional override for the source-of-truth message id when the
+     * assistant-reply hook fires with a different memory id than the
+     * user-turn hook. Lets onAssistantReply target the same `turnUri`.
+     */
+    userMessageId?: string;
   };
 
+  const mode = optsAny.mode ?? 'user-turn';
   const userId = (message as any).userId ?? 'anonymous';
   const roomId = (message as any).roomId ?? 'default';
-  const memId = (message as any).id ?? `mem-${Date.now()}`;
-  const userText = message.content?.text ?? '';
-  const assistantText =
-    optsAny.assistantText
-    ?? optsAny.assistantReply?.text
-    ?? (state as any)?.lastAssistantReply
-    ?? '';
+  // For assistant-reply mode, prefer the user message id if the caller
+  // passed it explicitly so we hit the same turnUri. Otherwise fall back
+  // to the assistant memory's own id (and the turn will be a "headless"
+  // assistant turn — still readable, just missing the matching user msg).
+  const turnSourceId = mode === 'assistant-reply' && optsAny.userMessageId
+    ? optsAny.userMessageId
+    : ((message as any).id ?? `mem-${Date.now()}`);
   const characterName = runtime.character?.name ?? runtime.getSetting('DKG_AGENT_NAME') ?? 'elizaos-agent';
-  const contextGraphId = optsAny.contextGraphId ?? runtime.getSetting('DKG_CHAT_CG') ?? 'chat';
-  const assertionName = optsAny.assertionName ?? runtime.getSetting('DKG_CHAT_ASSERTION') ?? 'chat-turns';
-  const turnUri = `urn:dkg:elizaos:chat:${encodeIriSegment(roomId)}:${encodeIriSegment(memId)}`;
+  const contextGraphId = optsAny.contextGraphId
+    ?? runtime.getSetting('DKG_CHAT_CG')
+    ?? CHAT_AGENT_CONTEXT_GRAPH;
+  const assertionName = optsAny.assertionName
+    ?? runtime.getSetting('DKG_CHAT_ASSERTION')
+    ?? CHAT_TURNS_ASSERTION;
+
+  // Deterministic per-room/per-message turn key so re-fires are idempotent
+  // and so onAssistantReply can target the same turnUri/userMsgUri/
+  // assistantMsgUri the user-turn hook produced.
+  const turnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(turnSourceId)}`;
+  const sessionId = String(roomId);
+  const sessionUri = `${CHAT_NS}session:${encodeIriSegment(sessionId)}`;
+  const userMsgUri = `${CHAT_NS}msg:user:${turnKey}`;
+  const assistantMsgUri = `${CHAT_NS}msg:agent:${turnKey}`;
+  const turnUri = `${CHAT_NS}turn:${turnKey}`;
   const ts = new Date().toISOString();
 
-  const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
-    // A4: bare IRI for the rdf:type object. Publisher wraps non-literals
-    //     in <...> at serialization; previously we stored `'<...>'` which
-    //     then serialized as `<<...>>` and the write failed.
-    { subject: turnUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      object: 'https://schema.origintrail.io/dkg/v10/ChatTurn', graph: '' },
-    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userId',
-      object: rdfString(userId), graph: '' },
-    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/roomId',
-      object: rdfString(roomId), graph: '' },
-    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/agentName',
-      object: rdfString(characterName), graph: '' },
-    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userMessage',
-      object: rdfString(userText), graph: '' },
-    { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/timestamp',
-      object: `${rdfString(ts)}^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: '' },
-  ];
-  if (assistantText) {
-    quads.push({
-      subject: turnUri,
-      predicate: 'https://schema.origintrail.io/dkg/v10/assistantReply',
-      object: rdfString(assistantText),
-      graph: '',
-    });
+  let quads: ChatQuad[];
+
+  if (mode === 'assistant-reply') {
+    // 2nd-pass A6: append-only assistant-reply path. We do NOT touch the
+    // user-message or turn-metadata quads — those were emitted by the
+    // user-turn hook. We only add the assistant Message subject and the
+    // single dkg:hasAssistantMessage link onto the existing turn.
+    const assistantText = (message as any)?.content?.text
+      ?? optsAny.assistantText
+      ?? optsAny.assistantReply?.text
+      ?? (state as any)?.lastAssistantReply
+      ?? '';
+    quads = [
+      ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
+      { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
+    ];
+  } else {
+    // user-turn path: emit (idempotently) the session entity, the user
+    // message, the turn envelope, and (if the same call has captured an
+    // assistant reply on `state` / `options`) the assistant message.
+    const userText = message.content?.text ?? '';
+    const assistantText =
+      optsAny.assistantText
+      ?? optsAny.assistantReply?.text
+      ?? (state as any)?.lastAssistantReply
+      ?? '';
+
+    quads = [
+      ...buildSessionEntityQuads(sessionUri, sessionId),
+      ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText),
+    ];
+    if (assistantText) {
+      quads.push(...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText));
+    }
+    quads.push(
+      ...buildTurnEnvelopeQuads(
+        turnUri,
+        sessionUri,
+        turnKey,
+        ts,
+        userMsgUri,
+        assistantText ? assistantMsgUri : null,
+        characterName,
+        userId,
+        roomId,
+      ),
+    );
   }
 
   // A2: best-effort lazy CG ensure. If the CG already exists this is a
@@ -431,7 +595,7 @@ export async function persistChatTurnImpl(
     await agent.ensureContextGraphLocal({
       id: contextGraphId,
       name: contextGraphId,
-      description: 'ElizaOS chat-turn persistence context graph (auto-ensured)',
+      description: 'ElizaOS chat-turn persistence (canonical schema:Conversation / schema:Message shape)',
       curated: true,
     });
   }

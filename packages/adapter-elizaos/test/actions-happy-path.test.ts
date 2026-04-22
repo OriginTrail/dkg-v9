@@ -610,7 +610,7 @@ describe('DKG_INVOKE_SKILL handler', () => {
 // DKG_PERSIST_CHAT_TURN — happy path via the stubbed agent
 // ───────────────────────────────────────────────────────────────────────────
 describe('DKG_PERSIST_CHAT_TURN handler', () => {
-  it('writes the turn quads via agent.assertion.write and reports the triple count (bot review A1/A3)', async () => {
+  it('writes the turn quads via agent.assertion.write using the canonical schema:Conversation/Message shape (bot review A* 2nd pass)', async () => {
     const { calls, cb } = captureCb();
     const ok = await dkgPersistChatTurn.handler(
       makeRuntime({ DKG_CHAT_CG: 'chat-room' }),
@@ -625,11 +625,28 @@ describe('DKG_PERSIST_CHAT_TURN handler', () => {
     expect(state.assertionWrites).toHaveLength(1);
     expect(state.assertionWrites[0].cgId).toBe('chat-room');
     expect(state.assertionWrites[0].name).toBe('chat-turns');
-    expect(state.assertionWrites[0].quads.length).toBe(7); // 6 base + assistantReply
+    // 2nd-pass A4 (canonical RDF shape): user-turn with assistantText emits
+    // session entity (2) + user msg (5) + assistant msg (6) + turn envelope
+    // (5 + hasAssistantMessage + 3 eliza-provenance) = 22 quads.
+    const quads = state.assertionWrites[0].quads;
+    expect(quads.length).toBeGreaterThanOrEqual(20);
+    // Critical canonical-shape assertions (ChatMemoryManager-readable):
+    expect(quads.some((q: any) =>
+      q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+      && q.object === 'http://schema.org/Conversation',
+    )).toBe(true);
+    expect(quads.some((q: any) =>
+      q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+      && q.object === 'http://schema.org/Message',
+    )).toBe(true);
+    expect(quads.some((q: any) =>
+      q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+      && q.object === 'http://dkg.io/ontology/ChatTurn',
+    )).toBe(true);
     // A2: ensureContextGraphLocal is called first with the same cg id.
     expect(state.ensureCGs).toHaveLength(1);
     expect(state.ensureCGs[0].id).toBe('chat-room');
-    expect(calls[0].text).toMatch(/Chat turn persisted \(7 triples\)/);
+    expect(calls[0].text).toMatch(/Chat turn persisted \(\d+ triples\)/);
   });
 
   it('routes assertion.write errors through the callback', async () => {

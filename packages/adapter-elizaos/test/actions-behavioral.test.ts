@@ -2,27 +2,31 @@
  * Behavioral coverage for the adapter-elizaos action-handler internals
  * and the persistChatTurnImpl cross-surface implementation.
  *
- * The five DKG_* action handlers each call `requireAgent()` which throws
- * when no DKGAgent is live; booting a real DKGAgent pulls in libp2p +
- * chain + storage per test and is covered by downstream integration
- * suites. The happy-path logic worth unit-testing is therefore:
+ * SECOND-PASS BOT REVIEW (PR #229):
+ *   - persistChatTurnImpl now emits the CANONICAL chat-turn shape used by
+ *     `node-ui/src/chat-memory.ts` (`schema:Conversation` /
+ *     `schema:Message` / `dkg:ChatTurn` + `urn:dkg:chat:` URIs) instead of
+ *     the previous ad-hoc `https://schema.origintrail.io/dkg/v10/ChatTurn`
+ *     vocabulary, so ChatMemoryManager / node-ui session views can read
+ *     adapter-emitted turns immediately.
+ *   - The default context graph is now `'agent-context'` (the same constant
+ *     that ChatMemoryManager reads), not `'chat'`.
+ *   - A new `mode: 'assistant-reply'` opt routes the call through an
+ *     append-only assistant-message path so onAssistantReply does NOT
+ *     duplicate the user-message + turn-envelope quads.
  *
- *   1. persistChatTurnImpl — takes a loose agent interface (publish only)
- *      so we exercise every quad-building branch, defaults chain, and
- *      contextGraphId / assistantText resolution order with a tiny
- *      capturing fake.
- *   2. Provider keyword extraction (exercised via dkgKnowledgeProvider.get
- *      short-circuit on stop-word / short-token inputs).
- *   3. Action handler argument parsing when the agent is absent — these
- *      paths are already covered in adapter-elizaos-extra.test.ts via
- *      error-routing, this file adds the happy-path branches for
- *      DKG_PERSIST_CHAT_TURN which CAN be tested without a live agent
- *      thanks to persistChatTurnImpl's loose type.
+ * Tests below assert all three contracts so any regression surfaces here
+ * instead of in node-ui later.
  */
 import { describe, it, expect } from 'vitest';
 import { persistChatTurnImpl, dkgPersistChatTurn } from '../src/actions.js';
 import { dkgKnowledgeProvider } from '../src/provider.js';
 import type { IAgentRuntime, Memory, State, HandlerCallback } from '../src/types.js';
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SCHEMA = 'http://schema.org/';
+const DKG_ONT = 'http://dkg.io/ontology/';
+const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 function makeRuntime(settings: Record<string, string> = {}, characterName?: string): IAgentRuntime {
   return {
@@ -53,19 +57,6 @@ interface CapturedEnsure {
   curated?: boolean;
 }
 
-/**
- * Bot review A1/A2/A3: persistChatTurnImpl now routes chat turns through
- * `agent.assertion.write` (the WM path) and pre-ensures the CG locally
- * via `agent.ensureContextGraphLocal`. The capturing fake exposes BOTH
- * surfaces and records every call so tests can assert that turns are
- * persisted to working memory (not broadcast) and that the CG is
- * pre-created before the write.
- *
- * `kcId` is retained in the signature for back-compat with existing
- * callers but is always an empty string for the WM path (WM writes do
- * not produce a KC on-chain id). Tests that used to assert on kcId now
- * assert `out.kcId === ''`.
- */
 function makeCapturingAgent(_kcIdUnused?: bigint | string) {
   const publishes: CapturedPublish[] = [];
   const ensures: CapturedEnsure[] = [];
@@ -83,84 +74,29 @@ function makeCapturingAgent(_kcIdUnused?: bigint | string) {
 }
 
 // ===========================================================================
-// persistChatTurnImpl — quad building + default resolution order
+// persistChatTurnImpl — canonical user-turn shape (schema:Conversation /
+// schema:Message / dkg:ChatTurn) — second-pass bot review
 // ===========================================================================
 
-describe('persistChatTurnImpl — base quad set', () => {
-  it('emits the six mandatory turn quads for a user-only message (no assistant reply)', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    const out = await persistChatTurnImpl(
-      agent,
-      makeRuntime({}, 'Pepper'),
-      makeMessage('hello world', { id: 'mem-1', roomId: 'room-A', userId: 'bob' } as any),
-      {} as State,
-      {},
-    );
-    expect(out.tripleCount).toBe(6);
-    expect(publishes).toHaveLength(1);
-    expect(publishes[0].cgId).toBe('chat');
-
-    const preds = publishes[0].quads.map(q => q.predicate);
-    expect(preds).toEqual(expect.arrayContaining([
-      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      'https://schema.origintrail.io/dkg/v10/userId',
-      'https://schema.origintrail.io/dkg/v10/roomId',
-      'https://schema.origintrail.io/dkg/v10/agentName',
-      'https://schema.origintrail.io/dkg/v10/userMessage',
-      'https://schema.origintrail.io/dkg/v10/timestamp',
-    ]));
-
-    // No assistantReply predicate when the text is absent.
-    expect(preds).not.toContain('https://schema.origintrail.io/dkg/v10/assistantReply');
-
-    // agentName should come from the character (highest priority).
-    const agentNameQuad = publishes[0].quads.find(q => q.predicate.endsWith('/agentName'))!;
-    expect(agentNameQuad.object).toBe('"Pepper"');
+describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui ChatMemoryManager)', () => {
+  it('defaults to the agent-context CG and chat-turns assertion (interop with rest of monorepo)', async () => {
+    const { agent, publishes, ensures } = makeCapturingAgent();
+    await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
+    // Second-pass bot review: ChatMemoryManager reads from `agent-context`
+    // / `chat-turns`. Defaulting to anything else (the prior default was
+    // `chat`) breaks out-of-the-box interop on every fresh install.
+    expect(publishes[0].cgId).toBe('agent-context');
+    expect(publishes[0].name).toBe('chat-turns');
+    expect(ensures[0].id).toBe('agent-context');
   });
 
-  it('emits the 7th assistantReply quad when opts.assistantText is supplied', async () => {
+  it('respects DKG_CHAT_CG override when explicitly set', async () => {
     const { agent, publishes } = makeCapturingAgent();
-    const out = await persistChatTurnImpl(
-      agent,
-      makeRuntime(),
-      makeMessage('hi', { id: 'm', roomId: 'r', userId: 'u' } as any),
-      {} as State,
-      { assistantText: 'hello back' },
-    );
-    expect(out.tripleCount).toBe(7);
-    const reply = publishes[0].quads.find(q => q.predicate.endsWith('/assistantReply'))!;
-    expect(reply.object).toBe('"hello back"');
+    await persistChatTurnImpl(agent, makeRuntime({ DKG_CHAT_CG: 'custom-cg' }), makeMessage('hi'), {} as State, {});
+    expect(publishes[0].cgId).toBe('custom-cg');
   });
 
-  it('falls back to opts.assistantReply.text when assistantText is not set', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(
-      agent,
-      makeRuntime(),
-      makeMessage('hi', { id: 'm', roomId: 'r', userId: 'u' } as any),
-      {} as State,
-      { assistantReply: { text: 'reply-obj' } },
-    );
-    const reply = publishes[0].quads.find(q => q.predicate.endsWith('/assistantReply'))!;
-    expect(reply.object).toBe('"reply-obj"');
-  });
-
-  it('falls back to state.lastAssistantReply when neither opts field is set', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(
-      agent,
-      makeRuntime(),
-      makeMessage('hi', { id: 'm', roomId: 'r', userId: 'u' } as any),
-      { lastAssistantReply: 'from-state' } as State,
-      {},
-    );
-    const reply = publishes[0].quads.find(q => q.predicate.endsWith('/assistantReply'));
-    expect(reply?.object).toBe('"from-state"');
-  });
-});
-
-describe('persistChatTurnImpl — contextGraphId resolution order', () => {
-  it('prefers opts.contextGraphId over DKG_CHAT_CG setting and "chat" default', async () => {
+  it('respects opts.contextGraphId over DKG_CHAT_CG and the default', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
       agent,
@@ -172,61 +108,148 @@ describe('persistChatTurnImpl — contextGraphId resolution order', () => {
     expect(publishes[0].cgId).toBe('opts-cg');
   });
 
-  it('uses DKG_CHAT_CG setting when opts.contextGraphId is undefined', async () => {
+  it('emits a schema:Conversation entity for the session (turnId roomId)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
-      agent,
-      makeRuntime({ DKG_CHAT_CG: 'settings-cg' }),
-      makeMessage('hi'),
-      {} as State,
-      {},
+      agent, makeRuntime(),
+      makeMessage('hello', { id: 'mem-1', roomId: 'room-A', userId: 'bob' } as any),
+      {} as State, {},
     );
-    expect(publishes[0].cgId).toBe('settings-cg');
+    const sessionTypeQuad = publishes[0].quads.find(
+      (q) => q.predicate === RDF_TYPE && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(sessionTypeQuad, 'must emit schema:Conversation type').toBeDefined();
+    expect(sessionTypeQuad!.subject).toMatch(/^urn:dkg:chat:session:room-A$/);
+
+    const sessionIdQuad = publishes[0].quads.find((q) => q.predicate === `${DKG_ONT}sessionId`);
+    expect(sessionIdQuad).toBeDefined();
+    expect(sessionIdQuad!.object).toBe('"room-A"');
   });
 
-  it('defaults to "chat" when neither opts nor settings provide one', async () => {
+  it('emits a schema:Message subject for the user message wired to the session and user actor', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('what is dkg?', { id: 'mem-1', roomId: 'r', userId: 'u' } as any),
+      {} as State, {},
+    );
+    const quads = publishes[0].quads;
+    const userMsgUri = `urn:dkg:chat:msg:user:r:mem-1`;
+    expect(quads).toContainEqual(expect.objectContaining({ subject: userMsgUri, predicate: RDF_TYPE, object: `${SCHEMA}Message` }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: userMsgUri, predicate: `${SCHEMA}isPartOf`, object: 'urn:dkg:chat:session:r' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: userMsgUri, predicate: `${SCHEMA}author`, object: 'urn:dkg:chat:actor:user' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: userMsgUri, predicate: `${SCHEMA}text`, object: '"what is dkg?"' }));
+  });
+
+  it('emits a dkg:ChatTurn envelope linking to the user message subject', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'mem-1', roomId: 'r', userId: 'u' } as any),
+      {} as State, {},
+    );
+    const turnUri = out.turnUri;
+    expect(turnUri).toBe('urn:dkg:chat:turn:r:mem-1');
+    const quads = publishes[0].quads;
+    expect(quads).toContainEqual(expect.objectContaining({ subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn` }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: turnUri, predicate: `${SCHEMA}isPartOf`, object: 'urn:dkg:chat:session:r' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: 'urn:dkg:chat:msg:user:r:mem-1' }));
+    // No assistant message link when the user-turn fires alone.
+    expect(quads.some((q) => q.predicate === `${DKG_ONT}hasAssistantMessage`)).toBe(false);
+  });
+
+  it('emits the assistant message + link when assistantText is supplied on the user-turn', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'mem-1', roomId: 'r', userId: 'u' } as any),
+      {} as State,
+      { assistantText: 'hello back' },
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:mem-1';
+    const quads = publishes[0].quads;
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: RDF_TYPE, object: `${SCHEMA}Message` }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: `${SCHEMA}author`, object: 'urn:dkg:chat:actor:agent' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: '"hello back"' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: `${DKG_ONT}replyTo`, object: 'urn:dkg:chat:msg:user:r:mem-1' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: out.turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri }));
+  });
+
+  it('rdf:type objects are bare IRIs (publisher wraps in <...> at serialization)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    expect(publishes[0].cgId).toBe('chat');
+    for (const q of publishes[0].quads.filter((q) => q.predicate === RDF_TYPE)) {
+      expect(q.object.startsWith('<')).toBe(false);
+    }
+  });
+
+  it('every emitted quad carries `graph: ""` (publisher rewrites to the assertion graph)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
+    for (const q of publishes[0].quads) {
+      expect(q).toHaveProperty('graph');
+      expect(q.graph).toBe('');
+    }
   });
 });
 
-describe('persistChatTurnImpl — agentName resolution order', () => {
-  it('prefers character.name over DKG_AGENT_NAME setting', async () => {
+// ===========================================================================
+// persistChatTurnImpl — assistant-reply MERGE path (second-pass bot review)
+// ===========================================================================
+
+describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-text corruption, no duplicate envelope)', () => {
+  it('emits ONLY assistant-message quads and a single hasAssistantMessage link', async () => {
     const { agent, publishes } = makeCapturingAgent();
+    // Note: the assistant memory carries the assistant TEXT in
+    // `message.content.text`. Previously this was incorrectly persisted as
+    // `userMessage`. With `mode: 'assistant-reply'` it must NOT be.
     await persistChatTurnImpl(
-      agent,
-      makeRuntime({ DKG_AGENT_NAME: 'from-settings' }, 'from-character'),
-      makeMessage('hi'),
+      agent, makeRuntime(),
+      makeMessage('the answer is 42', { id: 'asst-mem', roomId: 'r', userId: 'agent-eliza' } as any),
       {} as State,
-      {},
+      { mode: 'assistant-reply', userMessageId: 'mem-1' },
     );
-    const name = publishes[0].quads.find(q => q.predicate.endsWith('/agentName'))!;
-    expect(name.object).toBe('"from-character"');
+    const quads = publishes[0].quads;
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:mem-1';
+    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:mem-1';
+
+    // Assistant-message subject is present with the correct text.
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: '"the answer is 42"' }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: assistantMsgUri, predicate: `${DKG_ONT}replyTo`, object: userMsgUri }));
+    expect(quads).toContainEqual(expect.objectContaining({ subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri }));
+
+    // Critically: NO user-message subject is re-emitted (would cause
+    // duplicate-data and would mark the assistant text as user text).
+    expect(quads.some((q) => q.subject === userMsgUri)).toBe(false);
+    // And NO turn-envelope quads (those came from the user-turn call).
+    expect(quads.some((q) => q.subject === turnUri && q.predicate === RDF_TYPE)).toBe(false);
+    expect(quads.some((q) => q.subject === turnUri && q.predicate === `${DKG_ONT}turnId`)).toBe(false);
   });
 
-  it('falls back to DKG_AGENT_NAME when character is undefined', async () => {
+  it('targets the SAME turnUri as the matching user-turn call when userMessageId is supplied', async () => {
     const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(
-      agent,
-      makeRuntime({ DKG_AGENT_NAME: 'from-settings' }),
-      makeMessage('hi'),
-      {} as State,
-      {},
+    const userOut = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('what?', { id: 'mem-1', roomId: 'r', userId: 'u' } as any),
+      {} as State, {},
     );
-    const name = publishes[0].quads.find(q => q.predicate.endsWith('/agentName'))!;
-    expect(name.object).toBe('"from-settings"');
-  });
-
-  it('falls back to "elizaos-agent" when neither is set', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    const name = publishes[0].quads.find(q => q.predicate.endsWith('/agentName'))!;
-    expect(name.object).toBe('"elizaos-agent"');
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('the answer is 42', { id: 'asst-mem-2', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'mem-1' },
+    );
+    const linkQuad = publishes[1].quads.find((q) => q.predicate === `${DKG_ONT}hasAssistantMessage`)!;
+    expect(linkQuad.subject).toBe(userOut.turnUri);
   });
 });
 
-describe('persistChatTurnImpl — turnUri construction (reversible encoding, bot review A5)', () => {
+// ===========================================================================
+// persistChatTurnImpl — turnUri encoding (still bot review A5: reversible)
+// ===========================================================================
+
+describe('persistChatTurnImpl — turnUri reversible encoding (bot review A5)', () => {
   it('uses encodeURIComponent so different chars produce different turnUris (no collision)', async () => {
     const { agent } = makeCapturingAgent();
     const out1 = await persistChatTurnImpl(
@@ -239,162 +262,81 @@ describe('persistChatTurnImpl — turnUri construction (reversible encoding, bot
       makeMessage('hi', { id: 'mem:1', roomId: 'room@A' } as any),
       {} as State, {},
     );
-    // A5: `mem/1` and `mem:1` must NOT collapse onto the same subject.
     expect(out1.turnUri).not.toBe(out2.turnUri);
     expect(out1.turnUri).toContain(encodeURIComponent('mem/1'));
     expect(out2.turnUri).toContain(encodeURIComponent('mem:1'));
   });
 
-  it('percent-encoding is reversible — decodeURIComponent recovers the original IDs', async () => {
-    const { agent } = makeCapturingAgent();
-    const out = await persistChatTurnImpl(
-      agent, makeRuntime(),
-      makeMessage('hi', { id: 'mem/1:x', roomId: 'room@A!' } as any),
-      {} as State, {},
-    );
-    // Shape: urn:dkg:elizaos:chat:<enc(roomId)>:<enc(memId)>
-    // `:` delimits the fixed prefix segments AND separates the two
-    // encoded ID segments, so the two last colons delimit the two IDs.
-    // We assert by reconstructing from the known inputs.
-    expect(out.turnUri).toBe(
-      `urn:dkg:elizaos:chat:${encodeURIComponent('room@A!')}:${encodeURIComponent('mem/1:x')}`,
-    );
-  });
-
   it('uses a timestamp-based memId fallback when message.id is missing', async () => {
     const { agent } = makeCapturingAgent();
     const msg = makeMessage('hi', { roomId: 'r' } as any);
-    // Clear .id — forces the fallback branch `mem-${Date.now()}`
     delete (msg as any).id;
     const out = await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
-    expect(out.turnUri).toMatch(/^urn:dkg:elizaos:chat:r:mem-\d+$/);
+    expect(out.turnUri).toMatch(/^urn:dkg:chat:turn:r:mem-\d+$/);
   });
 
-  it('uses "anonymous" / "default" fallbacks for userId / roomId', async () => {
+  it('uses "anonymous" / "default" fallbacks for userId / roomId in the turn envelope', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const msg = makeMessage('hi', { id: 'm' } as any);
     delete (msg as any).userId;
     delete (msg as any).roomId;
     await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
     const quads = publishes[0].quads;
-    expect(quads.find(q => q.predicate.endsWith('/userId'))!.object).toBe('"anonymous"');
-    expect(quads.find(q => q.predicate.endsWith('/roomId'))!.object).toBe('"default"');
+    expect(quads.find((q) => q.predicate === `${DKG_ONT}elizaUserId`)!.object).toBe('"anonymous"');
+    expect(quads.find((q) => q.predicate === `${DKG_ONT}elizaRoomId`)!.object).toBe('"default"');
   });
 });
 
-describe('persistChatTurnImpl — rdfString escaping', () => {
+describe('persistChatTurnImpl — rdfString escaping + dateTime literal', () => {
   it('escapes backslashes, double quotes, newlines and carriage returns in user text', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
-      agent,
-      makeRuntime(),
+      agent, makeRuntime(),
       makeMessage('hello "world"\\n\nline2\r\nend'),
-      {} as State,
-      {},
+      {} as State, {},
     );
-    const userMsg = publishes[0].quads.find(q => q.predicate.endsWith('/userMessage'))!;
-    // Every embedded double quote becomes \"; every \ becomes \\; literal
-    // \n (CR) and \n (LF) bytes become the 2-char escape sequences \r / \n.
-    expect(userMsg.object).toContain('\\"world\\"');
-    expect(userMsg.object).toContain('\\n');
-    expect(userMsg.object).toContain('\\r');
-    // Must not contain a raw newline char — would be invalid N-Quads.
-    expect(userMsg.object).not.toMatch(/[\n\r]/);
+    const userText = publishes[0].quads.find((q) => q.predicate === `${SCHEMA}text`)!;
+    expect(userText.object).toContain('\\"world\\"');
+    expect(userText.object).toContain('\\n');
+    expect(userText.object).toContain('\\r');
+    expect(userText.object).not.toMatch(/[\n\r]/);
   });
 
-  it('timestamp quad ends with the xsd:dateTime datatype', async () => {
+  it('schema:dateCreated quad ends with the xsd:dateTime datatype', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    const ts = publishes[0].quads.find(q => q.predicate.endsWith('/timestamp'))!;
-    expect(ts.object).toMatch(/\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/);
+    const ts = publishes[0].quads.find((q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:msg:'))!;
+    expect(ts.object).toMatch(new RegExp(`\\^\\^<${XSD_DATETIME}>$`));
   });
 });
 
-describe('persistChatTurnImpl — result shape + WM contract (bot review A1/A3)', () => {
+describe('persistChatTurnImpl — result shape + WM contract', () => {
   it('returns an empty kcId string — WM writes do not produce on-chain KC ids', async () => {
     const { agent } = makeCapturingAgent();
     const out = await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
     expect(out.kcId).toBe('');
-    // Sanity-check the rest of the return shape is still contractual.
     expect(typeof out.turnUri).toBe('string');
     expect(typeof out.tripleCount).toBe('number');
-  });
-
-  it('emits rdf:type as a BARE IRI (no `<...>` wrapping) so the publisher does not double-wrap', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    const typeQuad = publishes[0].quads.find(q =>
-      q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-    )!;
-    // A4: must be `https://...` NOT `<https://...>`; the publisher adds
-    //     the angle brackets at serialization time.
-    expect(typeQuad.object).toBe('https://schema.origintrail.io/dkg/v10/ChatTurn');
-    expect(typeQuad.object.startsWith('<')).toBe(false);
-  });
-
-  it('pre-ensures the CG via ensureContextGraphLocal before writing the assertion', async () => {
-    const { agent, publishes, ensures } = makeCapturingAgent();
-    await persistChatTurnImpl(
-      agent, makeRuntime({ DKG_CHAT_CG: 'my-cg' }), makeMessage('hi'), {} as State, {},
-    );
-    // A2: ensureContextGraphLocal MUST be called with the same CG id as
-    //     the subsequent assertion.write, so fresh installs don't throw.
-    expect(ensures).toHaveLength(1);
-    expect(ensures[0].id).toBe('my-cg');
-    expect(ensures[0].curated).toBe(true);
-    expect(publishes[0].cgId).toBe('my-cg');
-    // A1/A3: the quads were routed via assertion.write to the
-    //        'chat-turns' assertion name (default), not publish().
-    expect(publishes[0].name).toBe('chat-turns');
   });
 
   it('honors a DKG_CHAT_ASSERTION setting override for the assertion name', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
-      agent,
-      makeRuntime({ DKG_CHAT_ASSERTION: 'custom-chat' }),
-      makeMessage('hi'),
-      {} as State,
-      {},
+      agent, makeRuntime({ DKG_CHAT_ASSERTION: 'custom-chat' }),
+      makeMessage('hi'), {} as State, {},
     );
     expect(publishes[0].name).toBe('custom-chat');
   });
 
-  it('every emitted quad carries a `graph` field (empty string — publisher rewrites to the assertion graph)', async () => {
-    const { agent, publishes } = makeCapturingAgent();
-    await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    // A3: quads without a `graph` field serialize as `<undefined>` — every
-    //     emitted quad here must have `graph: ''` so the publisher rewrites
-    //     it to the assertion graph URI cleanly.
-    for (const q of publishes[0].quads) {
-      expect(q).toHaveProperty('graph');
-      expect(q.graph).toBe('');
-    }
-  });
-
-  it('works even when the agent does NOT expose ensureContextGraphLocal (tests-only / legacy shims)', async () => {
-    const { publishes } = (() => {
-      const publishes: CapturedPublish[] = [];
-      const agent = {
-        assertion: {
-          async write(cgId: string, name: string, quads: any) {
-            publishes.push({ cgId, name, quads: [...quads] });
-          },
+  it('works even when the agent does NOT expose ensureContextGraphLocal', async () => {
+    const publishes: CapturedPublish[] = [];
+    const agent: any = {
+      assertion: {
+        async write(cgId: string, name: string, quads: any) {
+          publishes.push({ cgId, name, quads: [...quads] });
         },
-        // deliberately omit ensureContextGraphLocal
-      };
-      return { agent, publishes };
-    })();
-    const { agent } = (() => {
-      const a: any = {
-        assertion: {
-          async write(cgId: string, name: string, quads: any) {
-            publishes.push({ cgId, name, quads: [...quads] });
-          },
-        },
-      };
-      return { agent: a };
-    })();
+      },
+    };
     const out = await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
     expect(out.tripleCount).toBeGreaterThan(0);
     expect(publishes).toHaveLength(1);
@@ -402,10 +344,7 @@ describe('persistChatTurnImpl — result shape + WM contract (bot review A1/A3)'
 });
 
 // ===========================================================================
-// dkgPersistChatTurn ACTION — happy path via the service's globally-installed
-// agent. We can't drive the action's `requireAgent()` from here because that
-// uses module-private state, so we only assert the shape and error-routing
-// contract (happy path is validated directly against persistChatTurnImpl).
+// dkgPersistChatTurn ACTION — error routing only (no live agent)
 // ===========================================================================
 
 describe('dkgPersistChatTurn action — metadata + error routing', () => {
@@ -435,40 +374,34 @@ describe('dkgPersistChatTurn action — metadata + error routing', () => {
 });
 
 // ===========================================================================
-// dkgKnowledgeProvider — extractKeywords branches via the public get()
+// dkgKnowledgeProvider — keyword extraction branches (unchanged)
 // ===========================================================================
 
 describe('dkgKnowledgeProvider — keyword extraction branches', () => {
   it('returns null when no agent is initialized', async () => {
     const out = await dkgKnowledgeProvider.get!(
-      makeRuntime(),
-      makeMessage('tell me about distributed systems'),
+      makeRuntime(), makeMessage('tell me about distributed systems'),
     );
-    // Without a DKGAgent singleton the provider MUST degrade to null.
-    // This is the provider's documented graceful-degradation contract.
     expect(out === null || typeof out === 'string').toBe(true);
   });
 
   it('returns null for messages with only stop words and sub-3-char tokens', async () => {
     const out = await dkgKnowledgeProvider.get!(
-      makeRuntime(),
-      makeMessage('a of in the is be or to an'),
+      makeRuntime(), makeMessage('a of in the is be or to an'),
     );
     expect(out).toBeNull();
   });
 
   it('returns null for a fully punctuation-only message', async () => {
     const out = await dkgKnowledgeProvider.get!(
-      makeRuntime(),
-      makeMessage('!!! ... ??? ,,,'),
+      makeRuntime(), makeMessage('!!! ... ??? ,,,'),
     );
     expect(out).toBeNull();
   });
 
   it('does not throw on messages containing special-regex characters', async () => {
     const out = await dkgKnowledgeProvider.get!(
-      makeRuntime(),
-      makeMessage('alice() [brackets] {braces} "quotes" — em-dash'),
+      makeRuntime(), makeMessage('alice() [brackets] {braces} "quotes" — em-dash'),
     );
     expect(out === null || typeof out === 'string').toBe(true);
   });

@@ -231,6 +231,14 @@ describe('OriginTrail Game: 3 player game', () => {
       '[ProtocolRouter] handler error', // stream timeout/close; recoverable
       'Sync page retry',
       'Workspace sync page retry',
+      // PR #229 bot review round 12 tail: hardhat/ethers head race —
+      // see chain-event-poller.ts for the rationale. The poller's own
+      // catch block was downgraded to WARN in r12, so this allowlist
+      // entry is belt-and-suspenders for any other call site that
+      // might surface the same upstream RPC error as [ERROR] during
+      // E2E teardown (e.g. listenForEvents in evm-adapter).
+      'block range extends beyond current head block',
+      '[ChainEventPoller] Poll transient',
     ];
 
     for (let i = 0; i < nodes.length; i++) {

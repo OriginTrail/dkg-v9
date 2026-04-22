@@ -159,6 +159,20 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint72 indexed newIdentityId
     );
     event PositionDeleted(uint256 indexed tokenId);
+    // D21+D23 — ephemeral NFTs: relock / redelegate burn the old tokenId and
+    // mint a fresh one. `createNewPositionFromExisting` emits this event to
+    // expose the continuity link (stats `cumulativeRewardsClaimed`,
+    // `lastClaimedEpoch`, `migrationEpoch` carry over) that off-chain indexers
+    // need to trace a position's history across NFT burns.
+    event PositionReplaced(
+        uint256 indexed oldTokenId,
+        uint256 indexed newTokenId,
+        uint72 indexed newIdentityId,
+        uint96 raw,
+        uint40 newLockEpochs,
+        uint40 newExpiryEpoch,
+        uint64 newMultiplier18
+    );
     event LastClaimedEpochUpdated(uint256 indexed tokenId, uint32 epoch);
     event MigrationEpochSet(uint256 indexed tokenId, uint32 epoch);
     // D19 — compound-into-raw model. `increaseRaw` bumps principal
@@ -477,6 +491,172 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         }
 
         emit PositionRedelegated(tokenId, oldIdentityId, newIdentityId);
+    }
+
+    /**
+     * @notice D23 primitive — atomically replace a live position at
+     *         `oldTokenId` with a fresh one at `newTokenId`, preserving
+     *         `cumulativeRewardsClaimed`, `lastClaimedEpoch`, and
+     *         `migrationEpoch` while applying caller-supplied new
+     *         `identityId`, lock tier, and multiplier.
+     *
+     * @dev D21 ephemeral-NFT enabler. `StakingV10.relock` /
+     *      `StakingV10.redelegate` call this with a fresh `newTokenId`
+     *      minted by `DKGStakingConvictionNFT`; the wrapper then burns
+     *      `oldTokenId`. All continuity a delegator cares about (lifetime
+     *      reward stats, reward cursor, migration marker) rides the
+     *      preserved fields so the burn-and-mint is invisible at the
+     *      economic layer.
+     *
+     *      Invariants / requires:
+     *        - `oldTokenId` references a live position (`identityId != 0`, `raw > 0`).
+     *        - `newTokenId` is unused (`positions[newTokenId].identityId == 0`).
+     *        - No pending withdrawal on `oldTokenId` — the withdrawal is keyed
+     *          by tokenId and the new tokenId must start clean; callers must
+     *          cancel first.
+     *        - `newIdentityId != 0`, `newMultiplier18 == _tierMultiplier(newLockEpochs)`.
+     *
+     *      Side effects (all atomic):
+     *        1. Unwind old-identity effective-stake contribution at
+     *           `currentEpoch` (and cancel the old expiry drop if still
+     *           boosted).
+     *        2. Install new-identity effective-stake contribution at
+     *           `currentEpoch` and schedule the new expiry drop.
+     *        3. Write `positions[newTokenId]` with preserved stats and
+     *           caller-supplied identity/tier.
+     *        4. Delete `positions[oldTokenId]`.
+     *        5. `_popNodeToken(oldIdentityId, oldTokenId)` +
+     *           `_pushNodeToken(newIdentityId, newTokenId)`.
+     *        6. If identity changes, move `raw` between per-node aggregates;
+     *           `totalStakeV10` invariant (raw stays in system).
+     *        7. Finalize dirty epochs up to `currentEpoch - 1`.
+     *        8. Emit `PositionReplaced`.
+     *
+     *      Caller obligations (in `StakingV10`):
+     *        - Settle per-node score-per-stake indices via
+     *          `_prepareForStakeChangeV10` on BOTH old and new identities at
+     *          `currentEpoch` BEFORE calling this primitive. The primitive
+     *          only touches CSS internal diff tables; it does not talk to
+     *          `RandomSamplingStorage`.
+     *        - Sharding-table maintenance + Ask recalculation after this
+     *          call based on the resulting per-node `nodeStakeV10`.
+     */
+    function createNewPositionFromExisting(
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        uint72 newIdentityId,
+        uint40 newLockEpochs,
+        uint64 newMultiplier18
+    ) external onlyContracts {
+        require(newIdentityId != 0, "Zero node");
+        require(newMultiplier18 == _tierMultiplier(newLockEpochs), "Tier mismatch");
+        require(positions[newTokenId].identityId == 0, "New token used");
+        require(oldTokenId != newTokenId, "Same tokenId");
+        require(pendingWithdrawals[oldTokenId].amount == 0, "Has pending");
+
+        Position memory old = positions[oldTokenId];
+        require(old.identityId != 0, "No position");
+        uint96 raw = old.raw;
+        require(raw > 0, "Zero raw");
+
+        uint72 oldIdentityId = old.identityId;
+        uint40 oldExpiryEpoch = old.expiryEpoch;
+        uint64 oldMultiplier18 = old.multiplier18;
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+
+        // --- 1. Unwind old-identity effective-stake contribution (D19 — no rewards addend). ---
+        bool oldStillBoosted = oldExpiryEpoch != 0 && currentEpoch < oldExpiryEpoch;
+        uint256 effectiveNowOld = oldStillBoosted
+            ? (uint256(raw) * uint256(oldMultiplier18)) / SCALE18
+            : uint256(raw);
+        int256 signedOld = int256(effectiveNowOld);
+        nodeEffectiveStakeDiff[oldIdentityId][currentEpoch] -= signedOld;
+        _markNodeDirty(oldIdentityId, currentEpoch);
+        // Cancel the old pending expiry drop on the old identity (if scheduled).
+        int256 oldExpiryDelta;
+        if (oldStillBoosted && oldMultiplier18 > SCALE18) {
+            oldExpiryDelta =
+                (int256(uint256(raw)) * int256(uint256(oldMultiplier18) - SCALE18)) / int256(SCALE18);
+            nodeEffectiveStakeDiff[oldIdentityId][oldExpiryEpoch] += oldExpiryDelta;
+        }
+
+        // --- 2. Install new-identity effective-stake contribution. ---
+        // New position enters fresh at currentEpoch under the caller-supplied
+        // multiplier. Full `raw * newMultiplier18` — the lock starts now.
+        uint256 effectiveNowNew = (uint256(raw) * uint256(newMultiplier18)) / SCALE18;
+        int256 signedNew = int256(effectiveNowNew);
+        nodeEffectiveStakeDiff[newIdentityId][currentEpoch] += signedNew;
+        _markNodeDirty(newIdentityId, currentEpoch);
+
+        uint40 newExpiryEpoch = _computeExpiryEpoch(newLockEpochs);
+        int256 newExpiryDelta;
+        if (newLockEpochs > 0 && newMultiplier18 > SCALE18) {
+            newExpiryDelta =
+                (int256(uint256(raw)) * int256(uint256(newMultiplier18) - SCALE18)) / int256(SCALE18);
+            nodeEffectiveStakeDiff[newIdentityId][newExpiryEpoch] -= newExpiryDelta;
+        }
+
+        // --- 3. Global effective-stake diff: net delta at currentEpoch + move expiry drops. ---
+        // Global total changes by (new contribution − old contribution) at
+        // currentEpoch. Old/new expiry drops are mirrored into the global
+        // table so `totalEffectiveStakeAtEpoch` stays correct past expiry.
+        effectiveStakeDiff[currentEpoch] += (signedNew - signedOld);
+        _markGlobalDirty(currentEpoch);
+        if (oldExpiryDelta != 0) {
+            effectiveStakeDiff[oldExpiryEpoch] += oldExpiryDelta;
+        }
+        if (newExpiryDelta != 0) {
+            effectiveStakeDiff[newExpiryEpoch] -= newExpiryDelta;
+        }
+
+        // --- 4. Write new position preserving stats; delete old. ---
+        positions[newTokenId] = Position({
+            raw: raw,
+            lockEpochs: newLockEpochs,
+            expiryEpoch: newExpiryEpoch,
+            identityId: newIdentityId,
+            cumulativeRewardsClaimed: old.cumulativeRewardsClaimed,
+            multiplier18: newMultiplier18,
+            lastClaimedEpoch: old.lastClaimedEpoch,
+            migrationEpoch: old.migrationEpoch
+        });
+        delete positions[oldTokenId];
+
+        // --- 5. Per-node enumeration (D5). ---
+        _popNodeToken(oldIdentityId, oldTokenId);
+        _pushNodeToken(newIdentityId, newTokenId);
+
+        // --- 6. Raw aggregates (D15). Totals invariant. ---
+        // Manual move (not _decrease+_increase) to keep totalStakeV10 strictly
+        // invariant without firing spurious "Decreased+Increased" pair events
+        // that imply TRAC moved in/out of the system.
+        if (oldIdentityId != newIdentityId) {
+            uint256 rawU = uint256(raw);
+            nodeStakeV10[oldIdentityId] -= rawU;
+            nodeStakeV10[newIdentityId] += rawU;
+            emit NodeStakeV10Decreased(oldIdentityId, rawU, nodeStakeV10[oldIdentityId], totalStakeV10);
+            emit NodeStakeV10Increased(newIdentityId, rawU, nodeStakeV10[newIdentityId], totalStakeV10);
+        }
+
+        // --- 7. Finalize dirty epochs. ---
+        if (currentEpoch > 1) {
+            _finalizeEffectiveStakeUpTo(currentEpoch - 1);
+            if (oldIdentityId != newIdentityId) {
+                _finalizeNodeEffectiveStakeUpTo(oldIdentityId, currentEpoch - 1);
+            }
+            _finalizeNodeEffectiveStakeUpTo(newIdentityId, currentEpoch - 1);
+        }
+
+        emit PositionReplaced(
+            oldTokenId,
+            newTokenId,
+            newIdentityId,
+            raw,
+            newLockEpochs,
+            newExpiryEpoch,
+            newMultiplier18
+        );
     }
 
     function setLastClaimedEpoch(uint256 tokenId, uint32 epoch) external onlyContracts {

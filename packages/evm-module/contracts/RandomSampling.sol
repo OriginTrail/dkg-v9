@@ -11,12 +11,10 @@ import {ProfileLib} from "./libraries/ProfileLib.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {AskStorage} from "./storage/AskStorage.sol";
-import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
@@ -41,12 +39,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     IdentityStorage public identityStorage;
     RandomSamplingStorage public randomSamplingStorage;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
-    StakingStorage public stakingStorage;
     ProfileStorage public profileStorage;
     EpochStorage public epochStorage;
     Chronos public chronos;
     AskStorage public askStorage;
-    DelegatorsInfo public delegatorsInfo;
     ParametersStorage public parametersStorage;
     ShardingTableStorage public shardingTableStorage;
     ContextGraphStorage public contextGraphStorage;
@@ -118,12 +114,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         askStorage = AskStorage(hub.getContractAddress("AskStorage"));
-        delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
         // Phase 10 — value-weighted challenge generation. ContextGraphStorage is
@@ -270,15 +264,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
             randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-            // Calculate and add to nodeEpochScorePerStake
-            // Phase 11: use effective node stake = V8_raw + V10_effective
-            // = nodeStake + (nodeEffective_V10 - nodeV10BaseStake)
-            uint256 rawNodeStake = uint256(stakingStorage.getNodeStake(identityId));
-            uint256 nodeEffV10 = convictionStakingStorage.getNodeEffectiveStakeAtEpoch(
+            // D4+D15 — post-migration the only source of staked TRAC is the V10
+            // conviction layer: StakingStorage stops being written to by V10
+            // (D15), migration is mandatory (all V8 delegators move to V10
+            // positions), and the `nodeV10BaseStake` subtraction term is
+            // therefore redundant (there's no V8 principal to double-count
+            // against). The denominator is the V10 boosted effective stake.
+            uint256 effectiveNodeStake = convictionStakingStorage.getNodeEffectiveStakeAtEpoch(
                 identityId, epoch
             );
-            uint256 nodeV10Base = convictionStakingStorage.getNodeV10BaseStake(identityId);
-            uint256 effectiveNodeStake = rawNodeStake + nodeEffV10 - nodeV10Base;
             if (effectiveNodeStake > 0) {
                 uint256 nodeScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
                 randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
@@ -571,8 +565,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
         // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
+        //
+        // D15 — post-migration the node's canonical raw TRAC stake is
+        // `ConvictionStakingStorage.nodeStakeV10`. StakingStorage.nodes[id].stake
+        // is V8 legacy and not maintained after V10 cutover; reading it here
+        // would zero-out the stake factor for any V10 node and lock it out
+        // of scoring. Migration is mandatory (user directive) — there are
+        // no V8-only nodes — so the V10 aggregate IS the node stake.
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = uint256(stakingStorage.getNodeStake(identityId));
+        uint256 nodeStake = convictionStakingStorage.getNodeStakeV10(identityId);
         nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
         // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
         uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;

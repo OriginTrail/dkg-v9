@@ -136,6 +136,11 @@
   },
   {
     "inputs": [],
+    "name": "EmptyBatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidLockEpochs",
     "type": "error"
   },
@@ -241,9 +246,28 @@
         "internalType": "uint8",
         "name": "lockEpochs",
         "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isAdmin",
+        "type": "bool"
       }
     ],
     "name": "ConvertedFromV8",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "v10LaunchEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "MigrationBatchFinalized",
     "type": "event"
   },
   {
@@ -289,19 +313,25 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newTokenId",
         "type": "uint256"
       },
       {
         "indexed": true,
         "internalType": "uint72",
-        "name": "oldIdentityId",
+        "name": "newIdentityId",
         "type": "uint72"
       },
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "uint72",
-        "name": "newIdentityId",
+        "name": "oldIdentityId",
         "type": "uint72"
       }
     ],
@@ -314,7 +344,13 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newTokenId",
         "type": "uint256"
       },
       {
@@ -427,6 +463,64 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "delegator",
+        "type": "address"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint8",
+        "name": "lockEpochs",
+        "type": "uint8"
+      }
+    ],
+    "name": "adminMigrateV8",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "delegators",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint8",
+        "name": "lockEpochs",
+        "type": "uint8"
+      }
+    ],
+    "name": "adminMigrateV8Batch",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "tokenIds",
+        "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "to",
         "type": "address"
       },
@@ -513,30 +607,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
-      }
-    ],
-    "name": "convertToNFT",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "convictionStakingStorage",
     "outputs": [
@@ -597,16 +667,16 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
+    "inputs": [
       {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "v10LaunchEpoch",
+        "type": "uint256"
       }
     ],
-    "stateMutability": "view",
+    "name": "finalizeMigrationBatch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -773,7 +843,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
         "type": "uint256"
       },
       {
@@ -783,7 +853,13 @@
       }
     ],
     "name": "redelegate",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -791,7 +867,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
         "type": "uint256"
       },
       {
@@ -801,7 +877,13 @@
       }
     ],
     "name": "relock",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -853,6 +935,30 @@
     ],
     "name": "safeTransferFrom",
     "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint8",
+        "name": "lockEpochs",
+        "type": "uint8"
+      }
+    ],
+    "name": "selfMigrateV8",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },

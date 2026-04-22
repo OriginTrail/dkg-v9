@@ -225,19 +225,6 @@
   },
   {
     "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
-      {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "epochStorage",
     "outputs": [
       {
@@ -488,19 +475,6 @@
     "outputs": [
       {
         "internalType": "contract ShardingTableStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
         "name": "",
         "type": "address"
       }

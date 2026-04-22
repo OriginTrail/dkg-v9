@@ -22,11 +22,6 @@
   },
   {
     "inputs": [],
-    "name": "LockNotExpired",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "LockStillActive",
     "type": "error"
   },
@@ -88,11 +83,6 @@
   },
   {
     "inputs": [],
-    "name": "V8StakeNotFullyClaimed",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "WithdrawalAlreadyRequested",
     "type": "error"
   },
@@ -122,7 +112,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "staker",
+        "name": "delegator",
         "type": "address"
       },
       {
@@ -140,7 +130,13 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "amount",
+        "name": "stakeBaseAbsorbed",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "pendingAbsorbed",
         "type": "uint96"
       },
       {
@@ -148,6 +144,12 @@
         "internalType": "uint8",
         "name": "lockEpochs",
         "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isAdmin",
+        "type": "bool"
       }
     ],
     "name": "ConvertedFromV8",
@@ -343,6 +345,34 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "delegator",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint8",
+        "name": "lockEpochs",
+        "type": "uint8"
+      }
+    ],
+    "name": "adminConvertToNFT",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "ask",
     "outputs": [
@@ -405,34 +435,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
-      }
-    ],
-    "name": "convertToNFT",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "convictionStorage",
     "outputs": [
@@ -466,19 +468,6 @@
     "name": "createWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
-      {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -593,7 +582,12 @@
       },
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
         "type": "uint256"
       },
       {
@@ -616,7 +610,12 @@
       },
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
         "type": "uint256"
       },
       {
@@ -633,12 +632,53 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "staker",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint8",
+        "name": "lockEpochs",
+        "type": "uint8"
+      }
+    ],
+    "name": "selfConvertToNFT",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "_status",
         "type": "bool"
       }
     ],
     "name": "setStatus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "setV10LaunchEpoch",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -700,19 +740,6 @@
     "name": "stake",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "staking",
-    "outputs": [
-      {
-        "internalType": "contract Staking",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

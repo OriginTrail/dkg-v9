@@ -574,13 +574,62 @@ export function httpAuthGuard(
       }
       // Stash the auth context so route handlers can call
       // verifyHttpSignedRequestAfterBody(req, rawBody) after
-      // buffering the body. The actual HMAC check happens there.
+      // buffering the body. The actual HMAC check happens there
+      // (or synchronously below for body-less requests).
       (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth = {
         token: acceptedToken,
         timestamp: tsHeader,
         nonce: nonceHeader,
         signature: sigHeader,
       };
+
+      // Bot review (PR #229 F2 second follow-up): protected GET / HEAD
+      // routes never call readBody*(), so the post-body enforcement in
+      // the daemon's body-reading helpers never runs for them. Without
+      // this block, a signed request with arbitrary x-dkg-signature
+      // would reach the handler as long as the bearer token is valid
+      // and the nonce is fresh — which defeats the whole binding
+      // contract. For any request that the daemon's body-reading code
+      // path is NOT guaranteed to exercise (GET / HEAD / zero
+      // content-length with no chunked transfer), we verify the HMAC
+      // right here, bound to an empty body, and either fail closed
+      // with 401 or mark the request `verified` so a subsequent
+      // readBody (the request *might* still carry a body on unusual
+      // methods) is a no-op.
+      const clRaw = req.headers['content-length'];
+      const clNum = typeof clRaw === 'string' ? Number(clRaw) : NaN;
+      const isChunked = req.headers['transfer-encoding'] === 'chunked';
+      const method = req.method ?? 'GET';
+      const isZeroBody =
+        method === 'GET' ||
+        method === 'HEAD' ||
+        method === 'OPTIONS' ||
+        method === 'DELETE' ||
+        (!isChunked && Number.isFinite(clNum) && clNum <= 0);
+      if (isZeroBody) {
+        const pending = (req as unknown as {
+          __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
+        }).__dkgSignedAuth!;
+        const outcome = verifyHttpSignedRequestAfterBody(req, '');
+        if (!outcome.ok) {
+          const status = outcome.reason === 'missing-fields' ? 400 : 401;
+          const extraHeaders: Record<string, string> =
+            status === 401 ? { 'WWW-Authenticate': 'Bearer realm="dkg-node"' } : {};
+          res.writeHead(status, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': corsOrigin ?? '*',
+            ...extraHeaders,
+          });
+          res.end(
+            JSON.stringify({
+              error: `Signed request rejected: ${outcome.reason}`,
+            }),
+          );
+          return false;
+        }
+        pending.verified = true;
+      }
+
       return true;
     }
 

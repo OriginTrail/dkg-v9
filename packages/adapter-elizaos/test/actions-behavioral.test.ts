@@ -227,6 +227,66 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(quads.some((q) => q.subject === turnUri && q.predicate === `${DKG_ONT}turnId`)).toBe(false);
   });
 
+  // ---------------------------------------------------------------------
+  // Bot review (PR #229 follow-up, actions.ts:517): the headless-assistant
+  // path (mode=assistant-reply with NO userMessageId) used to emit only
+  // the assistant message + hasAssistantMessage link, leaving the turnUri
+  // without a `rdf:type dkg:ChatTurn` or `dkg:hasUserMessage` edge —
+  // ChatMemoryManager queries filtered on `?turn a dkg:ChatTurn` then
+  // dropped the reply entirely. The fix emits the full turn envelope
+  // (minus hasUserMessage, because there is no user message) so readers
+  // find the reply. Pin both the presence of the ChatTurn envelope and
+  // the deliberate absence of a spurious hasUserMessage edge.
+  // ---------------------------------------------------------------------
+  it('HEADLESS assistant-reply (no userMessageId) emits the full dkg:ChatTurn envelope', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('unsolicited reply', { id: 'asst-only-mem', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply' }, // deliberately omit userMessageId
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:asst-only-mem';
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:asst-only-mem';
+
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}turnId`,
+    }));
+    // Critically: NO hasUserMessage edge (there is no user message).
+    expect(quads.some((q) => q.subject === turnUri && q.predicate === `${DKG_ONT}hasUserMessage`)).toBe(false);
+    // Assistant text is still emitted.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: '"unsolicited reply"',
+    }));
+  });
+
+  it('HEADLESS assistant-reply writes the same bytes on re-fire (idempotent: stable timestamp)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('same reply', { id: 'stable-id', roomId: 'r' } as any);
+    await persistChatTurnImpl(
+      agent, makeRuntime(), msg, {} as State,
+      { mode: 'assistant-reply' },
+    );
+    await persistChatTurnImpl(
+      agent, makeRuntime(), msg, {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const tsQuad = (i: number) => publishes[i].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    // Bot review (PR #229 follow-up, actions.ts:539): re-firing the same
+    // hook must not mint a fresh `schema:dateCreated`, otherwise downstream
+    // readers see conflicting timestamps for the "same" turn.
+    expect(tsQuad(0).object).toBe(tsQuad(1).object);
+  });
+
   it('targets the SAME turnUri as the matching user-turn call when userMessageId is supplied', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const userOut = await persistChatTurnImpl(
@@ -242,6 +302,51 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     );
     const linkQuad = publishes[1].quads.find((q) => q.predicate === `${DKG_ONT}hasAssistantMessage`)!;
     expect(linkQuad.subject).toBe(userOut.turnUri);
+  });
+
+  // ---------------------------------------------------------------------
+  // Bot review (PR #229 follow-up, actions.ts:539): stable timestamp on
+  // retries for user-turn mode as well. Readers that dedupe by
+  // schema:dateCreated must see byte-identical values across re-fires.
+  // ---------------------------------------------------------------------
+  it('user-turn mode uses a STABLE timestamp so two calls with the same message produce identical dateCreated quads', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('hello', { id: 'stable-u', roomId: 'r' } as any);
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    // Wait long enough that `new Date().toISOString()` would differ if we
+    // regressed — 5ms is enough for millisecond-resolution diffs.
+    await new Promise((r) => setTimeout(r, 5));
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    const turnTs = (i: number) => publishes[i].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    expect(turnTs(0).object).toBe(turnTs(1).object);
+  });
+
+  it('user-turn mode honors an explicit `ts` override when supplied (payload-provided stable timestamp)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const fixed = '2026-01-02T03:04:05.678Z';
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hello', { id: 'ts-override', roomId: 'r' } as any),
+      {} as State,
+      { ts: fixed },
+    );
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    expect(turnTs.object).toBe(`"${fixed}"^^<${XSD_DATETIME}>`);
+  });
+
+  it('prefers message.createdAt (numeric ms) over the deterministic fallback', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('hello', { id: 'with-createdAt', roomId: 'r' } as any);
+    (msg as any).createdAt = Date.UTC(2026, 5, 10, 12, 0, 0);
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    expect(turnTs.object).toBe(`"2026-06-10T12:00:00.000Z"^^<${XSD_DATETIME}>`);
   });
 });
 

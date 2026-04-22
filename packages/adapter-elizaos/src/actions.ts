@@ -412,6 +412,95 @@ function buildAssistantMessageQuads(
   ];
 }
 
+/**
+ * Variant of `buildTurnEnvelopeQuads` for the "headless assistant
+ * reply" case (no user message, no user-turn hook). Emits the full
+ * `dkg:ChatTurn` envelope (type, session link, turnId, timestamp,
+ * hasAssistantMessage, eliza provenance) WITHOUT a `dkg:hasUserMessage`
+ * edge — so readers filtering on `?turn a dkg:ChatTurn` find the reply
+ * instead of silently dropping it. See bot review PR #229, actions.ts:517.
+ */
+function buildHeadlessAssistantTurnEnvelopeQuads(
+  turnUri: string,
+  sessionUri: string,
+  turnKey: string,
+  ts: string,
+  assistantMsgUri: string,
+  characterName: string,
+  userId: string,
+  roomId: string,
+): ChatQuad[] {
+  return [
+    { subject: turnUri, predicate: RDF_TYPE_IRI, object: `${DKG_ONT_NS}ChatTurn`, graph: '' },
+    { subject: turnUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
+    { subject: turnUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}elizaUserId`, object: rdfString(userId), graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}elizaRoomId`, object: rdfString(roomId), graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}agentName`, object: rdfString(characterName), graph: '' },
+  ];
+}
+
+/**
+ * Resolve a STABLE timestamp for the turn / message quads so a hook
+ * that re-fires for the same message produces byte-identical quads
+ * (same `schema:dateCreated` value), preserving the idempotence the
+ * surrounding code relies on. Preference order:
+ *   1. explicit override via `options.ts` (if supplied by the caller),
+ *   2. the ElizaOS memory's own `createdAt` (ms since epoch) or
+ *      a string `date`/`timestamp`/`ts` field if present,
+ *   3. a deterministic timestamp derived from the turnSourceId — the
+ *      exact same source id will always map to the exact same
+ *      ISO-8601 value across process restarts.
+ *
+ * The third case is a degraded fallback for test doubles / synthetic
+ * callers that don't carry a clock. It is NOT a real wall-clock — it
+ * is a stable *identifier* formatted as an ISO-8601 string so the
+ * downstream `xsd:dateTime` literal is well-formed.
+ *
+ * See bot review PR #229, actions.ts:539.
+ */
+function resolveStableTurnTimestamp(
+  message: unknown,
+  optsAny: { ts?: string; timestamp?: string },
+  turnSourceId: string,
+): string {
+  if (typeof optsAny.ts === 'string' && optsAny.ts.length > 0) return optsAny.ts;
+  if (typeof optsAny.timestamp === 'string' && optsAny.timestamp.length > 0) return optsAny.timestamp;
+  const m = message as {
+    createdAt?: number | string;
+    timestamp?: number | string;
+    date?: string;
+    ts?: string;
+  } | null | undefined;
+  if (m) {
+    if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)) {
+      return new Date(m.createdAt).toISOString();
+    }
+    if (typeof m.createdAt === 'string' && m.createdAt.length > 0) return m.createdAt;
+    if (typeof m.timestamp === 'number' && Number.isFinite(m.timestamp)) {
+      return new Date(m.timestamp).toISOString();
+    }
+    if (typeof m.timestamp === 'string' && m.timestamp.length > 0) return m.timestamp;
+    if (typeof m.date === 'string' && m.date.length > 0) return m.date;
+    if (typeof m.ts === 'string' && m.ts.length > 0) return m.ts;
+  }
+  // Deterministic fallback: hash the turn source id → bounded integer
+  // → ISO-8601 string. This is NOT meaningful as a wall-clock; it is a
+  // stable *synthetic* value so a retry collides byte-for-byte with
+  // the original write.
+  const seed = String(turnSourceId);
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 16777619) >>> 0;
+  }
+  // Map into a safe 32-bit-epoch range centred on 2020-01-01 so the
+  // resulting Date is valid and stable.
+  const base = Date.UTC(2020, 0, 1);
+  return new Date(base + (h % 63113904000)).toISOString();
+}
+
 function buildTurnEnvelopeQuads(
   turnUri: string,
   sessionUri: string,
@@ -507,6 +596,18 @@ export async function persistChatTurnImpl(
      * user-turn hook. Lets onAssistantReply target the same `turnUri`.
      */
     userMessageId?: string;
+    /**
+     * Optional stable timestamp override — bot review PR #229 follow-up
+     * on actions.ts:539. When the hook is re-fired for the same memory
+     * (network retry, ElizaOS re-emitting an event on reconnect, test
+     * harness repeating a call) callers can pin the timestamp so the
+     * rewritten quads are byte-identical with the originals. Accepts
+     * either `ts` or `timestamp` (alias) for DX parity with the hook
+     * payload types. If neither is supplied we derive a stable value
+     * from the underlying message; see `resolveStableTurnTimestamp`.
+     */
+    ts?: string;
+    timestamp?: string;
   };
 
   const mode = optsAny.mode ?? 'user-turn';
@@ -514,8 +615,21 @@ export async function persistChatTurnImpl(
   const roomId = (message as any).roomId ?? 'default';
   // For assistant-reply mode, prefer the user message id if the caller
   // passed it explicitly so we hit the same turnUri. Otherwise fall back
-  // to the assistant memory's own id (and the turn will be a "headless"
-  // assistant turn — still readable, just missing the matching user msg).
+  // to the assistant memory's own id — in which case the 'assistant-
+  // reply' code path below emits the FULL ChatTurn envelope (not just
+  // the hasAssistantMessage link) so the reply is discoverable by
+  // readers that filter on `?turn a dkg:ChatTurn` even without a
+  // matching user-turn hook.
+  //
+  // Bot review (PR #229 follow-up, actions.ts:517): the previous revision
+  // fell through to the append-only path on this fallback, which wrote
+  // ONLY the assistant message + `dkg:hasAssistantMessage` link onto a
+  // turnUri that had no ChatTurn / dkg:hasUserMessage quads — the
+  // ChatMemoryManager queries that filter `?turn a dkg:ChatTurn` then
+  // dropped the reply entirely. We now track whether we're on that
+  // fallback so the write path below can emit the turn envelope.
+  const headlessAssistantReply =
+    mode === 'assistant-reply' && !optsAny.userMessageId;
   const turnSourceId = mode === 'assistant-reply' && optsAny.userMessageId
     ? optsAny.userMessageId
     : ((message as any).id ?? `mem-${Date.now()}`);
@@ -536,24 +650,61 @@ export async function persistChatTurnImpl(
   const userMsgUri = `${CHAT_NS}msg:user:${turnKey}`;
   const assistantMsgUri = `${CHAT_NS}msg:agent:${turnKey}`;
   const turnUri = `${CHAT_NS}turn:${turnKey}`;
-  const ts = new Date().toISOString();
+  // Bot review (PR #229 follow-up, actions.ts:539): `new Date().toISOString()`
+  // broke idempotence. Re-firing onChatTurn / onAssistantReply for the
+  // same message reuses the same {turnUri, userMsgUri, assistantMsgUri}
+  // but would stamp a FRESH schema:dateCreated every time, so readers
+  // that sort / dedupe by the timestamp saw duplicate/conflicting
+  // entries for the same turn. Prefer a stable timestamp from the
+  // hook/message payload; as a last resort derive one deterministically
+  // from the turnSourceId so a retry is byte-identical with the
+  // original write.
+  const ts = resolveStableTurnTimestamp(message, optsAny, turnSourceId);
 
   let quads: ChatQuad[];
 
   if (mode === 'assistant-reply') {
-    // 2nd-pass A6: append-only assistant-reply path. We do NOT touch the
-    // user-message or turn-metadata quads — those were emitted by the
-    // user-turn hook. We only add the assistant Message subject and the
-    // single dkg:hasAssistantMessage link onto the existing turn.
+    // 2nd-pass A6: append-only assistant-reply path. When the caller
+    // supplied `userMessageId` (the common case — onAssistantReply
+    // fires after onChatTurn), we do NOT touch the user-message or
+    // turn-metadata quads; those were emitted by the user-turn hook.
+    // We only add the assistant Message subject and the single
+    // dkg:hasAssistantMessage link onto the existing turn.
+    //
+    // When `userMessageId` is absent (bot review actions.ts:517: a
+    // reply without a matching user turn — e.g. proactive agent
+    // message, or the user-turn hook was skipped), the turn envelope
+    // does NOT exist yet, so we emit the full session + turn envelope
+    // ourselves. We skip the user-message quads because there is no
+    // user message, but we still produce a `dkg:ChatTurn` subject so
+    // ChatMemoryManager queries filtered on `?turn a dkg:ChatTurn`
+    // can find this reply.
     const assistantText = (message as any)?.content?.text
       ?? optsAny.assistantText
       ?? optsAny.assistantReply?.text
       ?? (state as any)?.lastAssistantReply
       ?? '';
-    quads = [
-      ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
-      { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
-    ];
+    if (headlessAssistantReply) {
+      quads = [
+        ...buildSessionEntityQuads(sessionUri, sessionId),
+        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
+        ...buildHeadlessAssistantTurnEnvelopeQuads(
+          turnUri,
+          sessionUri,
+          turnKey,
+          ts,
+          assistantMsgUri,
+          characterName,
+          userId,
+          roomId,
+        ),
+      ];
+    } else {
+      quads = [
+        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
+        { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
+      ];
+    }
   } else {
     // user-turn path: emit (idempotently) the session entity, the user
     // message, the turn envelope, and (if the same call has captured an

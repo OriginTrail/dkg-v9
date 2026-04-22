@@ -525,3 +525,161 @@ describe('enforceSignedRequestPostBody — centralised body-binding enforcement'
     expect(out).toEqual({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR #229 F2 second follow-up: httpAuthGuard must fail closed on signed
+// GET / HEAD / zero-body requests that never reach readBody*(), so the
+// daemon can't accept a forged x-dkg-signature just because the token is
+// valid and the timestamp is fresh. Previously httpAuthGuard stashed
+// __dkgSignedAuth and returned true for these routes, and nothing ever
+// verified the signature.
+// ---------------------------------------------------------------------------
+
+describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously', () => {
+  const VALID = 'get-head-tok';
+  let validTokens: Set<string>;
+  let server: Server;
+  let baseUrl: string;
+  let handlerCallCount: number;
+
+  beforeEach(async () => {
+    _clearReplayCacheForTesting();
+    validTokens = new Set([VALID]);
+    handlerCallCount = 0;
+    server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      // Only count handler invocations that survive the guard — an
+      // unverified signed request must NEVER get here.
+      handlerCallCount++;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, url: req.url }));
+    });
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(r => server.close(() => r()));
+  });
+
+  function signedHeaders(
+    method: string,
+    pathName: string,
+    body: string = '',
+    overrides: Partial<{ ts: string; nonce: string; sig: string }> = {},
+  ): Record<string, string> {
+    const ts = overrides.ts ?? String(Date.now());
+    const nonce = overrides.nonce ?? `n-${randomBytes(8).toString('hex')}`;
+    const sig = overrides.sig ?? sigFor(VALID, method, pathName, ts, nonce, body);
+    return {
+      Authorization: `Bearer ${VALID}`,
+      'x-dkg-timestamp': ts,
+      'x-dkg-nonce': nonce,
+      'x-dkg-signature': sig,
+    };
+  }
+
+  it('accepts a correctly-signed GET (bound to empty body) — 200', async () => {
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: signedHeaders('GET', '/api/agents', ''),
+    });
+    expect(res.status).toBe(200);
+    expect(handlerCallCount).toBe(1);
+  });
+
+  it('rejects a signed GET with a tampered signature — 401 and the handler never runs', async () => {
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // Sign something else entirely (wrong path), then send to /api/agents.
+    const forgedSig = sigFor(VALID, 'GET', '/api/something-else', ts, nonce, '');
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: signedHeaders('GET', '/api/agents', '', { ts, nonce, sig: forgedSig }),
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toMatch(/Signed request rejected: bad-signature/);
+    expect(handlerCallCount).toBe(0);
+  });
+
+  it('rejects a signed HEAD with a tampered signature — 401', async () => {
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      method: 'HEAD',
+      headers: signedHeaders('HEAD', '/api/agents', '', {
+        ts,
+        nonce,
+        sig: 'deadbeef'.repeat(8),
+      }),
+    });
+    expect(res.status).toBe(401);
+    expect(handlerCallCount).toBe(0);
+  });
+
+  it('rejects a signed body-less POST with a tampered signature — 401 (handler never runs)', async () => {
+    // POST with content-length: 0 must be treated as zero-body and
+    // verified synchronously, not waved through because no readBody*()
+    // runs for this handler.
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      method: 'POST',
+      headers: {
+        ...signedHeaders('POST', '/api/agents', '', {
+          ts,
+          nonce,
+          sig: 'aa'.repeat(32),
+        }),
+        'Content-Length': '0',
+      },
+    });
+    expect(res.status).toBe(401);
+    expect(handlerCallCount).toBe(0);
+  });
+
+  it('rejects a signed GET with a forged body binding (signed for non-empty body, request has none)', async () => {
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // Attacker signs using a pretend body they hope the server won't check.
+    const bodyHashed = 'secret-payload';
+    const forgedSig = sigFor(VALID, 'GET', '/api/agents', ts, nonce, bodyHashed);
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: signedHeaders('GET', '/api/agents', '', { ts, nonce, sig: forgedSig }),
+    });
+    expect(res.status).toBe(401);
+    expect(handlerCallCount).toBe(0);
+  });
+
+  it('handles a signed GET marks request.__dkgSignedAuth.verified so later readBody is a no-op', async () => {
+    // White-box test: spin up an in-process server that reaches into
+    // the request object and pins that __dkgSignedAuth.verified === true
+    // after the guard passes for a signed GET.
+    const recorded: Array<{ verified?: boolean }> = [];
+    const handler = (req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, new Set([VALID]), null)) return;
+      const pending = (req as unknown as {
+        __dkgSignedAuth?: { verified?: boolean };
+      }).__dkgSignedAuth;
+      recorded.push({ verified: pending?.verified });
+      res.writeHead(200);
+      res.end();
+    };
+    const s2 = createServer(handler);
+    await new Promise<void>(r => s2.listen(0, '127.0.0.1', r));
+    const port = (s2.address() as { port: number }).port;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/agents`, {
+        method: 'GET',
+        headers: signedHeaders('GET', '/api/agents', ''),
+      });
+      expect(res.status).toBe(200);
+      expect(recorded[0]?.verified).toBe(true);
+    } finally {
+      await new Promise<void>(r => s2.close(() => r()));
+    }
+  });
+});

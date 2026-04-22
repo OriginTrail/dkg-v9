@@ -110,26 +110,48 @@ export class BlazegraphStore implements TripleStore {
         removed++;
       }
     }
-    const def = await this.query(defaultQ);
-    if (def.type === 'bindings') {
-      for (const row of def.bindings) {
+    // Bot review (PR #229 follow-up, blazegraph.ts:131): the previous
+    // revision skipped the default-graph DELETE for any (s,p,o) that
+    // matched a named-graph row earlier in this call. In Blazegraph's
+    // quads mode the unquoted `{ ${triple} }` pattern returns rows
+    // from every graph (default + named), so the suppression avoided
+    // double-counting the same quad — but it ALSO silently dropped a
+    // real default-graph row when the same (s,p,o) happened to exist
+    // in a named graph as well. `deleteByPattern()` is supposed to
+    // remove every match across the store, so we re-query the default-
+    // dataset view AFTER the named deletes. At that point the only
+    // remaining bindings for this pattern are default-graph rows
+    // (named-graph instances are gone). We delete each one with
+    // `DELETE DATA { triple }` (which in Blazegraph targets the
+    // default graph only) and de-dupe via `seen` so an engine that
+    // still echoes the pattern multiple times doesn't inflate the
+    // count.
+    const defAfter = await this.query(defaultQ);
+    if (defAfter.type === 'bindings') {
+      for (const row of defAfter.bindings) {
         const sx = pattern.subject ?? row['s'];
         const px = pattern.predicate ?? row['p'];
         const ox = pattern.object ?? row['o'];
         if (!sx || !px || !ox) continue;
         const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
-        // De-dup against named-graph hits when Blazegraph reports the
-        // same triple in both views (a quads-mode quirk where a quad
-        // inserted into a named graph also satisfies the default-graph
-        // pattern).
         const dedupKey = `__default__\u0001${sx}\u0001${px}\u0001${ox}`;
         if (seen.has(dedupKey)) continue;
-        // If we already deleted this (s,p,o) from any named graph in
-        // this call, skip the default-graph delete to avoid inflating
-        // the count when the engine reports the same quad twice.
-        const namedHit = [...seen].some((k) => k.endsWith(`\u0001${sx}\u0001${px}\u0001${ox}`));
-        if (namedHit) continue;
         seen.add(dedupKey);
+        // ASK before DELETE: guarantees the row we're about to delete
+        // really exists in the default graph (SELECT { triple } alone
+        // is ambiguous in quads mode). If the engine can't represent a
+        // DEFAULT-scoped ASK we fall back to issuing the DELETE
+        // unconditionally — it's a no-op when the triple is absent.
+        let existsInDefault = true;
+        try {
+          const ask = await this.query(
+            `ASK WHERE { ${tripleData} FILTER NOT EXISTS { GRAPH ?__g { ${tripleData} } } }`,
+          );
+          if (ask.type === 'boolean') existsInDefault = ask.value;
+        } catch {
+          // ignore — fall through to the unconditional delete
+        }
+        if (!existsInDefault) continue;
         await this.sparqlUpdate(`DELETE DATA { ${tripleData} }`);
         removed++;
       }

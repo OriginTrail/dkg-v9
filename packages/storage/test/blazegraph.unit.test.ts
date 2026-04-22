@@ -186,6 +186,125 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(removed).toBe(3);
   });
 
+  // Bot review (PR #229 follow-up, blazegraph.ts:131): the previous
+  // revision blanket-skipped the default-graph delete whenever the same
+  // (s,p,o) had any named-graph hit, which silently lost a real
+  // default-graph row when BOTH intentionally existed. The fix runs the
+  // default-dataset SELECT AFTER the named deletes and issues a DELETE
+  // DATA for each remaining row. Pin that a default-graph triple is
+  // deleted even when the same (s,p,o) also exists in a named graph.
+  it('deleteByPattern (no graph) deletes BOTH the named-graph row AND the default-graph row for the same (s,p,o)', async () => {
+    const updates: string[] = [];
+    let selectCall = 0;
+    setFetch(async (_url, init) => {
+      const body = String(init?.body ?? '');
+      if (body.startsWith('update=')) {
+        updates.push(decodeURIComponent(body.slice('update='.length)));
+        return new Response(null, { status: 200 });
+      }
+      if (body.startsWith('query=')) {
+        selectCall++;
+        const decoded = decodeURIComponent(body.slice('query='.length));
+        if (/^SELECT/i.test(decoded.trim()) && /GRAPH \?g/.test(decoded)) {
+          // Named-graph SELECT: return one hit.
+          return new Response(
+            JSON.stringify({
+              head: { vars: ['g'] },
+              results: {
+                bindings: [{ g: { type: 'uri', value: 'http://ex.org/named1' } }],
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (/^SELECT/i.test(decoded.trim())) {
+          // Default-dataset SELECT: report the triple (simulating
+          // Blazegraph quads-mode's default-dataset union view). After
+          // the named delete this row represents a genuine default-
+          // graph instance that MUST be removed.
+          return new Response(
+            JSON.stringify({ head: { vars: [] }, results: { bindings: [{}] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (/^ASK/i.test(decoded.trim())) {
+          // The default-graph existence check: return TRUE so the
+          // default-graph delete proceeds.
+          return new Response(
+            JSON.stringify({ boolean: true }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+      }
+      return new Response(null, { status: 200 });
+    });
+    const s = new BlazegraphStore(baseUrl);
+    const removed = await s.deleteByPattern({
+      subject: 'http://ex.org/s',
+      predicate: 'http://ex.org/p',
+      object: '"o"',
+    });
+    // One delete for the named-graph instance, one for the default-graph
+    // instance = 2 total. Previously the default-graph delete was
+    // suppressed by the `namedHit` gate, returning 1.
+    expect(removed).toBe(2);
+    const namedDelete = updates.find((u) => u.includes('GRAPH <http://ex.org/named1>') && u.includes('DELETE DATA'));
+    const defaultDelete = updates.find((u) => /DELETE DATA\s*\{\s*<http:\/\/ex\.org\/s>/.test(u) && !u.includes('GRAPH'));
+    expect(namedDelete).toBeDefined();
+    expect(defaultDelete).toBeDefined();
+  });
+
+  it('deleteByPattern (no graph) does NOT delete the default-graph row when the ASK probe reports it absent', async () => {
+    const updates: string[] = [];
+    setFetch(async (_url, init) => {
+      const body = String(init?.body ?? '');
+      if (body.startsWith('update=')) {
+        updates.push(decodeURIComponent(body.slice('update='.length)));
+        return new Response(null, { status: 200 });
+      }
+      if (body.startsWith('query=')) {
+        const decoded = decodeURIComponent(body.slice('query='.length));
+        if (/^SELECT/i.test(decoded.trim()) && /GRAPH \?g/.test(decoded)) {
+          return new Response(
+            JSON.stringify({
+              head: { vars: ['g'] },
+              results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (/^SELECT/i.test(decoded.trim())) {
+          // After the named delete, the default-dataset SELECT still
+          // echoes the triple (because the engine re-checked it and the
+          // named row HAS been removed, so the only remaining row would
+          // be the default one — EXCEPT here the ASK below will say
+          // it's not there, simulating "the named row was the only
+          // place it lived").
+          return new Response(
+            JSON.stringify({ head: { vars: [] }, results: { bindings: [{}] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (/^ASK/i.test(decoded.trim())) {
+          return new Response(
+            JSON.stringify({ boolean: false }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+      }
+      return new Response(null, { status: 200 });
+    });
+    const s = new BlazegraphStore(baseUrl);
+    const removed = await s.deleteByPattern({
+      subject: 'http://ex.org/s',
+      predicate: 'http://ex.org/p',
+      object: '"o"',
+    });
+    expect(removed).toBe(1);
+    const defaultDelete = updates.find((u) => /DELETE DATA\s*\{\s*<http:\/\/ex\.org\/s>/.test(u) && !u.includes('GRAPH'));
+    expect(defaultDelete).toBeUndefined();
+  });
+
   it('deleteBySubjectPrefix returns count delta', async () => {
     let call = 0;
     setFetch(async (_url, init) => {

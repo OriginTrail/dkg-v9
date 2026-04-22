@@ -89,11 +89,53 @@ describe('CLI-10 — signed-request auth (spec §18)', () => {
     expect(found).not.toEqual([]); // PROD-BUG: spec §18 verifier missing
   });
 
-  it('rejects a replayed nonce (PROD-BUG: nonce store unimplemented)', async () => {
-    // There is no nonce store to talk to; the Bearer guard accepts every
-    // request whose Authorization header matches, with zero timestamp or
-    // nonce binding. A request replayed 24 hours later (or 24 million times)
-    // is indistinguishable from the original at the transport layer.
+  it('rejects a replayed nonce when the client opts into the signed-request scheme', async () => {
+    // Bot review PR #229 (post-round-5): the previous revision of this
+    // test pinned the coarse `(token, method, path, content-length)`
+    // body-less fingerprint cache — which was itself removed because it
+    // rejected every idempotent body-less retry as a spurious replay.
+    // The authoritative replay defence is now the explicit signed-
+    // request scheme (`x-dkg-timestamp` + `x-dkg-nonce` + `x-dkg-
+    // signature`). This test pins that: replay of an identical signed
+    // envelope MUST be rejected with 401.
+    const token = randomBytes(32).toString('base64url');
+    const validTokens = new Set([token]);
+    const { server, baseUrl } = await startGuardedServer(validTokens);
+    try {
+      const ts = new Date().toISOString();
+      const nonce = randomBytes(12).toString('hex');
+      // Same HMAC shape the production guard expects: signs the full
+      // envelope string (method + path+search + ts + nonce + bodyHash).
+      const path = '/api/query';
+      const bodyHash = createHash('sha256').update('').digest('hex');
+      const material = `POST\n${path}\n${ts}\n${nonce}\n${bodyHash}`;
+      const sig = createHmac('sha256', token).update(material).digest('hex');
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'x-dkg-timestamp': ts,
+        'x-dkg-nonce': nonce,
+        'x-dkg-signature': sig,
+      };
+
+      const first = await fetch(`${baseUrl}${path}`, { method: 'POST', headers });
+      expect(first.status).toBe(200);
+
+      // Replay with identical nonce — rejected.
+      const replay = await fetch(`${baseUrl}${path}`, { method: 'POST', headers });
+      expect(replay.status).toBe(401);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it('body-less Bearer-only retries are NOT rejected as replays (bot review PR #229 regression fix)', async () => {
+    // Companion regression: the removed coarse fingerprint cache used
+    // to 401-reject a second identical body-less POST inside a 60 s
+    // window, even for legitimate idempotent retries (concrete
+    // symptom: `POST /api/local-agent-integrations/:id/refresh`
+    // double-click). Transport-layer dedup that punishes idempotent
+    // retries is worse than no dedup at all; callers that want strict
+    // replay protection MUST opt into the signed-request scheme above.
     const token = randomBytes(32).toString('base64url');
     const validTokens = new Set([token]);
     const { server, baseUrl } = await startGuardedServer(validTokens);
@@ -109,10 +151,7 @@ describe('CLI-10 — signed-request auth (spec §18)', () => {
       });
 
       expect(first.status).toBe(200);
-      // PROD-BUG: spec §18 requires per-request nonce, so `second` should
-      // be 401 / 409 "replay detected". Bearer-only auth can't distinguish.
-      // Left red as evidence — see CLI-10.
-      expect(second.status).toBe(401);
+      expect(second.status).toBe(200);
     } finally {
       await stopServer(server);
     }

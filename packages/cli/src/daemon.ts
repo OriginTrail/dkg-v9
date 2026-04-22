@@ -130,17 +130,46 @@ type MarkItDownTarget = {
 // they don't get re-created on every request.
 
 /**
+ * Marker files/dirs that prove we're running from a dkg-v9 checkout.
+ * Anything on this list must be present at the resolved repo root, and
+ * must NOT exist next to a typical npm-global `node_modules/.bin`
+ * install tree, so we can cheaply tell the two apart.
+ */
+const REPO_ROOT_MARKERS = ['.cursor', 'AGENTS.md', 'packages'] as const;
+
+/**
  * Resolve the dkg-v9 repo root from the daemon's compiled location.
  * The daemon ships at packages/cli/dist/daemon.js, so the repo root
- * is three levels up. For npm-installed builds the resolved path
- * won't contain `.cursor/` or `AGENTS.md`, so the templates assembler
- * will throw a clear error — which is correct behaviour today (the
- * manifest publish flow requires a checkout). When npm distribution
- * lands, this resolver gains a fallback to bundled templates.
+ * is three levels up.
+ *
+ * Bakes a monorepo-checkout assumption into every generated
+ * `.dkg/config.yaml`, hooks file, and `mcp.json` the daemon's
+ * manifest install flow produces — absolute paths like
+ * `<root>/packages/mcp-dkg/src/index.ts` are written verbatim into
+ * the workspace. If that assumption is wrong (npm-global install,
+ * tarball extract, etc.) those paths don't exist and the workspace
+ * wiring is silently dead: the MCP server fails to start and every
+ * subsequent tool call 500s with cryptic "ENOENT … index.ts".
+ *
+ * Rather than ship a dead config, fail fast here with a clear message.
+ * When npm distribution lands we'll switch this to a bundled-assets
+ * resolver, but until then "require a checkout" is the actual
+ * invariant of the manifest publish flow.
  */
 function manifestRepoRoot(): string {
   const daemonDir = dirname(fileURLToPath(import.meta.url));
-  return resolve(daemonDir, '..', '..', '..');
+  const root = resolve(daemonDir, '..', '..', '..');
+  const missing = REPO_ROOT_MARKERS.filter((m) => !existsSync(resolve(root, m)));
+  if (missing.length) {
+    throw new Error(
+      `manifestRepoRoot: daemon appears to be running outside a dkg-v9 checkout ` +
+        `(resolved root ${root} is missing ${missing.join(', ')}). The manifest ` +
+        `install flow bakes absolute monorepo paths into the generated workspace ` +
+        `config, so it is only supported from a checkout today. An npm-global ` +
+        `build must wait for bundled-asset distribution.`,
+    );
+  }
+  return root;
 }
 
 /**
@@ -168,17 +197,40 @@ function manifestNetworkLabel(networkName: string | undefined | null): 'testnet'
  * and always over plain HTTP, so hard-coding both is both safer and
  * more accurate.
  */
+/**
+ * Format a `host:port` pair safely for an `http://` URL, including the
+ * IPv6-literal bracket rules from RFC-3986 §3.2.2 (`[::1]:9201`, not
+ * `::1:9201`). We also downgrade the two "all-interfaces" binds
+ * (`0.0.0.0`, `::`) to the IPv4 loopback literal so a self-call can't
+ * escape the machine when the operator bound the daemon to LAN.
+ *
+ * Returned strings are always parseable as a URL authority component:
+ *   127.0.0.1   → 127.0.0.1:9201
+ *   ::1         → [::1]:9201
+ *   fe80::1     → [fe80::1]:9201
+ *   localhost   → localhost:9201
+ */
+function formatDaemonAuthority(apiHost: string, apiPort: number): string {
+  // Downgrade the "all-interfaces" binds to the IPv4 loopback so the
+  // self-client can't escape the machine even if the operator opened
+  // the daemon to the LAN. Does NOT touch `::1` — that's already
+  // loopback and we emit it verbatim (bracketed).
+  const downgraded = apiHost === '0.0.0.0' || apiHost === '::' ? '127.0.0.1' : apiHost;
+  // Bracket bare IPv6 literals. `:` only appears in IPv6 addresses for
+  // anything we emit (host names and IPv4 literals never contain `:`).
+  const isIpv6Literal = downgraded.includes(':') && !downgraded.startsWith('[');
+  const host = isIpv6Literal ? `[${downgraded}]` : downgraded;
+  return `${host}:${apiPort}`;
+}
+
 function manifestSelfClient(
   apiHost: string,
   apiPort: number,
   requestToken: string | null | undefined,
 ): DkgClient {
-  // Prefer a loopback literal so the call can't escape the machine even
-  // if the operator set `apiHost` to 0.0.0.0 for LAN access.
-  const loopback = apiHost === '0.0.0.0' || apiHost === '::' ? '127.0.0.1' : apiHost;
   return new DkgClient({
     config: {
-      api: `http://${loopback}:${apiPort}`,
+      api: `http://${formatDaemonAuthority(apiHost, apiPort)}`,
       token: requestToken ?? '',
       defaultProject: null,
       agentUri: null,
@@ -280,8 +332,10 @@ function buildManifestInstallContext(
   // would send the local bearer token to whatever origin the attacker
   // chose. Plain HTTP over loopback is what the daemon actually serves
   // by default, so this is also more accurate than trusting proxies.
-  const loopbackHost =
-    daemonApiHost === '0.0.0.0' || daemonApiHost === '::' ? '127.0.0.1' : daemonApiHost;
+  // `formatDaemonAuthority` handles IPv6 bracketing so binds to `::1`
+  // or `fe80::…` produce valid URLs (`http://[::1]:9201`) instead of
+  // the ambiguous `http://::1:9201`.
+  const daemonAuthority = formatDaemonAuthority(daemonApiHost, daemonApiPort);
   const wallet = requestAgentAddress.toLowerCase();
   const agentUri = `urn:dkg:agent:${wallet}`;
   return {
@@ -293,7 +347,7 @@ function buildManifestInstallContext(
       // still substitute sensibly. Everything new uses {{agentNickname}}
       // (free-form) or {{agentUri}} (wallet-based).
       agentSlug: nicknameToSlug(rawNickname),
-      daemonApiUrl: `http://${loopbackHost}:${daemonApiPort}`,
+      daemonApiUrl: `http://${daemonAuthority}`,
       // Absolute default (the daemon's auth.token always lives at
       // <homedir>/.dkg/auth.token unless overridden). Avoids the ~/...
       // expansion-bug class entirely; still overridable by the operator.

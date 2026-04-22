@@ -303,12 +303,23 @@ export class DKGNode {
         // reservation slot before we ask for a new one.
         const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
         await new Promise(r => setTimeout(r, delayMs));
+        let redialed = false;
         try {
           await node.dial(addr);
+          redialed = true;
           console.log(`[${ts()}] Relay watchdog: redialed ${short(relayPidStr)} for fresh reservation`);
         } catch (err: any) {
           console.log(`[${ts()}] Relay watchdog: reservation-redial failed for ${short(relayPidStr)}: ${err.message}`);
         }
+        // Stop after one reservation-recovery attempt per tick. libp2p's
+        // circuit-relay-v2 only holds one reservation at a time by default,
+        // so if this redial restored a reservation, every remaining relay
+        // in `this.relayTargets` would otherwise still see the stale
+        // `!haveAnyReservation` snapshot from line ~251 and tear-down +
+        // redial itself in the same tick, briefly dropping all relay paths
+        // at once. One recovery per tick is enough; the next tick re-reads
+        // multiaddrs and will handle any remaining unhealthy relays.
+        if (redialed) break;
         continue;
       }
 

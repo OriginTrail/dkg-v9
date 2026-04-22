@@ -5,7 +5,7 @@
  * Any interface that needs auth calls `verifyToken(token)` against the loaded set.
  */
 
-import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -277,19 +277,70 @@ export type SignedRequestOutcome =
     };
 
 /**
+ * Canonical string fed into the HMAC for {@link verifySignedRequest}.
+ *
+ * ```
+ * METHOD\n
+ * normalised-path\n
+ * timestamp\n
+ * nonce\n
+ * sha256(body-hex)
+ * ```
+ *
+ * Binds method, path, timestamp, nonce, and a hash of the body — so a
+ * captured signature cannot be replayed:
+ *   - against a different endpoint (path/method bound),
+ *   - with a fresh nonce swapped in (nonce bound),
+ *   - against the same endpoint with a tampered body (body hash bound).
+ *
+ * Callers that still compute HMAC over the legacy `timestamp + body`
+ * payload will fail verification — this is intentional (bot review F3).
+ */
+export function canonicalSignedRequestPayload(
+  method: string,
+  path: string,
+  timestamp: string,
+  nonce: string | undefined,
+  body: Buffer | string,
+): string {
+  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(body ?? '', 'utf-8');
+  const bodyHashHex = createHash('sha256').update(bodyBuf).digest('hex');
+  return [
+    (method ?? '').toUpperCase(),
+    path ?? '',
+    timestamp ?? '',
+    nonce ?? '',
+    bodyHashHex,
+  ].join('\n');
+}
+
+/**
  * Verify a signed request per spec §18.
  *
  * Required headers (mapped into `SignedRequestInput`):
  *   - `x-dkg-timestamp`   ISO-8601 or numeric epoch-ms
- *   - `x-dkg-signature`   hex-encoded HMAC-SHA256(token, ts + body)
- *   - `x-dkg-nonce`       opaque, single-use; rejects replay
+ *   - `x-dkg-signature`   hex-encoded HMAC-SHA256(token,
+ *                         canonicalSignedRequestPayload(method, path, ts,
+ *                         nonce, body))
+ *   - `x-dkg-nonce`       REQUIRED — opaque, single-use; rejects replay.
+ *
+ * The HMAC covers METHOD + PATH + TIMESTAMP + NONCE + SHA256(BODY) so:
+ *   - a captured signature cannot be replayed against another
+ *     endpoint/verb (method + path are bound);
+ *   - swapping the nonce to bypass the replay cache does not yield a
+ *     valid signature (nonce is bound);
+ *   - tampering the body breaks the hash and invalidates the signature.
+ *
+ * Nonce is REQUIRED: a signature without a nonce is rejected as
+ * `missing-fields` (bot review F3). Callers upgrading from the prior
+ * "timestamp + body only" scheme must regenerate signatures.
  *
  * Returns a discriminated result describing why a request was refused —
  * callers can map each `reason` to the appropriate HTTP status (401
  * for everything except `missing-fields`, which is 400).
  */
 export function verifySignedRequest(input: SignedRequestInput): SignedRequestOutcome {
-  if (!input.timestamp || !input.signature || !input.token) {
+  if (!input.timestamp || !input.signature || !input.token || !input.nonce) {
     return { ok: false, reason: 'missing-fields' };
   }
 
@@ -304,20 +355,19 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
     return { ok: false, reason: 'stale-timestamp' };
   }
 
-  if (input.nonce) {
-    pruneNonces(now);
-    if (seenNonces.has(input.nonce)) {
-      return { ok: false, reason: 'replayed-nonce' };
-    }
+  pruneNonces(now);
+  if (seenNonces.has(input.nonce)) {
+    return { ok: false, reason: 'replayed-nonce' };
   }
 
-  const bodyBuf = Buffer.isBuffer(input.body)
-    ? input.body
-    : Buffer.from(input.body ?? '', 'utf-8');
-  const expected = createHmac('sha256', input.token)
-    .update(input.timestamp)
-    .update(bodyBuf)
-    .digest('hex');
+  const payload = canonicalSignedRequestPayload(
+    input.method,
+    input.path,
+    input.timestamp,
+    input.nonce,
+    input.body,
+  );
+  const expected = createHmac('sha256', input.token).update(payload).digest('hex');
   // Constant-time comparison so a partial-match attacker can't
   // distinguish "first byte wrong" from "all bytes wrong" via timing.
   let supplied: Buffer;
@@ -332,9 +382,7 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
     return { ok: false, reason: 'bad-signature' };
   }
 
-  if (input.nonce) {
-    seenNonces.set(input.nonce, now + windowMs);
-  }
+  seenNonces.set(input.nonce, now + windowMs);
   return { ok: true };
 }
 
@@ -477,18 +525,74 @@ export function httpAuthGuard(
       }
     }
 
-    // CLI-10 (BUGS_FOUND.md spec §18 / dup #11): replay dedup for
-    // Bearer-only requests. We can't safely consume the request body
-    // here without breaking downstream handlers, so the dedup is
-    // intentionally restricted to BODY-LESS mutating requests where
-    // there is nothing else to distinguish two consecutive calls.
-    // Requests that DO carry a body are left to the application
-    // layer's idempotency / domain validation (e.g. the duplicate-CG
-    // create handler returns 409 when a body-bearing duplicate
-    // arrives). This keeps the dedup precise — the test's identical
-    // empty-body POST replay is caught (CLI-10), while legitimate
-    // domain-level duplicate-payload behaviour is preserved (CLI-7
-    // dup CG, CLI-16 path-traversal validator).
+    // Bot review F1/F2/F3 (BUGS_FOUND.md spec §18): when the client
+    // actually opted INTO the signed-request scheme (by sending
+    // `x-dkg-signature` and/or `x-dkg-nonce`) we MUST fail closed if
+    // any of the required headers is missing or malformed — otherwise
+    // a forged signature / replayed nonce would silently pass as long
+    // as the bearer token is valid. Full body-binding verification
+    // runs in {@link verifyHttpSignedRequestAfterBody} once route
+    // handlers have buffered the body. Here we pre-validate the
+    // headers that can be checked without the body:
+    //   - x-dkg-timestamp present + fresh (already done above)
+    //   - x-dkg-nonce present + not replayed
+    //   - x-dkg-signature present + well-formed hex
+    // Rejecting a replayed nonce here is safe: verifySignedRequest
+    // below records successful verifications under the same nonce.
+    const sigHeader = req.headers['x-dkg-signature'];
+    const nonceHeader = req.headers['x-dkg-nonce'];
+    const clientDeclaredSigned = (typeof sigHeader === 'string' && sigHeader.length > 0)
+      || (typeof nonceHeader === 'string' && nonceHeader.length > 0);
+    if (clientDeclaredSigned) {
+      if (
+        typeof sigHeader !== 'string' || sigHeader.length === 0 ||
+        typeof nonceHeader !== 'string' || nonceHeader.length === 0 ||
+        typeof tsHeader !== 'string' || tsHeader.length === 0
+      ) {
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="dkg-node"',
+          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+        });
+        res.end(JSON.stringify({
+          error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
+        }));
+        return false;
+      }
+      // Pre-body replay rejection: an attacker swapping in a fresh
+      // nonce still fails the post-body HMAC (nonce is bound), but
+      // catching a replayed nonce here saves the body parse.
+      pruneNonces(now);
+      if (seenNonces.has(nonceHeader)) {
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="dkg-node"',
+          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+        });
+        res.end(JSON.stringify({ error: 'Replayed nonce' }));
+        return false;
+      }
+      // Stash the auth context so route handlers can call
+      // verifyHttpSignedRequestAfterBody(req, rawBody) after
+      // buffering the body. The actual HMAC check happens there.
+      (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth = {
+        token: acceptedToken,
+        timestamp: tsHeader,
+        nonce: nonceHeader,
+        signature: sigHeader,
+      };
+      return true;
+    }
+
+    // Bot review F4: scope the coarse body-less replay cache to callers
+    // that have NOT opted into the signed-request scheme. Clients that
+    // sent x-dkg-nonce already returned above with the proper per-nonce
+    // replay defence; falling through here would double-reject a
+    // legitimate body-less POST that happens to share its 4-tuple with
+    // a previous one. Legacy Bearer-only callers still get the coarse
+    // fingerprint dedup as a best-effort guard (there is nothing else
+    // to distinguish two consecutive identical empty-body POSTs), and
+    // they can always migrate to signed-request mode to unlock retries.
     if (
       req.method &&
       req.method !== 'GET' &&
@@ -536,6 +640,56 @@ export function httpAuthGuard(
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
   return false;
+}
+
+/**
+ * Pending signed-request auth state attached to the request by
+ * {@link httpAuthGuard} when the client opted into the signed-request
+ * scheme. Route handlers MUST finish the check by calling
+ * {@link verifyHttpSignedRequestAfterBody} once they have buffered the
+ * request body.
+ */
+export interface SignedAuthPending {
+  token: string;
+  timestamp: string;
+  nonce: string;
+  signature: string;
+}
+
+/**
+ * Completes signed-request verification started by {@link httpAuthGuard}.
+ *
+ * After a route handler has buffered the request body, it MUST call this
+ * helper to finish the verification that the guard left pending. The
+ * helper reads the stashed auth context from `req.__dkgSignedAuth` and
+ * runs the full {@link verifySignedRequest} check binding method, path,
+ * timestamp, nonce, and body hash.
+ *
+ * Returns `{ ok: true }` if the request does not use signed-request mode
+ * (there is nothing to finish) or if the signature verifies. Otherwise
+ * returns the discriminated outcome describing why the request was
+ * rejected; the caller is expected to translate it into a 401.
+ *
+ * When the verification succeeds the nonce is committed to the seen-nonce
+ * cache, so subsequent replays are rejected even after process restart
+ * (bounded by the freshness window).
+ */
+export function verifyHttpSignedRequestAfterBody(
+  req: IncomingMessage,
+  body: Buffer | string,
+): SignedRequestOutcome {
+  const pending = (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth;
+  if (!pending) return { ok: true };
+  const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
+  return verifySignedRequest({
+    method: req.method ?? 'GET',
+    path: pathname,
+    body,
+    timestamp: pending.timestamp,
+    nonce: pending.nonce,
+    signature: pending.signature,
+    token: pending.token,
+  });
 }
 
 /**

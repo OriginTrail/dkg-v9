@@ -232,11 +232,28 @@ export class DKGQueryEngine implements QueryEngine {
     // When _minTrust is set, rewrite the query so every subject matched
     // by the user's pattern MUST carry an explicit
     // `http://dkg.io/ontology/trustLevel` literal whose integer value is
-    // ≥ minTrust. Subjects without trust metadata are rejected.
+    // ≥ minTrust. Subjects with no trust metadata are rejected.
+    //
+    // Bot review L1: previously, when `injectMinTrustFilter()` could not
+    // safely rewrite the query (e.g. explicit GRAPH, non-BGP first
+    // clause, multi-subject WHERE), we silently ran the ORIGINAL
+    // unfiltered SPARQL. That turned `_minTrust` into a no-op in exactly
+    // the shapes most likely to span sensitive data, and a caller had
+    // no signal that their trust threshold was being ignored. Now the
+    // rewriter MUST succeed or we fail closed — returning an empty
+    // bindings set is the correct behaviour for "no subject meets the
+    // trust threshold" when we cannot prove the threshold was applied.
     let effectiveSparql = sparql;
     if (view === 'verified-memory' && options._minTrust !== undefined) {
       const rewritten = injectMinTrustFilter(sparql, options._minTrust);
-      if (rewritten) effectiveSparql = rewritten;
+      if (!rewritten) {
+        console.warn(
+          `[DKGQueryEngine] _minTrust=${options._minTrust} requested for a query shape ` +
+            `injectMinTrustFilter cannot safely rewrite; returning empty result (fail-closed)`,
+        );
+        return { bindings: [] };
+      }
+      effectiveSparql = rewritten;
     }
 
     if (allGraphs.length === 1) {
@@ -417,16 +434,26 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
 }
 
 /**
- * Rewrites a SPARQL query so every subject variable used in its WHERE
+ * Rewrites a SPARQL query so EVERY subject variable used in its WHERE
  * block also matches `<http://dkg.io/ontology/trustLevel> ?__trustN`
  * with an integer value ≥ `minTrust`. Subjects with no trust metadata
  * are filtered out (the required triple is absent).
  *
- * The rewriter inspects the first statement inside the WHERE block to
- * identify subject variables. Queries that already contain an explicit
- * `GRAPH` pattern or no recognizable BGP subject var return unchanged.
- * Returns `null` when rewriting isn't safe so the caller can fall back
- * to the original (unfiltered) query.
+ * The rewriter scans the WHERE block for top-level triple patterns and
+ * collects every distinct subject variable (bot review L3 — previously
+ * only the first subject var was captured, so multi-subject queries
+ * like `?a <p> ?o . ?b <q> ?r` had `?b` pass through unfiltered).
+ *
+ * Returns `null` when:
+ *   - no `WHERE { ... }` block can be located;
+ *   - braces are unbalanced;
+ *   - the WHERE contains nested structure (`{`, `GRAPH`, `OPTIONAL`,
+ *     `UNION`, `MINUS`, `SERVICE`, subselect) we cannot safely rewrite;
+ *   - the block contains a constant (IRI/literal/blank) subject — we
+ *     cannot attach a filter to a constant, and silently ignoring the
+ *     constant row would leak sub-threshold data (L1 fail-closed);
+ *   - no subject var is found at all.
+ * Callers treat `null` as "refuse to run" (see bot review L1).
  */
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const whereIdx = sparql.search(/WHERE\s*\{/i);
@@ -447,20 +474,66 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
 
   const inner = sparql.slice(braceStart + 1, braceEnd);
 
-  // Find the first subject variable — token right before the first
-  // predicate. Accept `?name` or `$name` styles.
-  const subjMatch = inner.match(/[?$]([A-Za-z_]\w*)\s+[<?$]/);
-  if (!subjMatch) return null;
-  const subjectVar = subjMatch[0].trim().split(/\s+/)[0];
+  // Refuse to rewrite shapes we cannot reason about without a real
+  // SPARQL parser. Any of these tokens means there's a nested scope
+  // whose subjects the flat scan below cannot see.
+  if (/\{|\}/.test(inner)) return null;
+  if (/\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(inner)) {
+    return null;
+  }
 
-  const trustVar = '?__dkgTrust';
-  const extraBgp =
-    `${subjectVar} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
-    `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust}) `;
+  // Strip any trailing comment on the final line so the dot accounting
+  // below doesn't misclassify "# foo ." as a terminating triple.
+  const innerCodeOnly = inner.replace(/#[^\n]*/g, '');
+  const trimmedInner = innerCodeOnly.trim();
+  if (trimmedInner.length === 0) return null;
+
+  // Split on the top-level `.` separator to walk each triple pattern.
+  // Rejoin so the separator is preserved for the emitted query.
+  const statements = trimmedInner.split(/\.(?=\s|$)/).map(s => s.trim()).filter(Boolean);
+
+  const subjectVars = new Set<string>();
+  for (const stmt of statements) {
+    // First non-whitespace token is the subject.
+    const m = stmt.match(/^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?)/);
+    if (!m) return null;
+    const subj = m[1];
+    if (subj.startsWith('?') || subj.startsWith('$')) {
+      subjectVars.add(subj);
+      continue;
+    }
+    // Constant subject — we cannot attach a trustLevel filter to it
+    // without changing semantics, and silently letting it through
+    // would bypass `_minTrust` (bot review L1/L3). Refuse the rewrite.
+    return null;
+  }
+  if (subjectVars.size === 0) return null;
+
+  const extraClauses: string[] = [];
+  let i = 0;
+  for (const subjectVar of subjectVars) {
+    const trustVar = `?__dkgTrust${i++}`;
+    extraClauses.push(
+      `${subjectVar} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
+        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
+    );
+  }
+
+  // Bot review L2: the previous implementation unconditionally inserted
+  // `" . "` between `inner.trim()` and the injected clauses, which
+  // produced `... . . ?s <trustLevel> ...` when the original WHERE
+  // already ended with a dot (the common case) — a SPARQL syntax error
+  // that every rewritten query hit. Here we emit each rewritten triple
+  // with its OWN dot and join them after the original inner block,
+  // always with exactly one separating dot regardless of whether the
+  // caller terminated their final triple pattern.
+  const endsWithDot = /\.\s*$/.test(trimmedInner);
+  const separator = endsWithDot ? ' ' : ' . ';
+  const rewrittenInner = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
 
   const before = sparql.slice(0, braceStart + 1);
   const after = sparql.slice(braceEnd);
-  return `${before} ${inner.trim()} . ${extraBgp} ${after}`;
+  return `${before} ${rewrittenInner} ${after}`;
 }
 
 function mergeSharedMemoryAndDataResults(

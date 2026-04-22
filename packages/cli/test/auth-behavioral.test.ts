@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { randomBytes, createHmac } from 'node:crypto';
 import {
   verifySignedRequest,
+  canonicalSignedRequestPayload,
   rotateToken,
   revokeToken,
   httpAuthGuard,
@@ -30,8 +31,17 @@ import {
   SIGNED_REQUEST_FRESHNESS_WINDOW_MS,
 } from '../src/auth.js';
 
-function hmacHex(token: string, ts: string, body: string): string {
-  return createHmac('sha256', token).update(ts).update(body).digest('hex');
+function sigFor(
+  token: string,
+  method: string,
+  path: string,
+  ts: string,
+  nonce: string,
+  body: string | Buffer,
+): string {
+  return createHmac('sha256', token)
+    .update(canonicalSignedRequestPayload(method, path, ts, nonce, body))
+    .digest('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -42,10 +52,12 @@ describe('verifySignedRequest', () => {
   const TOKEN = 'secret-key';
   const BODY = '{"x":1}';
 
+  const freshNonce = () => `n-${randomBytes(8).toString('hex')}`;
+
   it('returns missing-fields when timestamp is absent', () => {
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: '', signature: 'abc', token: TOKEN,
+      timestamp: '', signature: 'abc', token: TOKEN, nonce: freshNonce(),
     });
     expect(out).toEqual({ ok: false, reason: 'missing-fields' });
   });
@@ -53,7 +65,7 @@ describe('verifySignedRequest', () => {
   it('returns missing-fields when signature is absent', () => {
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: new Date().toISOString(), signature: '', token: TOKEN,
+      timestamp: new Date().toISOString(), signature: '', token: TOKEN, nonce: freshNonce(),
     });
     expect(out).toEqual({ ok: false, reason: 'missing-fields' });
   });
@@ -61,7 +73,16 @@ describe('verifySignedRequest', () => {
   it('returns missing-fields when token is absent', () => {
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: new Date().toISOString(), signature: 'abc', token: '',
+      timestamp: new Date().toISOString(), signature: 'abc', token: '', nonce: freshNonce(),
+    });
+    expect(out).toEqual({ ok: false, reason: 'missing-fields' });
+  });
+
+  it('returns missing-fields when nonce is absent (bot review F3 — nonce is now required)', () => {
+    const ts = new Date().toISOString();
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: sigFor(TOKEN, 'POST', '/x', ts, 'n1', BODY), token: TOKEN,
     });
     expect(out).toEqual({ ok: false, reason: 'missing-fields' });
   });
@@ -69,7 +90,7 @@ describe('verifySignedRequest', () => {
   it('returns stale-timestamp for an unparseable timestamp', () => {
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: 'not-a-date', signature: 'abc', token: TOKEN,
+      timestamp: 'not-a-date', signature: 'abc', token: TOKEN, nonce: freshNonce(),
     });
     expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
   });
@@ -77,9 +98,11 @@ describe('verifySignedRequest', () => {
   it('returns stale-timestamp when outside the freshness window', () => {
     const now = Date.now();
     const oldTs = new Date(now - SIGNED_REQUEST_FRESHNESS_WINDOW_MS - 60_000).toISOString();
+    const nonce = freshNonce();
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: oldTs, signature: hmacHex(TOKEN, oldTs, BODY), token: TOKEN, now,
+      timestamp: oldTs, signature: sigFor(TOKEN, 'POST', '/x', oldTs, nonce, BODY),
+      token: TOKEN, nonce, now,
     });
     expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
   });
@@ -87,19 +110,22 @@ describe('verifySignedRequest', () => {
   it('accepts numeric epoch-ms timestamps', () => {
     const now = Date.now();
     const ts = String(now);
+    const nonce = freshNonce();
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: ts, signature: hmacHex(TOKEN, ts, BODY), token: TOKEN, now,
+      timestamp: ts, signature: sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY),
+      token: TOKEN, nonce, now,
     });
     expect(out).toEqual({ ok: true });
   });
 
   it('returns bad-signature for wrong signature bytes', () => {
     const ts = new Date().toISOString();
-    const wrongSig = createHmac('sha256', 'other-key').update(ts).update(BODY).digest('hex');
+    const nonce = freshNonce();
+    const wrongSig = sigFor('other-key', 'POST', '/x', ts, nonce, BODY);
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: ts, signature: wrongSig, token: TOKEN,
+      timestamp: ts, signature: wrongSig, token: TOKEN, nonce,
     });
     expect(out).toEqual({ ok: false, reason: 'bad-signature' });
   });
@@ -108,15 +134,59 @@ describe('verifySignedRequest', () => {
     const ts = new Date().toISOString();
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: ts, signature: 'aa', token: TOKEN,
+      timestamp: ts, signature: 'aa', token: TOKEN, nonce: freshNonce(),
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns bad-signature when the method is swapped (method is bound into the HMAC)', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY);
+    const out = verifySignedRequest({
+      method: 'DELETE', path: '/x', body: BODY,
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns bad-signature when the path is swapped (path is bound into the HMAC)', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY);
+    const out = verifySignedRequest({
+      method: 'POST', path: '/y', body: BODY,
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns bad-signature when the body is tampered (body hash is bound into the HMAC)', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY);
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: '{"x":2}',
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns bad-signature when the nonce is swapped (nonce is bound into the HMAC)', () => {
+    const ts = new Date().toISOString();
+    const nonce = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY);
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: sig, token: TOKEN, nonce: 'different-nonce',
     });
     expect(out).toEqual({ ok: false, reason: 'bad-signature' });
   });
 
   it('returns replayed-nonce on second use of the same nonce', () => {
     const ts = new Date().toISOString();
-    const sig = hmacHex(TOKEN, ts, BODY);
-    const nonce = `n-${randomBytes(4).toString('hex')}`;
+    const nonce = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY);
     const first = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
       timestamp: ts, signature: sig, token: TOKEN, nonce,
@@ -131,11 +201,12 @@ describe('verifySignedRequest', () => {
 
   it('accepts a Buffer body', () => {
     const ts = new Date().toISOString();
+    const nonce = freshNonce();
     const bodyBuf = Buffer.from(BODY, 'utf-8');
-    const sig = createHmac('sha256', TOKEN).update(ts).update(bodyBuf).digest('hex');
+    const sig = sigFor(TOKEN, 'POST', '/x', ts, nonce, bodyBuf);
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: bodyBuf,
-      timestamp: ts, signature: sig, token: TOKEN,
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
     });
     expect(out).toEqual({ ok: true });
   });
@@ -143,11 +214,11 @@ describe('verifySignedRequest', () => {
   it('respects a custom freshnessWindowMs', () => {
     const now = Date.now();
     const ts = new Date(now - 10_000).toISOString();
-    // 1s window — 10s-old request must be stale
+    const nonce = freshNonce();
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
-      timestamp: ts, signature: hmacHex(TOKEN, ts, BODY), token: TOKEN,
-      now, freshnessWindowMs: 1000,
+      timestamp: ts, signature: sigFor(TOKEN, 'POST', '/x', ts, nonce, BODY),
+      token: TOKEN, nonce, now, freshnessWindowMs: 1000,
     });
     expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
   });

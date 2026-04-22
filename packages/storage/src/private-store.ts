@@ -1,5 +1,5 @@
 import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import { createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import type { TripleStore, Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
@@ -21,18 +21,56 @@ const ENC_PREFIX = 'enc:gcm:v1:';
  *      always sees a full 256-bit key).
  *   2. `DKG_PRIVATE_STORE_KEY` env var (same shape as #1).
  *   3. A deterministic process-wide default derived from a constant
- *      domain string. This is NOT secret — it serves three goals:
- *        (a) on-disk N-Quads dumps no longer contain plaintext (ST-2);
- *        (b) every PrivateContentStore in the same process produces
- *            identical ciphertext for identical plaintext, which keeps
- *            equality-based subtraction/dedup pipelines functional
- *            (e.g. async-lift `subtractFinalizedExactQuads`); and
- *        (c) a separate node operator who has not configured
- *            DKG_PRIVATE_STORE_KEY can still round-trip private data.
- *      Operators who require real confidentiality MUST set
- *      DKG_PRIVATE_STORE_KEY to a per-deployment secret.
+ *      domain string. This is NOT secret — operators who require real
+ *      confidentiality MUST set DKG_PRIVATE_STORE_KEY to a per-deployment
+ *      secret. Set `DKG_PRIVATE_STORE_STRICT_KEY=1` (or pass
+ *      `strictKey: true` to the constructor) to turn this fallback into
+ *      a hard error at startup (bot review N3).
+ *
+ * We emit a loud console warning the first time the default key is used
+ * so the gap is visible in deploy logs even without strict mode.
  */
 const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
+let defaultKeyWarned = false;
+
+function strictKeyRequestedFromEnv(): boolean {
+  const v = (process.env.DKG_PRIVATE_STORE_STRICT_KEY ?? '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * Decode a string-encoded key/passphrase into raw bytes.
+ *
+ * Bot review N2: previously any non-hex string fell through to
+ * `Buffer.from(s, 'base64')`, which silently interprets non-base64 input
+ * as truncated garbage. Two callers passing the passphrases `"hunter2"`
+ * and `"hunter2!"` would end up with the SAME key because both decode
+ * to the same leading bytes under a permissive base64 reader.
+ *
+ * Resolution:
+ *   - 64-char hex → decode as hex.
+ *   - Canonical base64 (length multiple of 4, valid alphabet, length >=
+ *     44 so the DECODED length is 32 or more) → decode as base64.
+ *   - Everything else → treat as a UTF-8 passphrase and SHA-256-stretch.
+ */
+function decodeKeyOrPassphrase(s: string): Buffer {
+  if (/^[0-9a-fA-F]{64}$/.test(s)) {
+    return Buffer.from(s, 'hex');
+  }
+  const looksLikeCanonicalBase64 =
+    s.length >= 44 &&
+    s.length % 4 === 0 &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(s);
+  if (looksLikeCanonicalBase64) {
+    try {
+      const buf = Buffer.from(s, 'base64');
+      if (buf.length >= 32) return buf;
+    } catch {
+      // fall through to passphrase path
+    }
+  }
+  return Buffer.from(s, 'utf8');
+}
 
 /**
  * Stateless mirror of {@link PrivateContentStore}'s seal — used by
@@ -71,19 +109,46 @@ export function decryptPrivateLiteral(
   }
 }
 
-function resolveEncryptionKey(explicit?: Uint8Array | string): Buffer {
+function resolveEncryptionKey(
+  explicit?: Uint8Array | string,
+  options: { strictKey?: boolean } = {},
+): Buffer {
   const fromExplicit = explicit ?? process.env.DKG_PRIVATE_STORE_KEY;
   if (fromExplicit) {
     const buf =
       typeof fromExplicit === 'string'
-        ? /^[0-9a-fA-F]{64}$/.test(fromExplicit)
-          ? Buffer.from(fromExplicit, 'hex')
-          : Buffer.from(fromExplicit, 'base64')
+        ? decodeKeyOrPassphrase(fromExplicit)
         : Buffer.from(fromExplicit);
     if (buf.length !== 32) {
       return createHash('sha256').update(buf).digest();
     }
     return buf;
+  }
+  // Bot review N3: no key configured. If the caller (or the operator
+  // via DKG_PRIVATE_STORE_STRICT_KEY) has opted into strict mode, refuse
+  // to fall back to the public default — any private data encrypted
+  // under the default key is essentially plaintext for anyone with the
+  // repo source.
+  const strict = options.strictKey ?? strictKeyRequestedFromEnv();
+  if (strict) {
+    throw new Error(
+      'PrivateContentStore strict mode: DKG_PRIVATE_STORE_KEY is not set ' +
+        'and no encryptionKey was supplied. Refusing to fall back to the ' +
+        'process-wide default key — any private triples written under it ' +
+        'would be decryptable by anyone with repo access.',
+    );
+  }
+  if (!defaultKeyWarned) {
+    defaultKeyWarned = true;
+    // Loud warning on stderr so it survives log-level filtering.
+    console.warn(
+      '[PrivateContentStore] WARNING: DKG_PRIVATE_STORE_KEY is not set. ' +
+        'Falling back to a deterministic default key derived from a public ' +
+        'constant — private triples encrypted under this key are NOT ' +
+        'confidential against anyone with access to this repository. Set ' +
+        'DKG_PRIVATE_STORE_KEY to a per-deployment secret, or set ' +
+        'DKG_PRIVATE_STORE_STRICT_KEY=1 to turn this fallback into an error.',
+    );
   }
   return createHash('sha256').update(DEFAULT_KEY_DOMAIN).digest();
 }
@@ -100,11 +165,13 @@ export class PrivateContentStore {
   constructor(
     store: TripleStore,
     graphManager: ContextGraphManager,
-    options: { encryptionKey?: Uint8Array | string } = {},
+    options: { encryptionKey?: Uint8Array | string; strictKey?: boolean } = {},
   ) {
     this.store = store;
     this.graphManager = graphManager;
-    this.encryptionKey = resolveEncryptionKey(options.encryptionKey);
+    this.encryptionKey = resolveEncryptionKey(options.encryptionKey, {
+      strictKey: options.strictKey,
+    });
   }
 
   /**
@@ -113,22 +180,26 @@ export class PrivateContentStore {
    * (a quoted string with no datatype/language). The wrapper preserves
    * the original literal shape (language tag / datatype IRI) by
    * embedding it in the plaintext payload before encryption.
+   *
+   * Bot review N1: the previous implementation derived the IV as
+   * HMAC-SHA256(key, plaintext) truncated to 96 bits. That is NOT RFC
+   * 8452 AES-GCM-SIV; it is plain AES-GCM with a deterministic IV. Two
+   * identical plaintexts sealed under the same key produce identical
+   * 96-bit IVs, which is exactly the condition AES-GCM forbids — a
+   * single same-key same-nonce collision on two distinct plaintexts
+   * leaks H (the authentication subkey) and lets an attacker forge
+   * arbitrary tags. Even without two distinct plaintexts, determinism
+   * itself is a confidentiality leak: identical plaintexts become
+   * identical ciphertexts, which is visible at the storage layer.
+   *
+   * We now draw a fresh 96-bit random IV for every seal. The downstream
+   * dedup pipeline (async-lift `subtractFinalizedExactQuads`) already
+   * decrypts via {@link decryptPrivateLiteral} before comparing, so
+   * non-deterministic ciphertext does not break it.
    */
   private encryptLiteral(serialized: string): string {
     if (!serialized.startsWith('"')) return serialized;
-    // Deterministic IV: HMAC-SHA256(key, plaintext) truncated to 96 bits.
-    // This is the AES-GCM-SIV pattern — different plaintexts yield
-    // different IVs (collision probability negligible at 96 bits) so
-    // GCM's nonce-misuse hazard does not apply, while identical
-    // plaintexts produce identical ciphertexts. Equality-based
-    // dedup/subtraction (e.g. publisher async-lift
-    // `subtractFinalizedExactQuads`) therefore continues to work
-    // without a decryption pass and ST-2 at-rest confidentiality is
-    // preserved (the on-disk envelope never contains the plaintext).
-    const iv = createHmac('sha256', this.encryptionKey)
-      .update(serialized, 'utf8')
-      .digest()
-      .subarray(0, 12);
+    const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
     const ct = Buffer.concat([
       cipher.update(serialized, 'utf8'),

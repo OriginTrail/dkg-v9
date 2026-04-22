@@ -49,15 +49,32 @@ export function buildSignedGossipEnvelope(p: SignEnvelopeParams): Uint8Array {
 }
 
 /**
- * Try to decode a wire payload as a signed GossipEnvelope. Returns the
- * envelope plus the recovered signer address. Returns `undefined` if the
- * bytes are not a valid envelope (e.g. legacy raw payloads still in
- * flight during a rolling upgrade) so the caller can fall back to the
- * raw decode path.
+ * Try to decode a wire payload as a signed GossipEnvelope.
+ *
+ * Return shapes:
+ *   - `undefined` — bytes are NOT an envelope (legacy raw payload / different
+ *     encoding). Callers MAY fall back to processing the raw bytes.
+ *   - `{ envelope, recoveredSigner }` — bytes are a well-formed envelope AND
+ *     the signature recovered successfully AND the recovered signer matches
+ *     `envelope.agentAddress`. Safe to dispatch.
+ *
+ * For well-formed envelopes whose signature cannot be recovered, or whose
+ * recovered signer does NOT match `envelope.agentAddress`, we return
+ * `undefined` together with a side-channel log — NOT the envelope. This
+ * closes the hole where a forged/tampered envelope would otherwise fall
+ * through to the "legacy raw bytes" fallback path in callers and reach the
+ * publish/SWM/update/finalization handlers as if it were authenticated
+ * (bot review C1/E1).
+ *
+ * If a caller legitimately needs to inspect the envelope bytes after a bad
+ * signature (e.g. for structured telemetry), it can call
+ * `decodeGossipEnvelope()` directly and handle the distinction itself —
+ * but dispatch code MUST NOT read `envelope.payload` unless this function
+ * returned a defined result.
  */
 export function tryUnwrapSignedEnvelope(
   data: Uint8Array,
-): { envelope: GossipEnvelopeMsg; recoveredSigner: string | undefined } | undefined {
+): { envelope: GossipEnvelopeMsg; recoveredSigner: string } | undefined {
   let envelope: GossipEnvelopeMsg;
   try {
     envelope = decodeGossipEnvelope(data);
@@ -73,7 +90,13 @@ export function tryUnwrapSignedEnvelope(
   if (!envelope.payload || envelope.payload.length === 0) {
     return undefined;
   }
-  let recovered: string | undefined;
+  // From here on, the bytes were a decodable envelope. We treat recovery
+  // failure (and signer mismatch) as a hard reject instead of "parsed but
+  // unauthenticated": letting such a blob through would make the new
+  // envelope-signing layer strictly weaker than having no envelope at all,
+  // because callers use `env?.envelope.payload ?? data` to fall back to raw
+  // bytes, and a forged envelope would still be processed as legacy gossip.
+  let recovered: string;
   try {
     const signingPayload = computeGossipSigningPayload(
       envelope.type,
@@ -85,9 +108,49 @@ export function tryUnwrapSignedEnvelope(
       .verifyMessage(signingPayload, ethers.hexlify(envelope.signature))
       .toLowerCase();
   } catch {
-    recovered = undefined;
+    return undefined;
+  }
+  const claimed = (envelope.agentAddress ?? '').toLowerCase();
+  if (!claimed || claimed !== recovered) {
+    return undefined;
   }
   return { envelope, recoveredSigner: recovered };
+}
+
+/**
+ * Classification helper used by ingress logging/metrics to distinguish
+ * "legacy raw" from "tampered" without relaxing the dispatch rule. Returns:
+ *   - 'raw'       — bytes are not an envelope.
+ *   - 'verified'  — well-formed envelope with a valid signature that matches
+ *                   `envelope.agentAddress`.
+ *   - 'forged'    — well-formed envelope whose signature did not recover or
+ *                   whose recovered signer did not match `agentAddress`.
+ */
+export function classifyGossipBytes(data: Uint8Array): 'raw' | 'verified' | 'forged' {
+  let envelope: GossipEnvelopeMsg;
+  try {
+    envelope = decodeGossipEnvelope(data);
+  } catch {
+    return 'raw';
+  }
+  if (envelope.version !== GOSSIP_ENVELOPE_VERSION) return 'raw';
+  if (!envelope.signature || envelope.signature.length === 0) return 'raw';
+  if (!envelope.payload || envelope.payload.length === 0) return 'raw';
+  try {
+    const signingPayload = computeGossipSigningPayload(
+      envelope.type,
+      envelope.contextGraphId,
+      envelope.timestamp,
+      envelope.payload,
+    );
+    const recovered = ethers
+      .verifyMessage(signingPayload, ethers.hexlify(envelope.signature))
+      .toLowerCase();
+    const claimed = (envelope.agentAddress ?? '').toLowerCase();
+    return claimed && claimed === recovered ? 'verified' : 'forged';
+  } catch {
+    return 'forged';
+  }
 }
 
 /**

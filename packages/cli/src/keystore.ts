@@ -150,13 +150,22 @@ export async function decryptKeystore(
       `Refusing to load weak keystore: dklen must be ${REQUIRED_DKLEN} for AES-256-GCM (got ${kdfparams.dklen}). invalid dklen.`,
     );
   }
+  // Bot review G1: compute saltHex into a local FIRST, defensively
+  // falling back to '' for missing/non-string values. The previous
+  // `kdfparams.salt.length / 2` expression in the throw message would
+  // itself throw (TypeError: Cannot read properties of undefined) when
+  // `salt` was missing or non-string — turning a "weak keystore"
+  // validation error into an uncaught runtime crash that surfaced as
+  // "scrypt failed" three call frames higher. Now the validator
+  // reports the intended weak-keystore error in both cases.
+  const saltHex = typeof kdfparams.salt === 'string' ? kdfparams.salt : '';
   if (
-    typeof kdfparams.salt !== "string" ||
-    !/^[0-9a-f]*$/i.test(kdfparams.salt) ||
-    kdfparams.salt.length / 2 < MIN_SALT_BYTES
+    typeof kdfparams.salt !== 'string' ||
+    !/^[0-9a-f]*$/i.test(saltHex) ||
+    saltHex.length / 2 < MIN_SALT_BYTES
   ) {
     throw new Error(
-      `Refusing to load weak keystore: salt too short (${kdfparams.salt.length / 2} bytes < ${MIN_SALT_BYTES}). weak keystore.`,
+      `Refusing to load weak keystore: salt too short (${saltHex.length / 2} bytes < ${MIN_SALT_BYTES}). weak keystore.`,
     );
   }
 

@@ -767,10 +767,19 @@ export class OriginTrailGameCoordinator {
           participantIdentityIds,
           requiredSignatures: M,
         });
-        if (result && result.contextGraphId != null) {
+        // EVM adapter returns { success: false, contextGraphId: 0n } when the
+        // ContextGraphCreated event cannot be parsed out of the receipt logs,
+        // so we MUST NOT treat a `!= null` result as success — doing so binds
+        // the swarm to a non-existent context graph ("0"), which later
+        // publishes/signatures silently target and drop. Gate on the explicit
+        // TxResult.success flag AND reject the 0n sentinel so future adapter
+        // regressions can't sneak a fake id back into the happy path.
+        if (result && result.success && result.contextGraphId !== 0n && result.contextGraphId != null) {
           swarm.contextGraphId = String(result.contextGraphId);
           swarm.requiredSignatures = M;
           this.log(`Context graph ${swarm.contextGraphId} created for swarm ${swarmId} (M=${M}, ${participantIdentityIds.length} participants)`);
+        } else {
+          this.log(`Context graph creation for swarm ${swarmId} did not succeed (success=${result?.success}, contextGraphId=${result?.contextGraphId}); game proceeds without on-chain anchoring`);
         }
       }
     } catch (err) {

@@ -486,14 +486,29 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.isImmutable
         );
         if (address(knowledgeAssetsStorage) != address(0)) {
+            // E-9 / bot review: legacy KnowledgeBatchCreated has a (startKAId,
+            // endKAId) range. KAV10 does NOT mint into the legacy KAS id space,
+            // so we emit a synthetic but INTERNALLY CONSISTENT range — the
+            // previous implementation hard-coded startKAId == endKAId == kcId
+            // regardless of knowledgeAssetsAmount, which tells pre-V10 indexers
+            // that every V10 batch contains exactly one KA even when it has
+            // N > 1. We now emit [kcId, kcId + N − 1] so the endKAId − startKAId
+            // + 1 == knowledgeAssetsAmount invariant holds. Range IDs remain
+            // synthetic (they live in KCS's id space, not KAS's) — legacy
+            // consumers that need real KAS-space IDs must continue to read
+            // from V9 publishes. The canonical, topic-unique V10 event is the
+            // one emitted above from KAV10 itself.
+            uint64 startKAId = uint64(kcId);
+            uint256 endKAIdRaw = kcId + p.knowledgeAssetsAmount - 1;
+            uint64 endKAId = endKAIdRaw > type(uint64).max ? type(uint64).max : uint64(endKAIdRaw);
             knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
                 kcId,
                 msg.sender,
                 p.merkleRoot,
                 uint64(p.byteSize),
                 uint32(p.knowledgeAssetsAmount),
-                uint64(kcId),
-                uint64(kcId),
+                startKAId,
+                endKAId,
                 currentEpoch,
                 currentEpoch + p.epochs,
                 p.tokenAmount,

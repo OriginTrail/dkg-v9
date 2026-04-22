@@ -89,8 +89,27 @@ interface NodeInfo {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function rndId(): string {
-  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+/**
+ * Monotonic counter used alongside an rng-derived suffix so rndId()
+ * stays unique even when two calls land inside the same Date.now()
+ * millisecond under a seeded RNG (the suffix length is fixed so the
+ * RNG alone cannot guarantee uniqueness).
+ */
+let rndIdCounter = 0;
+
+/**
+ * Bot review J1: previously rndId() used Math.random() unconditionally,
+ * so two sim runs started with the same seed still produced different
+ * entity URIs and query LIMITs. Now every random-using helper takes an
+ * explicit `rng` callback. runSimulation() creates a seeded RNG from
+ * `config.seed` at the start of the run and threads it through every
+ * executor; Math.random() is only used as the fallback when no seed is
+ * provided.
+ */
+function rndId(rng: () => number = Math.random): string {
+  rndIdCounter = (rndIdCounter + 1) >>> 0;
+  const rand = rng().toString(36).slice(2, 10).padEnd(8, '0');
+  return Date.now().toString(36) + '-' + rand + '-' + rndIdCounter.toString(36);
 }
 
 /** Devnet auth token path for a node (node1, node2, … not node-1). Used by loadNodeTokens; exported for tests. */
@@ -125,8 +144,8 @@ async function loadNodeTokens(nodes: NodeInfo[]): Promise<void> {
   );
 }
 
-function pickRandom<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function pickRandom<T>(arr: T[], rng: () => number = Math.random): T {
+  return arr[Math.floor(rng() * arr.length)];
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -265,15 +284,16 @@ async function execPublish(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const graph = `did:dkg:context-graph:${config.contextGraph}`;
   const quads = Array.from({ length: config.kasPerPublish }, () => {
-    const entity = `did:dkg:entity:sim-${rndId()}`;
+    const entity = `did:dkg:entity:sim-${rndId(rng)}`;
     return {
       subject: entity,
       predicate: 'http://schema.org/name',
-      object: `"SimEntity-${rndId()}"`,
+      object: `"SimEntity-${rndId(rng)}"`,
       graph,
     };
   });
@@ -337,9 +357,10 @@ async function execQuery(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const limit = 5 + Math.floor(Math.random() * 21);
+  const limit = 5 + Math.floor(rng() * 21);
   const sparql = `SELECT * WHERE { ?s ?p ?o } LIMIT ${limit}`;
 
   try {
@@ -378,15 +399,16 @@ async function execWorkspace(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const graph = `did:dkg:context-graph:${config.contextGraph}`;
-  const entity = `did:dkg:entity:sim-ws-${rndId()}`;
+  const entity = `did:dkg:entity:sim-ws-${rndId(rng)}`;
   const quads = [
     {
       subject: entity,
       predicate: 'http://schema.org/name',
-      object: `"WsEntity-${rndId()}"`,
+      object: `"WsEntity-${rndId(rng)}"`,
       graph,
     },
   ];
@@ -426,6 +448,7 @@ async function execChat(
   node: NodeInfo,
   nodes: NodeInfo[],
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const peers = nodes.filter((n) => n.id !== node.id && n.peerId);
@@ -441,12 +464,12 @@ async function execChat(
     };
   }
 
-  const target = pickRandom(peers);
+  const target = pickRandom(peers, rng);
   try {
     const res = await fetch(`http://127.0.0.1:${node.port}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ to: target.peerId, text: `sim-ping-${rndId()}` }),
+      body: JSON.stringify({ to: target.peerId, text: `sim-ping-${rndId(rng)}` }),
       signal: opSignal(signal, 'chat'),
     });
     const body = (await res.json()) as { delivered?: boolean; error?: string; phases?: Record<string, number> };
@@ -522,6 +545,16 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
 async function runSimulation(config: SimConfig, signal: AbortSignal) {
   const nodes = getNodes();
 
+  // Bot review J1: resolve the RNG ONCE per sim run and thread it into
+  // every executor / helper that was previously calling Math.random().
+  // Two runs with the same numeric seed now replay identical operation
+  // types, node round-robin, query LIMITs, entity URIs, and chat-peer
+  // picks. Runs without `config.seed` keep the old non-deterministic
+  // Math.random() path for backwards compatibility with existing UIs.
+  const rng: () => number = typeof config.seed === 'number'
+    ? createSeededRng(config.seed)
+    : Math.random;
+
   await loadNodeTokens(nodes);
 
   await ensureContextGraph(nodes, config.contextGraph, signal);
@@ -572,7 +605,7 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
     let nodeRR = 0;
     function launchOne() {
       if (dispatched >= config.opCount) return; // cap so we never exceed opCount (avoids race overshoot)
-      const opType = pickRandom(config.enabledOps);
+      const opType = pickRandom(config.enabledOps, rng);
       nodeRR = (nodeRR + 1) % nodes.length;
       const node = nodes[nodeRR];
       dispatched++;
@@ -582,19 +615,19 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       let promise: Promise<OpEvent>;
       switch (opType) {
         case 'publish':
-          promise = execPublish(node, config, signal);
+          promise = execPublish(node, config, signal, rng);
           break;
         case 'query':
-          promise = execQuery(node, config, signal);
+          promise = execQuery(node, config, signal, rng);
           break;
         case 'workspace':
-          promise = execWorkspace(node, config, signal);
+          promise = execWorkspace(node, config, signal, rng);
           break;
         case 'chat':
-          promise = execChat(node, nodes, signal);
+          promise = execChat(node, nodes, signal, rng);
           break;
         default:
-          promise = execPublish(node, config, signal);
+          promise = execPublish(node, config, signal, rng);
       }
 
       promise.then(onOpDone).catch(() => {
@@ -688,7 +721,10 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
     config.concurrency = config.concurrency ?? 10;
     config.kasPerPublish = config.kasPerPublish ?? 1;
     config.contextGraph = config.contextGraph ?? 'devnet-test';
-    config.name = config.name ?? `Sim-${rndId()}`;
+    const nameRng: () => number = typeof config.seed === 'number'
+      ? createSeededRng(config.seed)
+      : Math.random;
+    config.name = config.name ?? `Sim-${rndId(nameRng)}`;
 
     const abort = new AbortController();
     activeAbort = abort;

@@ -62,7 +62,17 @@ beforeAll(async () => {
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
-  });
+    // Bot review C2: this test enforces the SPEC §04/RFC-29 contract
+    // (WM is strictly per-agent). With the new two-tier enforcement
+    // model in DKGAgent — where cross-agent WM reads default to
+    // lenient + warn to avoid silently breaking HTTP/CLI/UI callers
+    // that have not yet plumbed `agentAuthSignature` end to end — this
+    // test must explicitly opt into STRICT mode to reassert the spec
+    // contract. Production callers that hold the secret can opt in the
+    // same way; the default (lenient + warn) only applies when the
+    // operator has not decided either way.
+    strictWmCrossAgentAuth: true,
+  } as any);
   await node.start();
 
   // Register a second agent "B" co-hosted on the same node. The default

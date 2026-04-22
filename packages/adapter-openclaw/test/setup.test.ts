@@ -895,14 +895,22 @@ describe('openclaw.plugin.json manifest', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
     const pkg = JSON.parse(readFileSync(packagePath, 'utf-8'));
     expect(manifest.kind).toBe('memory');
-    // K-9 (BUGS_FOUND.md): the manifest `id` MUST match the published
-    // npm `name` so plugin discovery / OpenClaw slot resolution can
-    // identify the package by either field interchangeably. The
-    // historical short `'adapter-openclaw'` id silently shadowed the
-    // scoped npm name and broke discovery whenever both fields were
-    // checked. The id is now the canonical scoped npm name.
-    expect(manifest.id).toBe(pkg.name);
-    expect(manifest.id).toBe('@origintrail-official/dkg-adapter-openclaw');
+    // Bot review B1: the manifest `id` and the published npm `name` are
+    // intentionally DIFFERENT identifiers. The `id` is the plugin slot
+    // key used by OpenClaw's slot resolution (`plugins.slots.memory`,
+    // `plugins.entries`, `plugins.allow`) — this must stay short and
+    // stable (`adapter-openclaw`) because it is hard-coded across
+    // `setup.ts`, `DkgMemoryPlugin.ts`, and `openclaw-entry.mjs`. The
+    // `pkg.name` is the scoped npm package name used for installation.
+    // A previous iteration of this PR renamed `manifest.id` to
+    // `pkg.name` in the manifest alone, which split the plugin identity
+    // in two and silently broke slot election; the rename has been
+    // reverted and the slot id is once again the short `adapter-openclaw`.
+    expect(manifest.id).toBe('adapter-openclaw');
+    // Sanity check that both the adapter code AND this test agree on
+    // the slot identifier — any future rename must update every call
+    // site that matches on `plugins.slots.memory`.
+    expect(pkg.name).toBe('@origintrail-official/dkg-adapter-openclaw');
   });
 });
 

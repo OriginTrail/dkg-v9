@@ -24,13 +24,29 @@ export class OxigraphStore implements TripleStore {
    * Side-table preserving the ORIGINAL `^^<datatype>` of typed numeric
    * literals through round-trips. Oxigraph canonicalizes numeric
    * subtypes (e.g. `xsd:long` → `xsd:integer`), which loses the
-   * publisher's intent and breaks BUGS_FOUND.md#ST-12. Keyed by the
-   * lexical value alone — the value range (e.g. ±2^63 for `long`)
-   * already disambiguates `xsd:long` vs `xsd:integer` for any single
-   * literal a publisher wrote, and clashes (same lexical value with
-   * two different declared types) re-resolve on next insert.
+   * publisher's intent and breaks BUGS_FOUND.md#ST-12.
+   *
+   * Bot review M1: previously keyed by the lexical value alone, which
+   * corrupted results whenever two quads in the store used the same
+   * lexeme with different declared types (e.g. `"1"^^xsd:int` and
+   * `"1"^^xsd:positiveInteger`). The later insert clobbered the
+   * earlier entry, so BOTH quads read back with the newer datatype.
+   *
+   * Key is now the full quad identity (subject | predicate | value |
+   * graph) so each typed-literal position owns its own declared type.
+   * Collisions only happen when the same position is written twice
+   * with different declared types, which is a genuine overwrite.
    */
   private originalNumericDatatype = new Map<string, string>();
+
+  private static numericDatatypeKey(
+    subject: string,
+    predicate: string,
+    value: string,
+    graph: string | undefined,
+  ): string {
+    return `${subject}\u0000${predicate}\u0000${value}\u0000${graph ?? ''}`;
+  }
 
   /**
    * @param persistPath  If provided, the store will dump/load N-Quads
@@ -49,17 +65,21 @@ export class OxigraphStore implements TripleStore {
   /**
    * Capture publisher-declared numeric subtype before it goes through
    * Oxigraph (which collapses `xsd:long`, `xsd:int`, `xsd:short`,
-   * `xsd:byte` and friends into `xsd:integer`).
-   * BUGS_FOUND.md#ST-12.
+   * `xsd:byte` and friends into `xsd:integer`). The declared type is
+   * keyed per-quad (see {@link originalNumericDatatype}) so two quads
+   * sharing a lexeme but declaring different subtypes each retain
+   * their own declared type on read-back. BUGS_FOUND.md#ST-12.
    */
-  private rememberNumericDatatype(term: string): void {
+  private rememberNumericDatatype(q: DKGQuad): void {
+    const term = q.object;
     if (!term.startsWith('"')) return;
     const m = term.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
     if (!m) return;
     const value = m[1];
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return;
-    this.originalNumericDatatype.set(value, dtype);
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    this.originalNumericDatatype.set(key, dtype);
   }
 
   private hydrateSync(filePath: string): void {
@@ -101,7 +121,7 @@ export class OxigraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[]): Promise<void> {
     if (quads.length === 0) return;
-    for (const q of quads) this.rememberNumericDatatype(q.object);
+    for (const q of quads) this.rememberNumericDatatype(q);
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
@@ -148,8 +168,17 @@ export class OxigraphStore implements TripleStore {
     if (first instanceof Map) {
       const bindings = (result as Map<string, OxTerm>[]).map((row) => {
         const obj: Record<string, string> = {};
+        // Bot review M1: SELECT results are keyed only by the
+        // binding value (we don't know which quad each binding came
+        // from), so we can only safely restore the declared subtype
+        // when every remembered quad with this lexeme agreed on it.
+        // If two quads in the store declared different xsd subtypes
+        // for the same lexeme (e.g. `"1"^^xsd:int` vs
+        // `"1"^^xsd:positiveInteger`), SELECT cannot pick a side
+        // without the position — so we fall through to Oxigraph's
+        // canonical form instead of silently reporting the wrong type.
         for (const [key, term] of row.entries()) {
-          obj[key] = this.restoreOriginalDatatype(termToString(term));
+          obj[key] = this.restoreOriginalDatatypeForSelectBinding(termToString(term));
         }
         return obj;
       });
@@ -159,28 +188,74 @@ export class OxigraphStore implements TripleStore {
 
     const quads = (result as OxQuad[]).map((oxq) => {
       const dq = fromOxQuad(oxq);
-      dq.object = this.restoreOriginalDatatype(dq.object);
+      dq.object = this.restoreOriginalDatatype(dq);
       return dq;
     });
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
   /**
-   * Reverse of `rememberNumericDatatype` — if a SELECT/CONSTRUCT row
-   * contains a typed literal whose datatype Oxigraph collapsed (e.g.
-   * `xsd:integer`), restore the publisher's original declared type
-   * from the side-table. BUGS_FOUND.md#ST-12.
+   * Reverse of `rememberNumericDatatype` — if a CONSTRUCT row contains
+   * a typed literal whose datatype Oxigraph collapsed (e.g. `xsd:long`
+   * → `xsd:integer`), restore the publisher's original declared type
+   * from the side-table keyed by the full quad identity (bot review
+   * M1). Falls through unchanged when no entry exists or the key is
+   * not a known numeric subtype. BUGS_FOUND.md#ST-12.
    */
-  private restoreOriginalDatatype(serialized: string): string {
+  private restoreOriginalDatatype(q: DKGQuad): string {
+    const serialized = q.object;
     if (!serialized.startsWith('"')) return serialized;
     const m = serialized.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
     if (!m) return serialized;
     const value = m[1];
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return serialized;
-    const original = this.originalNumericDatatype.get(value);
-    if (!original || original === dtype) return serialized;
-    return `"${value}"^^<${original}>`;
+    // Prefer the exact quad-identity match (per bot review M1 — this
+    // is the unambiguous path when one position declared a specific
+    // subtype).
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    const original = this.originalNumericDatatype.get(key);
+    if (original && original !== dtype) {
+      return `"${value}"^^<${original}>`;
+    }
+    // CONSTRUCT results often project quads into the default graph
+    // (`CONSTRUCT { ?s ?p ?o }`), so the per-quad key doesn't line up
+    // with the graph-scoped write-time key. Fall back to the
+    // lexical-only best-effort lookup WITH CONFLICT DETECTION: if
+    // every remembered quad with this lexeme declared the same
+    // subtype, restore it; if two different subtypes were declared
+    // anywhere, refuse to guess and return Oxigraph's canonical form.
+    return this.restoreOriginalDatatypeForSelectBinding(serialized);
+  }
+
+  /**
+   * Bot review M1: lexical-only restore for SELECT bindings. Only
+   * returns the declared subtype when EVERY remembered quad that
+   * carried this lexeme declared the SAME subtype — otherwise falls
+   * back to Oxigraph's canonical form. This preserves the common
+   * case (single publisher wrote `"42"^^xsd:long`) while refusing
+   * to guess when the store contains conflicting declarations.
+   */
+  private restoreOriginalDatatypeForSelectBinding(serialized: string): string {
+    if (!serialized.startsWith('"')) return serialized;
+    const m = serialized.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return serialized;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return serialized;
+    let only: string | undefined;
+    // Keys are `s\0p\0value\0g` — scan for entries matching this value.
+    const needle = `\u0000${value}\u0000`;
+    for (const [k, v] of this.originalNumericDatatype) {
+      if (!k.includes(needle)) continue;
+      if (only === undefined) {
+        only = v;
+      } else if (only !== v) {
+        return serialized; // conflict — fall back to Oxigraph canonical
+      }
+    }
+    if (!only || only === dtype) return serialized;
+    return `"${value}"^^<${only}>`;
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {

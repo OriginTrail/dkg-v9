@@ -35,6 +35,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
   buildSignedGossipEnvelope,
   tryUnwrapSignedEnvelope,
+  classifyGossipBytes,
   buildPublishRequestSig,
 } from './signed-gossip.js';
 import { ProfileManager } from './profile-manager.js';
@@ -237,6 +238,15 @@ export interface DKGAgentConfig {
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
+  /**
+   * When true, explicit `agentAddress` `working-memory` queries on nodes
+   * hosting >1 local agent MUST include a valid `agentAuthSignature`
+   * (spec §04 RFC-29). When false (default) missing signatures produce a
+   * warning but are allowed through, so existing HTTP/CLI/UI callers that
+   * have not been upgraded to plumb the signature don't suddenly get
+   * empty results. Can also be enabled via `DKG_STRICT_WM_AUTH=1`.
+   */
+  strictWmCrossAgentAuth?: boolean;
 }
 
 /**
@@ -2701,18 +2711,40 @@ export class DKGAgent {
     // the private key. Otherwise any in-process caller could read another
     // co-hosted agent's WM by knowing/guessing the address.
     // See BUGS_FOUND.md A-1.
+    //
+    // Bot review C2: the HTTP `/api/query`, CLI, node-ui, and adapter
+    // surfaces do NOT yet plumb `agentAuthSignature`, so hard-requiring it
+    // would silently degrade every existing cross-agent WM read to `[]`.
+    // Until the signature is plumbed end-to-end, enforcement is gated on
+    // `config.strictWmCrossAgentAuth` (opt-in / set `DKG_STRICT_WM_AUTH=1`).
+    // When the gate is off we STILL validate any signature the caller
+    // supplied (so an explicitly-signed request is never downgraded), but
+    // missing signatures only produce a warning instead of an empty result.
     if (
       opts.view === 'working-memory'
       && opts.agentAddress
       && this.localAgents.size > 1
     ) {
-      const ok = this.verifyWmAuthSignature(opts.agentAddress, opts.agentAuthSignature);
-      if (!ok) {
-        this.log.info(
+      const strictEnv = (process.env.DKG_STRICT_WM_AUTH ?? '').toLowerCase();
+      const strict = this.config.strictWmCrossAgentAuth === true
+        || strictEnv === '1' || strictEnv === 'true' || strictEnv === 'yes';
+      const sigProvided = typeof opts.agentAuthSignature === 'string' && opts.agentAuthSignature.length > 0;
+      if (strict || sigProvided) {
+        const ok = this.verifyWmAuthSignature(opts.agentAddress, opts.agentAuthSignature);
+        if (!ok) {
+          this.log.info(
+            ctx,
+            `WM cross-agent query denied: missing/invalid agentAuthSignature for ${opts.agentAddress}`,
+          );
+          return { bindings: [] };
+        }
+      } else {
+        this.log.warn(
           ctx,
-          `WM cross-agent query denied: missing/invalid agentAuthSignature for ${opts.agentAddress}`,
+          `WM cross-agent query for ${opts.agentAddress} has no agentAuthSignature; ` +
+          `allowing temporarily because strictWmCrossAgentAuth is off. Set DKG_STRICT_WM_AUTH=1 ` +
+          `to enforce once callers plumb the signature end-to-end.`,
         );
-        return { bindings: [] };
       }
     }
 
@@ -2934,36 +2966,67 @@ export class DKGAgent {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
+    // Ingress-side envelope enforcement (bot review C1/E1). Bytes fall into
+    // one of three classes:
+    //   - 'verified' → envelope parsed, signature recovered, and recovered
+    //                  signer equals `envelope.agentAddress`. Safe to
+    //                  dispatch `envelope.payload` AND attach the recovered
+    //                  signer for membership/authorisation checks downstream.
+    //   - 'raw'      → not an envelope at all (legacy non-envelope gossip).
+    //                  Fall back to raw bytes for backward-compat.
+    //   - 'forged'   → envelope parsed but signature failed to recover or
+    //                  did not match claimed agentAddress. MUST be dropped;
+    //                  letting this fall through to the raw path would make
+    //                  the new signing layer strictly weaker than no
+    //                  envelope (a tampered envelope would still be
+    //                  processed as legacy gossip).
+    const dispatchIngress = (label: string, data: Uint8Array): {
+      payload: Uint8Array;
+      recoveredSigner: string | undefined;
+    } | undefined => {
+      const kind = classifyGossipBytes(data);
+      if (kind === 'forged') {
+        const ctx = createOperationContext('system');
+        this.log.warn(ctx, `rejected forged ${label} envelope on cg=${contextGraphId}`);
+        return undefined;
+      }
+      if (kind === 'verified') {
+        const env = tryUnwrapSignedEnvelope(data)!;
+        return { payload: env.envelope.payload, recoveredSigner: env.recoveredSigner };
+      }
+      return { payload: data, recoveredSigner: undefined };
+    };
+
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
+      const ing = dispatchIngress('publish', data);
+      if (!ing) return;
       const gph = this.getOrCreateGossipPublishHandler();
-      const env = tryUnwrapSignedEnvelope(data);
-      const payload = env?.envelope.payload ?? data;
-      await gph.handlePublishMessage(payload, contextGraphId, undefined, from);
+      await gph.handlePublishMessage(ing.payload, contextGraphId, undefined, from);
     });
 
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
+      const ing = dispatchIngress('swm', data);
+      if (!ing) return;
       const wh = this.getOrCreateSharedMemoryHandler();
-      const env = tryUnwrapSignedEnvelope(data);
-      const payload = env?.envelope.payload ?? data;
-      await wh.handle(payload, from);
+      await wh.handle(ing.payload, from);
     });
 
     const updateTopic = paranetUpdateTopic(contextGraphId);
     this.gossip.subscribe(updateTopic);
     this.gossip.onMessage(updateTopic, async (_topic, data, from) => {
+      const ing = dispatchIngress('update', data);
+      if (!ing) return;
       const uh = this.getOrCreateUpdateHandler();
-      const env = tryUnwrapSignedEnvelope(data);
-      const payload = env?.envelope.payload ?? data;
-      await uh.handle(payload, from);
+      await uh.handle(ing.payload, from);
     });
 
     const finalizationTopic = paranetFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
     this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+      const ing = dispatchIngress('finalization', data);
+      if (!ing) return;
       const fh = this.getOrCreateFinalizationHandler();
-      const env = tryUnwrapSignedEnvelope(data);
-      const payload = env?.envelope.payload ?? data;
-      await fh.handleFinalizationMessage(payload, contextGraphId);
+      await fh.handleFinalizationMessage(ing.payload, contextGraphId);
     });
   }
 
@@ -4300,11 +4363,26 @@ export class DKGAgent {
     knowledgeAssetUal: string;
     agentAddress?: string;
   }): Promise<PublishResult> {
-    const { buildEndorsementQuads } = await import('./endorse.js');
-    const quads = buildEndorsementQuads(
-      this.peerId,
+    // Bot review D1: use the ASYNC endorsement builder and pass the local
+    // agent wallet as the signer whenever one is available, so the resulting
+    // `endorsementSignature` quad carries a real EIP-191 signature that
+    // verifiers can recover the endorsing address from. When no wallet is
+    // available (pre-bootstrap / read-only nodes) we fall back to the
+    // unsigned digest hex — the quad still binds (agent, ual, cg, ts, nonce)
+    // for tamper detection, but peers that require non-repudiation will
+    // reject it. The previous sync `buildEndorsementQuads` path silently
+    // ignored any `signer` option and always emitted the unsigned digest.
+    const { buildEndorsementQuadsAsync } = await import('./endorse.js');
+    const walletForEndorsement = (this.wallet as unknown as { ethWallet?: { signMessage: (msg: Uint8Array | string) => Promise<string> } }).ethWallet;
+    const signer = walletForEndorsement
+      ? (digest: Uint8Array) => walletForEndorsement.signMessage(digest)
+      : undefined;
+    const agentAddress = opts.agentAddress ?? this.peerId;
+    const quads = await buildEndorsementQuadsAsync(
+      agentAddress,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
+      signer ? { signer } : {},
     );
     return this.publish(opts.contextGraphId, quads);
   }

@@ -21,7 +21,30 @@ function requireAgent(): DKGAgent {
 
 export { requireAgent };
 
-export const dkgService: Service = {
+/**
+ * Bot review A7: export a real extended service type instead of only
+ * asserting the object literal. Without this, downstream TypeScript
+ * consumers would only see `Service` and would have to cast to `any`
+ * to reach `persistChatTurn`/`onChatTurn`. Declaring the symbol itself
+ * as `DKGService` — a named interface that extends `Service` with the
+ * new chat-turn surface — preserves the API in the emitted `.d.ts`.
+ */
+export interface DKGService extends Service {
+  persistChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options?: Record<string, unknown>,
+  ): Promise<{ tripleCount: number; turnUri: string; kcId: string }>;
+  onChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options?: Record<string, unknown>,
+  ): Promise<{ tripleCount: number; turnUri: string; kcId: string }>;
+}
+
+export const dkgService: DKGService = {
   name: 'dkg-node',
 
   async initialize(runtime: IAgentRuntime): Promise<void> {
@@ -76,9 +99,6 @@ export const dkgService: Service = {
     state?: State,
     options: Record<string, unknown> = {},
   ): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
-    return (dkgService as any).persistChatTurn(runtime, message, state, options);
+    return dkgService.persistChatTurn(runtime, message, state, options);
   },
-} as Service & {
-  persistChatTurn: (...args: any[]) => Promise<any>;
-  onChatTurn: (...args: any[]) => Promise<any>;
 };

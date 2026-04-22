@@ -20,12 +20,14 @@ export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './goss
 export { FinalizationHandler } from './finalization-handler.js';
 export {
   buildEndorsementQuads,
+  buildEndorsementQuadsAsync,
   canonicalEndorseDigest,
   DKG_ENDORSES,
   DKG_ENDORSED_AT,
   DKG_ENDORSEMENT_NONCE,
   DKG_ENDORSEMENT_SIGNATURE,
   type BuildEndorsementQuadsOptions,
+  type BuildEndorsementQuadsAsyncOptions,
 } from './endorse.js';
 export {
   CclEvaluator,

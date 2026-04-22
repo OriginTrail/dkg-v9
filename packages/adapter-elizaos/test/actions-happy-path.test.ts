@@ -24,12 +24,16 @@ interface PublishCall { cgId: string; quads: any[] }
 interface QueryCall { sparql: string }
 interface SendChatCall { peerId: string; text: string }
 interface InvokeSkillCall { peerId: string; skillUri: string; input: Uint8Array }
+interface AssertionWriteCall { cgId: string; name: string; quads: any[] }
+interface EnsureCGCall { id: string; name: string; curated?: boolean }
 
 const state = {
   publishes: [] as PublishCall[],
   queries: [] as QueryCall[],
   sendChats: [] as SendChatCall[],
   invokes: [] as InvokeSkillCall[],
+  assertionWrites: [] as AssertionWriteCall[],
+  ensureCGs: [] as EnsureCGCall[],
   findSkillsResult: [] as any[],
   findAgentsResult: [] as any[],
   queryResult: { bindings: [] as any[] },
@@ -40,6 +44,9 @@ const state = {
     outputData: new TextEncoder().encode('pong'),
     error: undefined as string | undefined,
   },
+  // Bot review A1/A3: let individual tests opt in to having
+  // assertion.write throw, mirroring the old publish-error path.
+  assertionWriteError: null as Error | null,
 };
 
 function fakeAgent() {
@@ -61,6 +68,17 @@ function fakeAgent() {
     invokeSkill: async (peerId: string, skillUri: string, input: Uint8Array) => {
       state.invokes.push({ peerId, skillUri, input });
       return state.invokeResult;
+    },
+    // Bot review A1/A3: chat-turn persistence routes through the
+    // WM assertion surface, not publish().
+    assertion: {
+      write: async (cgId: string, name: string, quads: any[]) => {
+        if (state.assertionWriteError) throw state.assertionWriteError;
+        state.assertionWrites.push({ cgId, name, quads });
+      },
+    },
+    ensureContextGraphLocal: async (opts: { id: string; name: string; curated?: boolean }) => {
+      state.ensureCGs.push({ id: opts.id, name: opts.name, curated: opts.curated });
     },
   };
 }
@@ -115,6 +133,8 @@ beforeEach(() => {
   state.queries.length = 0;
   state.sendChats.length = 0;
   state.invokes.length = 0;
+  state.assertionWrites.length = 0;
+  state.ensureCGs.length = 0;
   state.findSkillsResult = [];
   state.findAgentsResult = [];
   state.queryResult = { bindings: [] };
@@ -125,6 +145,7 @@ beforeEach(() => {
     outputData: new TextEncoder().encode('pong'),
     error: undefined,
   };
+  state.assertionWriteError = null;
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -589,8 +610,7 @@ describe('DKG_INVOKE_SKILL handler', () => {
 // DKG_PERSIST_CHAT_TURN — happy path via the stubbed agent
 // ───────────────────────────────────────────────────────────────────────────
 describe('DKG_PERSIST_CHAT_TURN handler', () => {
-  it('calls publish() with the turn quads and reports the triple count', async () => {
-    state.publishResult = { kcId: 7n, kaManifest: [] };
+  it('writes the turn quads via agent.assertion.write and reports the triple count (bot review A1/A3)', async () => {
     const { calls, cb } = captureCb();
     const ok = await dkgPersistChatTurn.handler(
       makeRuntime({ DKG_CHAT_CG: 'chat-room' }),
@@ -600,29 +620,28 @@ describe('DKG_PERSIST_CHAT_TURN handler', () => {
       cb,
     );
     expect(ok).toBe(true);
-    expect(state.publishes).toHaveLength(1);
-    expect(state.publishes[0].cgId).toBe('chat-room');
-    expect(state.publishes[0].quads.length).toBe(7); // 6 base + assistantReply
+    // A1/A3: turns go to WM (assertion.write), NOT to publish().
+    expect(state.publishes).toHaveLength(0);
+    expect(state.assertionWrites).toHaveLength(1);
+    expect(state.assertionWrites[0].cgId).toBe('chat-room');
+    expect(state.assertionWrites[0].name).toBe('chat-turns');
+    expect(state.assertionWrites[0].quads.length).toBe(7); // 6 base + assistantReply
+    // A2: ensureContextGraphLocal is called first with the same cg id.
+    expect(state.ensureCGs).toHaveLength(1);
+    expect(state.ensureCGs[0].id).toBe('chat-room');
     expect(calls[0].text).toMatch(/Chat turn persisted \(7 triples\)/);
   });
 
-  it('routes publish() errors through the callback', async () => {
-    const svc = await import('../src/service.js');
-    const spy = vi.spyOn(svc, 'requireAgent').mockReturnValue({
-      publish: async () => { throw new Error('no store'); },
-    } as any);
-    try {
-      const { calls, cb } = captureCb();
-      const ok = await dkgPersistChatTurn.handler(
-        makeRuntime(),
-        makeMessage('hi'),
-        {} as State, {}, cb,
-      );
-      expect(ok).toBe(false);
-      expect(calls[0].text).toMatch(/Chat turn persist failed: no store/);
-    } finally {
-      spy.mockRestore();
-    }
+  it('routes assertion.write errors through the callback', async () => {
+    state.assertionWriteError = new Error('no store');
+    const { calls, cb } = captureCb();
+    const ok = await dkgPersistChatTurn.handler(
+      makeRuntime(),
+      makeMessage('hi'),
+      {} as State, {}, cb,
+    );
+    expect(ok).toBe(false);
+    expect(calls[0].text).toMatch(/Chat turn persist failed: no store/);
   });
 });
 

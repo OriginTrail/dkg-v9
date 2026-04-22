@@ -313,13 +313,63 @@ export const dkgPersistChatTurn: Action = {
   ],
 };
 
+/**
+ * Minimal agent contract required by {@link persistChatTurnImpl}.
+ *
+ * Bot review A1/A3: chat-turn persistence MUST NOT go through the canonical
+ * `agent.publish()` pipeline — that writes finalized data to the broadcast
+ * data graph (and requires the CG to already exist on-chain), which means
+ * every user/assistant message would be shipped to the network and charged
+ * against KA/finalization semantics. Chat history belongs in the per-agent
+ * working-memory assertion graph instead (`agent.assertion.write`), which
+ * stays local to the node and satisfies the `view: 'working-memory'`
+ * retrieval contract this hook advertises.
+ *
+ * Bot review A2: fresh installs don't have a `chat` context graph. Before
+ * writing we best-effort call `ensureContextGraphLocal` so the CG exists
+ * locally (this is idempotent if it already exists) and won't throw on
+ * the first turn persisted. In production this method is on `DKGAgent`;
+ * tests may omit it and the ensure step becomes a no-op.
+ *
+ * The tuple type is deliberately wide so unit tests can plug in a capturing
+ * fake without booting a real DKGAgent (libp2p + chain + storage are
+ * validated end-to-end by the downstream integration suites).
+ */
+export interface ChatTurnPersistenceAgent {
+  assertion: {
+    write: (
+      contextGraphId: string,
+      name: string,
+      quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+      opts?: { subGraphName?: string },
+    ) => Promise<void>;
+  };
+  ensureContextGraphLocal?: (opts: {
+    id: string;
+    name: string;
+    description?: string;
+    curated?: boolean;
+  }) => Promise<void>;
+}
+
 /** Shared implementation used by the action AND the dkgService.persistChatTurn / hooks.onChatTurn surface.
- *  The agent contract is intentionally loose so unit tests can plug in a
- *  fake publisher; in production a `DKGAgent` is passed and its
- *  `publish` returns `PublishResult` (`kcId` is `bigint`). We coerce to
- *  string before handing back to the caller. */
+ *
+ *  Bot review A1/A2/A3/A4/A5 fixes:
+ *    - A1/A3: writes via `agent.assertion.write` (WM path) instead of
+ *             `agent.publish` (broadcast/finalization path).
+ *    - A2:    lazily ensures the target CG exists locally so fresh
+ *             installs with the default `chat` CG don't throw.
+ *    - A3:    builds real `Quad[]` (with `graph: ''`; the publisher
+ *             rewrites this to the real assertion graph URI) so
+ *             serialization doesn't produce `<undefined>` named graphs.
+ *    - A4:    emits the `rdf:type` object as a bare IRI — the publisher
+ *             wraps non-literals in `<...>` on serialization, so the
+ *             previous `'<...>'` double-wrapped to `<<...>>`.
+ *    - A5:    uses `encodeURIComponent` for reversible ID encoding so
+ *             `room/a` and `room:a` don't collide onto the same subject.
+ */
 export async function persistChatTurnImpl(
-  agent: { publish: (cgId: string, quads: any) => Promise<{ kcId: bigint | string }> },
+  agent: ChatTurnPersistenceAgent,
   runtime: IAgentRuntime,
   message: Memory,
   state: State,
@@ -329,6 +379,7 @@ export async function persistChatTurnImpl(
     contextGraphId?: string;
     assistantText?: string;
     assistantReply?: { text?: string };
+    assertionName?: string;
   };
 
   const userId = (message as any).userId ?? 'anonymous';
@@ -342,36 +393,77 @@ export async function persistChatTurnImpl(
     ?? '';
   const characterName = runtime.character?.name ?? runtime.getSetting('DKG_AGENT_NAME') ?? 'elizaos-agent';
   const contextGraphId = optsAny.contextGraphId ?? runtime.getSetting('DKG_CHAT_CG') ?? 'chat';
-  const turnUri = `urn:dkg:elizaos:chat:${escapeIri(roomId)}:${escapeIri(memId)}`;
+  const assertionName = optsAny.assertionName ?? runtime.getSetting('DKG_CHAT_ASSERTION') ?? 'chat-turns';
+  const turnUri = `urn:dkg:elizaos:chat:${encodeIriSegment(roomId)}:${encodeIriSegment(memId)}`;
   const ts = new Date().toISOString();
 
-  const quads: Array<{ subject: string; predicate: string; object: string }> = [
+  const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
+    // A4: bare IRI for the rdf:type object. Publisher wraps non-literals
+    //     in <...> at serialization; previously we stored `'<...>'` which
+    //     then serialized as `<<...>>` and the write failed.
     { subject: turnUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      object: '<https://schema.origintrail.io/dkg/v10/ChatTurn>' },
+      object: 'https://schema.origintrail.io/dkg/v10/ChatTurn', graph: '' },
     { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userId',
-      object: rdfString(userId) },
+      object: rdfString(userId), graph: '' },
     { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/roomId',
-      object: rdfString(roomId) },
+      object: rdfString(roomId), graph: '' },
     { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/agentName',
-      object: rdfString(characterName) },
+      object: rdfString(characterName), graph: '' },
     { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/userMessage',
-      object: rdfString(userText) },
+      object: rdfString(userText), graph: '' },
     { subject: turnUri, predicate: 'https://schema.origintrail.io/dkg/v10/timestamp',
-      object: `${rdfString(ts)}^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+      object: `${rdfString(ts)}^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: '' },
   ];
   if (assistantText) {
     quads.push({
       subject: turnUri,
       predicate: 'https://schema.origintrail.io/dkg/v10/assistantReply',
       object: rdfString(assistantText),
+      graph: '',
     });
   }
 
-  const result = await agent.publish(contextGraphId, quads as any);
-  return { tripleCount: quads.length, turnUri, kcId: String(result.kcId) };
+  // A2: best-effort lazy CG ensure. If the CG already exists this is a
+  // cheap no-op; if the agent doesn't expose the method (unit tests) we
+  // skip and let assertionWrite surface a real error. We intentionally do
+  // NOT register on-chain here — that's a separate explicit operation.
+  if (typeof agent.ensureContextGraphLocal === 'function') {
+    await agent.ensureContextGraphLocal({
+      id: contextGraphId,
+      name: contextGraphId,
+      description: 'ElizaOS chat-turn persistence context graph (auto-ensured)',
+      curated: true,
+    });
+  }
+
+  // A1/A3: write into the per-agent WM assertion graph, not the
+  // broadcast data graph.
+  await agent.assertion.write(contextGraphId, assertionName, quads);
+  return { tripleCount: quads.length, turnUri, kcId: '' };
+}
+
+/**
+ * Bot review A5: reversible URI-segment encoding. Replacing every non-[A-Za-z0-9_.-]
+ * byte with `_` is lossy — `room/a` and `room:a` both collapse to `room_a`,
+ * silently merging distinct rooms (or distinct messages) onto the same
+ * `turnUri`. `encodeURIComponent` is round-trippable via `decodeURIComponent`
+ * and keeps percent-encoded chars IRI-safe for our `urn:dkg:` scheme.
+ *
+ * We leave the legacy `escapeIri` export in place for back-compat with
+ * any callers still importing it (none in-tree), but route chat-turn
+ * encoding through `encodeIriSegment`.
+ */
+function encodeIriSegment(s: string): string {
+  // Keep `.`, `-`, `_` unescaped (they're safe in our URN scheme);
+  // everything else goes through encodeURIComponent.
+  return encodeURIComponent(String(s));
 }
 
 function escapeIri(s: string): string {
+  // Back-compat shim (intentionally unused by persistChatTurnImpl now).
+  // Kept to avoid breaking hypothetical external importers. Consider
+  // removing in the next breaking release.
+  void encodeIriSegment; // silence linters that flag unused helper pairs
   return String(s).replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 

@@ -30,11 +30,24 @@ export interface ViewResolution {
  * prefixes) that the query engine should target.
  *
  * Spec reference: §12 GET — Declared State Views.
+ *
+ * Trust-level semantics for `verified-memory` (P-13):
+ *   The root content graph `did:dkg:context-graph:{id}` holds chain-confirmed
+ *   data at only `TrustLevel.SelfAttested` (on-chain anchoring proves the
+ *   publisher signed it, not that a quorum endorsed it). Higher-trust data
+ *   lives in per-quorum sub-graphs under `/_verified_memory/{quorum}`.
+ *   When `minTrust > SelfAttested`, the root data graph is excluded from
+ *   the resolution so low-trust triples cannot leak into a high-trust query.
  */
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
-  opts?: { agentAddress?: string; verifiedGraph?: string; assertionName?: string },
+  opts?: {
+    agentAddress?: string;
+    verifiedGraph?: string;
+    assertionName?: string;
+    minTrust?: TrustLevel;
+  },
 ): ViewResolution {
   if (REMOVED_VIEWS.includes(view as string)) {
     throw new Error(
@@ -74,8 +87,13 @@ export function resolveViewGraphs(
       // Verified Memory content layer (chain-confirmed data lands here after
       // finalization).  Any quorum-specific verified-memory sub-graphs live
       // under `_verified_memory/` and are unioned in as well.
+      //
+      // P-13: when the caller demands more than SelfAttested, the root data
+      // graph is dropped — only quorum-verified sub-graphs survive.
+      const requireHighTrust =
+        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       return {
-        graphs: [contextGraphDataUri(contextGraphId)],
+        graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
@@ -190,6 +208,9 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
+      // Accept both the new public `minTrust` field and the legacy
+      // `_minTrust` alias for backward compatibility.
+      minTrust: options.minTrust ?? options._minTrust,
     });
 
     const allGraphs = [...resolution.graphs];

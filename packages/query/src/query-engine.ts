@@ -40,9 +40,22 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
-   * @internal Reserved for future use — not yet enforced by DKGQueryEngine.
-   * Will filter verified-memory triples below this trust threshold once trust
-   * metadata is available in verified-memory graphs.
+   * Minimum trust level for triples returned by a `verified-memory` view.
+   *
+   * When set above `TrustLevel.SelfAttested` the resolver drops the root
+   * data graph — which holds only chain-confirmed SelfAttested triples —
+   * so that low-trust data cannot leak into a high-trust query. Only
+   * quorum-verified sub-graphs under `/_verified_memory/{quorum}` survive.
+   *
+   * Note: per-quad trust filtering inside the surviving sub-graphs (based
+   * on a `dkg:trustLevel` predicate carried on each triple) is tracked
+   * separately as Q-1 and is not yet implemented; this field only affects
+   * which NAMED graphs are unioned.
+   */
+  minTrust?: TrustLevel;
+  /**
+   * @deprecated Use `minTrust`. Legacy alias kept for backward compat.
+   * Will be removed in a future release.
    */
   _minTrust?: TrustLevel;
 }

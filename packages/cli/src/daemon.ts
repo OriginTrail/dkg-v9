@@ -81,6 +81,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from './catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
@@ -649,37 +650,6 @@ let isUpdating = false;
 
 type CatchupJobState = "queued" | "running" | "done" | "failed" | "denied";
 
-interface CatchupJobResult {
-  connectedPeers: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-    };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-    };
-  };
-}
-
 interface CatchupJob {
   jobId: string;
   paranetId: string;
@@ -697,7 +667,17 @@ interface CatchupTracker {
   latestByParanet: Map<string, string>;
 }
 
+function toCatchupStatusResponse(job: CatchupJob) {
+  return {
+    ...job,
+    contextGraphId: job.paranetId,
+    includeSharedMemory: job.includeWorkspace,
+  };
+}
+
 type PublishAccessPolicy = "public" | "ownerOnly" | "allowList";
+
+let daemonCatchupRunner: CatchupRunner | null = null;
 
 interface PublishQuad {
   subject: string;
@@ -1754,6 +1734,7 @@ async function runDaemonInner(
     ],
   );
   let corsAllowed: CorsAllowlist = "*";
+  daemonCatchupRunner = createCatchupRunner(agent);
 
   const server = createServer(async (req, res) => {
     try {
@@ -1998,6 +1979,11 @@ async function runDaemonInner(
       ?.stop()
       .catch((err: any) =>
         log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+      );
+    await daemonCatchupRunner
+      ?.close()
+      .catch((err: any) =>
+        log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
       );
     server.close();
     appStaticServer?.close();
@@ -3730,6 +3716,34 @@ async function handleRequest(
       };
     });
     return jsonResponse(res, 200, { agents: enriched });
+  }
+
+  // GET /api/peer-info?peerId=<id>
+  if (req.method === "GET" && path === "/api/peer-info") {
+    const peerId = url.searchParams.get("peerId");
+    if (!peerId) {
+      return jsonResponse(res, 400, { error: 'Missing "peerId" query param' });
+    }
+
+    const allConns = agent.node.libp2p.getConnections();
+    const peerConns = allConns.filter((c) => c.remotePeer.toString() === peerId);
+    const protocols = await agent.getPeerProtocols(peerId);
+
+    const health = agent.getPeerHealth().get(peerId);
+    return jsonResponse(res, 200, {
+      peerId,
+      connected: peerConns.length > 0,
+      connectionCount: peerConns.length,
+      transports: peerConns.map((c) =>
+        c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
+      ),
+      directions: peerConns.map((c) => c.direction),
+      remoteAddrs: peerConns.map((c) => c.remoteAddr?.toString() ?? null),
+      protocols,
+      syncCapable: protocols.includes('/dkg/10.0.0/sync'),
+      lastSeen: health?.lastSeen ?? null,
+      latencyMs: health?.latencyMs ?? null,
+    });
   }
 
   // GET /api/skills
@@ -7043,6 +7057,7 @@ async function handleRequest(
 
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+    console.log(`[subscribe] contextGraph=${paranetId} includeSharedMemory=${shouldSyncSharedMemory}`);
     agent.subscribeToContextGraph(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -7079,13 +7094,12 @@ async function handleRequest(
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
+      console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
       try {
-        const result = await agent.syncContextGraphFromConnectedPeers(
-          paranetId,
-          {
-            includeSharedMemory: shouldSyncSharedMemory,
-          },
-        );
+        const result = await daemonCatchupRunner!.run({
+          contextGraphId: paranetId,
+          includeSharedMemory: shouldSyncSharedMemory,
+        });
         job.result = result;
         job.status = "done";
 
@@ -7115,11 +7129,16 @@ async function handleRequest(
           (s?.emptyResponses ?? 0) > 0;
 
         // Authoritative ACL denial: at least one peer explicitly denied
-        // the sync (via the SYNC_ACCESS_DENIED_MARKER sentinel surfaced
-        // by syncContextGraphFromConnectedPeers) and NO peer returned a
-        // clean response of any shape. Transport timeouts / unreachable
-        // peers do NOT increment accessDeniedPeers, so an open CG with
-        // slow/offline peers won't be misclassified as denied.
+        // the sync (via the `syncDenied` sentinel surfaced by the new
+        // `runDurableSync` worker — see `sync/requester/page-fetch.ts`
+        // which flips `deniedPhases`, which `runCatchupOverPeers` then
+        // rolls up into the single `denied` boolean we read here). The
+        // boolean replaces HEAD's per-peer `accessDeniedPeers` counter
+        // that was removed by the v10-rc sync refactor; we no longer
+        // need the count because we gate on `cleanResponse` to handle
+        // mixed pools. Transport timeouts / unreachable peers do NOT
+        // set `syncDenied`, so an open CG with slow/offline peers won't
+        // be misclassified as denied.
         //
         // Corner case the earlier guard missed: an authorised peer that
         // responded empty or meta-only (legitimate — CG exists but has
@@ -7129,7 +7148,7 @@ async function handleRequest(
         // from a peer that's happy to serve us. Gating on
         // `cleanResponse` makes the classification symmetric with the
         // synced-flip below.
-        if (result.accessDeniedPeers > 0 && !cleanResponse) {
+        if (result.denied && !cleanResponse) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
           // Only unsubscribe if the CG was only known via auto-discovery,
@@ -7168,11 +7187,25 @@ async function handleRequest(
             // failure so the UI doesn't pretend the sync succeeded.
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
+          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
+            // v10-rc surfaces this explicitly: peers are connected but
+            // none advertise the sync protocol yet. Not "our sync failed",
+            // just "no one can serve us right now" — surface as failure
+            // so the UI retries instead of declaring "synced".
+            job.status = "failed";
+            job.error = "No sync-capable peers found for catch-up";
           }
+
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${paranetId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
+        console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
       }
@@ -7214,7 +7247,7 @@ async function handleRequest(
       });
     }
 
-    return jsonResponse(res, 200, job);
+    return jsonResponse(res, 200, toCatchupStatusResponse(job));
   }
 
   // POST /api/paranet/create (legacy) — create a context graph definition

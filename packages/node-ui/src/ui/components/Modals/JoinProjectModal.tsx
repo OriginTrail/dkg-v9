@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
-  subscribeToContextGraph, fetchContextGraphs, authHeaders,
+  subscribeToContextGraph, fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent, fetchCatchupStatus,
+  connectToPeerWithTimeout,
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -15,20 +16,30 @@ interface JoinProjectModalProps {
 
 function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
   const normalized = raw.trim().replace(/\\n/g, '\n');
-  const multiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
-  const multiaddr = multiaddrMatch?.[1] ?? null;
-  const cgId = (multiaddr
-    ? normalized.replace(multiaddr, '')
-    : normalized
-  ).split('\n').map(l => l.trim()).filter(Boolean)[0] ?? '';
+  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
+  const cgId = lines[0] ?? '';
+  const multilineMultiaddr = lines.slice(1).join('').replace(/\s+/g, '');
+  const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
+  const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
+  const multiaddr = multilineMultiaddr.startsWith('/') ? multilineMultiaddr : inlineMultiaddr;
   return { cgId, multiaddr };
+}
+
+function validateInvite(cgId: string, multiaddr: string | null): string | null {
+  if (!cgId) return 'Missing project ID';
+  if (!multiaddr) return null;
+  if (!multiaddr.startsWith('/')) return 'Invalid curator multiaddr';
+  if (!multiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
+  return null;
 }
 
 // Catchup iterates connected peers with a ~30s per-peer sync timeout. Even
 // with parallel per-peer sync on the backend, the slowest peer gates the
 // whole job, so we need a generous total wait to reliably observe denials
 // for curated projects before giving up. Timeout path is deliberately not
-// treated as success by the caller.
+// treated as success by the caller. (HEAD tier-4: raised from 10×1.5s to
+// 60×1.5s so denials on slow curators don't get misreported as transport
+// errors in the UI.)
 async function pollCatchupStatus(
   cgId: string,
   maxAttempts = 60,
@@ -89,7 +100,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleJoin = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setJoining(true);
     setError(null);
@@ -101,14 +116,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       if (multiaddr) {
         setProgress('Connecting to curator node…');
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 1000));
         } catch {
-          // Non-fatal -- nodes may already be connected
+          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
         }
       }
 
@@ -149,7 +160,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         // from just retrying. Surface a neutral network error instead
         // and let them retry; a real ACL denial lands in the `denied`
         // branch above, or in the `err.message` check at the bottom
-        // of this function.
+        // of this function. (HEAD tier-4c G3; v10-rc's copy "syncing
+        // still in progress" was milder but still implied success —
+        // we'd rather the user retry explicitly than think the subscribe
+        // finished when the background sync never landed data.)
         setError(
           'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
         );
@@ -191,7 +205,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleSendRequest = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setSendingRequest(true);
     setError(null);
@@ -199,14 +217,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     try {
       if (multiaddr) {
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 500));
         } catch {
-          // Non-fatal
+          // Non-fatal — signed join requests can still be delivered via existing peers.
         }
       }
 

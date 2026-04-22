@@ -27,8 +27,9 @@ import {
 } from './actions.js';
 
 /**
- * PR #229 bot review round 16 (r16-2): bounded cache of user-message
- * ids whose `onChatTurn` write completed successfully IN THIS PROCESS.
+ * PR #229 bot review round 16 (r16-2) + round 17 (r17-1): bounded cache
+ * of user-message ids whose `onChatTurn` write completed successfully
+ * IN THIS PROCESS, SCOPED PER RUNTIME.
  *
  * Context: r14-2 plumbed an explicit `userTurnPersisted` boolean up
  * to `persistChatTurnImpl`, and r15-2 ensured that even when the
@@ -42,32 +43,66 @@ import {
  * edge alongside the real one — readers can bind to the stub and
  * surface a blank turn.
  *
- * Right answer: the plugin KNOWS whether onChatTurn landed, because
- * IT is the code that dispatched `persistChatTurn`. Track the set
- * of successfully-persisted (roomId, userMsgId) tuples here, then
- * consult it when onAssistantReply fires. If we find a hit we pass
- * `userTurnPersisted: true` (cheap append-only path — safe, reader
- * contract already holds via the real user message). Otherwise we
- * still pass `false` and take the headless branch (r14-2 invariant
- * preserved for cases where the user-turn write truly was skipped).
+ * r16-2's first pass made the cache a single process-global Map.
+ * r17-1 fixed the cross-agent leak: one process can legitimately
+ * host MULTIPLE Eliza runtimes (multi-tenant daemon, test harness,
+ * orchestrator). A successful `onChatTurn` in runtime A must NOT
+ * make runtime B's `onAssistantReply` silently take the append-only
+ * path for the same `(roomId, userMsgId)` coincidence — B never
+ * wrote the user-turn envelope, so the reply would become
+ * unreadable in B's graph.
  *
- * Cache design:
- *   - Keyed by `${roomId}\0${userMsgId}` (the same pair that determines
- *     `turnKey` in `persistChatTurnImpl`) so we never confuse a
- *     user-message id that happens to repeat across rooms.
- *   - Bounded to `MAX_ENTRIES` so a long-running node doesn't
- *     accumulate unbounded state — we drop the oldest entries in
- *     insertion order (Map iteration order is insertion-ordered
- *     in every JS engine we care about). The worst-case consequence
- *     of eviction is that a late-arriving onAssistantReply for an
- *     old user turn falls through to the headless branch, which is
- *     the documented-safe path (r15-2 collision guard still holds).
- *   - Only records onChatTurn RESOLUTIONS, not rejections. If the
- *     user-turn write throws we deliberately NEVER record it so the
- *     assistant reply falls through to the safe headless branch.
+ * Fix: a `WeakMap<runtime, Map<key, true>>` — every runtime object
+ * gets its own LRU Map; when the runtime is garbage-collected, its
+ * entire cache disappears automatically (no leak on runtime
+ * replacement). Each per-runtime Map is still bounded to
+ * `PERSISTED_USER_TURN_CACHE_MAX` entries. Keys within a runtime
+ * are `${roomId}\u0000${userMsgId}` (the same pair that determines
+ * `turnKey` in `persistChatTurnImpl`).
+ *
+ * Fallback: if the caller invokes the hooks with a non-object
+ * runtime (e.g. a `null` / `undefined` stub from a one-off script),
+ * we degrade to a single "anonymous" per-process Map so the r16-2
+ * in-process sharing property still holds for that caller. This
+ * cannot bridge two runtimes because both of them would have to
+ * be non-object to hit the fallback, which is not a realistic
+ * multi-tenant shape.
+ *
+ * Only records onChatTurn RESOLUTIONS, not rejections. If the
+ * user-turn write throws we deliberately NEVER record it so the
+ * assistant reply falls through to the safe headless branch.
  */
 const PERSISTED_USER_TURN_CACHE_MAX = 10_000;
-const persistedUserTurns = new Map<string, true>();
+/**
+ * Per-runtime caches. WeakMap so we don't pin runtime instances in
+ * memory past their natural lifetime (service reload, hot-swap).
+ * Keyed by identity of the runtime object — two distinct runtime
+ * instances with identical shape each get their own Map.
+ *
+ * Declared `let` so `__resetPersistedUserTurnCacheForTests` can
+ * rebind it to a brand-new WeakMap (WeakMap has no `.clear()` in
+ * the language spec). In production this binding is only written
+ * once at module load.
+ */
+let persistedUserTurnsByRuntime: WeakMap<object, Map<string, true>> = new WeakMap();
+/**
+ * Fallback for non-object runtimes. Primarily exists to keep one-off
+ * scripts and tests that pass a literal object or `null` working —
+ * in production `runtime` is always an `IAgentRuntime` instance.
+ */
+let persistedUserTurnsAnon: Map<string, true> = new Map();
+
+function resolveRuntimeCache(runtime: unknown): Map<string, true> {
+  if (runtime !== null && typeof runtime === 'object') {
+    let m = persistedUserTurnsByRuntime.get(runtime as object);
+    if (!m) {
+      m = new Map<string, true>();
+      persistedUserTurnsByRuntime.set(runtime as object, m);
+    }
+    return m;
+  }
+  return persistedUserTurnsAnon;
+}
 
 function persistedUserTurnKey(roomId: unknown, userMsgId: unknown): string | null {
   const r = typeof roomId === 'string' ? roomId : '';
@@ -76,22 +111,39 @@ function persistedUserTurnKey(roomId: unknown, userMsgId: unknown): string | nul
   return `${r}\u0000${u}`;
 }
 
-function markUserTurnPersisted(roomId: unknown, userMsgId: unknown): void {
+function markUserTurnPersisted(
+  runtime: unknown,
+  roomId: unknown,
+  userMsgId: unknown,
+): void {
   const k = persistedUserTurnKey(roomId, userMsgId);
   if (!k) return;
+  const m = resolveRuntimeCache(runtime);
   // Refresh LRU ordering: remove + re-insert so the entry moves to
   // the tail (most-recent). Eviction pops the head.
-  persistedUserTurns.delete(k);
-  persistedUserTurns.set(k, true);
-  if (persistedUserTurns.size > PERSISTED_USER_TURN_CACHE_MAX) {
-    const oldest = persistedUserTurns.keys().next().value;
-    if (oldest !== undefined) persistedUserTurns.delete(oldest);
+  m.delete(k);
+  m.set(k, true);
+  if (m.size > PERSISTED_USER_TURN_CACHE_MAX) {
+    const oldest = m.keys().next().value;
+    if (oldest !== undefined) m.delete(oldest);
   }
 }
 
-function hasUserTurnBeenPersisted(roomId: unknown, userMsgId: unknown): boolean {
+function hasUserTurnBeenPersisted(
+  runtime: unknown,
+  roomId: unknown,
+  userMsgId: unknown,
+): boolean {
   const k = persistedUserTurnKey(roomId, userMsgId);
-  return k !== null && persistedUserTurns.has(k);
+  if (k === null) return false;
+  // For object runtimes, a WeakMap miss means "this runtime has
+  // never recorded ANY user turn" — no need to materialize an
+  // empty Map just to answer false.
+  if (runtime !== null && typeof runtime === 'object') {
+    const m = persistedUserTurnsByRuntime.get(runtime as object);
+    return m !== undefined && m.has(k);
+  }
+  return persistedUserTurnsAnon.has(k);
 }
 
 /**
@@ -100,9 +152,18 @@ function hasUserTurnBeenPersisted(roomId: unknown, userMsgId: unknown): boolean 
  * a clean slate. Exported as `__resetPersistedUserTurnCacheForTests`
  * (double-underscore prefix marks it as a non-public surface — the
  * only documented consumer is the plugin test suite).
+ *
+ * Resets BOTH the anonymous fallback Map and the per-runtime
+ * WeakMap (the WeakMap itself cannot be cleared in-place, so we
+ * rebind it — old entries become unreachable and GC-eligible).
  */
 export function __resetPersistedUserTurnCacheForTests(): void {
-  persistedUserTurns.clear();
+  persistedUserTurnsAnon = new Map();
+  // Rebind the WeakMap: the previous instance (and every
+  // runtime→Map association inside it) becomes unreachable and
+  // GC-eligible. WeakMap has no `.clear()` in the spec — rebinding
+  // is the canonical "drop everything" operation.
+  persistedUserTurnsByRuntime = new WeakMap();
 }
 
 /**
@@ -178,7 +239,12 @@ async function onAssistantReplyHandler(
     opts.userTurnPersisted = (options as any).userTurnPersisted;
   } else {
     const roomId = (message as any)?.roomId;
-    opts.userTurnPersisted = hasUserTurnBeenPersisted(roomId, userMessageId);
+    // r17-1: scope cache lookup by runtime identity — different
+    // Eliza runtimes in the same process MUST NOT see each
+    // other's user-turn writes, otherwise runtime B's
+    // onAssistantReply would take the append-only path for a
+    // turn envelope that only exists in runtime A's graph.
+    opts.userTurnPersisted = hasUserTurnBeenPersisted(runtime, roomId, userMessageId);
   }
   return dkgService.persistChatTurn(runtime, message, state, opts);
 }
@@ -199,10 +265,12 @@ async function onChatTurnHandler(
 ) {
   const result = await dkgService.persistChatTurn(runtime, message, state, options);
   // Only mark AFTER the write resolved — if it throws we never
-  // reach this line and the cache stays clean.
+  // reach this line and the cache stays clean. r17-1: scope the
+  // record by the runtime identity so runtime B never sees
+  // runtime A's successful user-turn writes.
   const roomId = (message as any)?.roomId;
   const userMsgId = (message as any)?.id;
-  markUserTurnPersisted(roomId, userMsgId);
+  markUserTurnPersisted(runtime, roomId, userMsgId);
   return result;
 }
 

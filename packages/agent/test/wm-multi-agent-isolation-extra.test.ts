@@ -470,4 +470,113 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     );
     expect(res.bindings.length).toBe(0);
   });
+
+  // -------------------------------------------------------------------------
+  // PR #229 bot review round 17 (r17-2): WM cross-agent deny paths must
+  // preserve the *shape* the caller asked for. A `CONSTRUCT` caller branches
+  // on `result.quads !== undefined` to decide whether it got graph data back;
+  // returning `{ bindings: [] }` on a deny (as we did before r17-2) makes a
+  // fail-closed denial look exactly like a legitimate SELECT-with-zero-rows
+  // response, which is exactly the kind of silent shape-mismatch that
+  // breaks downstream consumers in production. Pin the contract.
+  // -------------------------------------------------------------------------
+  it('r17-2: CONSTRUCT deny on WM cross-agent impersonation returns quads:[] (shape preserved)', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-construct');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 CONSTRUCT', description: '' });
+    await node!.assertion.create(cgId, 'shape');
+    await node!.assertion.write(cgId, 'shape', [
+      {
+        subject: 'urn:wm:alice:fact:shape',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-shape-probe"',
+        graph: '',
+      },
+    ]);
+
+    // Impersonation attempt from B → A's WM with no auth signature at all.
+    // Strict mode is on (see beforeAll) so this MUST be denied.
+    const res: any = await node!.query(
+      `CONSTRUCT { ?s <http://schema.org/description> ?o } WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    // The denial MUST:
+    //  - return `quads` (the CONSTRUCT shape), not a bindings-only SELECT shape;
+    //  - return an empty `quads` array (no data leaked);
+    //  - return an empty `bindings` array alongside (stable `QueryResult` shape).
+    expect(
+      res.quads,
+      'CONSTRUCT deny must preserve quads shape — otherwise callers branching on result.quads misread the deny as a SELECT',
+    ).toBeDefined();
+    expect(Array.isArray(res.quads)).toBe(true);
+    expect(res.quads.length, 'denied CONSTRUCT must leak zero quads').toBe(0);
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(0);
+  });
+
+  it('r17-2: ASK deny on WM cross-agent impersonation returns bindings=[{result:"false"}]', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-ask');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 ASK', description: '' });
+    await node!.assertion.create(cgId, 'ask');
+    await node!.assertion.write(cgId, 'ask', [
+      {
+        subject: 'urn:wm:alice:fact:ask',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-ask-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res: any = await node!.query(
+      `ASK { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    // ASK deny must be the canonical "false" boolean — NOT an empty
+    // bindings array (which would leak "true" to a caller that treats
+    // `bindings.length === 0` as a failure signal).
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(1);
+    expect(res.bindings[0]?.result).toBe('false');
+  });
+
+  it('r17-2: SELECT deny on WM cross-agent impersonation returns bindings=[] without a quads key', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-select');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 SELECT', description: '' });
+    await node!.assertion.create(cgId, 'sel');
+    await node!.assertion.write(cgId, 'sel', [
+      {
+        subject: 'urn:wm:alice:fact:sel',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-sel-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res: any = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(0);
+    // SELECT must NOT carry `quads` (that would hint at graph data and
+    // confuse callers that normalize on `quads !== undefined`).
+    expect(res.quads).toBeUndefined();
+  });
 });

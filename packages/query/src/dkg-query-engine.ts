@@ -9,7 +9,7 @@ import {
   REMOVED_VIEWS,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
-import { validateReadOnlySparql } from './sparql-guard.js';
+import { validateReadOnlySparql, detectSparqlQueryForm, emptyResultForForm } from './sparql-guard.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -224,7 +224,12 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     if (allGraphs.length === 0) {
-      return { bindings: [] };
+      // r17-2: preserve query-form shape so CONSTRUCT/DESCRIBE callers
+      // that branch on `result.quads !== undefined` don't misread a
+      // legitimately-empty view as a bindings-only SELECT. The empty
+      // `quads: []` is structurally compatible with `Quad[]`; the cast
+      // is just to satisfy the nominal `QueryResult` contract.
+      return emptyResultForForm(detectSparqlQueryForm(sparql)) as QueryResult;
     }
 
     // Spec §14 trust-gradient filter — only enforced on verified-memory
@@ -251,7 +256,10 @@ export class DKGQueryEngine implements QueryEngine {
           `[DKGQueryEngine] _minTrust=${options._minTrust} requested for a query shape ` +
             `injectMinTrustFilter cannot safely rewrite; returning empty result (fail-closed)`,
         );
-        return { bindings: [] };
+        // r17-2: preserve the query form so CONSTRUCT/DESCRIBE callers
+        // see `{ bindings: [], quads: [] }` rather than a shapeless deny.
+        // Cast to QueryResult — `quads: []` is structurally `Quad[]`.
+        return emptyResultForForm(detectSparqlQueryForm(sparql)) as QueryResult;
       }
       effectiveSparql = rewritten;
     }

@@ -318,3 +318,120 @@ describe('dkgPlugin.hooks — r16-2: onChatTurn → onAssistantReply in-process 
     }
   });
 });
+
+// -----------------------------------------------------------------------
+// PR #229 bot review round 17 — r17-1: the persistedUserTurns cache
+// MUST be scoped per-runtime. Process hosting multiple Eliza runtimes
+// (multi-tenant daemon, orchestrator, test harness) would otherwise
+// cross-contaminate: runtime A's successful onChatTurn would make
+// runtime B's onAssistantReply take the append-only path for a turn
+// envelope that only exists in A's graph. B's reply becomes
+// unreadable (no matching dkg:ChatTurn / userMsg subject in B).
+// -----------------------------------------------------------------------
+describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('runtime A onChatTurn does NOT affect runtime B onAssistantReply (cross-runtime isolation)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtimeA = { getSetting: () => undefined, character: { name: 'A' } } as any;
+      const runtimeB = { getSetting: () => undefined, character: { name: 'B' } } as any;
+      // Same roomId+msgId coincidence between the two tenants — the
+      // worst-case the bot flagged.
+      const userMsg = { content: { text: 'hi' }, id: 'shared-msg', userId: 'u', roomId: 'shared-room' } as any;
+      const replyOnB = {
+        content: { text: 'r' }, id: 'asst-b', userId: 'a', roomId: 'shared-room',
+        replyTo: 'shared-msg',
+      } as any;
+
+      // Runtime A successfully persists the user turn.
+      await (dkgPlugin as any).hooks.onChatTurn(runtimeA, userMsg, {}, {});
+      // Runtime B receives an assistant reply pointing at the SAME
+      // (roomId, msgId) coordinates — but B never wrote the envelope.
+      await (dkgPlugin as any).hooks.onAssistantReply(runtimeB, replyOnB, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userMessageId).toBe('shared-msg');
+      // r17-1 invariant: B must NOT take the append-only path.
+      // Pre-r17-1 (process-global cache) this flipped to `true` and
+      // B's reply became unreadable in B's graph.
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('same runtime handles cache hits correctly (no regression on r16-2 intra-runtime sharing)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'same' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'u-17', userId: 'u', roomId: 'r-17' } as any;
+      const reply = {
+        content: { text: 'r' }, id: 'a-17', userId: 'a', roomId: 'r-17',
+        replyTo: 'u-17',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Same runtime → cache hit → append-only path (r16-2 behaviour
+      // preserved; only the SCOPE of the cache changed).
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('non-object runtime (null/undefined edge case) falls through to the anon map without crashing', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      // Pathological script that forgets to pass runtime. The plugin
+      // must not throw on the WeakMap lookup — WeakMap keys must be
+      // objects.
+      const userMsg = { content: { text: 'hi' }, id: 'u-anon', userId: 'u', roomId: 'r-anon' } as any;
+      const reply = {
+        content: { text: 'r' }, id: 'a-anon', userId: 'a', roomId: 'r-anon',
+        replyTo: 'u-anon',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(null, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(null, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Same "runtime" (null → same anon bucket) so cache hits.
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('runtime A onChatTurn FAIL → runtime B cache stays clean AND runtime A cache stays clean (no cross-leak via failure)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any);
+    spy.mockRejectedValueOnce(new Error('fail-A')) // onChatTurn in A
+       .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const rtA = { getSetting: () => undefined, character: { name: 'A' } } as any;
+      const rtB = { getSetting: () => undefined, character: { name: 'B' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'u-fail', userId: 'u', roomId: 'rF' } as any;
+      const replyA = { content: { text: 'r' }, id: 'a-a', userId: 'a', roomId: 'rF', replyTo: 'u-fail' } as any;
+      const replyB = { content: { text: 'r' }, id: 'a-b', userId: 'a', roomId: 'rF', replyTo: 'u-fail' } as any;
+
+      await expect((dkgPlugin as any).hooks.onChatTurn(rtA, userMsg, {}, {})).rejects.toThrow(/fail-A/);
+      await (dkgPlugin as any).hooks.onAssistantReply(rtA, replyA, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(rtB, replyB, {}, {});
+
+      // Both runtimes fall through to headless because nothing was
+      // ever recorded.
+      expect(spy.mock.calls[1][3].userTurnPersisted).toBe(false);
+      expect(spy.mock.calls[2][3].userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

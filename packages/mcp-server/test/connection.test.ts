@@ -192,13 +192,11 @@ describe('DkgClient', () => {
     // URL now routes through to the `fetch()` call site.
     describe('DKG_NODE_URL full base URL routing (bot review r10-2 + r11-2)', () => {
       it('routes to a remote HTTPS host with an explicit port (origin-only)', async () => {
-        // PR #229 bot review round 11 (r11-2): DkgClient's per-request
-        // paths already prefix `/api/...`, so the base URL MUST be
-        // origin-only. If the user sets `DKG_NODE_URL=https://host:8443/api`,
-        // the pathname is intentionally dropped — otherwise requests
-        // would double-up to `/api/api/status` and miss the remote
-        // daemon entirely.
-        process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
+        // r17-4: the base URL MUST be origin-only. Callers that
+        // previously set `DKG_NODE_URL=https://host:8443/api` now
+        // fail-fast at `normalizeBaseUrl`; they should drop the
+        // trailing `/api` (DkgClient already hard-codes that prefix).
+        process.env.DKG_NODE_URL = 'https://remote.example:8443';
         const c = await DkgClient.connect();
 
         const { fn, calls } = createTrackingFetch([
@@ -227,7 +225,11 @@ describe('DkgClient', () => {
         expect(calls[0].url).toBe('http://remote.example:80/api/status');
       });
 
-      it('tolerates a trailing slash on the env URL (no `//` in concatenation)', async () => {
+      it('tolerates a single trailing slash on the env URL (pathname=`/` is still origin-only)', async () => {
+        // r17-4: a single trailing slash resolves to `u.pathname === '/'`
+        // which the guard treats as the origin case (not rejected).
+        // Anything deeper (`/api`, `/api/`) is rejected — pinned in
+        // the dedicated `normalizeBaseUrl` test block above.
         process.env.DKG_NODE_URL = 'http://remote.example:9999/';
         const c = await DkgClient.connect();
 
@@ -244,27 +246,16 @@ describe('DkgClient', () => {
     });
   });
 
-  describe('normalizeBaseUrl (bot review r10-2 + r11-2)', () => {
-    it('returns origin-only (scheme + host + port) and DROPS the pathname', () => {
-      // r11-2: pathname is intentionally dropped because DkgClient's
-      // per-request routes already hard-code the `/api/...` prefix.
-      expect(normalizeBaseUrl('https://remote.example:8443/api')).toBe(
-        'https://remote.example:8443',
-      );
+  describe('normalizeBaseUrl (bot review r10-2 + r11-2 + r17-4)', () => {
+    it('returns origin-only (scheme + host + port) for root-path URLs', () => {
       expect(normalizeBaseUrl('http://10.0.0.1:7777')).toBe(
         'http://10.0.0.1:7777',
       );
-      expect(normalizeBaseUrl('http://node.example:80/some/nested/path')).toBe(
-        'http://node.example:80',
+      expect(normalizeBaseUrl('http://10.0.0.1:7777/')).toBe(
+        'http://10.0.0.1:7777',
       );
-    });
-
-    it('tolerates trailing slashes (they are dropped with the pathname)', () => {
-      expect(normalizeBaseUrl('http://node.example:80/api/')).toBe(
-        'http://node.example:80',
-      );
-      expect(normalizeBaseUrl('http://node.example:80//api//')).toBe(
-        'http://node.example:80',
+      expect(normalizeBaseUrl('https://node.example:443')).toBe(
+        'https://node.example:443',
       );
     });
 
@@ -275,6 +266,18 @@ describe('DkgClient', () => {
       expect(normalizeBaseUrl('https://node.example')).toBe(
         'https://node.example:443',
       );
+    });
+
+    it('r17-4: rejects URLs with a non-root pathname instead of silently stripping it', () => {
+      // Pre-r17-4 these all reduced to `https://host:port` — which
+      // silently bypassed any reverse-proxy prefix. Now they return
+      // `undefined` so DkgClient.connect surfaces the misconfig.
+      expect(normalizeBaseUrl('https://remote.example:8443/api')).toBeUndefined();
+      expect(normalizeBaseUrl('http://node.example:80/some/nested/path')).toBeUndefined();
+      expect(normalizeBaseUrl('http://node.example:80/api/')).toBeUndefined();
+      expect(normalizeBaseUrl('http://node.example:80//api//')).toBeUndefined();
+      expect(normalizeBaseUrl('https://host/dkg')).toBeUndefined();
+      expect(normalizeBaseUrl('https://host/dkg/api')).toBeUndefined();
     });
 
     it('returns undefined for empty, malformed, or non-http URLs', () => {
@@ -290,16 +293,29 @@ describe('DkgClient', () => {
   // this helper centralizes the logic so both surfaces agree.
   describe('resolveDaemonEndpoint (bot review r10-3)', () => {
     it('resolves from DKG_NODE_URL + DKG_NODE_TOKEN when set (origin-only)', async () => {
-      process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
+      // r17-4: the URL MUST be origin-only (no path); supplying a
+      // pathname like `/api` now fails-fast in `normalizeBaseUrl`.
+      process.env.DKG_NODE_URL = 'https://remote.example:8443';
       process.env.DKG_NODE_TOKEN = 'env-tok';
       const r = await resolveDaemonEndpoint({ requireReachable: true });
-      // r11-2: pathname is dropped so DkgClient's `/api/...` routes
-      // don't double up on the wire.
       expect(r.baseOrPort).toBe('https://remote.example:8443');
       expect(r.displayUrl).toBe('https://remote.example:8443');
       expect(r.token).toBe('env-tok');
       expect(r.tokenSource).toBe('env');
       expect(r.urlSource).toBe('env');
+    });
+
+    it('r17-4: DKG_NODE_URL with a non-root pathname is rejected (falls back to file-derived port)', async () => {
+      process.env.DKG_NODE_URL = 'https://remote.example:8443/dkg';
+      process.env.DKG_NODE_TOKEN = 'env-tok';
+      process.env.DKG_API_PORT = '9201';
+      await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      // Origin is unusable → helper falls through to the file-port
+      // path. The env token is STILL honoured (token vs URL are
+      // independent), so tokenSource stays `env`.
+      expect(r.baseOrPort).toBe(9201);
+      expect(r.urlSource).toBe('file');
     });
 
     it('falls back to the file-derived port + token on a normal install', async () => {

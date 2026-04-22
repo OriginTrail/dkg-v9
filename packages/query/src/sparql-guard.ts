@@ -28,6 +28,76 @@ const MUTATING_PATTERN = new RegExp(
 // Matches the query form keyword after optional PREFIX/BASE preamble
 const READ_ONLY_FORMS = /^\s*(?:(?:PREFIX|BASE)\s+[^\n]*\n\s*)*(SELECT|CONSTRUCT|ASK|DESCRIBE)\b/i;
 
+/** SPARQL query form — enough to shape a `QueryResult` correctly. */
+export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNKNOWN';
+
+/**
+ * PR #229 bot review round 17 (r17-2): classify a read-only SPARQL
+ * query so callers can produce a result shape that MATCHES what the
+ * query engine would return for a successful-but-empty execution of
+ * the same form:
+ *
+ *   - SELECT  → `{ bindings: [] }`
+ *   - ASK     → `{ bindings: [{ result: 'false' }] }` (the `dkg-query-engine`
+ *               convention: ASK results surface through bindings so
+ *               callers don't need a separate branch)
+ *   - CONSTRUCT / DESCRIBE → `{ bindings: [], quads: [] }`
+ *   - UNKNOWN → `{ bindings: [] }` (safe default; unreachable from
+ *               inside `DKGAgent.query` because `validateReadOnlySparql`
+ *               rejects anything that doesn't match a known form)
+ *
+ * This lets fail-closed branches (WM cross-agent auth denial, private-CG
+ * leak guard, quota exceed, ...) emit a result indistinguishable from
+ * an empty legitimate response, without breaking downstream callers
+ * that branch on the presence of `quads`.
+ */
+export function detectSparqlQueryForm(sparql: string): SparqlQueryForm {
+  const stripped = stripLiteralsAndComments(sparql);
+  const m = READ_ONLY_FORMS.exec(stripped);
+  if (!m) return 'UNKNOWN';
+  const kw = m[1].toUpperCase();
+  if (kw === 'SELECT' || kw === 'CONSTRUCT' || kw === 'ASK' || kw === 'DESCRIBE') {
+    return kw;
+  }
+  return 'UNKNOWN';
+}
+
+/**
+ * Shape of an empty `QueryResult`.
+ *
+ * Structural alias deliberately expressed with the `unknown`/`never`
+ * quad element type so this module stays dependency-free of
+ * `@origintrail-official/dkg-query`'s `Quad`. Callers treat the
+ * returned object as a plain `QueryResult` — the `quads` array is
+ * always `[]`.
+ */
+export interface EmptyQueryResultShape {
+  bindings: Array<Record<string, string>>;
+  quads?: unknown[];
+}
+
+/**
+ * Build a shape-matched empty `QueryResult` for a given SPARQL form.
+ *
+ * Keep this logic colocated with `detectSparqlQueryForm` (same file)
+ * so the shape contract is visibly enforced in one place — any future
+ * change to `QueryResult` in `@origintrail-official/dkg-query` must
+ * update both together.
+ *
+ * Returns a FRESH object on every call, so callers can safely mutate
+ * it (append bindings on a subsequent fallthrough, e.g.) without
+ * worrying about cross-call aliasing.
+ */
+export function emptyResultForForm(form: SparqlQueryForm): EmptyQueryResultShape {
+  if (form === 'CONSTRUCT' || form === 'DESCRIBE') {
+    return { bindings: [], quads: [] };
+  }
+  if (form === 'ASK') {
+    return { bindings: [{ result: 'false' }] };
+  }
+  return { bindings: [] };
+}
+
 export interface SparqlGuardResult {
   safe: boolean;
   reason?: string;

@@ -255,10 +255,20 @@ export async function resolveDaemonEndpoint(options: {
  * {@link DkgClient} route already starts with `/api/...`, so an
  * override of `DKG_NODE_URL=https://remote.example:8443/api` produced
  * `.../api/api/status` on the wire — the remote daemon was
- * unreachable. We now normalize to ORIGIN-ONLY and ignore the
- * pathname entirely. If a base path is ever required at this layer,
- * the per-request paths in `DkgClient` would need to be decoupled
- * from the hard-coded `/api/` prefix at the same time.
+ * unreachable.
+ *
+ * PR #229 bot review round 17 (r17-4). Silently dropping the pathname
+ * was still a footgun: a daemon exposed behind a reverse-proxy prefix
+ * like `https://host/dkg` LOOKED configured, but traffic silently
+ * went to `https://host/api/...` — past the prefix. We now FAIL FAST
+ * and return `undefined` for any URL whose pathname is non-trivial
+ * (anything that isn't empty or `/`). That bubbles up as "daemon
+ * unreachable" at `DkgClient.connect`, which surfaces the
+ * misconfiguration in the operator's logs instead of producing
+ * opaque 404s from the proxy. If a base-path-aware DkgClient is
+ * added later, drop this guard and propagate the pathname — the
+ * per-request routes would need to stop hard-coding the `/api/`
+ * prefix at the same time.
  */
 export function normalizeBaseUrl(raw: string): string | undefined {
   if (!raw) return undefined;
@@ -273,6 +283,18 @@ export function normalizeBaseUrl(raw: string): string | undefined {
   if (!Number.isFinite(explicitPort) || explicitPort <= 0 || explicitPort > 65535) return undefined;
   if (!u.hostname) return undefined;
 
+  // r17-4: reject any non-root pathname instead of silently dropping
+  // it. URL normalizes a missing path to `/`, so origin-only inputs
+  // like `https://host:443` parse as `u.pathname === '/'`.
+  // Anything else (e.g. `/api`, `/dkg`, `/dkg/api`) would be thrown
+  // away by the pre-r17-4 code, leaving the operator with a base URL
+  // that looks right but silently bypasses their reverse-proxy
+  // prefix. Fail-fast: return undefined so DkgClient.connect reports
+  // "daemon unreachable" and the misconfiguration is visible.
+  if (u.pathname && u.pathname !== '/') {
+    return undefined;
+  }
+
   // Preserve the explicit host:port even when the port is the
   // protocol default — keeping the shape deterministic makes logs
   // and test assertions easier to reason about.
@@ -281,7 +303,6 @@ export function normalizeBaseUrl(raw: string): string | undefined {
     : `${u.hostname}:${explicitPort}`;
 
   // Origin-only: DkgClient's per-request paths hard-code the
-  // `/api/...` prefix, so any additional pathname here would double
-  // up (see r11-2 rationale above). Deliberately drop `u.pathname`.
+  // `/api/...` prefix (see r11-2 / r17-4 rationale above).
   return `${u.protocol}//${hostPart}`;
 }

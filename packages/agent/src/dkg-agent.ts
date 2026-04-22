@@ -30,7 +30,9 @@ import { randomBytes } from 'node:crypto';
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
+  detectSparqlQueryForm, emptyResultForForm,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
+  type SparqlQueryForm,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
@@ -2768,9 +2770,36 @@ export class DKGAgent {
       agentAddress?: string;
       /**
        * Proof that the caller controls the private key matching `agentAddress`.
-       * Computed by signing `dkg-wm-auth:<agentAddress>` with `eth_signMessage`.
-       * REQUIRED for `view: 'working-memory'` queries on multi-agent nodes
-       * to prevent cross-agent WM impersonation (BUGS_FOUND.md A-1).
+       *
+       * Wire format (PR #229 bot review round 17, r17-3):
+       *
+       *   `<timestampMs>.<nonce>.<eip191HexSignature>`
+       *
+       * where the signed payload is exactly:
+       *
+       *   `${DKGAgent.WM_AUTH_CHALLENGE_PREFIX}${agentAddress.toLowerCase()}:${timestampMs}:${nonce}`
+       *
+       * (currently `dkg-wm-auth:v2:<addr-lower>:<ts>:<nonce>`).
+       *
+       * Produce the token with one of:
+       *   - `DKGAgent.wmAuthChallenge(agentAddress, timestampMs, nonce)`
+       *     to build the payload, sign it via EIP-191
+       *     (`eth_signMessage` / `wallet.signMessage`), and join as
+       *     `${ts}.${nonce}.${hexSig}`; or
+       *   - `dkgAgent.signWmAuthChallenge(agentAddress)` which
+       *     returns a ready-to-use token string using a wallet this
+       *     agent already holds (and `undefined` when it doesn't).
+       *
+       * Pre-r17-3 this field's docstring described the legacy v1
+       * payload `dkg-wm-auth:<agentAddress>`; that format is no
+       * longer accepted by `verifyWmAuthSignature()` — every signer
+       * that follows the old doc emits a token that always fails.
+       *
+       * REQUIRED for `view: 'working-memory'` queries on multi-agent
+       * nodes to prevent cross-agent WM impersonation (BUGS_FOUND.md
+       * A-1). The gate is fail-closed by default; see
+       * `strictWmCrossAgentAuth` / `DKG_STRICT_WM_AUTH` for the
+       * escape hatches.
        */
       agentAuthSignature?: string;
       verifiedGraph?: string;
@@ -2789,9 +2818,19 @@ export class DKGAgent {
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
 
+    // PR #229 bot review round 17 (r17-2): fail-closed denials MUST
+    // preserve the `QueryResult` shape for the SPARQL form the caller
+    // issued — otherwise a `CONSTRUCT`/`DESCRIBE` caller branching on
+    // `result.quads !== undefined` misinterprets an auth denial as an
+    // empty-bindings SELECT success. Classify once up front; reuse
+    // `emptyResultForForm` (returns a fresh object per call) for each
+    // deny branch below so branches never share a mutable reference.
+    const sparqlForm: SparqlQueryForm = detectSparqlQueryForm(sparql);
+    const denied = () => emptyResultForForm(sparqlForm);
+
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      return { bindings: [] };
+      return denied();
     }
 
     // Spec §04 / RFC-29 — multi-agent WM isolation. When more than one agent
@@ -2842,7 +2881,7 @@ export class DKGAgent {
             ctx,
             `WM cross-agent query denied: missing/invalid agentAuthSignature for ${opts.agentAddress}`,
           );
-          return { bindings: [] };
+          return denied();
         }
       } else {
         this.log.warn(
@@ -2865,7 +2904,7 @@ export class DKGAgent {
       // aggregates (ASK, COUNT) or projections that omit graph/subject.
       if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
         this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return { bindings: [] };
+        return denied();
       }
     }
 

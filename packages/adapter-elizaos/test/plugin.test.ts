@@ -64,3 +64,22 @@ describe('dkgService', () => {
     expect(dkgService.name.length).toBeGreaterThan(0);
   });
 });
+
+describe('dkgPlugin.hooks wiring', () => {
+  it('exposes onChatTurn / onAssistantReply / chatPersistenceHook as functions that delegate to dkgService.persistChatTurn', async () => {
+    const p = dkgPlugin as any;
+    expect(typeof p.hooks.onChatTurn).toBe('function');
+    expect(typeof p.hooks.onAssistantReply).toBe('function');
+    expect(typeof p.chatPersistenceHook).toBe('function');
+
+    // Invoking each hook without a live DKGAgent MUST surface the
+    // "DKG node not started" error — confirming the hook actually
+    // routes into dkgService.persistChatTurn rather than being a stub.
+    const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+    const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r' } as any;
+
+    for (const hook of [p.hooks.onChatTurn, p.hooks.onAssistantReply, p.chatPersistenceHook]) {
+      await expect(hook(runtime, msg)).rejects.toThrow(/DKG node not started/);
+    }
+  });
+});

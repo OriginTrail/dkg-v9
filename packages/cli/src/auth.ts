@@ -184,12 +184,25 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
   const filePath = tokenFilePath();
   await mkdir(dirname(filePath), { recursive: true });
   const fresh = generateToken();
+  // Capture the pre-rotation file-derived tokens BEFORE we drop the
+  // snapshot — the rotation contract is that every token that came
+  // from `auth.token` must be invalidated in-memory once the file has
+  // been rewritten. If we relied on `reconcileFileTokens` alone, a
+  // reset snapshot would short-circuit the remove-old-tokens step
+  // (see reconcileFileTokens: the removal loop is gated on the old
+  // snapshot existing). Config-pinned tokens — those added via
+  // `loadTokens({ tokens: [...] })` — are not part of `fileTokens`
+  // and therefore survive rotation unchanged.
+  const previous = lastFileSnapshot.get(validTokens);
   await writeFile(
     filePath,
     `# DKG node API token — treat this like a password\n${fresh}\n`,
     { mode: 0o600 },
   );
   await chmod(filePath, 0o600);
+  if (previous) {
+    for (const oldTok of previous.fileTokens) validTokens.delete(oldTok);
+  }
   // Force the next reconcile to actually re-read the file even if the
   // OS reused the previous mtime (e.g. on filesystems with low
   // resolution like ext3 / FAT32 / certain CI tmpfs).

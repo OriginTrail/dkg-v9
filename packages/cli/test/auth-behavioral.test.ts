@@ -1,0 +1,359 @@
+/**
+ * Behavioral coverage for `src/auth.ts` paths NOT exercised by the
+ * existing `test/auth.test.ts`:
+ *
+ *   - verifySignedRequest (every discriminated-result reason)
+ *   - rotateToken / revokeToken
+ *   - _clearReplayCacheForTesting
+ *   - httpAuthGuard branches:
+ *       stale-timestamp precheck, Bearer-only replay dedup, SSE query-
+ *       param token (/api/events), CORS origin echo, body-bearing path
+ *       bypassing the replay dedup.
+ *
+ * All tests run against real HTTP servers (no request mocking) and a
+ * real on-disk `auth.token` file scoped to a tmp dir, matching the QA
+ * policy of minimising mocks.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
+import { writeFile, mkdir, rm, utimes, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomBytes, createHmac } from 'node:crypto';
+import {
+  verifySignedRequest,
+  rotateToken,
+  revokeToken,
+  httpAuthGuard,
+  loadTokens,
+  _clearReplayCacheForTesting,
+  SIGNED_REQUEST_FRESHNESS_WINDOW_MS,
+} from '../src/auth.js';
+
+function hmacHex(token: string, ts: string, body: string): string {
+  return createHmac('sha256', token).update(ts).update(body).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// verifySignedRequest — every branch of the discriminated-result type
+// ---------------------------------------------------------------------------
+
+describe('verifySignedRequest', () => {
+  const TOKEN = 'secret-key';
+  const BODY = '{"x":1}';
+
+  it('returns missing-fields when timestamp is absent', () => {
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: '', signature: 'abc', token: TOKEN,
+    });
+    expect(out).toEqual({ ok: false, reason: 'missing-fields' });
+  });
+
+  it('returns missing-fields when signature is absent', () => {
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: new Date().toISOString(), signature: '', token: TOKEN,
+    });
+    expect(out).toEqual({ ok: false, reason: 'missing-fields' });
+  });
+
+  it('returns missing-fields when token is absent', () => {
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: new Date().toISOString(), signature: 'abc', token: '',
+    });
+    expect(out).toEqual({ ok: false, reason: 'missing-fields' });
+  });
+
+  it('returns stale-timestamp for an unparseable timestamp', () => {
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: 'not-a-date', signature: 'abc', token: TOKEN,
+    });
+    expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
+  });
+
+  it('returns stale-timestamp when outside the freshness window', () => {
+    const now = Date.now();
+    const oldTs = new Date(now - SIGNED_REQUEST_FRESHNESS_WINDOW_MS - 60_000).toISOString();
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: oldTs, signature: hmacHex(TOKEN, oldTs, BODY), token: TOKEN, now,
+    });
+    expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
+  });
+
+  it('accepts numeric epoch-ms timestamps', () => {
+    const now = Date.now();
+    const ts = String(now);
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: hmacHex(TOKEN, ts, BODY), token: TOKEN, now,
+    });
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('returns bad-signature for wrong signature bytes', () => {
+    const ts = new Date().toISOString();
+    const wrongSig = createHmac('sha256', 'other-key').update(ts).update(BODY).digest('hex');
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: wrongSig, token: TOKEN,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns bad-signature when the hex string is malformed (length mismatch)', () => {
+    const ts = new Date().toISOString();
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: 'aa', token: TOKEN,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('returns replayed-nonce on second use of the same nonce', () => {
+    const ts = new Date().toISOString();
+    const sig = hmacHex(TOKEN, ts, BODY);
+    const nonce = `n-${randomBytes(4).toString('hex')}`;
+    const first = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
+    });
+    expect(first.ok).toBe(true);
+    const second = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: sig, token: TOKEN, nonce,
+    });
+    expect(second).toEqual({ ok: false, reason: 'replayed-nonce' });
+  });
+
+  it('accepts a Buffer body', () => {
+    const ts = new Date().toISOString();
+    const bodyBuf = Buffer.from(BODY, 'utf-8');
+    const sig = createHmac('sha256', TOKEN).update(ts).update(bodyBuf).digest('hex');
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: bodyBuf,
+      timestamp: ts, signature: sig, token: TOKEN,
+    });
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('respects a custom freshnessWindowMs', () => {
+    const now = Date.now();
+    const ts = new Date(now - 10_000).toISOString();
+    // 1s window — 10s-old request must be stale
+    const out = verifySignedRequest({
+      method: 'POST', path: '/x', body: BODY,
+      timestamp: ts, signature: hmacHex(TOKEN, ts, BODY), token: TOKEN,
+      now, freshnessWindowMs: 1000,
+    });
+    expect(out).toEqual({ ok: false, reason: 'stale-timestamp' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rotateToken + revokeToken — programmatic rotation API
+// ---------------------------------------------------------------------------
+
+describe('rotateToken / revokeToken', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `dkg-auth-rot-${randomBytes(4).toString('hex')}`);
+    await mkdir(tempDir, { recursive: true });
+    process.env.DKG_HOME = tempDir;
+    _clearReplayCacheForTesting();
+  });
+
+  afterEach(async () => {
+    delete process.env.DKG_HOME;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('rotateToken generates a new token, rewrites the file, and invalidates the old one', async () => {
+    const tokens = await loadTokens();
+    const [original] = [...tokens];
+    expect(tokens.has(original)).toBe(true);
+
+    const fresh = await rotateToken(tokens);
+    expect(fresh).not.toBe(original);
+    expect(tokens.has(fresh)).toBe(true);
+    // The original file-derived token must now be out of the set.
+    expect(tokens.has(original)).toBe(false);
+
+    // File on disk must contain only the new token.
+    const raw = await readFile(join(tempDir, 'auth.token'), 'utf-8');
+    expect(raw).toContain(fresh);
+    expect(raw).not.toContain(original);
+  });
+
+  it('rotateToken preserves config-pinned tokens', async () => {
+    const tokens = await loadTokens({ tokens: ['config-pin'] });
+    await rotateToken(tokens);
+    expect(tokens.has('config-pin')).toBe(true);
+  });
+
+  it('revokeToken removes a token from the in-memory set', async () => {
+    const tokens = await loadTokens({ tokens: ['t-a', 't-b'] });
+    expect(revokeToken('t-a', tokens)).toBe(true);
+    expect(tokens.has('t-a')).toBe(false);
+    expect(tokens.has('t-b')).toBe(true);
+    // Revoking a missing token returns false (Set.delete semantics).
+    expect(revokeToken('not-present', tokens)).toBe(false);
+  });
+
+  it('verifyToken hot-reloads tokens when the file mtime changes', async () => {
+    const { verifyToken } = await import('../src/auth.js');
+    const tokens = await loadTokens();
+    const [original] = [...tokens];
+    expect(verifyToken(original, tokens)).toBe(true);
+
+    // Rewrite the file out-of-band and bump the mtime.
+    const tokPath = join(tempDir, 'auth.token');
+    await writeFile(tokPath, '# rotated\nnew-out-of-band-token\n');
+    const later = new Date(Date.now() + 60_000);
+    await utimes(tokPath, later, later);
+
+    // Next verify should invalidate the original and accept the new one.
+    expect(verifyToken('new-out-of-band-token', tokens)).toBe(true);
+    expect(verifyToken(original, tokens)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// httpAuthGuard — SSE, replay-dedup, stale-ts precheck, CORS origin echo
+// ---------------------------------------------------------------------------
+
+describe('httpAuthGuard — advanced branches', () => {
+  const VALID = 'test-tok';
+  let validTokens: Set<string>;
+  let server: Server;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    _clearReplayCacheForTesting();
+    validTokens = new Set([VALID]);
+    server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, 'https://example.com')) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(r => server.close(() => r()));
+  });
+
+  it('accepts a valid token via the ?token= query parameter on /api/events (SSE)', async () => {
+    const res = await fetch(`${baseUrl}/api/events?token=${VALID}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects /api/events with an invalid token query parameter', async () => {
+    const res = await fetch(`${baseUrl}/api/events?token=nope`);
+    expect(res.status).toBe(401);
+  });
+
+  it('does NOT accept ?token= on non-SSE endpoints', async () => {
+    // /api/agents is protected — query-param token is SSE-only.
+    const res = await fetch(`${baseUrl}/api/agents?token=${VALID}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects when x-dkg-timestamp is outside the freshness window (pre-signature gate)', async () => {
+    const staleTs = String(Date.now() - SIGNED_REQUEST_FRESHNESS_WINDOW_MS - 5000);
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      headers: { Authorization: `Bearer ${VALID}`, 'x-dkg-timestamp': staleTs },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toMatch(/Stale or unparseable x-dkg-timestamp/);
+  });
+
+  it('rejects unparseable x-dkg-timestamp values', async () => {
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      headers: { Authorization: `Bearer ${VALID}`, 'x-dkg-timestamp': 'not-a-date' },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts a well-formed fresh x-dkg-timestamp', async () => {
+    const freshTs = String(Date.now());
+    const res = await fetch(`${baseUrl}/api/agents`, {
+      headers: { Authorization: `Bearer ${VALID}`, 'x-dkg-timestamp': freshTs },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('dedupes identical body-less POST replays within the TTL window', async () => {
+    // First body-less POST is accepted (handler sends 200).
+    const first = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(first.status).toBe(200);
+
+    // Exact same body-less POST is caught by the CLI-10 replay cache.
+    const second = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(second.status).toBe(401);
+    const body = await second.json();
+    expect(body.error).toMatch(/Replay detected/);
+  });
+
+  it('does NOT dedupe POSTs that carry a body', async () => {
+    // First POST with a body.
+    const first = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: 1 }),
+    });
+    expect(first.status).toBe(200);
+
+    // Second POST with a body — must still succeed (application layer
+    // decides dedup semantics for body-bearing requests).
+    const second = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: 1 }),
+    });
+    expect(second.status).toBe(200);
+  });
+
+  it('echoes the configured CORS origin in 401 responses', async () => {
+    const res = await fetch(`${baseUrl}/api/agents`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://example.com');
+  });
+
+  it('does NOT dedupe GET/HEAD requests (never stateful)', async () => {
+    const a = await fetch(`${baseUrl}/api/agents`, {
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(a.status).toBe(200);
+    const b = await fetch(`${baseUrl}/api/agents`, {
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(b.status).toBe(200);
+  });
+
+  it('_clearReplayCacheForTesting resets the dedup state', async () => {
+    await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    _clearReplayCacheForTesting();
+    const retry = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(retry.status).toBe(200);
+  });
+});

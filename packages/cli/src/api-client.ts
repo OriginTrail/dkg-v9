@@ -267,6 +267,7 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -274,6 +275,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -285,6 +288,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -310,6 +315,7 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -317,6 +323,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -328,6 +336,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -357,6 +367,7 @@ export class ApiClient {
       peersTried: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      denied: boolean;
       diagnostics?: {
         noProtocolPeers: number;
         durable: {
@@ -364,6 +375,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
@@ -375,6 +388,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;

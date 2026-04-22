@@ -8,14 +8,40 @@ interface Libp2pLike {
   };
 }
 
+const CONNECT_WAIT_TIMEOUT_MS = 5000;
+const CONNECT_WAIT_INTERVAL_MS = 100;
+
+async function waitForPeerConnection(
+  libp2p: Libp2pLike,
+  peerId: string,
+  timeoutMs = CONNECT_WAIT_TIMEOUT_MS,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const connected = libp2p.getConnections().some((conn) => conn.remotePeer.toString() === peerId);
+    if (connected) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, CONNECT_WAIT_INTERVAL_MS));
+  }
+  return false;
+}
+
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
   multiaddress: string,
+  log?: (message: string) => void,
 ): Promise<void> {
   const { multiaddr } = await import('@multiformats/multiaddr');
 
   if (!multiaddress.includes('/p2p-circuit/p2p/')) {
+    log?.(`Dialing direct invite multiaddr: ${multiaddress}`);
     await libp2p.dial(multiaddr(multiaddress));
+    const directPeerId = multiaddress.split('/p2p/').pop();
+    if (directPeerId) {
+      const connected = await waitForPeerConnection(libp2p, directPeerId);
+      log?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directPeerId}`);
+    }
     return;
   }
 
@@ -23,12 +49,17 @@ export async function connectToMultiaddr(
   const relayMultiaddr = multiaddress.slice(0, circuitIndex);
   const targetPeerId = multiaddress.slice(circuitIndex + '/p2p-circuit/p2p/'.length);
 
+  log?.(`Dialing relay from circuit invite: relay=${relayMultiaddr} targetPeer=${targetPeerId}`);
   await libp2p.dial(multiaddr(relayMultiaddr));
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
+  log?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
+  log?.(`Dialing final circuit target peer: ${targetPeerId}`);
   await libp2p.dial(targetPid);
+  const connected = await waitForPeerConnection(libp2p, targetPeerId);
+  log?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
 }
 
 export async function ensurePeerConnected(

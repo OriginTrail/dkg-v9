@@ -6560,6 +6560,7 @@ async function handleRequest(
 
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+    console.log(`[subscribe] contextGraph=${paranetId} includeSharedMemory=${shouldSyncSharedMemory}`);
     agent.subscribeToContextGraph(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -6596,6 +6597,7 @@ async function handleRequest(
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
+      console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
       try {
         const result = await daemonCatchupRunner!.run({
           contextGraphId: paranetId,
@@ -6610,12 +6612,19 @@ async function handleRequest(
         ) {
           job.status = "failed";
           job.error = "No sync-capable peers found for catch-up";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} failed: ${job.error}`);
+        } else if (result.denied) {
+          job.status = "denied";
+          job.error = "Sync denied by remote peer";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer`);
         } else {
           job.status = "done";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} done peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} data=${result.dataSynced} swm=${result.sharedMemorySynced}`);
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
+        console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
       }

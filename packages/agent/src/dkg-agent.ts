@@ -41,7 +41,12 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
-import { sendSyncRequest } from './p2p/sync-transport.js';
+import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { runDurableSync } from './sync/requester/durable-sync.js';
+import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
+import { buildSyncRequestEnvelope } from './sync/auth/request-build.js';
+import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   hashAgentToken,
@@ -101,6 +106,7 @@ const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const SYNC_AUTH_MAX_AGE_MS = 90_000;
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
+const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
@@ -160,6 +166,8 @@ export interface DurableSyncDiagnostics {
   fetchedDataTriples: number;
   insertedMetaTriples: number;
   insertedDataTriples: number;
+  bytesReceived: number;
+  resumedPhases: number;
   emptyResponses: number;
   metaOnlyResponses: number;
   dataRejectedMissingMeta: number;
@@ -172,6 +180,8 @@ export interface SharedMemorySyncDiagnostics {
   fetchedDataTriples: number;
   insertedMetaTriples: number;
   insertedDataTriples: number;
+  bytesReceived: number;
+  resumedPhases: number;
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
@@ -185,10 +195,12 @@ export interface CatchupSyncDiagnostics {
 
 interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
+  deniedPhases: number;
 }
 
 interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
   insertedTriples: number;
+  deniedPhases: number;
 }
 
 export interface DKGAgentConfig {
@@ -285,6 +297,7 @@ export class DKGAgent {
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
   private readonly metaRefreshTimestamps = new Map<string, number>();
   private readonly preferredSyncPeers = new Map<string, string>();
+  private readonly syncCheckpoints = new Map<string, number>();
   private syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
@@ -1079,94 +1092,21 @@ export class DKGAgent {
     onPhase?: PhaseCallback,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    const summary: DurableSyncResult = {
-      insertedTriples: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      emptyResponses: 0,
-      metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-      rejectedKcs: 0,
-      failedPeers: 0,
-    };
-
-    try {
-      for (const [index, pid] of contextGraphIds.entries()) {
-        const dataGraph = paranetDataGraphUri(pid);
-        const metaGraph = paranetMetaGraphUri(pid);
-        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
-
-        this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
-
-        onPhase?.('fetch', 'start');
-        const fetchStartedAt = Date.now();
-
-        const metaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
-        const dataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
-
-        onPhase?.('fetch', 'end');
-        const fetchDurationMs = Date.now() - fetchStartedAt;
-        const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
-
-        onPhase?.('verify', 'start');
-        const verifyStartedAt = Date.now();
-        const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, isSystemContextGraph);
-        onPhase?.('verify', 'end');
-        const verifyDurationMs = Date.now() - verifyStartedAt;
-
-        this.log.info(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
-        this.log.info(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-        summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
-        summary.fetchedDataTriples += processed.totalFetchedDataQuads;
-        summary.emptyResponses += processed.emptyResponses;
-        summary.metaOnlyResponses += processed.metaOnlyResponses;
-        summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
-
-        if (
-          processed.emptyResponses > 0 ||
-          processed.dataRejectedMissingMeta > 0 ||
-          (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
-        ) {
-          continue;
-        }
-
-        onPhase?.('store', 'start');
-        const storeStartedAt = Date.now();
-        if (processed.verifiedData.length > 0) {
-          await this.store.insert(processed.verifiedData);
-          summary.insertedTriples += processed.verifiedData.length;
-          summary.insertedDataTriples += processed.verifiedData.length;
-        }
-        if (processed.verifiedMeta.length > 0) {
-          await this.store.insert(processed.verifiedMeta);
-          summary.insertedTriples += processed.verifiedMeta.length;
-          summary.insertedMetaTriples += processed.verifiedMeta.length;
-        }
-        onPhase?.('store', 'end');
-        const storeDurationMs = Date.now() - storeStartedAt;
-
-        if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
-          this.log.debug(
-            ctx,
-            `Requester durable timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms store=${storeDurationMs}ms`,
-          );
-        }
-
-        if (processed.rejectedKcs > 0) {
-          this.log.warn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
-          summary.rejectedKcs += processed.rejectedKcs;
-        }
-      }
-      if (summary.insertedTriples > 0) {
-        this.log.info(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
-      }
-    } catch (err) {
-      this.log.warn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      summary.failedPeers += 1;
-    }
-    return summary;
+    return runDurableSync({
+      ctx,
+      remotePeerId,
+      contextGraphIds,
+      onPhase,
+      createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+      fetchSyncPages: this.fetchSyncPages.bind(this),
+      processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
+      storeInsert: (quads) => this.store.insert(quads),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
   }
 
   /**
@@ -1181,77 +1121,30 @@ export class DKGAgent {
     phase: 'data' | 'meta',
     graphUri: string,
     deadline: number,
-  ): Promise<Quad[]> {
-    const allQuads: Quad[] = [];
-    let offset = 0;
-    let timedOut = false;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      if (Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
-
-      const remainingMs = Math.max(0, deadline - Date.now());
-      const timeoutMs = Math.min(
-        SYNC_PAGE_TIMEOUT_MS,
-        Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
-      );
-
-      // Build a fresh request (with unique requestId + signature) per attempt
-      // so that authenticated private-sync retries aren't rejected as replays.
-      const curOffset = offset;
-      const transportStartedAt = Date.now();
-      const responseBytes = await sendSyncRequest({
-        remotePeerId,
-        timeoutMs,
-        retryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-        contextGraphId,
-        offset,
-        protocolId: PROTOCOL_SYNC,
-        requestFactory: () => this.buildSyncRequest(contextGraphId, curOffset, SYNC_PAGE_SIZE, includeSharedMemory, remotePeerId, phase),
-        send: (peerId, protocolId, data, sendTimeoutMs) => this.router.send(peerId, protocolId, data, sendTimeoutMs),
-        onRetry: (attempt, delay, err) => {
-          this.log.warn(ctx, `Sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
-        },
-      });
-      const transportDurationMs = Date.now() - transportStartedAt;
-
-      const decodeStartedAt = Date.now();
-      const nquadsText = new TextDecoder().decode(responseBytes).trim();
-      const decodeDurationMs = Date.now() - decodeStartedAt;
-      if (nquadsText === SYNC_DENIED_RESPONSE) {
-        throw new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
-      }
-      if (!nquadsText) break;
-
-      const parseStartedAt = Date.now();
-      const parsed = await this.getOrCreateSyncVerifyWorker().parseAndFilter(nquadsText, graphUri, contextGraphId);
-      const parseDurationMs = Date.now() - parseStartedAt;
-      if (parsed.totalQuads === 0) break;
-
-      const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
-      if (stepDurationMs > 100) {
-        this.log.debug(
-          ctx,
-          `Sync page timing for "${contextGraphId}" offset=${curOffset} phase=${phase}: transport=${transportDurationMs}ms decode=${decodeDurationMs}ms parse=${parseDurationMs}ms`,
-        );
-      }
-
-      allQuads.push(...parsed.quads);
-
-      offset += parsed.totalQuads;
-      if (parsed.totalQuads < SYNC_PAGE_SIZE) break;
-    }
-    if (timedOut) {
-      const scope = includeSharedMemory ? 'shared-memory' : 'durable';
-      this.log.warn(
-        ctx,
-        `Sync timeout for ${scope} ${phase} phase of "${contextGraphId}" (${allQuads.length} triples received so far for ${graphUri})`,
-      );
-    }
-    return allQuads;
+  ): Promise<SyncPageResult> {
+    return fetchSyncPages({
+      ctx,
+      remotePeerId,
+      contextGraphId,
+      includeSharedMemory,
+      phase,
+      graphUri,
+      deadline,
+      syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
+      syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
+      syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+      syncPageSize: SYNC_PAGE_SIZE,
+      syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      debugSyncProgress: DEBUG_SYNC_PROGRESS,
+      protocolSync: PROTOCOL_SYNC,
+      checkpointStore: this.syncCheckpoints,
+      buildSyncRequest: this.buildSyncRequest.bind(this),
+      parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => this.getOrCreateSyncVerifyWorker().parseAndFilter(nquadsText, targetGraphUri, targetContextGraphId),
+      send: (peerId, protocolId, data, sendTimeoutMs) => this.router.send(peerId, protocolId, data, sendTimeoutMs),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
   }
 
   /**
@@ -1273,91 +1166,30 @@ export class DKGAgent {
     contextGraphIds: string[],
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
-    const summary: SharedMemorySyncResult = {
-      insertedTriples: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      emptyResponses: 0,
-      droppedDataTriples: 0,
-      failedPeers: 0,
-    };
-
-    try {
-      for (const [index, pid] of contextGraphIds.entries()) {
-        const wsGraph = paranetWorkspaceGraphUri(pid);
-        const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
-        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
-
-        this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
-
-        const fetchStartedAt = Date.now();
-        const wsMetaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
-        const wsDataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
-        const fetchDurationMs = Date.now() - fetchStartedAt;
-
-        const verifyStartedAt = Date.now();
-        const processed = await this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads);
-        const verifyDurationMs = Date.now() - verifyStartedAt;
-        this.log.info(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
-        summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
-        summary.fetchedDataTriples += processed.totalFetchedDataQuads;
-        summary.emptyResponses += processed.emptyResponses;
-
-        if (processed.emptyResponses > 0) {
-          continue;
-        }
-
-        const validWsQuads = processed.verifiedData;
-        const dropped = processed.droppedDataTriples;
-        if (dropped > 0) {
-          this.log.warn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
-          summary.droppedDataTriples += dropped;
-        }
-
+    return runSharedMemorySync({
+      ctx,
+      remotePeerId,
+      contextGraphIds,
+      createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+      fetchSyncPages: this.fetchSyncPages.bind(this),
+      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads),
+      ensureParanet: async (contextGraphId) => {
         const graphManager = new GraphManager(this.store);
-        const storeStartedAt = Date.now();
-        await graphManager.ensureParanet(pid);
-
-        if (validWsQuads.length > 0) {
-          await this.store.insert(validWsQuads);
-          summary.insertedTriples += validWsQuads.length;
-          summary.insertedDataTriples += validWsQuads.length;
+        await graphManager.ensureParanet(contextGraphId);
+      },
+      storeInsert: (quads) => this.store.insert(quads),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      ensureOwnedMap: (contextGraphId) => {
+        if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+          this.workspaceOwnedEntities.set(contextGraphId, new Map());
         }
-        if (processed.verifiedMeta.length > 0) {
-          await this.store.insert(processed.verifiedMeta);
-          summary.insertedTriples += processed.verifiedMeta.length;
-          summary.insertedMetaTriples += processed.verifiedMeta.length;
-        }
-
-        if (!this.workspaceOwnedEntities.has(pid)) {
-          this.workspaceOwnedEntities.set(pid, new Map());
-        }
-        const ownedMap = this.workspaceOwnedEntities.get(pid)!;
-        for (const [entity, creator] of processed.entityCreators) {
-          if (!ownedMap.has(entity)) {
-            ownedMap.set(entity, creator);
-          }
-        }
-        const storeDurationMs = Date.now() - storeStartedAt;
-
-        this.log.info(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${processed.verifiedMeta.length} meta triples`);
-        if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
-          this.log.debug(
-            ctx,
-            `Requester SWM timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms store+ownership=${storeDurationMs}ms`,
-          );
-        }
-      }
-      if (summary.insertedTriples > 0) {
-        this.log.info(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
-      }
-    } catch (err) {
-      this.log.warn(ctx, `SWM sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      summary.failedPeers += 1;
-    }
-    return summary;
+        return this.workspaceOwnedEntities.get(contextGraphId)!;
+      },
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
   }
 
   private createContextGraphSyncDeadline(remainingContextGraphs: number): number {
@@ -1430,6 +1262,8 @@ export class DKGAgent {
         fetchedDataTriples: 0,
         insertedMetaTriples: 0,
         insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
         emptyResponses: 0,
         metaOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
@@ -1441,16 +1275,25 @@ export class DKGAgent {
         fetchedDataTriples: 0,
         insertedMetaTriples: 0,
         insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
       },
     };
 
+    this.log.info(
+      ctx,
+      `Catch-up peer set for "${contextGraphId}": ${peers.map((peer) => peer.toString()).join(', ') || 'none'}`,
+    );
+
     for (const pid of peers) {
+      this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
         noProtocolPeers++;
+        this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
         continue;
       }
 
@@ -1463,6 +1306,8 @@ export class DKGAgent {
       diagnostics.durable.fetchedDataTriples += durableResult.fetchedDataTriples;
       diagnostics.durable.insertedMetaTriples += durableResult.insertedMetaTriples;
       diagnostics.durable.insertedDataTriples += durableResult.insertedDataTriples;
+      diagnostics.durable.bytesReceived += durableResult.bytesReceived;
+      diagnostics.durable.resumedPhases += durableResult.resumedPhases;
       diagnostics.durable.emptyResponses += durableResult.emptyResponses;
       diagnostics.durable.metaOnlyResponses += durableResult.metaOnlyResponses;
       diagnostics.durable.dataRejectedMissingMeta += durableResult.dataRejectedMissingMeta;
@@ -1475,6 +1320,8 @@ export class DKGAgent {
         diagnostics.sharedMemory.fetchedDataTriples += sharedResult.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += sharedResult.insertedMetaTriples;
         diagnostics.sharedMemory.insertedDataTriples += sharedResult.insertedDataTriples;
+        diagnostics.sharedMemory.bytesReceived += sharedResult.bytesReceived;
+        diagnostics.sharedMemory.resumedPhases += sharedResult.resumedPhases;
         diagnostics.sharedMemory.emptyResponses += sharedResult.emptyResponses;
         diagnostics.sharedMemory.droppedDataTriples += sharedResult.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += sharedResult.failedPeers;
@@ -2168,7 +2015,12 @@ export class DKGAgent {
   }
 
   async connectTo(multiaddress: string): Promise<void> {
-    await connectToMultiaddr(this.node.libp2p as any, multiaddress);
+    const ctx = createOperationContext('connect');
+    await connectToMultiaddr(
+      this.node.libp2p as any,
+      multiaddress,
+      (message) => this.log.info(ctx, message),
+    );
   }
 
   /**
@@ -4946,65 +4798,22 @@ export class DKGAgent {
     // against its allowlist.
     const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
     const needsAuth = isPrivate || !hasLocalData;
-
-    if (!needsAuth) {
-      const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
-      const phaseSuffix = phase === 'meta' ? '|meta' : '';
-      return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
-    }
-
-    const request: SyncRequestEnvelope = {
+    const defaultAgent = this.defaultAgentAddress ? this.localAgents.get(this.defaultAgentAddress) : undefined;
+    return buildSyncRequestEnvelope({
       contextGraphId,
       offset,
       limit,
       includeSharedMemory,
+      targetPeerId: responderPeerId,
+      requesterPeerId: this.peerId,
       phase,
-    };
-
-    request.targetPeerId = responderPeerId;
-    request.requesterPeerId = this.peerId;
-    request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    request.issuedAtMs = Date.now();
-
-    const digest = this.computeSyncDigest(
-      contextGraphId,
-      offset,
-      limit,
-      includeSharedMemory,
-      responderPeerId,
-      request.requesterPeerId,
-      request.requestId,
-      request.issuedAtMs,
-    );
-
-    const identityId = await this.chain.getIdentityId();
-    if (identityId > 0n && typeof this.chain.signMessage === 'function') {
-      const signature = await this.chain.signMessage(digest);
-      request.requesterIdentityId = identityId.toString();
-      request.requesterSignatureR = ethers.hexlify(signature.r);
-      request.requesterSignatureVS = ethers.hexlify(signature.vs);
-    } else if (this.defaultAgentAddress) {
-      const agent = this.localAgents.get(this.defaultAgentAddress);
-      if (agent?.privateKey) {
-        const wallet = new ethers.Wallet(agent.privateKey);
-        const sig = ethers.Signature.from(await wallet.signMessage(digest));
-        request.requesterIdentityId = '0';
-        request.requesterAgentAddress = this.defaultAgentAddress;
-        request.requesterSignatureR = ethers.hexlify(sig.r);
-        request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
-      }
-    }
-
-    if (needsAuth && (!request.requesterSignatureR || !request.requesterSignatureVS)) {
-      const signingTarget = this.defaultAgentAddress
-        ? `default agent ${this.defaultAgentAddress}`
-        : 'node identity';
-      throw new Error(
-        `Cannot build authenticated sync request for "${contextGraphId}": missing signing key for ${signingTarget}`,
-      );
-    }
-
-    return new TextEncoder().encode(JSON.stringify(request));
+      needsAuth,
+      computeSyncDigest: this.computeSyncDigest.bind(this),
+      getIdentityId: () => this.chain.getIdentityId(),
+      signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
+      defaultAgentAddress: this.defaultAgentAddress,
+      defaultAgentPrivateKey: defaultAgent?.privateKey,
+    });
   }
 
   private computeSyncDigest(
@@ -5039,132 +4848,22 @@ export class DKGAgent {
     if (!isPrivate) {
       return true;
     }
-    const ctx = createOperationContext('sync');
-
-    const now = Date.now();
-    for (const [requestId, seenAt] of this.seenPrivateSyncRequestIds) {
-      if (now - seenAt > SYNC_AUTH_MAX_AGE_MS) {
-        this.seenPrivateSyncRequestIds.delete(requestId);
-      }
-    }
-
-    let requesterIdentityId = 0n;
-    try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch { /* malformed — treated as unauthenticated */ }
-
-    if (
-      request.targetPeerId !== this.peerId ||
-      request.requesterPeerId !== remotePeerId ||
-      !request.requestId ||
-      request.issuedAtMs == null ||
-      now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
-      now < request.issuedAtMs - 5000 ||
-      !request.requesterSignatureR ||
-      !request.requesterSignatureVS
-    ) {
-      this.log.warn(
-        ctx,
-        `Denied sync request for "${request.contextGraphId}": malformed or mismatched envelope (requesterPeer=${request.requesterPeerId ?? 'n/a'} targetPeer=${request.targetPeerId ?? 'n/a'} remotePeer=${remotePeerId} identityId=${request.requesterIdentityId ?? '0'} agentAddress=${request.requesterAgentAddress ?? 'n/a'})`,
-      );
-      return false;
-    }
-
-    if (this.seenPrivateSyncRequestIds.has(request.requestId)) {
-      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": replay detected for request ${request.requestId}`);
-      return false;
-    }
-
-    const digest = this.computeSyncDigest(
-      request.contextGraphId,
-      request.offset,
-      request.limit,
-      request.includeSharedMemory,
-      request.targetPeerId,
-      request.requesterPeerId,
-      request.requestId,
-      request.issuedAtMs,
-    );
-
-    let recoveredAddress: string;
-    try {
-      recoveredAddress = ethers.recoverAddress(ethers.hashMessage(digest), {
-        r: request.requesterSignatureR,
-        yParityAndS: request.requesterSignatureVS,
-      });
-    } catch {
-      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": failed to recover signer (identityId=${request.requesterIdentityId ?? '0'} agentAddress=${request.requesterAgentAddress ?? 'n/a'})`);
-      return false;
-    }
-
-    // Two auth paths:
-    // 1. Core nodes (identityId > 0): verify on-chain identity owns the key
-    // 2. Edge nodes (identityId = 0): wallet signature is sufficient —
-    //    recovered address checked directly against allowlist
-    if (requesterIdentityId > 0n) {
-      const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
-      if (typeof verifyIdentity !== 'function') {
-        this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": identity verification unavailable (identityId=${requesterIdentityId.toString()} signer=${recoveredAddress})`);
-        return false;
-      }
-      const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
-      if (!validIdentity) {
-        this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": signer ${recoveredAddress} does not verify for identityId=${requesterIdentityId.toString()}`);
-        return false;
-      }
-    } else if (!request.requesterAgentAddress ||
-      recoveredAddress.toLowerCase() !== request.requesterAgentAddress.toLowerCase()) {
-      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": edge signer mismatch (signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'})`);
-      return false;
-    }
-
-    const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
-    let allowed = participants?.some((p) =>
-      p.toLowerCase() === recoveredAddress.toLowerCase() ||
-      (requesterIdentityId > 0n && p === String(requesterIdentityId)),
-    ) ?? false;
-
-    // Legacy peer-ID allowlist: `inviteToContextGraph` (the path behind
-    // `POST /api/context-graph/invite`) writes `DKG_ALLOWED_PEER` quads.
-    // Honor them here so peer-ID invites actually unblock sync. The
-    // libp2p transport has already authenticated `remotePeerId`, and we
-    // validated `request.requesterPeerId === remotePeerId` above, so
-    // matching the peer ID against the allowlist is a trusted comparison.
-    if (!allowed) {
-      const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
-      if (allowedPeers?.includes(remotePeerId)) {
-        allowed = true;
-      }
-    }
-
-    // Requester has valid on-chain identity but is not in our local participant
-    // list. The curator may have invited them after our last meta sync — try
-    // refreshing the meta graph from the curator before denying.
-    if (!allowed) {
-      const refreshed = await this.refreshMetaFromCurator(request.contextGraphId);
-      if (refreshed) {
-        const freshParticipants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
-        allowed = freshParticipants?.some((p) =>
-          p.toLowerCase() === recoveredAddress.toLowerCase() ||
-          p === String(requesterIdentityId),
-        ) ?? false;
-
-        if (!allowed) {
-          const freshPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
-          if (freshPeers?.includes(remotePeerId)) {
-            allowed = true;
-          }
-        }
-      }
-    }
-
-    this.log.info(
-      ctx,
-      `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participants=${participants?.join(',') ?? 'none'} allowed=${allowed}`,
-    );
-
-    if (allowed) {
-      this.seenPrivateSyncRequestIds.set(request.requestId, now);
-    }
-    return allowed;
+    const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
+    return authorizePrivateSyncRequest({
+      ctx: createOperationContext('sync'),
+      request,
+      remotePeerId,
+      localPeerId: this.peerId,
+      syncAuthMaxAgeMs: SYNC_AUTH_MAX_AGE_MS,
+      seenRequestIds: this.seenPrivateSyncRequestIds,
+      computeSyncDigest: this.computeSyncDigest.bind(this),
+      verifyIdentity: typeof verifyIdentity === 'function' ? verifyIdentity.bind(this.chain) : undefined,
+      getParticipants: (contextGraphId) => this.getPrivateContextGraphParticipants(contextGraphId),
+      getAllowedPeers: (contextGraphId) => this.getContextGraphAllowedPeers(contextGraphId),
+      refreshMetaFromCurator: (contextGraphId) => this.refreshMetaFromCurator(contextGraphId),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
+    });
   }
 
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
@@ -5418,12 +5117,14 @@ export class DKGAgent {
 
     try {
       const deadline = Date.now() + 10_000;
-      const metaQuads = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
-      if (metaQuads.length > 0) {
-        await this.store.insert(metaQuads);
-        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaQuads.length} triples from curator ${curatorPeerId.slice(-8)}`);
+      const metaResult = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
+      if (metaResult.quads.length > 0) {
+        await this.store.insert(metaResult.quads);
+        this.syncCheckpoints.delete(metaResult.checkpointKey);
+        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaResult.quads.length} triples from curator ${curatorPeerId.slice(-8)}`);
         return true;
       }
+      this.syncCheckpoints.delete(metaResult.checkpointKey);
       return false;
     } catch (err) {
       this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);

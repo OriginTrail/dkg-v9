@@ -1111,6 +1111,27 @@ export class DKGAgent {
       }, 3000);
     });
 
+    // Clear the per-peer cooldown timestamp when the last live connection
+    // to a peer is torn down. The cooldown's job is to dedupe overlapping
+    // `connection:open` bursts (libp2p can fire more than one when
+    // multiple transports come up for the same peer within a few hundred
+    // ms). Without this close handler, a peer that dropped and
+    // reconnected 10–20s later — exactly the flaky-relay case this
+    // catch-up hook is meant to repair — would be silently skipped for
+    // up to a minute, so catch-up would stall until some other trigger
+    // fires. `connection:close` fires per connection, so we only forget
+    // the timestamp once no live connection to the peer remains. Codex
+    // tier-4i finding at packages/agent/src/dkg-agent.ts:1105.
+    this.node.libp2p.addEventListener('connection:close', (evt) => {
+      const remotePeer = evt.detail.remotePeer.toString();
+      if (remotePeer === this.node.libp2p.peerId.toString()) return;
+      const stillConnected = this.node.libp2p
+        .getPeers()
+        .some((p) => p.toString() === remotePeer);
+      if (stillConnected) return;
+      this.catchupOnConnectAt.delete(remotePeer);
+    });
+
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
     // not currently connected to, best-effort dial them. This catches the
     // case where two NAT'd edge nodes briefly lose their direct path but
@@ -1326,6 +1347,7 @@ export class DKGAgent {
       remotePeerId,
       contextGraphIds,
       onPhase,
+      onAccessDenied,
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
@@ -4031,17 +4053,35 @@ export class DKGAgent {
     const rememberedPeerId = this.joinRequestOriginPeers.get(originKey);
     if (rememberedPeerId) {
       targetPeerId = rememberedPeerId;
-    } else {
-      // Fallback: agent registry (covers curator-restart case).
+    }
+
+    // Always consult the registry when we either had no remembered peer
+    // OR we have one but no live connection to it right now. This fixes
+    // the regression Codex flagged: with only the remembered path, if
+    // the requester disconnected between submitting the request and the
+    // curator acting on it, we'd have no `targetRelayAddress` to redial
+    // and the notification would be silently dropped even though the
+    // registry knows exactly how to reach them. Registry lookup is
+    // cheap (local graph query) so this is fine to do opportunistically.
+    const rememberedIsConnected = rememberedPeerId
+      ? this.node.libp2p
+          .getConnections()
+          .some((c) => c.remotePeer.toString() === rememberedPeerId)
+      : false;
+    if (!targetPeerId || !rememberedIsConnected) {
       try {
         const agents = await this.discovery.findAgents();
         const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
         if (match) {
-          targetPeerId = match.peerId;
+          // Only swap targetPeerId when we didn't already have a
+          // remembered one — the remembered id is the authoritative
+          // routing hint; we're just picking up the relay fallback.
+          if (!targetPeerId) targetPeerId = match.peerId;
           targetRelayAddress = match.relayAddress;
         }
       } catch {
-        // Registry unavailable — we'll just skip delivery below.
+        // Registry unavailable — we'll just skip delivery below if we
+        // also have no live connection to the remembered peer.
       }
     }
 

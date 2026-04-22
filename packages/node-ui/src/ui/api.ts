@@ -423,60 +423,82 @@ export interface AssertionInfo {
  *
  * SWM is different. When an assertion is promoted its triples move into
  * the single `/_shared_memory` graph, so the assertion graph itself becomes
- * empty and the WM-style listing returns nothing. The `_meta` graph is the
- * canonical record of lifecycle state, but crucially the lifecycle-entity
- * triples that carry `dkg:state` / `dkg:memoryLayer` / `dkg:assertionGraph`
- * are only written on the node that authored the transition — they are not
- * re-emitted on replicas that receive the data via sync. What *does*
- * propagate on every node is the append-only stream of `prov:Activity`
- * event records under `<lifecycleUri>/event/<eventId>`, each tagged with
- * `prov:used|prov:generated <lifecycleUri>`, `prov:startedAtTime` and
- * `dkg:toLayer`. So to find SWM assertions we pick, per lifecycle, the
- * latest event and keep those whose `toLayer` is `"SWM"`.
+ * empty and the WM-style listing returns nothing. The authoring node's
+ * `_meta` graph also records full lifecycle entities (`dkg:state`,
+ * `dkg:memoryLayer`, `prov:Activity` events), but `_meta` is NOT replicated
+ * between peers — only the context graph's data graphs and the
+ * `_shared_memory_meta` partitions propagate over sync.
+ *
+ * What DOES land on every replica is one `dkg:ShareTransition` entity per
+ * promote, authored by `generateShareTransitionMetadata()` in
+ * `@origintrail-official/dkg-publisher`:
+ *
+ *   GRAPH <did:dkg:context-graph:<cg>[/<sg>]/_shared_memory_meta> {
+ *     <urn:dkg:share:<opId>> a dkg:ShareTransition ;
+ *                            dkg:source   "assertion/<agent>/<name>" ;
+ *                            dkg:agent    did:dkg:agent:<address> ;
+ *                            dkg:timestamp "…"^^xsd:dateTime .
+ *   }
+ *
+ * So on every node — authoring or replica — we can enumerate promoted
+ * assertions by listing ShareTransitions and reconstructing the lifecycle
+ * URN that the UI already uses as `graphUri` elsewhere. We parse the
+ * sub-graph suffix (if any) from the meta graph IRI itself so this keeps
+ * working for sub-graph-scoped shares.
  */
 export async function listAssertions(
   contextGraphId: string,
   layer: 'wm' | 'swm' = 'wm',
 ): Promise<AssertionInfo[]> {
   if (layer === 'swm') {
-    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-    const PROV = 'http://www.w3.org/ns/prov#';
     const DKG = 'http://dkg.io/ontology/';
-    // Pick the latest `prov:Activity` per lifecycle and filter by toLayer.
-    // The inner subquery picks max(startedAt) per lifecycle; the outer join
-    // reads that event's `toLayer`. We anchor `?lifecycle` to the
-    // `urn:dkg:assertion:` namespace so we don't pick up other activities.
-    const sparql = `SELECT DISTINCT ?lifecycle WHERE {
-      {
-        SELECT ?lifecycle (MAX(?st) AS ?maxTime) WHERE {
-          GRAPH <${metaGraph}> {
-            ?ev (<${PROV}used>|<${PROV}generated>) ?lifecycle ;
-                <${PROV}startedAtTime> ?st .
-            FILTER(STRSTARTS(STR(?lifecycle), "urn:dkg:assertion:"))
-          }
-        }
-        GROUP BY ?lifecycle
+    const swmMetaPrefix = `did:dkg:context-graph:${contextGraphId}`;
+    const sparql = `SELECT DISTINCT ?g ?source ?agent WHERE {
+      GRAPH ?g {
+        ?s a <${DKG}ShareTransition> ;
+           <${DKG}source> ?source ;
+           <${DKG}agent> ?agent .
       }
-      GRAPH <${metaGraph}> {
-        ?ev2 (<${PROV}used>|<${PROV}generated>) ?lifecycle ;
-             <${PROV}startedAtTime> ?maxTime ;
-             <${DKG}toLayer> ?toLayer .
-      }
-      FILTER(?toLayer = "SWM")
+      FILTER(STRSTARTS(STR(?g), "${swmMetaPrefix}"))
+      FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
     }`;
     const data = await executeQuery(sparql, contextGraphId);
     const bindings: any[] = data?.result?.bindings ?? [];
+    const seen = new Set<string>();
     const result: AssertionInfo[] = [];
     for (const b of bindings) {
-      const lifecycle = typeof b.lifecycle === 'string' ? b.lifecycle : b.lifecycle?.value;
-      if (!lifecycle) continue;
-      // Lifecycle URN shape is
-      //   urn:dkg:assertion:<cgId>[:<subGraphName>]:<agent>:<name>
-      // The agent is a 0x EVM address which never contains ':', and the
-      // name is the last colon-separated segment.
-      const lastColon = lifecycle.lastIndexOf(':');
-      if (lastColon < 0) continue;
-      const name = lifecycle.slice(lastColon + 1);
+      const g = typeof b.g === 'string' ? b.g : b.g?.value;
+      const source = typeof b.source === 'string' ? b.source : b.source?.value;
+      const agentUri = typeof b.agent === 'string' ? b.agent : b.agent?.value;
+      if (!g || !source || !agentUri) continue;
+
+      // `dkg:source` literal is `assertion/<agent>/<name>`. The agent
+      // segment is a 0x EVM address (no slashes, no colons), but `<name>`
+      // is only slash/whitespace-free — it CAN contain `:` — so split on
+      // the first two `/` rather than a blind last-segment parse.
+      const m = source.match(/^assertion\/([^/]+)\/(.+)$/);
+      if (!m) continue;
+      const name = m[2];
+
+      // `dkg:agent` is `did:dkg:agent:<address>`; pull the address so we
+      // rebuild the exact lifecycle URN shape used on the authoring node.
+      const addrMatch = /^did:dkg:agent:(.+)$/.exec(agentUri);
+      const address = addrMatch ? addrMatch[1] : null;
+      if (!address) continue;
+
+      // Recover optional sub-graph segment from `?g`:
+      //   did:dkg:context-graph:<cg>/_shared_memory_meta          → none
+      //   did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta     → <sg>
+      const tail = g.slice(swmMetaPrefix.length); // "/<sg?>/_shared_memory_meta"
+      const inner = tail.replace(/\/_shared_memory_meta$/, '').replace(/^\//, '');
+      const subGraphName = inner.length > 0 ? inner : undefined;
+
+      const lifecycle = subGraphName
+        ? `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${address}:${name}`
+        : `urn:dkg:assertion:${contextGraphId}:${address}:${name}`;
+
+      if (seen.has(lifecycle)) continue;
+      seen.add(lifecycle);
       result.push({ name, graphUri: lifecycle });
     }
     return result;

@@ -176,7 +176,15 @@ capture:
   subGraph: chat
   assertion: chat-log
   privacy: team
-  tool: cursor
+  # NOTE: \`tool\` is intentionally NOT pinned here. Each tool's hook
+  # script exports \`DKG_CAPTURE_TOOL\` at invocation time (Claude Code
+  # hooks export \`claude-code\`, Cursor defaults to \`cursor\` when the
+  # env var is absent), so the hook loader can tell which tool just
+  # fired even on "both Cursor and Claude installed" setups. Writing
+  # \`tool: cursor\` into this shared YAML used to break that because
+  # \`.dkg/config.yaml\` beats \`DKG_CAPTURE_TOOL\` in the config loader
+  # (see mcp-dkg/src/config.ts) — Claude-only installs would then
+  # record every turn as \`cursor\`.
 `;
 
 /**

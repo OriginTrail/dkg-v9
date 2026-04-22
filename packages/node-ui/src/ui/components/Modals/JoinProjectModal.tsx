@@ -138,8 +138,21 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       }
 
       if (catchup.status === 'timeout') {
-        setError('Timed out waiting for peers to respond. The project may be private and pending curator approval — you can try sending a join request.');
-        setAccessDenied(true);
+        // A poll timeout is NOT evidence of ACL denial — it just means
+        // no peer finished the catchup within ~90s. Common reasons:
+        //   - project is public but peers are slow / offline,
+        //   - network path is congested,
+        //   - our subscribe hasn't reached a peer that holds the CG yet.
+        // Flipping `accessDenied` here used to push users of public
+        // projects straight into the "Access Restricted — send signed
+        // join request" flow, which is misleading and cuts them off
+        // from just retrying. Surface a neutral network error instead
+        // and let them retry; a real ACL denial lands in the `denied`
+        // branch above, or in the `err.message` check at the bottom
+        // of this function.
+        setError(
+          'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
+        );
         setProgress('');
         return;
       }

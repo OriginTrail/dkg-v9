@@ -1414,16 +1414,23 @@ export class DKGAgent {
       );
 
       const nquadsText = new TextDecoder().decode(responseBytes).trim();
-      if (nquadsText === SYNC_DENIED_RESPONSE) {
-        throw new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
-      }
       if (!nquadsText) break;
 
-      // Explicit ACL denial from the responder. Throwing here lets
-      // syncFromPeer distinguish denial from an empty page / transport
-      // error instead of having higher-level code guess from a 0-triple
-      // result.
-      if (nquadsText === SYNC_ACCESS_DENIED_MARKER) {
+      // Explicit ACL denial from the responder. Both sentinels mean the
+      // same thing: `SYNC_ACCESS_DENIED_MARKER` is what current builds
+      // emit (line ~735), while `SYNC_DENIED_RESPONSE` is the legacy
+      // sentinel older peers still send during a rolling upgrade.
+      // Mapping both to `SyncAccessDeniedError` keeps `accessDeniedPeers`
+      // accurate in mixed-version networks — otherwise the legacy path
+      // would be classified as a generic transport failure/timeout and
+      // curated joins would silently mis-report ACL denials as network
+      // errors. Throwing also lets `syncFromPeer` distinguish denial
+      // from an empty page / transport error instead of having
+      // higher-level code guess from a 0-triple result.
+      if (
+        nquadsText === SYNC_ACCESS_DENIED_MARKER ||
+        nquadsText === SYNC_DENIED_RESPONSE
+      ) {
         throw new SyncAccessDeniedError(contextGraphId);
       }
 

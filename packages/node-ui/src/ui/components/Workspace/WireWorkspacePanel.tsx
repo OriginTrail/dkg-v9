@@ -405,7 +405,16 @@ export function WireWorkspacePanel({
         <button
           className="v10-modal-btn primary"
           onClick={handlePreview}
-          disabled={busy || !workspaceRoot.trim() || !nickname.trim() || !agent}
+          // NOTE: we deliberately DO NOT gate on `!agent`. The backend
+          // derives `agentUri` from the bearer token during
+          // `plan-install`/`install`, so a transient failure of
+          // `/api/agent/current` (reverse-proxy flake, daemon restart,
+          // keystore rehydration race) must not lock the panel — the
+          // install can still succeed, and the identity read is purely
+          // informational (used to display the wallet address for
+          // confirmation). Gating on it caused day-4 QA to report the
+          // panel "hanging" whenever identity fetch retried slowly.
+          disabled={busy || !workspaceRoot.trim() || !nickname.trim()}
         >
           {busy ? 'Loading preview…' : 'Preview install'}
         </button>

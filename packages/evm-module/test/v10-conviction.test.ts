@@ -41,7 +41,10 @@ import {
 
 const SCALE18 = 10n ** 18n;
 const SIX_X = 6n * SCALE18;
-const WITHDRAWAL_DELAY_SECONDS = 15 * 24 * 60 * 60;
+// D14 — WITHDRAWAL_DELAY collapsed to 0 since conviction lock expiry already
+// serves as the delay. Kept as a named constant so the finalize-flow test
+// stays self-documenting when the delay is reintroduced.
+const WITHDRAWAL_DELAY_SECONDS = 0;
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -235,21 +238,24 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
     expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
-    // TRAC moved in one hop: staker → StakingStorage. NFT wrapper untouched.
+    // TRAC moved in one hop: staker → StakingStorage (shared vault). NFT
+    // wrapper untouched. Note (D15): even though V10 accounting lives on
+    // ConvictionStakingStorage, the TRAC custody vault is still the V8
+    // StakingStorage contract — V10 does not run its own ERC-20 vault.
     expect(await Token.balanceOf(accounts[0].address)).to.equal(
       stakerBalBefore - amount,
     );
     expect(await Token.balanceOf(ssAddr)).to.equal(ssBalBefore + amount);
     expect(await Token.balanceOf(nftAddr)).to.equal(0n);
 
-    // StakingStorage bookkeeping.
+    // D15 — V10 stake lives in ConvictionStakingStorage. StakingStorage
+    // keeps track of the TRAC custody only (no delegator-base rows for V10
+    // tokenId keys). The V8 `getDelegatorStakeBase` / `getNodeStake`
+    // getters stay zero for V10 positions.
     expect(
-      await StakingStorageContract.getDelegatorStakeBase(
-        identityId,
-        tokenIdKey(0),
-      ),
+      await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
     ).to.equal(amount);
-    expect(await StakingStorageContract.getNodeStake(identityId)).to.equal(
+    expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
       amount,
     );
 
@@ -262,7 +268,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   });
 
   // --------------------------------------------------------------------------
-  // Test 3 — claim after time advance banks rewards
+  // Test 3 — claim after time advance compounds rewards into raw (D19)
   // --------------------------------------------------------------------------
   //
   // Inject per-epoch `nodeEpochScorePerStake`, `nodeEpochScore`,
@@ -272,9 +278,10 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   //     grossNodeRewards = epochPool * nodeScore18 / allNodesScore18
   //     reward = delegatorScore18 * grossNodeRewards / nodeScore18
   // (with operatorFee = 0 for a fresh profile). We verify the
-  // `RewardsClaimed` event fires and the position's `rewards` bucket
-  // matches.
-  it('claim: reward accrues after one-epoch advance and banks into position.rewards', async () => {
+  // `RewardsClaimed` event fires and the reward compounds directly into
+  // `pos.raw` (D19 — the separate `rewards` bucket was removed; claims
+  // increment raw principal and `cumulativeRewardsClaimed`).
+  it('claim: reward accrues after one-epoch advance and compounds into pos.raw (D19)', async () => {
     const { identityId } = await createProfile();
     const amount = hre.ethers.parseEther('1000');
     await mintAndApprove(accounts[0], amount);
@@ -325,9 +332,13 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       .to.emit(StakingV10Contract, 'RewardsClaimed')
       .withArgs(0n, expectedReward);
 
+    // D19 — rewards compound directly into `raw`; no separate `rewards`
+    // bucket exists anymore. `cumulativeRewardsClaimed` is the running
+    // total of every reward ever banked into this position (stat only,
+    // not used in any settlement math).
     const pos = await ConvictionStakingStorageContract.getPosition(0);
-    expect(pos.rewards).to.equal(expectedReward);
-    expect(pos.raw).to.equal(amount); // raw untouched by claim
+    expect(pos.raw).to.equal(amount + expectedReward);
+    expect(pos.cumulativeRewardsClaimed).to.equal(expectedReward);
   });
 
   // --------------------------------------------------------------------------
@@ -335,10 +346,11 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   // --------------------------------------------------------------------------
   //
   // End-to-end withdrawal: lock on a 1-epoch tier, advance past expiry,
-  // call `createWithdrawal` for the full amount, wait past the 15-day
-  // delay, then `finalizeWithdrawal`. Verifies TRAC is refunded to the
-  // staker and the NFT is burned (full drain).
-  it('withdrawal lifecycle: create → wait delay → finalize refunds TRAC and burns NFT on full drain', async () => {
+  // `createWithdrawal` for the full amount, then `finalizeWithdrawal`
+  // immediately (D14 — WITHDRAWAL_DELAY is 0 post-V10; the conviction
+  // lock itself serves as the time-lock). Verifies TRAC refund to the
+  // staker and NFT burn on full drain.
+  it('withdrawal lifecycle: post-expiry create → finalize refunds TRAC and burns NFT on full drain (D14)', async () => {
     const { identityId } = await createProfile();
     const ParametersStorage =
       await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
@@ -348,31 +360,21 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     await mintAndApprove(accounts[0], minStake);
     await NFT.connect(accounts[0]).createConviction(identityId, minStake, 1);
 
-    // Advance past the 1-epoch lock.
+    // Advance past the 1-epoch lock. `_computeExpiryEpoch(1)` snaps to
+    // `epochAtTimestamp(now + 30d + blockDriftBuffer) + 1`, which lands 2
+    // epochs beyond the mint epoch on a 30-day schedule. Bump 3 epochs to
+    // clear the expiry + buffer with margin.
     const epochLength = await ChronosContract.epochLength();
-    await time.increase(Number(epochLength) * 2);
+    await time.increase(Number(epochLength) * 3);
 
     // Satisfy the UnclaimedEpochs guard before withdrawal.
     await NFT.connect(accounts[0]).claim(0);
-    // Start the 15-day withdrawal timer for the full stake.
-    await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
 
-    // Pre-delay finalize must revert.
-    await expect(
-      NFT.connect(accounts[0]).finalizeWithdrawal(0),
-    ).to.be.revertedWithCustomError(
-      StakingV10Contract,
-      'WithdrawalDelayPending',
-    );
-
-    // Wait out the delay. Crossing 15 days advances Chronos by ~360 epochs,
-    // so the next CSS mutator would walk that entire dormant window — we
-    // amortize the walk via the hub-owner-privileged
-    // `finalizeEffectiveStakeUpTo` entry point so finalize stays under
-    // the per-tx gas cap.
-    await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-
-    const currentEpochBeforeFin = Number(
+    // Walk the effective-stake finalization cursor to `currentEpoch - 1`
+    // before requesting a withdrawal. createWithdrawal re-settles the
+    // position and each unfinalized epoch costs gas; dormant windows of
+    // ~30 days would otherwise blow the per-tx gas cap.
+    const currentEpochBeforeWd = Number(
       await ChronosContract.getCurrentEpoch(),
     );
     const lastGlobal = Number(
@@ -383,7 +385,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
         identityId,
       ),
     );
-    const target = currentEpochBeforeFin - 1;
+    const target = currentEpochBeforeWd - 1;
     const chunk = 50;
     for (let e = lastGlobal + chunk; e <= target; e += chunk) {
       await ConvictionStakingStorageContract.connect(
@@ -406,15 +408,29 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       ).finalizeNodeEffectiveStakeUpTo(identityId, target);
     }
 
+    // Full drain — claim() may have compounded rewards into raw (D19),
+    // so withdraw the updated pos.raw (not the original minStake).
+    const pos = await ConvictionStakingStorageContract.getPosition(0);
+    await NFT.connect(accounts[0]).createWithdrawal(0, pos.raw);
+
+    // D14 — WITHDRAWAL_DELAY=0: finalize can run in the same block as
+    // createWithdrawal, no time advance required. Lock expiry already
+    // serves as the de-facto delay.
+    if (WITHDRAWAL_DELAY_SECONDS > 0) {
+      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
+    }
+
     const stakerBalBefore = await Token.balanceOf(accounts[0].address);
     await NFT.connect(accounts[0]).finalizeWithdrawal(0);
 
-    // TRAC refunded.
+    // TRAC refunded (original principal + claimed rewards).
     expect(await Token.balanceOf(accounts[0].address)).to.equal(
-      stakerBalBefore + minStake,
+      stakerBalBefore + pos.raw,
     );
-    // Node stake drained.
-    expect(await StakingStorageContract.getNodeStake(identityId)).to.equal(0n);
+    // D15 — V10 node stake lives on ConvictionStakingStorage; drained to 0.
+    expect(
+      await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+    ).to.equal(0n);
     // NFT burned → ownerOf reverts.
     await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
       NFT,
@@ -423,18 +439,20 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   });
 
   // --------------------------------------------------------------------------
-  // Test 5 — convertToNFT V8 → V10 migration
+  // Test 5 — selfMigrateV8: V8 → V10 migration (D7 + D8)
   // --------------------------------------------------------------------------
   //
   // End-to-end V8-to-V10 migration smoke: set up a V8 address-keyed
   // delegator position directly (faster + decoupled from V8 `stake()`
   // correctness — `test/unit/Staking.test.ts` owns that), then call
-  // `NFT.convertToNFT(identityId, 12)` and verify:
-  //   - V8 bucket drained and removed from DelegatorsInfo set
-  //   - V10 position created under bytes32(tokenId) key
-  //   - Total/node stake invariant (V8 out = V10 in)
+  // `NFT.selfMigrateV8(identityId, lockEpochs)` and verify:
+  //   - V8 bucket drained
+  //   - V10 position created with `raw = stakeBaseAbsorbed + pendingAbsorbed` (D8)
+  //   - V10 aggregates (`totalStakeV10`, `nodeStakeV10`) grow by the migrated
+  //     amount (D15 — V10 has its own aggregates; V8 ones are NOT decremented
+  //     in this direct-seeding setup since we never went through V8 `stake()`)
   //   - NFT owned by the migrator
-  it('convertToNFT: V8 stake migrates into V10 NFT position, totals invariant', async () => {
+  it('selfMigrateV8: V8 stake migrates into V10 NFT position (D7+D8+D15)', async () => {
     const { identityId } = await createProfile();
     const amount = hre.ethers.parseEther('1000');
 
@@ -477,46 +495,42 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       baseline,
     );
 
-    const totalStakeBefore = await StakingStorageContract.getTotalStake();
-    const nodeStakeBefore =
-      await StakingStorageContract.getNodeStake(identityId);
+    const totalStakeV10Before =
+      await ConvictionStakingStorageContract.totalStakeV10();
+    const nodeStakeV10Before =
+      await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
 
-    await expect(NFT.connect(accounts[0]).convertToNFT(identityId, 12))
+    // D8 — both stakeBaseAbsorbed (V8 principal) and pendingAbsorbed (V8
+    // pending withdrawal) collapse into a single V10 `raw` value. In this
+    // direct-seeding setup we only wrote the principal, so pendingAbsorbed
+    // is 0 and `raw = amount`. `isAdmin = false` since this is a
+    // staker-initiated self-migration via the NFT wrapper.
+    await expect(NFT.connect(accounts[0]).selfMigrateV8(identityId, 12))
       .to.emit(NFT, 'ConvertedFromV8')
-      .withArgs(accounts[0].address, 0n, identityId, 12)
+      .withArgs(accounts[0].address, 0n, identityId, 12, false)
       .and.to.emit(StakingV10Contract, 'ConvertedFromV8')
-      .withArgs(accounts[0].address, 0n, identityId, amount, 12);
+      .withArgs(accounts[0].address, 0n, identityId, amount, 0n, 12, false);
 
     // V8 bucket drained.
     expect(
       await StakingStorageContract.getDelegatorStakeBase(identityId, v8Key),
     ).to.equal(0n);
-    expect(
-      await DelegatorsInfoContract.isNodeDelegator(
-        identityId,
-        accounts[0].address,
-      ),
-    ).to.equal(false);
 
-    // V10 position created under bytes32(tokenId=0).
-    expect(
-      await StakingStorageContract.getDelegatorStakeBase(
-        identityId,
-        tokenIdKey(0),
-      ),
-    ).to.equal(amount);
+    // D15 — V10 position lives in ConvictionStakingStorage. V10 does not
+    // write a mirror row into StakingStorage under the tokenId key; V10
+    // aggregates live on CSS.
     const pos = await ConvictionStakingStorageContract.getPosition(0);
     expect(pos.raw).to.equal(amount);
     expect(pos.lockEpochs).to.equal(12);
     expect(pos.multiplier18).to.equal(SIX_X);
 
-    // Total + node invariants.
-    expect(await StakingStorageContract.getTotalStake()).to.equal(
-      totalStakeBefore,
+    // V10 aggregates grow by the migrated amount (D15).
+    expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
+      totalStakeV10Before + amount,
     );
-    expect(await StakingStorageContract.getNodeStake(identityId)).to.equal(
-      nodeStakeBefore,
-    );
+    expect(
+      await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+    ).to.equal(nodeStakeV10Before + amount);
 
     // NFT owned by migrator.
     expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);

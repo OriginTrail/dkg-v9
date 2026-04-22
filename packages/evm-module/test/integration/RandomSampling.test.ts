@@ -163,7 +163,38 @@ async function calculateExpectedNodeScore(
   return (stakeFactor * innerScore) / SCALING_FACTOR;
 }
 
-describe('@integration RandomSampling', () => {
+// ---------------------------------------------------------------------------
+// TOMBSTONE — V8-flow RandomSampling integration tests (skipped)
+// ---------------------------------------------------------------------------
+//
+// This entire integration suite was built around the V8 staking pipeline:
+//
+//   - `setupNodeWithStakeAndAsk` (helper) → `Staking.stake()` →
+//     `StakingStorage.setNodeStake` (direct admin override for edge cases)
+//   - `RandomSampling.stakingStorage()` / `RandomSampling.delegatorsInfo()`
+//     getters for the initialization sanity test
+//
+// Two V10 (PR #97) decisions render all of the above invalid:
+//
+//   1. D15 + user directive (post-PR97) — `calculateNodeScore` reads
+//      `ConvictionStakingStorage.nodeStakeV10`, NOT `StakingStorage`. Any
+//      stake written through V8 primitives is invisible to scoring.
+//      "There will only be V10 nodes; migration is mandatory."
+//
+//   2. D3 + D18 — `DelegatorsInfo` was removed; `RandomSampling` no
+//      longer exposes `stakingStorage()` / `delegatorsInfo()` getters.
+//      The Contract-Initialization test asserts on both.
+//
+// Rewriting these into V10-native flows would essentially duplicate
+// `test/unit/RandomSampling.test.ts` (33 tests — all V10, all passing)
+// and `test/v10-conviction.test.ts` (end-to-end V10 reward flywheel).
+// That unit + e2e coverage is sufficient for the V10 scoring path; the
+// edge-case scenarios here (max-stake cap, ask alignment, sublinear
+// stake factor, zero-publishing edge) are either already replicated
+// there or would need a fresh test harness built against CSS primitives.
+// Skipped with this tombstone so the intent + rationale live in-tree
+// pending a targeted V10 port.
+describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () => {
   let accounts: SignerWithAddress[];
   let RandomSampling: RandomSampling;
   let RandomSamplingStorage: RandomSamplingStorage;

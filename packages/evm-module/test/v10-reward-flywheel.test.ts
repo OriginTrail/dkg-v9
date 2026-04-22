@@ -134,7 +134,35 @@ async function deployFlywheelFixture(): Promise<FlywheelFixture> {
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe('@integration V10 Phase 11 — full reward flywheel', function () {
+// ---------------------------------------------------------------------------
+// TOMBSTONE — Mixed V8 + V10 flywheel scenarios (skipped, V10-only model)
+// ---------------------------------------------------------------------------
+//
+// Every test in this describe block mixes a V8 `Staking.stake()` delegator
+// with a V10 conviction-NFT staker on the same `identityId`. Two separate
+// decisions made during V10 (PR #97) render this mixed-mode scenario
+// invalid going forward:
+//
+//   1. D15 — V10 aggregates live on `ConvictionStakingStorage.nodeStakeV10`
+//      / `totalStakeV10`, NOT on `StakingStorage.getNodeStake`. These suites
+//      assert `getNodeStake(id) == V10_RAW + V8_RAW`, which was true when
+//      V10 mirrored into SS; under D15 it equals the V8 bucket only.
+//
+//   2. User directive (post-PR97) — "there will only be V10 nodes" and
+//      `calculateNodeScore` now reads V10-only stake. Any V8 stake parked
+//      on a V10 node earns no score → earns no rewards → breaks the 6:1
+//      conservation math these tests check.
+//
+// Migration is MANDATORY: the only valid post-V10 path for a V8 delegator
+// landing on a V10 node is `selfMigrateV8` → `ConvertedFromV8` which absorbs
+// the V8 stake into a fresh V10 position. That flow is covered by
+// `@integration V10 Phase 5 — selfMigrateV8` in v10-conviction.test.ts and
+// by the unit suite on DKGStakingConvictionNFT. The mixed-mode flywheel
+// math here is strictly obsolete and would need a full rewrite against the
+// new aggregates + V10-only scoring model to carry any signal. Skipping
+// with this tombstone in lieu of deletion so the intent + rationale is
+// preserved in-tree.
+describe.skip('@integration V10 Phase 11 — full reward flywheel (OBSOLETE: mixed V8+V10)', function () {
   let accounts: SignerWithAddress[];
   let Token: Token;
   let Chronos: Chronos;

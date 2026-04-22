@@ -22,27 +22,22 @@ session-start hook emits nothing, and the write/shell hooks only fire on the
 hardcoded protected paths (the guard's own files). You can do ad-hoc work
 without any task ceremony.
 
-You engage the system in one of four ways:
+You engage the system in one of three ways:
 
-1. **Interactive wizard (default)** — run `pnpm task start`. A terminal
-   wizard asks you a few questions (description, which packages, extras),
-   drafts a manifest, shows a preview, and activates it. No agent round-trip
-   needed; works identically in every agent (Cursor, Claude Code, Codex,
-   Gemini, …) and even with no agent at all.
-2. **Smart onboarding (`pnpm task start --smart`)** — agent-guided flow.
-   The CLI asks you for a multi-line task description, then drops a
-   one-shot marker that embeds that description and copies the trigger
-   text to your clipboard. The agent reads your description, explores
-   the repo semantically, and proposes a scope via a rich two-part
-   `AskQuestion` (multi-select packages + single-select action), and on
-   `approve` runs `pnpm task create` itself (the `afterShellExecution`
-   hook has a narrow allowlist for the canonical invocation — see
-   "Architecture / approved-task-create allowlist" below). Use this when
-   you want the agent to do the thinking.
-3. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
+1. **`pnpm task start`** — agent-guided onboarding. The CLI asks you for
+   a task description (single-Enter submit; multi-line pastes welcome),
+   drops a one-shot marker that embeds the description, and copies the
+   trigger text to your clipboard. The next message you send in any chat
+   (new or existing) makes the agent read your description, explore the
+   repo, and propose a scope via a short plan-mode `AskQuestion`. On
+   approval the agent runs `pnpm task create` itself (the
+   `afterShellExecution` hook has a narrow allowlist for the canonical
+   invocation — see "Architecture / approved-task-create allowlist"
+   below).
+2. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
    already have.
-4. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
-   builds + activates a manifest in one shot.
+3. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
+   builds + activates a manifest in one shot (useful for CI / scripts).
 
 Clearing the active task (`pnpm task clear`) returns Cursor to its invisible
 default.
@@ -68,9 +63,9 @@ or deleted afterwards.
 ### Approved-task-create allowlist
 
 The after-shell hooks include a narrow, audited allowlist so the agent
-can finish the smart-onboarding flow itself — i.e. on plan-mode
-`approve`, the agent runs `pnpm task create <id> ...` and the hook lets
-the resulting `agent-scope/tasks/<id>.json` plus `agent-scope/active`
+can finish the onboarding flow itself — i.e. on plan-mode `approve`,
+the agent runs `pnpm task create <id> ...` and the hook lets the
+resulting `agent-scope/tasks/<id>.json` plus `agent-scope/active`
 persist.
 
 The allowlist is:
@@ -94,8 +89,8 @@ The allowlist is:
   so a syntactically-invalid manifest never reaches disk for the hook to
   allow.
 
-This keeps the smart-onboarding UX one-step (agent runs the command
-after you click Approve) without weakening protection: every non-matching
+This keeps the onboarding UX one-step (agent runs the command after
+you click Approve) without weakening protection: every non-matching
 write to `agent-scope/tasks/**` and `agent-scope/active` is still
 immediately reverted.
 
@@ -196,11 +191,8 @@ pnpm scope:validate      # validates every manifest
 ## Quick start
 
 ```bash
-# Interactive wizard (default) — asks a few questions, drafts + activates a manifest
+# Onboarding — paste a description in the CLI, the agent proposes a scope in chat
 pnpm task start
-
-# Smart onboarding — paste a description in the CLI, agent proposes scope in chat
-pnpm task start --smart
 
 # Non-interactive manifest creation (flags)
 pnpm task create my-task \
@@ -238,86 +230,64 @@ pnpm task clear
 
 ## Onboarding flow
 
-There are two onboarding flows. The **interactive wizard** is the default
-— fully deterministic, no agent involvement. The **smart flow**
-(`--smart`) is an AI-driven alternative when you want the agent to
-understand your task description semantically and propose a scope.
+`pnpm task start` is the single onboarding command. It's agent-guided:
+the CLI captures your task description, drops a one-shot marker, and the
+agent takes it from there.
 
-### Flow 1 — interactive wizard (default)
+1. **You run `pnpm task start`** in the terminal. The CLI prompts:
 
-Run `pnpm task start`. The CLI walks you through a short questionnaire:
+   > What are you working on?
+   > (One or two sentences is plenty. Paste longer briefs if you have them.)
+   > Press Enter to send.
 
-1. **Description** — one sentence describing the task. Used as
-   `description` in the manifest and as the seed for the task id.
-2. **Task id** — auto-kebab-cased from the description; press Enter to
-   accept or type your own.
-3. **Packages** — the wizard discovers workspace packages from
-   `pnpm-workspace.yaml` (or `package.json` `workspaces`, or a `packages/*`
-   fallback), presents them as a numbered list, and pre-selects the ones
-   whose names overlap with keywords in your description. Type the numbers
-   you want, or press Enter to accept the suggestion, or `none` to skip.
-4. **Build-artefact exemptions** — y/n for the standard
-   `**/dist/**`, `**/*.tsbuildinfo`, `pnpm-lock.yaml` set.
-5. **Extra allowed globs** (optional) and **extra deny globs** (optional) —
-   free-text, one per line, blank to finish. `!**/secrets.*` and
-   `!**/.env*` are always denied automatically.
-6. **Preview** — prints the drafted manifest JSON.
-7. **Save / edit / cancel** — `s` saves & activates, `e` opens `$EDITOR`
-   (or `$VISUAL`) on the file and re-validates on exit, `c` aborts without
-   writing anything.
+   Single Enter submits; multi-line pastes are captured in full via
+   paste-detection.
 
-No chat round-trip, no agent needed, runs in under a second, works
-identically in every agent. This is the recommended path.
+2. **The CLI drops `agent-scope/.pending-onboarding`** (gitignored) —
+   a one-shot marker containing the onboarding protocol *and* your
+   description inside a `=== USER TASK DESCRIPTION ===` block. The
+   trigger text is also copied to your clipboard as a fallback.
 
-If `stdin` is not a TTY (CI, piped input), `pnpm task start` errors out
-with guidance to use `pnpm task create <id> --flags...` directly. Both
-onboarding modes need interactive input.
+3. **Your next message in any chat triggers onboarding.** Three
+   parallel consumers compete for the marker so it fires exactly once:
 
-### Flow 2 — smart onboarding (`pnpm task start --smart`)
+   - **New chat (Cmd+L)** — the `sessionStart` hook injects the trigger.
+   - **Current chat, any message** — the agent's top-of-turn rule reads
+     the marker on its first action; the `postToolUse` hook injects it
+     as `additional_context` if the agent happens to call a tool first.
+   - **Manual paste** — the trigger is already in your clipboard.
 
-The CLI prompts you for a task description (press Enter to submit —
-multi-line pastes are captured in full via paste-detection), then drops
-a one-shot marker at
-`agent-scope/.pending-onboarding` (gitignored) that *already embeds* your
-description inside a `=== USER TASK DESCRIPTION ===` block. The trigger
-text is also copied to your clipboard.
+4. **The agent follows a fixed protocol** (defined in
+   `.cursor/rules/agent-scope.mdc`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`):
 
-Your NEXT message in any chat (new or existing) makes the agent pivot to
-smart onboarding. Three parallel consumers compete for the marker so it
-fires exactly once:
-
-- **New chat (Cmd+L)** — the `sessionStart` hook injects the trigger.
-- **Current chat, any message** — the agent's top-of-turn rule reads the
-  marker on its first action; the `postToolUse` hook injects it as
-  `additional_context` if the agent happens to call a tool first.
-- **Manual paste** — the trigger is already in your clipboard.
-
-The agent then follows a fixed protocol (defined in
-`.cursor/rules/agent-scope.mdc`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`):
-
-1. Reads your description from the marker (does NOT ask you again).
-2. Explores the codebase (Grep / Glob / SemanticSearch / DKG) to find
-   relevant files. Counts matching files per candidate package.
-3. Proposes a scope via a **single short `AskQuestion`** — one question,
-   two options. The prompt is one-line rephrase of the task + the scope
-   as 3–5 bullet globs + "Sound good?" The options are:
-   - `go` — "Yes, go with that"
-   - `custom_instruction` — "Tell me what to change"
-4. On `go`, the agent itself runs `pnpm task create <id> ...` via the
-   shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
-   recognise the canonical task-create invocation and allow its two
-   specific writes (`agent-scope/tasks/<id>.json` and `agent-scope/active`)
-   to persist; every other write to those paths is still reverted. See
-   the "approved-task-create allowlist" section for details.
-5. On `custom_instruction`, the agent asks in plain chat what you'd like
-   changed, updates the draft, and re-asks step 3.
-6. Once approved, the agent starts the real work in the same turn.
+   1. Reads your description from the marker (does NOT ask you again).
+   2. Explores the codebase (Grep / Glob / SemanticSearch / DKG) to find
+      relevant files. Counts matching files per candidate package.
+   3. Proposes a scope via a **single short `AskQuestion`** — one
+      question, two options. The prompt is a one-line rephrase of the
+      task + the scope as 3–5 bullet globs + "Sound good?" The options
+      are:
+      - `go` — "Yes, go with that"
+      - `custom_instruction` — "Tell me what to change"
+   4. On `go`, the agent itself runs `pnpm task create <id> ...` via the
+      shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
+      recognise the canonical task-create invocation and allow its two
+      specific writes (`agent-scope/tasks/<id>.json` and
+      `agent-scope/active`) to persist; every other write to those paths
+      is still reverted. See the "approved-task-create allowlist"
+      section for details.
+   5. On `custom_instruction`, the agent asks in plain chat what you'd
+      like changed, updates the draft, and re-asks step 3.
+   6. Once approved, the agent starts the real work in the same turn.
 
 From here, every attempted write to an out-of-scope file triggers a
 plan-mode AskQuestion menu — see **Escalation** below.
 
-The marker is one-shot: the first hook that consumes it also deletes it,
-so the trigger fires exactly once per `pnpm task start --smart`.
+The marker is one-shot: the first consumer that reads it also deletes
+it, so onboarding fires exactly once per `pnpm task start`.
+
+If `stdin` is not a TTY (CI, piped input), `pnpm task start` errors out
+with guidance to use `pnpm task create <id> --flags...` directly.
 
 ## Manifest format
 

@@ -19,13 +19,11 @@ through `.cursor/rules/agent-scope.mdc` and `CLAUDE.md`.
 
 The guard is **invisible by default**. It only activates when:
 
-1. The user runs `pnpm task start --smart` and the trigger line
+1. The user runs `pnpm task start` and the trigger line
    `agent-scope: start task onboarding.` reaches you (via a hook or via
    your own top-of-turn marker check). The marker already embeds the
    user's task description in a `=== USER TASK DESCRIPTION ===` block —
-   do NOT ask the user to describe it again. The default `pnpm task start`
-   without `--chat` is an interactive CLI wizard that writes a manifest
-   itself and never reaches you, so most users will skip this flow, OR
+   do NOT ask the user to describe it again, OR
 2. An active task is set (`agent-scope/active` exists; the session-start
    hook will inject a context block naming it; or you can check by running
    `pnpm task show`), OR
@@ -55,16 +53,13 @@ terminal:
 touch agent-scope/.bootstrap-token
 ```
 
-## Smart onboarding (when the user runs `pnpm task start --smart`)
+## Task onboarding (when the user runs `pnpm task start`)
 
-`pnpm task start --smart` captures a multi-line task description from the
-user in the terminal, then drops a one-shot marker file at
+`pnpm task start` captures a task description from the user in the
+terminal, then drops a one-shot marker file at
 `agent-scope/.pending-onboarding` containing trigger text *and* the
 user's description embedded in a `=== USER TASK DESCRIPTION ===` block.
-(The default `pnpm task start` without `--smart` is an interactive CLI
-wizard that never involves you — by the time the user messages you, the
-manifest is already written and activated.) The marker is consumed
-atomically the first time anything reads it.
+The marker is consumed atomically the first time anything reads it.
 
 For Codex CLI and other agents without hook support, you should **proactively
 check for this marker on the first action of every turn** when no task is
@@ -80,8 +75,8 @@ active:
 
 1. **Get the task description.**
    - If the marker contains a `=== USER TASK DESCRIPTION ===` block
-     (the `--smart` flow), use that verbatim as the brief. DO NOT ask
-     the user to describe the task again.
+     (the `pnpm task start` flow), use that verbatim as the brief. DO
+     NOT ask the user to describe the task again.
    - Otherwise, ask them in chat: "Describe the task in detail —
      packages, behaviours, tests, any files you already know about."
      Wait for reply.
@@ -186,8 +181,7 @@ instead and follow their reply. Never invent options.
 ## CLI quick reference
 
 ```
-pnpm task start                   # interactive wizard (default, preferred)
-pnpm task start --smart           # user pastes description; agent proposes scope
+pnpm task start                   # user pastes description; agent proposes scope in chat
 pnpm task list                    # list available task manifests
 pnpm task show                    # show the active task and its scope
 pnpm task set <id>                # set the active task

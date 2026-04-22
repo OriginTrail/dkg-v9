@@ -12,16 +12,12 @@ Key points for Gemini:
   `pnpm task check <path>` to test a specific path.
 - A set of system files is **always protected** regardless of task. See
   the "Hardcoded protected paths" section in `AGENTS.md`.
-- Most users run `pnpm task start` without flags — that's an interactive
-  CLI wizard that writes a manifest directly. You don't see anything
-  special; by the time the user messages you, the active task is set.
-- If the user runs `pnpm task start --smart`, a one-shot marker file at
+- When the user runs `pnpm task start`, a one-shot marker file at
   `agent-scope/.pending-onboarding` is dropped. The marker already
   embeds the user's task description in a `=== USER TASK DESCRIPTION ===`
   block — do NOT ask them to describe it again. On your first action of
   any new turn (when no task is active), check whether that marker exists;
-  if it does, delete it and run the smart-onboarding protocol from
-  `AGENTS.md`.
+  if it does, delete it and run the onboarding protocol from `AGENTS.md`.
 - Gemini CLI does **not** have hard hook enforcement. You self-enforce by
   following the rules. The user trusts you to comply.
 - Never invent menu options when surfacing a denial — pass through the

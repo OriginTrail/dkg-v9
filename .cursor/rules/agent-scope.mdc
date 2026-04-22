@@ -1,5 +1,5 @@
 ---
-description: Task-scoped write permissions. Invisible by default; engaged via `pnpm task start` (interactive wizard, preferred) or `pnpm task start --smart` (agent-guided with pre-captured description) or an active task. All denials surface a plan-mode AskQuestion menu.
+description: Task-scoped write permissions. Invisible by default; engaged via `pnpm task start` (agent-guided with pre-captured description) or an active task. All denials surface a plan-mode AskQuestion menu.
 alwaysApply: true
 ---
 
@@ -10,17 +10,11 @@ engages it. If no active task is set and bootstrap is off, the system is a
 no-op for you — behave normally. The hardcoded protected paths (the guard's
 own files) are still defended, but that only matters if you try to touch them.
 
-The user turns the system on in one of three ways:
+The user turns the system on in one of two ways:
 
-1. **Interactive wizard (most common, no agent involvement)** — they run
-   `pnpm task start` in their terminal. A CLI wizard asks them a few
-   questions and writes + activates a manifest directly. No marker is
-   dropped and you see NOTHING in chat. By the time they message you, the
-   session-start hook has already injected the active-task context block —
-   treat it like case 3 below.
-2. **Smart onboarding (`pnpm task start --smart`)** — they want YOU to read
-   their task description, explore the repo, and propose a scope. The CLI
-   captures a multi-line description from them and drops a one-shot marker
+1. **`pnpm task start`** — they want YOU to read their task description,
+   explore the repo, and propose a scope. The CLI captures a task
+   description from them and drops a one-shot marker
    (`agent-scope/.pending-onboarding`, gitignored) that already embeds the
    description. THREE parallel consumers compete for the marker — whichever
    runs first wins, because consumption is atomic read-and-delete:
@@ -34,7 +28,7 @@ The user turns the system on in one of three ways:
    Result: the next user message in any chat, new or existing, triggers
    onboarding exactly once. After that the marker is gone and everything
    else behaves normally.
-3. **Existing active task** — the session-start hook injects a context block
+2. **Existing active task** — the session-start hook injects a context block
    naming the active task. From that moment on, writes are task-scoped and
    every denial must be surfaced via the plan-mode denial protocol below.
 
@@ -66,11 +60,11 @@ postToolUse hooks), treat it the same as finding the marker: pivot to the
 onboarding protocol immediately. The hooks already delete the marker for
 you in that case; do not double-delete — just follow the protocol.
 
-## Smart onboarding protocol — when the user wants to start a new scoped task
+## Task onboarding protocol — when the user wants to start a new scoped task
 
 Triggered by any of:
 
-- The smart-mode trigger text (either found in the pending-onboarding
+- The onboarding trigger text (either found in the pending-onboarding
   marker, or injected by the `sessionStart` / `postToolUse` hook). It
   begins with `agent-scope: start task onboarding.` and usually contains a
   `=== USER TASK DESCRIPTION ===` block.
@@ -82,9 +76,9 @@ Follow these steps exactly:
 
 1. **Get the task description.**
    - **If the trigger already contains a `=== USER TASK DESCRIPTION ===` block**
-     (the `--smart` flow): use that description verbatim as your brief.
-     DO NOT re-ask the user to describe the task — they already typed it
-     into the CLI.
+     (the `pnpm task start` flow): use that description verbatim as your
+     brief. DO NOT re-ask the user to describe the task — they already
+     typed it into the CLI.
    - **Otherwise** (bare marker or an intent phrase), send a plain chat
      message:
      > "OK, let's scope a new task. Describe in detail what we're building

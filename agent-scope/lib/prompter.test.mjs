@@ -1,5 +1,5 @@
 // Unit tests for the tiny prompter. Focuses on the paste-detection
-// primitives used by `pnpm task start --smart`'s description reader —
+// primitives used by `pnpm task start`'s description reader —
 // i.e. the `tryReadLine(timeoutMs)` helper and its interaction with
 // the blocking `ask()` path.
 

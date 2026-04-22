@@ -38,7 +38,7 @@ test('ONBOARDING_TRIGGER_TEXT starts with the canonical prefix and covers the pr
     ONBOARDING_TRIGGER_TEXT.startsWith('agent-scope: start task onboarding'),
     'trigger must begin with the documented prefix',
   );
-  assert.ok(ONBOARDING_TRIGGER_TEXT.includes('Smart onboarding protocol'));
+  assert.ok(ONBOARDING_TRIGGER_TEXT.includes('Task onboarding protocol'));
   assert.ok(ONBOARDING_TRIGGER_TEXT.includes('AskQuestion'));
   assert.ok(ONBOARDING_TRIGGER_TEXT.includes('pnpm task create'));
 });

@@ -190,30 +190,25 @@ This repo ships an opt-in task-scoping guard. It stays **invisible** unless
 engaged. Default behaviour: write normally, read anything. The guard only
 kicks in when:
 
-1. The user runs `pnpm task start` (interactive wizard — most common; by
-   the time they message you, an active task is already set and the
-   session-start hook has injected the context block), OR
-2. The user runs `pnpm task start --smart` and the trigger line
+1. The user runs `pnpm task start` and the trigger line
    `agent-scope: start task onboarding` appears in your context (marker
    consumed by a hook or by your top-of-turn check). The marker already
    embeds the user's task description — do NOT ask them to describe it
    again, OR
-3. An active task is set (session-start hook injects a context block naming
+2. An active task is set (session-start hook injects a context block naming
    it), OR
-4. You try to touch one of the hardcoded protected paths that defend the
+3. You try to touch one of the hardcoded protected paths that defend the
    guard itself — those are always blocked unless the user has enabled
    bootstrap mode.
 
-### Smart onboarding protocol (triggered by `pnpm task start --smart` / "start a scoped task")
+### Task onboarding protocol (triggered by `pnpm task start` / "start a scoped task")
 
-`pnpm task start --smart` asks the user for a multi-line task description
-in the terminal, then drops `agent-scope/.pending-onboarding` (gitignored)
-with that description already embedded, and copies the trigger to the
-user's clipboard. (The default `pnpm task start` without `--smart` is the
-interactive CLI wizard — it writes the manifest itself and never reaches
-you.) The marker is one-shot: the first thing that consumes it also
-deletes it, so it fires for **exactly one** user message no matter which
-chat that message lands in.
+`pnpm task start` asks the user for a task description in the terminal,
+drops `agent-scope/.pending-onboarding` (gitignored) with that description
+already embedded, and copies the trigger to the user's clipboard. The
+marker is one-shot: the first thing that consumes it also deletes it, so
+it fires for **exactly one** user message no matter which chat that
+message lands in.
 
 Three parallel consumers — whichever runs first wins:
 
@@ -238,7 +233,7 @@ active task** (`agent-scope/active` is absent), your FIRST action MUST be:
    b. IGNORE the user's actual message (whatever they typed, even if it
       was a specific instruction — they knew onboarding was pending when
       they sent it).
-   c. Pivot to the **Smart onboarding protocol** below: parse the marker
+   c. Pivot to the **Task onboarding protocol** below: parse the marker
       payload for a `=== USER TASK DESCRIPTION ===` block. If present, use
       it as the brief and skip step 1 below. Otherwise, ask the user to
       describe the task.
@@ -254,8 +249,8 @@ protocol below.
 
 1. **Get the task description.**
    - If the trigger / marker contains a `=== USER TASK DESCRIPTION ===`
-     block (the `--smart` flow), use that verbatim. DO NOT ask the user to
-     describe the task again — they already typed it into the CLI.
+     block (the `pnpm task start` flow), use that verbatim. DO NOT ask the
+     user to describe the task again — they already typed it into the CLI.
    - Otherwise, ask them in plain chat: "OK, let's scope a new task.
      Describe in detail what we're building or fixing — packages,
      behaviours, tests, any files you already know about." Wait for
@@ -385,8 +380,7 @@ The JSON shape (key fields only):
 ### CLI quick reference
 
 ```
-pnpm task start                   # interactive wizard (default) — user runs this; writes + activates manifest directly
-pnpm task start --smart           # user pastes description in CLI; agent proposes scope in chat
+pnpm task start                   # user pastes description in CLI; agent proposes scope in chat
 pnpm task create <id> [flags]     # non-interactive manifest build — agent runs this on approve (allowlisted)
 pnpm task list | show | set <id> | clear | check <path> | audit | resolve
 pnpm scope:status | scope:validate | scope:test

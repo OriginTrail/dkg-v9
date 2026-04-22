@@ -13,20 +13,12 @@ import {
   isBootstrapActive,
 } from '../lib/scope.mjs';
 import {
-  ONBOARDING_TRIGGER_TEXT,
   buildOnboardingTrigger,
   writeOnboardingMarker,
   copyToClipboard,
 } from '../lib/onboarding.mjs';
 import { detectAgents, statusGlyph, summary } from '../lib/check-agent.mjs';
-import {
-  discoverPackages,
-  deriveTaskId,
-  suggestPackagesFromDescription,
-  buildManifest,
-} from '../lib/wizard.mjs';
 import { createPrompter } from '../lib/prompter.mjs';
-import { spawnSync } from 'node:child_process';
 
 try { checkNodeVersion(); }
 catch (e) { console.error(e.message); process.exit(3); }
@@ -198,31 +190,24 @@ async function init(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Task onboarding
+// Task onboarding — `pnpm task start`
 // ---------------------------------------------------------------------------
 //
-// Two independent ways to start a task:
+// Single flow: the CLI asks "What are you working on?" (one short prompt,
+// single Enter to submit, multi-line pastes captured in full), then drops
+// a one-shot marker file at `agent-scope/.pending-onboarding` embedding
+// the user's description plus the Task onboarding protocol. The next
+// message the user sends in ANY chat (new or existing) makes the agent
+// read the description, explore the repo, and propose a scope via a
+// plan-mode AskQuestion. On approval the agent runs `pnpm task create`
+// itself via the allowlist.
 //
-//   (1) `pnpm task start` — default. Interactive CLI wizard that asks a few
-//       questions (description, packages, extras), drafts a manifest,
-//       previews it, and saves + activates it. No agent round-trip; works
-//       identically in every agent and with no agent at all. Deterministic
-//       keyword match.
-//
-//   (2) `pnpm task start --smart` — agent-guided mode. The CLI prompts
-//       once for a multi-line task description, then drops a marker that
-//       embeds that description + the Smart onboarding protocol. The next
-//       message the user sends in any chat makes the agent read the
-//       description, explore the repo, and propose a scope via a rich
-//       AskQuestion (two questions: multi-select packages + action). The
-//       agent prints a `pnpm task create ...` command for the user to run.
-//
-// If stdin is not a TTY we refuse — both modes need interactive input.
-// For CI / scripts use `pnpm task create <id> --description ... --allowed
-// ... --activate` directly.
+// Requires an interactive terminal. For non-interactive / CI use call
+// `pnpm task create <id> --description ... --allowed ... --activate`
+// directly — that path has always been scripted-friendly.
 // ---------------------------------------------------------------------------
 
-async function start(argv = []) {
+async function start() {
   const { id: activeId } = resolveActiveTaskId(root);
   if (activeId) {
     console.log(`A task is already active: ${activeId}`);
@@ -232,19 +217,7 @@ async function start(argv = []) {
     return;
   }
 
-  // Accept both --smart (canonical) and --chat (old name we're migrating
-  // away from). If someone still has `--chat` in muscle memory, warn and
-  // continue — don't make the rename a paper cut.
-  const smartMode = argv.includes('--smart') || argv.includes('-s');
-  const legacyChat = argv.includes('--chat') || argv.includes('-c');
-  const forceInteractive = argv.includes('--interactive') || argv.includes('-i');
-  const ttyOk = Boolean(process.stdin.isTTY) || forceInteractive;
-
-  if (legacyChat) {
-    console.error('warning: --chat was renamed to --smart; proceeding as --smart.');
-  }
-
-  if (!ttyOk) {
+  if (!process.stdin.isTTY) {
     console.error('error: `pnpm task start` requires an interactive terminal.');
     console.error('');
     console.error('For non-interactive / CI use, call `pnpm task create` directly:');
@@ -252,16 +225,6 @@ async function start(argv = []) {
     console.error('    --allowed "packages/foo/**" --inherits base --activate');
     process.exit(2);
   }
-
-  if (smartMode || legacyChat) return startSmart();
-  await startInteractive();
-}
-
-async function startSmart() {
-  console.log('agent-scope: smart task scoping');
-  console.log('  (the agent will read your description, explore the repo, and propose a scope)');
-  console.log('  (tip: `pnpm task start` without --smart runs the deterministic wizard instead)');
-  console.log('');
 
   const prompter = createPrompter();
   let description = '';
@@ -277,7 +240,7 @@ async function startSmart() {
 
   const trimmed = description.trim();
   if (!trimmed || trimmed.length < 10) {
-    bail('description is too short — smart mode needs at least a sentence of context');
+    bail('description is too short — give me at least a sentence of context');
   }
 
   const trigger = buildOnboardingTrigger({ description: trimmed });
@@ -285,251 +248,24 @@ async function startSmart() {
   const clip = copyToClipboard(trigger);
 
   console.log('');
-  console.log(`agent-scope: captured ${trimmed.split(/\s+/).length} words.`);
+  console.log(`Got it — captured ${trimmed.split(/\s+/).length} words.`);
   console.log('');
-  console.log('Next step — exchange ONE short message with your agent:');
-  console.log('');
-  console.log('  1. Go to your Cursor / Claude Code / Codex / Gemini chat.');
-  console.log('     Any chat works — new or existing.');
-  console.log('  2. Send any message ("go", "hi", whatever).');
-  console.log('  3. The agent reads your description, explores the repo, and');
-  console.log('     proposes a scope via a plan-mode AskQuestion. One click to');
-  console.log('     approve (or edit) the scope.');
-  console.log('  4. Paste the generated `pnpm task create` command back here.');
+  console.log('Now open any chat and send any message ("go", "hi", whatever).');
+  console.log('Your agent will read the description, explore the repo, and');
+  console.log('ask you one quick question to approve the proposed scope.');
   console.log('');
   if (clip.ok) {
-    console.log(`(Trigger also copied to clipboard via ${clip.method} — pasting works too.)`);
+    console.log(`(Trigger also copied to clipboard via ${clip.method}.)`);
   } else {
-    console.log(`(Clipboard copy unavailable: ${clip.reason}. Paste is optional —`);
-    console.log(` any message will trigger onboarding because of the marker file.)`);
+    console.log(`(Clipboard copy unavailable: ${clip.reason}. No paste needed —`);
+    console.log(` any message triggers onboarding because of the marker file.)`);
   }
   console.log('');
   console.log(`Marker file: ${markerPath}`);
   console.log('(Auto-deleted the moment the agent reads it; one-shot.)');
   console.log('');
-  console.log('Change your mind? `rm agent-scope/.pending-onboarding` and run');
-  console.log('`pnpm task start` for the deterministic wizard instead.');
+  console.log('Change your mind? `rm agent-scope/.pending-onboarding` and start over.');
   bootstrapWarning();
-}
-
-async function startInteractive() {
-  console.log('agent-scope: interactive task wizard');
-  console.log('  (no agent needed — hit Ctrl+C any time to cancel, nothing is saved until the final "save" step.)');
-  console.log('  (tip: for agent-guided onboarding instead, run `pnpm task start --chat`)');
-  console.log('');
-
-  const prompter = createPrompter();
-  try {
-    // 1) Description ---------------------------------------------------------
-    const description = await askNonEmpty(
-      prompter,
-      'What are you working on? (one short sentence)\n> ',
-      'A description is required so the task manifest is self-explanatory.',
-    );
-    console.log('');
-
-    // 2) Task ID -------------------------------------------------------------
-    const existingIds = listTasks(root);
-    const suggestedId = deriveTaskId(description, { existingIds });
-    const idInput = await prompter.ask(
-      `Task id (press Enter to accept "${suggestedId}"): `,
-      { default: suggestedId },
-    );
-    let taskId = idInput;
-    if (!/^[a-z0-9][a-z0-9-_.]{0,63}$/.test(taskId)) {
-      console.log(`  (invalid id "${taskId}" — falling back to "${suggestedId}")`);
-      taskId = suggestedId;
-    }
-    if (existingIds.includes(taskId)) {
-      const deduped = deriveTaskId(taskId + '-alt', { existingIds });
-      console.log(`  (id "${taskId}" already exists — using "${deduped}")`);
-      taskId = deduped;
-    }
-    const manifestPath = resolve(tasksDir, `${taskId}.json`);
-    console.log('');
-
-    // 3) Packages ------------------------------------------------------------
-    const packages = discoverPackages(root);
-    let selectedPackages = [];
-    if (packages.length === 0) {
-      console.log('No workspace packages detected — skipping package picker.');
-      console.log('(You can add allowed globs freely in the next step.)');
-    } else {
-      const suggested = suggestPackagesFromDescription(description, packages);
-      const suggestedSet = new Set(suggested.map(p => p.path));
-      const suggestedIndices = [];
-      printPackageList(packages, suggestedSet);
-      packages.forEach((p, i) => {
-        if (suggestedSet.has(p.path)) suggestedIndices.push(i + 1);
-      });
-      const prompt = suggestedIndices.length
-        ? `Pick packages (space/comma separated; Enter = suggested [${suggestedIndices.join(' ')}]; type "none" for none): `
-        : `Pick packages (space/comma separated; "none" or blank for none): `;
-      const picked = await prompter.askMultiNumber(prompt, packages.length, {
-        default: suggestedIndices,
-      });
-      selectedPackages = picked.map(i => packages[i - 1]).filter(Boolean);
-      if (selectedPackages.length) {
-        console.log(`  Selected: ${selectedPackages.map(p => p.name).join(', ')}`);
-      } else {
-        console.log('  No packages selected. You can still add custom allowed globs below.');
-      }
-    }
-    console.log('');
-
-    // 4) Build artefacts -----------------------------------------------------
-    const includeBuildArtifacts = await prompter.askYesNo(
-      'Include build artefacts + lockfile as exemptions (**/dist/**, *.tsbuildinfo, pnpm-lock.yaml)?',
-      { default: true },
-    );
-    console.log('');
-
-    // 5) Extras --------------------------------------------------------------
-    const extraAllowed = await prompter.askLines(
-      'Additional ALLOWED globs (optional):',
-      { hint: 'one per line, blank to finish (e.g. scripts/dev.ts)' },
-    );
-    const extraDeny = await prompter.askLines(
-      'Additional DENY globs (optional):',
-      { hint: 'one per line, blank to finish (! is added automatically). secrets and .env* are denied by default.' },
-    );
-    console.log('');
-
-    // 6) Build & preview -----------------------------------------------------
-    const inheritBase = listTasks(root).includes('base');
-    const manifest = buildManifest({
-      id: taskId,
-      description,
-      selectedPackages,
-      includeBuildArtifacts,
-      extraAllowed,
-      extraDeny,
-      inheritBase,
-      existingIds,
-    });
-
-    const errs = validateManifest(manifest, taskId);
-    if (errs.length) {
-      console.error('Generated manifest failed validation:');
-      for (const e of errs) console.error(`  - ${e}`);
-      bail('could not build a valid manifest from your inputs — aborting without saving');
-    }
-
-    if (!manifest.allowed && !manifest.inherits) {
-      console.log('Heads up: no allowed globs and no inherits — agent will have nothing it can write.');
-      const proceed = await prompter.askYesNo('Continue anyway?', { default: false });
-      if (!proceed) { console.log('Aborted. Nothing was saved.'); return; }
-    }
-
-    console.log('Proposed manifest:');
-    console.log(`  ${manifestPath}`);
-    console.log('');
-    for (const line of JSON.stringify(manifest, null, 2).split('\n')) {
-      console.log(`  ${line}`);
-    }
-    console.log('');
-
-    // 7) Save / edit / cancel -----------------------------------------------
-    const decision = await prompter.askChoice('What next?', [
-      { key: 's', label: 'save and activate (recommended)' },
-      { key: 'e', label: 'edit manually (opens $EDITOR; saved & activated on close)' },
-      { key: 'c', label: 'cancel — nothing will be written' },
-    ], { default: 's' });
-
-    if (decision === 'c') { console.log('Aborted. Nothing was saved.'); return; }
-
-    if (existsSync(manifestPath)) {
-      const overwrite = await prompter.askYesNo(
-        `Manifest already exists at ${manifestPath}. Overwrite?`,
-        { default: false },
-      );
-      if (!overwrite) { console.log('Aborted. Existing manifest untouched.'); return; }
-    }
-
-    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-    console.log(`Created ${manifestPath}`);
-
-    if (decision === 'e') {
-      const opened = openInEditor(manifestPath);
-      if (!opened.ok) {
-        console.log(`(editor launch failed: ${opened.reason} — manifest is saved as-is, edit it later with your editor of choice)`);
-      } else {
-        // Re-validate after editing; if invalid, leave it there and warn.
-        let edited;
-        try { edited = JSON.parse(readFileSync(manifestPath, 'utf8')); }
-        catch (e) {
-          console.error(`Saved file is no longer valid JSON: ${e.message}`);
-          console.error('Leaving it in place. Fix it by hand and run `pnpm task validate ' + taskId + '`.');
-          return;
-        }
-        const editErrs = validateManifest(edited, taskId);
-        if (editErrs.length) {
-          console.error('Edited manifest has validation errors:');
-          for (const e of editErrs) console.error(`  - ${e}`);
-          console.error('Leaving it in place. Fix it and run `pnpm task validate ' + taskId + '`.');
-          return;
-        }
-      }
-    }
-
-    writeFileSync(activeFile, `${taskId}\n`, 'utf8');
-    console.log(`Activated: ${taskId}`);
-    console.log('');
-    console.log('The agent can now only write files matching the allowed globs.');
-    console.log('Useful next commands:');
-    console.log('  pnpm task show            — see current scope');
-    console.log('  pnpm task check <path>    — test a single path');
-    console.log('  pnpm task clear           — exit task mode');
-    bootstrapWarning();
-  } finally {
-    prompter.close();
-  }
-}
-
-async function askNonEmpty(prompter, prompt, explain) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const v = await prompter.ask(prompt);
-    if (v && v.trim().length >= 3) return v.trim();
-    console.log(`  ${explain}`);
-  }
-  bail('no description provided after 3 tries — aborting');
-}
-
-function printPackageList(packages, suggestedSet) {
-  console.log('Workspace packages:');
-  const width = Math.max(...packages.map(p => p.name.length), 4);
-  const cols = 2;
-  const rows = Math.ceil(packages.length / cols);
-  for (let r = 0; r < rows; r++) {
-    const line = [];
-    for (let c = 0; c < cols; c++) {
-      const i = c * rows + r;
-      if (i >= packages.length) continue;
-      const p = packages[i];
-      const n = (i + 1).toString().padStart(2, ' ');
-      const marker = suggestedSet && suggestedSet.has(p.path) ? '*' : ' ';
-      line.push(`  ${marker}${n}. ${p.name.padEnd(width, ' ')}`);
-    }
-    console.log(line.join('  '));
-  }
-  if (suggestedSet && suggestedSet.size) console.log('  (* = suggested from your description)');
-}
-
-function openInEditor(filePath) {
-  const editor = process.env.VISUAL || process.env.EDITOR || 'vi';
-  try {
-    const parts = editor.split(/\s+/).filter(Boolean);
-    const cmd = parts[0];
-    const args = parts.slice(1).concat(filePath);
-    const r = spawnSync(cmd, args, { stdio: 'inherit' });
-    if (r.error) return { ok: false, reason: r.error.message };
-    if (typeof r.status === 'number' && r.status !== 0) {
-      return { ok: false, reason: `editor exited with status ${r.status}` };
-    }
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, reason: e.message };
-  }
 }
 
 function parseCreateArgs(argv) {
@@ -731,7 +467,7 @@ try {
     case 'clear':    clear(); break;
     case 'check':    check(rest[0]); break;
     case 'init':     await init(rest[0]); break;
-    case 'start':    await start(rest); break;
+    case 'start':    await start(); break;
     case 'create':   create(rest); break;
     case 'validate': validate(rest[0]); break;
     case 'audit':    audit(rest); break;
@@ -742,8 +478,7 @@ try {
       console.log([
         'usage: task <command> [args]',
         '',
-        '  start              interactive wizard: draft a manifest + activate',
-        '  start --smart      paste a description, agent proposes scope in chat',
+        '  start              describe the task; the agent proposes a scope in chat',
         '  list               list available task manifests',
         '  show               show the active task and its scope',
         '  set <id>           set the active task',

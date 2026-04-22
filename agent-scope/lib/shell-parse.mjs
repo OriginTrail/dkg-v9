@@ -192,7 +192,7 @@ export function bodyTouchesProtected(body, protectedPatterns) {
 // paths (including `agent-scope/tasks/**`). That's the right default — we
 // don't want the agent to silently mint itself a wider task scope.
 //
-// BUT: the smart-onboarding protocol ends with a plan-mode `AskQuestion`
+// BUT: the onboarding protocol ends with a plan-mode `AskQuestion`
 // where the USER explicitly approves the proposed scope. Post-approval,
 // the agent should be able to run `pnpm task create <id> ...` directly
 // without bouncing the command back to the user to copy-paste.

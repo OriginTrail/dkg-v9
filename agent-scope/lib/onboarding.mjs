@@ -1,17 +1,18 @@
-// Onboarding marker + clipboard helpers for `pnpm task start --smart`.
+// Onboarding marker + clipboard helpers for `pnpm task start`.
 //
-// The default `pnpm task start` is now a fully interactive CLI wizard that
-// never involves the agent. This module powers the `--smart` mode, where
-// the user pastes a task description in the CLI and the agent then reads
-// that description, explores the repo, and proposes a scope.
+// `pnpm task start` is the single onboarding flow: the CLI captures a
+// task description from the user, then drops a one-shot marker file at
+// `agent-scope/.pending-onboarding`. The next message the user sends in
+// any chat makes the agent read the description, explore the repo, and
+// propose a scope via a plan-mode AskQuestion.
 //
 // Flow:
 //
-//   1. `pnpm task start --smart` reads a multi-line description from the
-//      user, then drops a one-shot marker file at
-//      `agent-scope/.pending-onboarding`. The marker contains both the
-//      trigger text AND the user's description, so the agent does not need
-//      to ask the user "describe the task" again.
+//   1. `pnpm task start` reads a description from the user (single-Enter
+//      submit; multi-line pastes captured in full), then writes the
+//      marker. The marker contains both the trigger text AND the user's
+//      description, so the agent does not need to ask "describe the
+//      task" again.
 //   2. The user sends any message in any chat.
 //   3. THREE parallel consumers pick up the marker — whichever runs first
 //      wins, because consume is atomic (read-and-delete):
@@ -23,7 +24,7 @@
 //            top-of-turn marker check so even pure conversational messages
 //            (e.g. "hi") consume the marker correctly.
 //
-//   4. The agent follows the "Smart onboarding protocol" (CLAUDE.md,
+//   4. The agent follows the "Task onboarding protocol" (CLAUDE.md,
 //      .cursor/rules/agent-scope.mdc, AGENTS.md, GEMINI.md).
 //
 // Zero runtime deps. Pure-ish (spawnSync for clipboard; filesystem for marker).
@@ -62,10 +63,10 @@ export function buildOnboardingTrigger({ description = '' } = {}) {
     'agent-scope: start task onboarding.',
     '',
     hasDesc
-      ? 'The user ran `pnpm task start --smart` and has already provided their task description below. DO NOT ask them to describe it again — use the description as your brief.'
-      : 'The user ran `pnpm task start --smart` but did not include a description. Ask them to describe the task in one short chat message before proceeding.',
+      ? 'The user ran `pnpm task start` and has already provided their task description below. DO NOT ask them to describe it again — use the description as your brief.'
+      : 'The user ran `pnpm task start` but did not include a description. Ask them to describe the task in one short chat message before proceeding.',
     ...descBlock,
-    'Smart onboarding protocol — follow EXACTLY (full text in CLAUDE.md,',
+    'Task onboarding protocol — follow EXACTLY (full text in CLAUDE.md,',
     '.cursor/rules/agent-scope.mdc, AGENTS.md, GEMINI.md):',
     '',
     '  1. Stop whatever you were about to do on this turn.',

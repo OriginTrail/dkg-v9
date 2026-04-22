@@ -145,38 +145,53 @@ const lastFileSnapshot = new WeakMap<
 
 function reconcileFileTokens(validTokens: Set<string>): void {
   const filePath = tokenFilePath();
+  let rawBuf: Buffer;
   let mtimeMs = -1;
   let size = -1;
   try {
+    rawBuf = readFileSync(filePath);
     const st = statSync(filePath);
     mtimeMs = st.mtimeMs;
     size = st.size;
-  } catch {
+  } catch (err: any) {
+    // PR #229 bot review round 7 (auth.ts:162 — ENOENT path). If the
+    // token file is missing AND we had previously loaded tokens from
+    // it, those tokens MUST be revoked from `validTokens`: `dkg auth
+    // revoke` rewrites the file to empty or deletes it, and operators
+    // expect the in-memory set to follow suit. The previous revision
+    // `return`ed silently on ENOENT, leaving the last file-derived
+    // token valid forever.
+    if (err && err.code === 'ENOENT') {
+      const snapshot = lastFileSnapshot.get(validTokens);
+      if (snapshot) {
+        for (const oldTok of snapshot.fileTokens) validTokens.delete(oldTok);
+        lastFileSnapshot.delete(validTokens);
+      }
+    }
     return;
   }
-  const snapshot = lastFileSnapshot.get(validTokens);
-  // Cheap short-circuit: if size+mtime are identical, the bytes almost
-  // certainly are too (and the fallback below will prove it by hashing).
-  // Reading/hashing on every call would defeat the "one statSync per
-  // request" design goal.
-  if (snapshot && snapshot.mtimeMs === mtimeMs && snapshot.size === size) return;
-  let rawBuf: Buffer;
-  try {
-    rawBuf = readFileSync(filePath);
-  } catch {
-    return;
-  }
+
+  // PR #229 bot review round 7 (auth.ts:162 — fast-path gap). The
+  // previous revision short-circuited on matching `{mtimeMs, size}`
+  // before hashing. That's unsafe on coarse-mtime filesystems (HFS+
+  // 1s resolution, certain network mounts, CI tmpfs): a rotate that
+  // rewrites `auth.token` with a new token of the same length within
+  // the same second leaves `mtimeMs` and `size` unchanged and the
+  // old token stays hot. Always hash the bytes — the file is tiny
+  // (one or two lines) and hashing is O(µs).
   const contentHash = createHash('sha256').update(rawBuf).digest('hex');
+  const snapshot = lastFileSnapshot.get(validTokens);
   if (snapshot && snapshot.contentHash === contentHash) {
-    // mtime/size drifted but bytes are unchanged (e.g. atomic replace
-    // with identical content, or `touch`). Refresh the fast-path
-    // metadata so we don't re-hash on every request.
-    lastFileSnapshot.set(validTokens, {
-      mtimeMs,
-      size,
-      contentHash,
-      fileTokens: snapshot.fileTokens,
-    });
+    // Bytes unchanged — keep fileTokens, just refresh stat metadata so
+    // future reads don't trip debug warnings about skew.
+    if (snapshot.mtimeMs !== mtimeMs || snapshot.size !== size) {
+      lastFileSnapshot.set(validTokens, {
+        mtimeMs,
+        size,
+        contentHash,
+        fileTokens: snapshot.fileTokens,
+      });
+    }
     return;
   }
   const newFileTokens = new Set<string>();
@@ -685,12 +700,27 @@ export function httpAuthGuard(
       const clNum = typeof clRaw === 'string' ? Number(clRaw) : NaN;
       const isChunked = req.headers['transfer-encoding'] === 'chunked';
       const method = req.method ?? 'GET';
+      // PR #229 bot review round 7 (auth.ts:692): DELETE was lumped in
+      // with GET/HEAD/OPTIONS as "definitely body-less", but RFC 9110
+      // explicitly allows a DELETE request to carry a body and the DKG
+      // daemon accepts them on a handful of routes (e.g. admin token
+      // revocation carries a JSON body listing token ids). Treating
+      // those DELETEs as zero-body here binds the HMAC to an empty
+      // string and marks the request `verified` before `readBodyOrNull`
+      // ever runs — so any body bytes are silently accepted without
+      // authentication.
+      //
+      // Only short-circuit when the framing proves the request is
+      // actually body-less (GET/HEAD/OPTIONS are semantically body-less
+      // for HMAC binding; everything else must trip the explicit
+      // Content-Length/Transfer-Encoding check).
+      const isFramingBodyless =
+        !isChunked && Number.isFinite(clNum) && clNum <= 0;
       const isZeroBody =
         method === 'GET' ||
         method === 'HEAD' ||
         method === 'OPTIONS' ||
-        method === 'DELETE' ||
-        (!isChunked && Number.isFinite(clNum) && clNum <= 0);
+        isFramingBodyless;
       if (isZeroBody) {
         const pending = (req as unknown as {
           __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };

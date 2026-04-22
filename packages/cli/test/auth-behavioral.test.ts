@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { writeFile, mkdir, rm, utimes, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, rm, utimes, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes, createHmac } from 'node:crypto';
@@ -293,6 +293,50 @@ describe('rotateToken / revokeToken', () => {
 
     // Next verify should invalidate the original and accept the new one.
     expect(verifyToken('new-out-of-band-token', tokens)).toBe(true);
+    expect(verifyToken(original, tokens)).toBe(false);
+  });
+
+  // PR #229 bot review round 7 (auth.ts:162). Coarse-mtime filesystems
+  // (HFS+ 1s, some SMB mounts, certain CI tmpfs) re-use the same mtime
+  // tick on quick rewrites. `loadTokens` creates `auth.token` with a
+  // 64-byte hex token; a rotation replaces it with ANOTHER 64-byte hex
+  // token — same size, same second. The prior `{mtimeMs, size}` fast
+  // path would then skip the hash-and-reload step entirely, leaving
+  // the old token valid. Pin that the new file contents win regardless
+  // of the stat sidecar.
+  it('verifyToken hot-reloads even when the new token has the same size AND the same mtime', async () => {
+    const { verifyToken } = await import('../src/auth.js');
+    const tokens = await loadTokens();
+    const [original] = [...tokens];
+    const tokPath = join(tempDir, 'auth.token');
+
+    // Snapshot the current mtime so we can pin the rewritten file to
+    // the exact same tick (simulating coarse-mtime filesystems).
+    const { statSync } = await import('node:fs');
+    const originalStat = statSync(tokPath);
+    const frozenMtime = new Date(originalStat.mtimeMs);
+
+    // Same file shape (`# comment\n<64-hex-char>\n`) → same size.
+    const sameSizeToken = 'a'.repeat(64);
+    const header = '# DKG node API token — treat this like a password';
+    await writeFile(tokPath, `${header}\n${sameSizeToken}\n`);
+    await utimes(tokPath, frozenMtime, frozenMtime);
+
+    // Hash-on-every-read means the new token takes effect immediately.
+    expect(verifyToken(sameSizeToken, tokens)).toBe(true);
+    expect(verifyToken(original, tokens)).toBe(false);
+  });
+
+  it('verifyToken revokes the last file-derived token when auth.token is deleted (ENOENT)', async () => {
+    const { verifyToken } = await import('../src/auth.js');
+    const tokens = await loadTokens();
+    const [original] = [...tokens];
+    expect(verifyToken(original, tokens)).toBe(true);
+
+    await unlink(join(tempDir, 'auth.token'));
+
+    // Previous revision returned silently on ENOENT so the stale token
+    // stayed hot forever. Deletion is now a revocation signal.
     expect(verifyToken(original, tokens)).toBe(false);
   });
 });

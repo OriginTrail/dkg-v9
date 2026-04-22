@@ -161,6 +161,46 @@ describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
     expect(result.bindings).toEqual([]);
   });
 
+  // PR #229 bot review round 7 (dkg-query-engine.ts:513) — `rdf:type` style
+  // IRIs contain a `#` fragment. The prior naive `replace(/#[^\n]*/g,'')`
+  // would mangle the IRI into `<http://www.w3.org/1999/02/22-rdf-syntax-ns`
+  // and fail-close every such query to `[]`. Lock the happy path so the
+  // fragment is preserved and the trust filter is injected correctly.
+  it('honors _minTrust when the BGP contains a fragment IRI (rdf:type, xsd, rdfs)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:frag', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://schema.org/Person', consensusGraph),
+      quad('urn:frag', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:frag> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['t'])).toEqual(['http://schema.org/Person']);
+  });
+
+  it('still strips real line comments containing a fake terminator (`# … .`)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:cmt', 'http://schema.org/name', '"ok"', consensus),
+      quad('urn:cmt', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+    ]);
+    const sparql = [
+      'SELECT ?n WHERE {',
+      '  <urn:cmt> <http://schema.org/name> ?n . # trailing comment with a fake dot .',
+      '}',
+    ].join('\n');
+    const result = await engine.query(sparql, {
+      contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"ok"']);
+  });
+
   it('honors _minTrust on MIXED concrete + variable subjects in a single BGP', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

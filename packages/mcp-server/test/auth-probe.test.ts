@@ -111,13 +111,47 @@ describe('auth-probe — probeAuth (bearer credential validation)', () => {
     expect(r.code).toBe(401);
   });
 
-  it('short-circuits and reports FAILED when no credential is configured (no network call)', async () => {
-    const beforeCount = ctx.seen.length;
+  // PR #229 bot review round 7 (auth-probe.ts:69). An empty token is
+  // NOT a hard failure: if the daemon runs with `auth.enabled=false`
+  // the unauthenticated probe returns 200 and every MCP request would
+  // succeed. We report that as `authDisabled` so the host can render
+  // a distinct state. When auth IS enabled the probe still 401s and
+  // we still report FAILED — the old invariant is preserved.
+  it('surfaces auth-disabled daemon as {ok:true, authDisabled:true} when no credential is configured', async () => {
+    // Swap in a server that accepts the unauthenticated probe.
+    await new Promise<void>((r) => ctx.server.close(() => r()));
+    const openServer = http.createServer((req, res) => {
+      ctx.seen.push(req);
+      req.on('data', () => {});
+      req.on('end', () => {
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ agents: [] }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise<void>((r) => openServer.listen(0, '127.0.0.1', r));
+    const port = (openServer.address() as AddressInfo).port;
+    try {
+      const r = await probeAuth(`http://127.0.0.1:${port}`, '');
+      expect(r.ok).toBe(true);
+      expect(r.authDisabled).toBe(true);
+      expect(r.code).toBe(200);
+      const lastReq = ctx.seen[ctx.seen.length - 1];
+      expect(String(lastReq.headers['authorization'] ?? '')).toBe('');
+    } finally {
+      await new Promise<void>((r) => openServer.close(() => r()));
+    }
+  });
+
+  it('reports FAILED (401) with NO authDisabled flag when daemon requires auth and no credential is configured', async () => {
     const r = await probeAuth(`http://127.0.0.1:${ctx.port}`, '');
     expect(r.ok).toBe(false);
-    expect(r.body).toMatch(/no credential/i);
-    // No request must be sent when there's nothing to prove.
-    expect(ctx.seen.length).toBe(beforeCount);
+    expect(r.code).toBe(401);
+    expect(r.authDisabled).toBeUndefined();
   });
 
   it('hits an auth-GATED path (/api/agents), NOT /api/status (the public allowlist)', async () => {

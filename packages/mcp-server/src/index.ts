@@ -472,11 +472,24 @@ server.registerTool(
       // even when the node is reachable.
       const status = await probeStatus(url, cred);
       const authProbe = await probeAuth(url, cred);
+      // PR #229 bot review round 7 (auth-probe.ts:69): when no
+      // credential is configured AND the daemon accepts the
+      // unauthenticated `/api/agents` probe, surface that as a
+      // distinct `AUTH DISABLED` state instead of conflating it
+      // with a hard `FAILED`. Any subsequent MCP request would
+      // succeed because the daemon has `auth.enabled=false`, so
+      // the host shouldn't see a red "authentication broken"
+      // signal — it's the operator's choice.
+      const authProbeLabel = authProbe.authDisabled
+        ? 'AUTH DISABLED'
+        : authProbe.ok
+          ? 'OK'
+          : 'FAILED';
       return ok(
         `node = ${url}\n` +
           `credential fingerprint = ${fingerprint}\n` +
           `liveness probe = ${status.ok ? 'OK' : 'FAILED'}${status.code ? ` (${status.code})` : ''}\n` +
-          `auth probe = ${authProbe.ok ? 'OK' : 'FAILED'}${authProbe.code ? ` (${authProbe.code})` : ''}\n` +
+          `auth probe = ${authProbeLabel}${authProbe.code ? ` (${authProbe.code})` : ''}\n` +
           (status.body ? `liveness body = ${status.body}\n` : '') +
           (authProbe.body ? `auth body = ${authProbe.body}\n` : ''),
       );

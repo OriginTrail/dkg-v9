@@ -83,6 +83,46 @@ export class OxigraphStore implements TripleStore {
   }
 
   /**
+   * Drop the numeric-subtype side-table entry for a quad that was just
+   * removed from the store. PR #229 bot review round 7 (oxigraph.ts:164)
+   * — before this, `delete()` / `deleteByPattern()` / `dropGraph()` /
+   * `deleteBySubjectPrefix()` silently left stale entries behind, so
+   * `restoreOriginalDatatypeForSelectBinding()` could see phantom
+   * subtype conflicts from data that no longer existed (and the
+   * conflicts were persisted across restarts via the sidecar).
+   */
+  private forgetNumericDatatype(q: DKGQuad): void {
+    const term = q.object;
+    if (!term.startsWith('"')) return;
+    const m = term.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return;
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    this.originalNumericDatatype.delete(key);
+  }
+
+  /**
+   * Evict side-table entries whose graph suffix matches. Called from
+   * `dropGraph()` / `deleteBySubjectPrefix()` / `deleteByPattern()`
+   * when we don't have the pre-delete quad set to key by directly.
+   * Keys are `s\0p\0value\0g` so we filter on the final `\0g` suffix
+   * (plus optional subject-prefix predicate).
+   */
+  private evictNumericDatatypeForGraph(
+    graphUri: string,
+    subjectPrefix?: string,
+  ): void {
+    const suffix = `\u0000${graphUri}`;
+    for (const k of this.originalNumericDatatype.keys()) {
+      if (!k.endsWith(suffix)) continue;
+      if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
+      this.originalNumericDatatype.delete(k);
+    }
+  }
+
+  /**
    * Companion sidecar path that persists the numeric-subtype metadata
    * across restarts. The main N-Quads dump cannot carry it because
    * Oxigraph canonicalises `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte`
@@ -183,6 +223,7 @@ export class OxigraphStore implements TripleStore {
     for (const q of quads) {
       const oxQuad = toOxQuad(q);
       if (oxQuad) this.store.delete(oxQuad);
+      this.forgetNumericDatatype(q);
     }
     this.scheduleFlush();
   }
@@ -196,6 +237,9 @@ export class OxigraphStore implements TripleStore {
     );
     for (const q of matches) {
       this.store.delete(q);
+      // We have the concrete deleted quads in hand, so do an exact
+      // eviction rather than the graph-wide scan (bot review round 7).
+      this.forgetNumericDatatype(fromOxQuad(q));
     }
     if (matches.length > 0) this.scheduleFlush();
     return matches.length;
@@ -326,6 +370,12 @@ export class OxigraphStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+    // PR #229 bot review round 7 (oxigraph.ts:164): every numeric-
+    // subtype key that lived in this graph must be dropped too, so
+    // `restoreOriginalDatatypeForSelectBinding` can't see phantom
+    // conflicts from data that no longer exists (and the conflicts
+    // don't get persisted across restarts via the sidecar).
+    this.evictNumericDatatypeForGraph(graphUri);
     this.scheduleFlush();
   }
 
@@ -353,7 +403,14 @@ export class OxigraphStore implements TripleStore {
       `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
     );
     const removed = before - this.store.size;
-    if (removed > 0) this.scheduleFlush();
+    if (removed > 0) {
+      // PR #229 bot review round 7 (oxigraph.ts:164): evict sidecar
+      // entries for quads that just vanished. We filter by
+      // `startsWith(subjectPrefix)` (keys are `s\0p\0v\0g`) which
+      // mirrors the SPARQL `STRSTARTS(STR(?s), prefix)` filter above.
+      this.evictNumericDatatypeForGraph(graphUri, prefix);
+      this.scheduleFlush();
+    }
     return removed;
   }
 

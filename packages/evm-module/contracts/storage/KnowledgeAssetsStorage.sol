@@ -9,6 +9,7 @@ import {KnowledgeAssetsLib} from "../libraries/KnowledgeAssetsLib.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
 import {LibBitmap} from "solady/src/utils/LibBitmap.sol";
+import {HubLib} from "../libraries/HubLib.sol";
 
 /**
  * @title KnowledgeAssetsStorage
@@ -199,7 +200,20 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         uint40 endEpoch,
         uint96 tokenAmount,
         bool isPermanent
-    ) external onlyContracts {
+    ) external {
+        // PR #229 bot review round 7 (KnowledgeAssetsStorage.sol:202).
+        // `onlyContracts` allows every Hub-registered contract to emit
+        // `V10KnowledgeBatchEmitted` — a buggy or compromised registered
+        // contract could then forge batch-audit events that look like
+        // real V10 publishes, and indexers have no state change in this
+        // contract to cross-check. Lock the caller to the one contract
+        // that owns the V10 publish pipeline: `KnowledgeAssetsV10`.
+        // `hub.owner()` is kept as an explicit admin break-glass (same
+        // pattern used elsewhere in `HubDependent._checkHubContract`).
+        address v10 = hub.getContractAddress("KnowledgeAssetsV10");
+        if (msg.sender != v10 && msg.sender != hub.owner()) {
+            revert HubLib.UnauthorizedAccess("Only KnowledgeAssetsV10");
+        }
         emit V10KnowledgeBatchEmitted(
             batchId,
             publisherAddress,

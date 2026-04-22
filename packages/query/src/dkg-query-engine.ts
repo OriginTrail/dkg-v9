@@ -481,6 +481,57 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
  *   - no subject var is found at all.
  * Callers treat `null` as "refuse to run" (see bot review L1).
  */
+/**
+ * Strip SPARQL line comments (`# … EOL`) from a fragment of SPARQL
+ * WHERE body while preserving `#` that appears inside an IRI
+ * (`<http://…/rdf-ns#type>`) or inside a string literal (`"…#…"`,
+ * `'…#…'`). Used by `injectMinTrustFilter` where a full parser would
+ * be overkill but a naive line-comment regex mangles `rdf:type` etc.
+ *
+ * This is intentionally small: we handle the three grammar contexts
+ * that can legally contain a bare `#` in SPARQL 1.1 (IRI, quoted
+ * literal, line comment) and treat everything else as ordinary code.
+ * Triple-quoted `"""…"""` / `'''…'''` are NOT recognised because
+ * `injectMinTrustFilter` already bails on any WHERE containing tokens
+ * from the multi-line literal grammar (FILTER EXISTS, SELECT, …).
+ */
+function stripSparqlLineComments(src: string): string {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const ch = src[i];
+    if (ch === '<') {
+      const end = src.indexOf('>', i + 1);
+      if (end === -1) { out += src.slice(i); break; }
+      out += src.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (src[j] === quote) { j++; break; }
+        j++;
+      }
+      out += src.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '#') {
+      const nl = src.indexOf('\n', i);
+      if (nl === -1) { break; }
+      i = nl; // leave the newline so dot-accounting still sees line breaks
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const whereIdx = sparql.search(/WHERE\s*\{/i);
   if (whereIdx === -1) return null;
@@ -508,9 +559,15 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
     return null;
   }
 
-  // Strip any trailing comment on the final line so the dot accounting
-  // below doesn't misclassify "# foo ." as a terminating triple.
-  const innerCodeOnly = inner.replace(/#[^\n]*/g, '');
+  // Strip SPARQL line comments (`# … \n`) so the dot accounting below
+  // doesn't misclassify "# foo ." as a terminating triple — BUT leave
+  // `#` fragments inside IRIs (`<…#…>`) and literals (`"…#…"`) alone.
+  // The naive `/#[^\n]*/g` regex used here previously mangled the
+  // extremely common `rdf:type` shape
+  // `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>` whenever
+  // `_minTrust` was set, which fail-closes the entire query to `[]`
+  // (PR #229 bot review round 7 — dkg-query-engine.ts:513).
+  const innerCodeOnly = stripSparqlLineComments(inner);
   const trimmedInner = innerCodeOnly.trim();
   if (trimmedInner.length === 0) return null;
 

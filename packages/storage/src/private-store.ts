@@ -264,6 +264,55 @@ export class PrivateContentStore {
     }
   }
 
+  /**
+   * Read the set of already-present `(s, p, plaintextObject)` triples in
+   * `graphUri` whose `(s, p)` appears in `incoming`, decrypting the
+   * stored ciphertext objects so comparison is on plaintext identity.
+   *
+   * Scoping the SPARQL to only the `(s, p)` pairs the caller is about
+   * to write keeps this bounded: the naive "pull every private quad in
+   * the graph" variant would be O(|graph|) per insert.
+   */
+  private async collectExistingPlaintextKeys(
+    graphUri: string,
+    incoming: Quad[],
+  ): Promise<Set<string>> {
+    const subjects = new Set<string>();
+    const predicates = new Set<string>();
+    for (const q of incoming) {
+      subjects.add(q.subject);
+      predicates.add(q.predicate);
+    }
+    if (subjects.size === 0 || predicates.size === 0) return new Set();
+
+    const escIri = (iri: string) => `<${assertSafeIri(iri)}>`;
+    const subjectVals = [...subjects].map(escIri).join(' ');
+    const predicateVals = [...predicates].map(escIri).join(' ');
+    const sparql = `
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${assertSafeIri(graphUri)}> {
+          VALUES ?s { ${subjectVals} }
+          VALUES ?p { ${predicateVals} }
+          ?s ?p ?o .
+        }
+      }
+    `;
+    const keys = new Set<string>();
+    try {
+      const result = await this.store.query(sparql);
+      if (result.type !== 'bindings') return keys;
+      for (const row of result.bindings) {
+        const plain = this.decryptLiteral(row['o']);
+        keys.add(`${row['s']}\u0001${row['p']}\u0001${plain}`);
+      }
+    } catch {
+      // If the scoped read fails we fall back to no-dedup: worst case
+      // is the historical behaviour (duplicate ciphertexts) — never a
+      // confidentiality regression.
+    }
+    return keys;
+  }
+
   clearCache(key: string): void {
     this.privateEntities.delete(key);
   }
@@ -300,12 +349,36 @@ export class PrivateContentStore {
     // contains only ciphertext envelopes (`enc:gcm:v1:<base64>`),
     // satisfying the BUGS_FOUND.md ST-2 invariant. Callers retrieve
     // plaintext via `getPrivateTriples`, which reverses the seal.
-    const normalized = quads.map((q) => ({
-      ...q,
-      object: this.encryptLiteral(q.object),
-      graph: graphUri,
-    }));
-    await this.store.insert(normalized);
+    //
+    // PR #229 bot review round 7 — private-store.ts:226. Because
+    // `encryptLiteral` now uses a fresh random IV per call (bot review
+    // N1 rightly forbids deterministic IVs for AES-GCM), a plain
+    // `insert()` would duplicate the quad on every retry / replay of
+    // the same private KA: the store dedups by byte-identical terms,
+    // but ciphertext is never byte-identical across writes. Dedup here
+    // by decrypting the set of existing ciphertext objects at each
+    // `(s, p)` position in this private graph and skipping any incoming
+    // plaintext that is already there. The comparison is on
+    // **plaintext** triple identity, which is the semantic we want; it
+    // preserves random-IV confidentiality while making the write
+    // idempotent.
+    const existingPlainKeys = await this.collectExistingPlaintextKeys(graphUri, quads);
+    const toInsert: Quad[] = [];
+    const seenInBatch = new Set<string>();
+    for (const q of quads) {
+      const key = `${q.subject}\u0001${q.predicate}\u0001${q.object}`;
+      if (existingPlainKeys.has(key)) continue;
+      if (seenInBatch.has(key)) continue;
+      seenInBatch.add(key);
+      toInsert.push({
+        ...q,
+        object: this.encryptLiteral(q.object),
+        graph: graphUri,
+      });
+    }
+    if (toInsert.length > 0) {
+      await this.store.insert(toInsert);
+    }
 
     const key = this.privateKey(contextGraphId, subGraphName);
     let entities = this.privateEntities.get(key);

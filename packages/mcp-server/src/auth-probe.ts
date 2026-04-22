@@ -23,6 +23,16 @@ export interface ProbeResult {
   ok: boolean;
   code?: number;
   body?: string;
+  /**
+   * `authDisabled` is set when the probe reached an auth-gated endpoint
+   * without supplying any credential and the daemon accepted the
+   * request anyway — the only way that can happen in practice is if
+   * the daemon is running with `auth.enabled=false` (CLI-8). Callers
+   * render this as a distinct `auth disabled` status instead of lumping
+   * it in with `ok` or `FAILED` (PR #229 bot review round 7,
+   * auth-probe.ts:69).
+   */
+  authDisabled?: boolean;
 }
 
 /**
@@ -58,26 +68,37 @@ export async function probeStatus(
  * `FAILED`, so `mcp_auth status` can never again report OK for an
  * invalid or missing credential.
  *
- * When no credential is configured the probe short-circuits and
- * reports failure instead of trying to hit an endpoint that would
- * reject an empty Authorization header.
+ * When no credential is configured we still probe `/api/agents` —
+ * without an Authorization header. A 2xx response then means the
+ * daemon has auth disabled (`auth.enabled=false`) and every MCP
+ * request would succeed; we surface that as `{ok: true, authDisabled:
+ * true}` so the caller can render a distinct "auth disabled" state
+ * instead of the hard `FAILED` the previous short-circuit produced
+ * (PR #229 bot review round 7, auth-probe.ts:69). A 4xx response on
+ * the unauthenticated probe means auth IS enabled and no credential
+ * is configured — still a failure, but one the caller can distinguish
+ * from a rejected-credential failure.
  */
 export async function probeAuth(
   url: string,
   token: string,
 ): Promise<ProbeResult> {
-  if (!token) {
-    return { ok: false, body: 'no credential configured' };
-  }
   try {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     const res = await fetch(`${url.replace(/\/$/, '')}/api/agents`, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
     });
     const text = await res.text().catch(() => '');
-    return { ok: res.ok, code: res.status, body: text.slice(0, 240) };
+    const out: ProbeResult = {
+      ok: res.ok,
+      code: res.status,
+      body: text.slice(0, 240),
+    };
+    if (!token && res.ok) {
+      out.authDisabled = true;
+    }
+    return out;
   } catch (e) {
     return { ok: false, body: e instanceof Error ? e.message : String(e) };
   }

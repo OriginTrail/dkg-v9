@@ -9,8 +9,8 @@
  *   - encrypt→decrypt round-trip with an explicit 32-byte key
  *   - decrypt-with-wrong-key returns the envelope unchanged (never throws)
  */
-import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -19,7 +19,10 @@ import {
   PrivateContentStore,
   type Quad,
 } from '../src/index.js';
-import { decryptPrivateLiteral } from '../src/private-store.js';
+import {
+  decryptPrivateLiteral,
+  __resetPrivateStoreKeyCacheForTests,
+} from '../src/private-store.js';
 
 function makeFreshStore() {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-key-'));
@@ -150,29 +153,43 @@ describe('resolveEncryptionKey via PrivateContentStore constructor — branch co
     }
   });
 
-  it('falls back to the deterministic default-domain key when no config is supplied', async () => {
+  // PR #229 bot review round 12 (r12-2): with no explicit key, two
+  // instances in the same PROCESS now share the persisted per-node key
+  // (either by reading the existing file or by the in-process cache
+  // populated when ps1 generated it). This preserves the intra-process
+  // dedup property the old deterministic default provided but limits
+  // the key's blast radius to this one node's key file.
+  it('per-node persisted key: two PrivateContentStore instances in the same process share the same key and round-trip data', async () => {
     const { store, cleanup } = makeFreshStore();
+    const keyDir = mkdtempSync(join(tmpdir(), 'dkg-ps-persist-'));
+    const keyFile = join(keyDir, 'private-store.key');
     const prev = process.env.DKG_PRIVATE_STORE_KEY;
+    const prevFile = process.env.DKG_PRIVATE_STORE_KEY_FILE;
     delete process.env.DKG_PRIVATE_STORE_KEY;
+    process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+    __resetPrivateStoreKeyCacheForTests();
     try {
       const gm = new ContextGraphManager(store);
-      await gm.ensureContextGraph('cg-default');
+      await gm.ensureContextGraph('cg-persisted');
       const ps1 = new PrivateContentStore(store, gm);
       const ps2 = new PrivateContentStore(store, gm);
 
-      await ps1.storePrivateTriples('cg-default', 'did:dkg:agent:D', [
+      await ps1.storePrivateTriples('cg-persisted', 'did:dkg:agent:D', [
         { subject: 'did:dkg:agent:D', predicate: 'http://example.org/p', object: '"secret-default"', graph: '' },
       ] as Quad[]);
 
-      // Two instances share the SAME deterministic default key, so ps2 can
-      // read what ps1 wrote. This is the documented property (see
-      // DEFAULT_KEY_DOMAIN comment in private-store.ts) that keeps
-      // equality-based dedup pipelines working across process boundaries.
-      const read = await ps2.getPrivateTriples('cg-default', 'did:dkg:agent:D');
+      const read = await ps2.getPrivateTriples('cg-persisted', 'did:dkg:agent:D');
       expect(read).toHaveLength(1);
       expect(read[0].object).toBe('"secret-default"');
+      // The key file must have been created with exactly 32 bytes.
+      expect(existsSync(keyFile)).toBe(true);
+      expect(readFileSync(keyFile).length).toBe(32);
     } finally {
       if (prev !== undefined) process.env.DKG_PRIVATE_STORE_KEY = prev;
+      if (prevFile === undefined) delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+      else process.env.DKG_PRIVATE_STORE_KEY_FILE = prevFile;
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(keyDir, { recursive: true, force: true });
       cleanup();
     }
   });
@@ -194,6 +211,153 @@ describe('resolveEncryptionKey via PrivateContentStore constructor — branch co
     } finally {
       if (prev === undefined) delete process.env.DKG_PRIVATE_STORE_KEY;
       else process.env.DKG_PRIVATE_STORE_KEY = prev;
+      cleanup();
+    }
+  });
+});
+
+// -------------------------------------------------------------------------
+// PR #229 bot review round 12 (r12-2): the unconfigured-key fallback
+// MUST no longer share `sha256(DEFAULT_KEY_DOMAIN)` across nodes. The
+// new behaviour: generate and persist a per-node 32-byte random key at
+// `DKG_PRIVATE_STORE_KEY_FILE` (or `<DKG_HOME>/private-store.key`, or
+// `<homedir()>/.dkg/private-store.key`). Two nodes with different key
+// files must be cryptographically isolated.
+// -------------------------------------------------------------------------
+describe('r12-2: per-node persisted key isolates unconfigured nodes from each other', () => {
+  const savedEnv = {
+    DKG_PRIVATE_STORE_KEY: process.env.DKG_PRIVATE_STORE_KEY,
+    DKG_PRIVATE_STORE_KEY_FILE: process.env.DKG_PRIVATE_STORE_KEY_FILE,
+    DKG_PRIVATE_STORE_STRICT_KEY: process.env.DKG_PRIVATE_STORE_STRICT_KEY,
+  };
+
+  beforeEach(() => {
+    delete process.env.DKG_PRIVATE_STORE_KEY;
+    delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+    delete process.env.DKG_PRIVATE_STORE_STRICT_KEY;
+    __resetPrivateStoreKeyCacheForTests();
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    __resetPrivateStoreKeyCacheForTests();
+  });
+
+  it('two nodes with different key files cannot decrypt each other\'s private triples', async () => {
+    const nodeADir = mkdtempSync(join(tmpdir(), 'dkg-ps-node-a-'));
+    const nodeBDir = mkdtempSync(join(tmpdir(), 'dkg-ps-node-b-'));
+    const keyFileA = join(nodeADir, 'private-store.key');
+    const keyFileB = join(nodeBDir, 'private-store.key');
+    const { store: storeA, cleanup: cleanupA } = makeFreshStore();
+    const { store: storeB, cleanup: cleanupB } = makeFreshStore();
+    try {
+      // Node A writes under its own persisted key.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFileA;
+      __resetPrivateStoreKeyCacheForTests();
+      const gmA = new ContextGraphManager(storeA);
+      await gmA.ensureContextGraph('cg-nodeA');
+      const psA = new PrivateContentStore(storeA, gmA);
+      await psA.storePrivateTriples('cg-nodeA', 'did:dkg:agent:A', [
+        { subject: 'did:dkg:agent:A', predicate: 'http://example.org/p', object: '"nodeA-secret"', graph: '' },
+      ] as Quad[]);
+
+      // Pull the ciphertext from A's store via raw SPARQL.
+      const ctResult = await storeA.query(`SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 1`);
+      const ciphertextFromA = (ctResult as any).bindings[0].o as string;
+      expect(ciphertextFromA.startsWith('"enc:gcm:v1:')).toBe(true);
+
+      // Switch to Node B's key file and verify the envelope does NOT
+      // decrypt — decryptPrivateLiteral must return the envelope
+      // unchanged (the documented "wrong key" signal), never plaintext.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFileB;
+      __resetPrivateStoreKeyCacheForTests();
+      const decryptedUnderB = decryptPrivateLiteral(ciphertextFromA);
+      expect(decryptedUnderB).toBe(ciphertextFromA);
+      expect(decryptedUnderB).not.toBe('"nodeA-secret"');
+
+      // Also: Node B generating its own key must produce a DIFFERENT
+      // 32-byte secret. Files must exist, both 32 bytes, byte-unequal.
+      const gmB = new ContextGraphManager(storeB);
+      await gmB.ensureContextGraph('cg-nodeB');
+      const psB = new PrivateContentStore(storeB, gmB);
+      await psB.storePrivateTriples('cg-nodeB', 'did:dkg:agent:B', [
+        { subject: 'did:dkg:agent:B', predicate: 'http://example.org/p', object: '"nodeB-secret"', graph: '' },
+      ] as Quad[]);
+      expect(existsSync(keyFileA)).toBe(true);
+      expect(existsSync(keyFileB)).toBe(true);
+      const rawA = readFileSync(keyFileA);
+      const rawB = readFileSync(keyFileB);
+      expect(rawA.length).toBe(32);
+      expect(rawB.length).toBe(32);
+      expect(rawA.equals(rawB)).toBe(false);
+    } finally {
+      cleanupA();
+      cleanupB();
+      rmSync(nodeADir, { recursive: true, force: true });
+      rmSync(nodeBDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persisted key file is reused across process restarts (simulated via cache reset)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-reuse-'));
+    const keyFile = join(dir, 'private-store.key');
+    const { store, cleanup } = makeFreshStore();
+    try {
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      __resetPrivateStoreKeyCacheForTests();
+
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-reuse');
+      const ps1 = new PrivateContentStore(store, gm);
+      await ps1.storePrivateTriples('cg-reuse', 'did:dkg:agent:R', [
+        { subject: 'did:dkg:agent:R', predicate: 'http://example.org/p', object: '"persisted-across-restart"', graph: '' },
+      ] as Quad[]);
+      const originalKey = readFileSync(keyFile);
+      expect(originalKey.length).toBe(32);
+
+      // Simulate a process restart — drop the in-memory cache but
+      // leave the file on disk. The new instance MUST read the same
+      // key and decrypt the existing data.
+      __resetPrivateStoreKeyCacheForTests();
+      const ps2 = new PrivateContentStore(store, gm);
+      const read = await ps2.getPrivateTriples('cg-reuse', 'did:dkg:agent:R');
+      expect(read).toHaveLength(1);
+      expect(read[0].object).toBe('"persisted-across-restart"');
+      // The file must NOT have been rewritten.
+      expect(readFileSync(keyFile).equals(originalKey)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('strict mode (DKG_PRIVATE_STORE_STRICT_KEY=1) refuses both the persisted and deterministic fallbacks', async () => {
+    const { store, cleanup } = makeFreshStore();
+    try {
+      process.env.DKG_PRIVATE_STORE_STRICT_KEY = '1';
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-strict');
+      expect(() => new PrivateContentStore(store, gm)).toThrow(/strict mode/i);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('explicit `strictKey: true` option overrides the env (belt + suspenders)', async () => {
+    const { store, cleanup } = makeFreshStore();
+    try {
+      delete process.env.DKG_PRIVATE_STORE_STRICT_KEY;
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-strict-opt');
+      expect(() => new PrivateContentStore(store, gm, { strictKey: true })).toThrow(
+        /strict mode/i,
+      );
+    } finally {
       cleanup();
     }
   });

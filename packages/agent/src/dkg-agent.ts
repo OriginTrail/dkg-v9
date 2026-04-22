@@ -257,12 +257,18 @@ export interface DKGAgentConfig {
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
   /**
-   * When true, explicit `agentAddress` `working-memory` queries on nodes
-   * hosting >1 local agent MUST include a valid `agentAuthSignature`
-   * (spec §04 RFC-29). When false (default) missing signatures produce a
-   * warning but are allowed through, so existing HTTP/CLI/UI callers that
-   * have not been upgraded to plumb the signature don't suddenly get
-   * empty results. Can also be enabled via `DKG_STRICT_WM_AUTH=1`.
+   * Controls RFC-29 multi-agent working-memory isolation. When a node
+   * hosts >1 local agent, explicit `agentAddress` `working-memory`
+   * queries MUST include a valid `agentAuthSignature`.
+   *
+   * **Default (undefined) is STRICT / fail-closed** (PR #229 bot review
+   * round 12): missing or invalid signatures return `[]` so a caller
+   * that merely knows another agent's address cannot read that agent's
+   * WM. Operators still on a rolling upgrade where some HTTP/CLI/UI
+   * surfaces have not yet plumbed `agentAuthSignature` can temporarily
+   * opt out via `strictWmCrossAgentAuth: false` or
+   * `DKG_STRICT_WM_AUTH=0`, but doing so accepts that any in-process
+   * caller of a multi-agent node can read any local agent's WM.
    */
   strictWmCrossAgentAuth?: boolean;
   /**
@@ -2699,22 +2705,39 @@ export class DKGAgent {
     // co-hosted agent's WM by knowing/guessing the address.
     // See BUGS_FOUND.md A-1.
     //
-    // Bot review C2: the HTTP `/api/query`, CLI, node-ui, and adapter
-    // surfaces do NOT yet plumb `agentAuthSignature`, so hard-requiring it
-    // would silently degrade every existing cross-agent WM read to `[]`.
-    // Until the signature is plumbed end-to-end, enforcement is gated on
-    // `config.strictWmCrossAgentAuth` (opt-in / set `DKG_STRICT_WM_AUTH=1`).
-    // When the gate is off we STILL validate any signature the caller
-    // supplied (so an explicitly-signed request is never downgraded), but
-    // missing signatures only produce a warning instead of an empty result.
+    // PR #229 bot review round 12: the gate is now **fail-closed by
+    // default**. Any call that lacks a valid `agentAuthSignature`
+    // returns `[]`. Operators still on a rolling upgrade where some
+    // HTTP/CLI/UI/adapter surfaces have not yet plumbed
+    // `agentAuthSignature` can opt out via
+    // `strictWmCrossAgentAuth: false` (or `DKG_STRICT_WM_AUTH=0`), but
+    // doing so explicitly accepts the RFC-29 isolation hole — so the
+    // knob is loud about what it trades off. When the gate IS
+    // disabled we still validate any signature the caller happened to
+    // supply (so a signed request is never downgraded), and a missing
+    // signature degrades to a warn-log instead of an error.
     if (
       opts.view === 'working-memory'
       && opts.agentAddress
       && this.localAgents.size > 1
     ) {
       const strictEnv = (process.env.DKG_STRICT_WM_AUTH ?? '').toLowerCase();
-      const strict = this.config.strictWmCrossAgentAuth === true
-        || strictEnv === '1' || strictEnv === 'true' || strictEnv === 'yes';
+      const envExplicitOff =
+        strictEnv === '0' || strictEnv === 'false' || strictEnv === 'no';
+      const envExplicitOn =
+        strictEnv === '1' || strictEnv === 'true' || strictEnv === 'yes';
+      // Default: strict / fail-closed. The only ways to disable
+      // enforcement are an *explicit* env opt-out (`DKG_STRICT_WM_AUTH`
+      // set to `0`/`false`/`no`) or setting
+      // `config.strictWmCrossAgentAuth` to literal `false`. Any
+      // explicit env opt-in always wins over a config opt-out so a
+      // fleet-wide rollout can tighten the gate without redeploying
+      // every node. `undefined` config → strict.
+      const strict = envExplicitOn
+        ? true
+        : envExplicitOff
+          ? false
+          : this.config.strictWmCrossAgentAuth !== false;
       const sigProvided = typeof opts.agentAuthSignature === 'string' && opts.agentAuthSignature.length > 0;
       if (strict || sigProvided) {
         const ok = this.verifyWmAuthSignature(opts.agentAddress, opts.agentAuthSignature);
@@ -2729,8 +2752,8 @@ export class DKGAgent {
         this.log.warn(
           ctx,
           `WM cross-agent query for ${opts.agentAddress} has no agentAuthSignature; ` +
-          `allowing temporarily because strictWmCrossAgentAuth is off. Set DKG_STRICT_WM_AUTH=1 ` +
-          `to enforce once callers plumb the signature end-to-end.`,
+          `allowing because strictWmCrossAgentAuth has been explicitly disabled. ` +
+          `This opens an RFC-29 isolation hole — re-enable once every caller plumbs the signature.`,
         );
       }
     }

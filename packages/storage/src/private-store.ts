@@ -1,5 +1,8 @@
 import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type { TripleStore, Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
@@ -15,27 +18,110 @@ import type { ContextGraphManager } from './graph-manager.js';
  *  breaking existing data. */
 const ENC_PREFIX = 'enc:gcm:v1:';
 
-/** Encryption key resolution order:
+/** Encryption key resolution order (PR #229 bot review round 12, r12-2):
  *   1. Explicit constructor `encryptionKey` (32 bytes, hex/base64/raw or
  *      shorter passphrase — short inputs are SHA-256-stretched so AES-256
  *      always sees a full 256-bit key).
  *   2. `DKG_PRIVATE_STORE_KEY` env var (same shape as #1).
- *   3. A deterministic process-wide default derived from a constant
- *      domain string. This is NOT secret — operators who require real
- *      confidentiality MUST set DKG_PRIVATE_STORE_KEY to a per-deployment
- *      secret. Set `DKG_PRIVATE_STORE_STRICT_KEY=1` (or pass
- *      `strictKey: true` to the constructor) to turn this fallback into
- *      a hard error at startup (bot review N3).
+ *   3. A **per-node persisted** key generated at first run and stored on
+ *      disk with 0600 permissions. The path resolves in this order:
+ *        a. `DKG_PRIVATE_STORE_KEY_FILE`
+ *        b. `<DKG_HOME>/private-store.key`
+ *        c. `<homedir()>/.dkg/private-store.key`
+ *      If any directory in the chain is unwritable we fall through to
+ *      step 4 rather than silently crashing.
+ *   4. As a last resort a deterministic `sha256(DEFAULT_KEY_DOMAIN)` —
+ *      which is NOT secret and has to be kept behind a loud warning
+ *      for environments (e.g. read-only FS, sandboxed CI) where
+ *      persisting a key is impossible. Operators who need guaranteed
+ *      confidentiality even in those environments MUST configure
+ *      `DKG_PRIVATE_STORE_KEY` explicitly or turn on strict mode via
+ *      `DKG_PRIVATE_STORE_STRICT_KEY=1` (or `strictKey: true`), which
+ *      turns step 4 into a hard error.
  *
- * We emit a loud console warning the first time the default key is used
- * so the gap is visible in deploy logs even without strict mode.
+ * Pre-r12 behaviour: step 3 did not exist, so every node without an
+ * explicit key shared `sha256(DEFAULT_KEY_DOMAIN)` — any attacker with
+ * repo source could decrypt the stored "private" triples across the
+ * whole fleet.
  */
 const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
+const PERSISTED_KEY_FILENAME = 'private-store.key';
 let defaultKeyWarned = false;
+let persistedKeyWarned = false;
+let cachedPersistedKey: Buffer | null = null;
 
 function strictKeyRequestedFromEnv(): boolean {
   const v = (process.env.DKG_PRIVATE_STORE_STRICT_KEY ?? '').toLowerCase();
   return v === '1' || v === 'true' || v === 'yes';
+}
+
+function resolvePersistedKeyPath(): string {
+  if (process.env.DKG_PRIVATE_STORE_KEY_FILE) {
+    return process.env.DKG_PRIVATE_STORE_KEY_FILE;
+  }
+  if (process.env.DKG_HOME) {
+    return join(process.env.DKG_HOME, PERSISTED_KEY_FILENAME);
+  }
+  return join(homedir(), '.dkg', PERSISTED_KEY_FILENAME);
+}
+
+/**
+ * Load the per-node persisted key, generating it on first run.
+ *
+ * Returns `null` if we cannot read or create the key file (read-only
+ * filesystem, unknown home directory, etc.) so the caller can fall
+ * through to the deterministic last-resort key under a loud warning.
+ *
+ * Failure modes we deliberately tolerate:
+ *   - file exists but is shorter than 32 bytes: treat as corrupt,
+ *     regenerate (we never want a short AES-256 key).
+ *   - dir doesn't exist: `mkdirSync(..., recursive: true)`.
+ *   - write errors: fall through to last-resort key.
+ *
+ * The cached key is process-wide so multiple `PrivateContentStore`
+ * instances on the same node share the same secret without re-reading
+ * the file on every construction.
+ */
+function loadOrCreatePersistedKey(): Buffer | null {
+  if (cachedPersistedKey) return cachedPersistedKey;
+  const path = resolvePersistedKeyPath();
+  try {
+    if (existsSync(path)) {
+      const raw = readFileSync(path);
+      if (raw.length >= 32) {
+        cachedPersistedKey = Buffer.from(raw.subarray(0, 32));
+        return cachedPersistedKey;
+      }
+    }
+    // Generate + persist a fresh 32-byte secret. 0o600 so only the
+    // node operator's user account can read it.
+    const dir = dirname(path);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const fresh = randomBytes(32);
+    writeFileSync(path, fresh, { mode: 0o600 });
+    try { chmodSync(path, 0o600); } catch { /* non-POSIX FS */ }
+    if (!persistedKeyWarned) {
+      persistedKeyWarned = true;
+      console.warn(
+        `[PrivateContentStore] Generated per-node private-store key at ${path}. ` +
+          'Back this file up alongside your node data; losing it makes existing ' +
+          'private triples unrecoverable. Override with DKG_PRIVATE_STORE_KEY ' +
+          'or DKG_PRIVATE_STORE_KEY_FILE to use a managed secret instead.',
+      );
+    }
+    cachedPersistedKey = fresh;
+    return cachedPersistedKey;
+  } catch {
+    return null;
+  }
+}
+
+/** Test-only: drop any cached per-node key so a subsequent call
+ *  re-reads from the (possibly-changed) persistence path. */
+export function __resetPrivateStoreKeyCacheForTests(): void {
+  cachedPersistedKey = null;
+  defaultKeyWarned = false;
+  persistedKeyWarned = false;
 }
 
 /**
@@ -128,30 +214,41 @@ function resolveEncryptionKey(
     }
     return buf;
   }
-  // Bot review N3: no key configured. If the caller (or the operator
-  // via DKG_PRIVATE_STORE_STRICT_KEY) has opted into strict mode, refuse
-  // to fall back to the public default — any private data encrypted
-  // under the default key is essentially plaintext for anyone with the
-  // repo source.
+  // Bot review N3 / r12-2: no key configured. If the caller (or the
+  // operator via DKG_PRIVATE_STORE_STRICT_KEY) has opted into strict
+  // mode, refuse to fall back to ANY unconfigured key — strict callers
+  // want a managed secret or nothing at all.
   const strict = options.strictKey ?? strictKeyRequestedFromEnv();
   if (strict) {
     throw new Error(
       'PrivateContentStore strict mode: DKG_PRIVATE_STORE_KEY is not set ' +
-        'and no encryptionKey was supplied. Refusing to fall back to the ' +
-        'process-wide default key — any private triples written under it ' +
-        'would be decryptable by anyone with repo access.',
+        'and no encryptionKey was supplied. Refusing to fall back to an ' +
+        'auto-generated per-node key or the deterministic default — ' +
+        'configure a managed secret explicitly.',
     );
   }
+  // Preferred default (PR #229 bot review r12-2): per-node persisted
+  // key. This gives every unconfigured node a unique secret so
+  // "private" triples are not cross-decryptable across the fleet.
+  const persisted = loadOrCreatePersistedKey();
+  if (persisted) return persisted;
+  // Last resort — persistence failed (read-only FS / CI sandbox / no
+  // HOME). Emit a LOUD warning so the operator can see the gap and
+  // either configure DKG_PRIVATE_STORE_KEY or make the key path
+  // writable. Private triples written under this key are NOT
+  // confidential against anyone with repo access.
   if (!defaultKeyWarned) {
     defaultKeyWarned = true;
-    // Loud warning on stderr so it survives log-level filtering.
     console.warn(
-      '[PrivateContentStore] WARNING: DKG_PRIVATE_STORE_KEY is not set. ' +
-        'Falling back to a deterministic default key derived from a public ' +
-        'constant — private triples encrypted under this key are NOT ' +
-        'confidential against anyone with access to this repository. Set ' +
-        'DKG_PRIVATE_STORE_KEY to a per-deployment secret, or set ' +
-        'DKG_PRIVATE_STORE_STRICT_KEY=1 to turn this fallback into an error.',
+      '[PrivateContentStore] WARNING: DKG_PRIVATE_STORE_KEY is not set ' +
+        'and the per-node key file could not be created ' +
+        `(${resolvePersistedKeyPath()}). Falling back to a deterministic ` +
+        'default key derived from a public constant — private triples ' +
+        'encrypted under this key are NOT confidential against anyone ' +
+        'with access to this repository. Set DKG_PRIVATE_STORE_KEY to a ' +
+        'per-deployment secret, set DKG_PRIVATE_STORE_KEY_FILE to a ' +
+        'writable path, or set DKG_PRIVATE_STORE_STRICT_KEY=1 to turn ' +
+        'this fallback into an error.',
     );
   }
   return createHash('sha256').update(DEFAULT_KEY_DOMAIN).digest();

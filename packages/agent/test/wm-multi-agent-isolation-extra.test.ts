@@ -62,15 +62,11 @@ beforeAll(async () => {
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
-    // Bot review C2: this test enforces the SPEC §04/RFC-29 contract
-    // (WM is strictly per-agent). With the new two-tier enforcement
-    // model in DKGAgent — where cross-agent WM reads default to
-    // lenient + warn to avoid silently breaking HTTP/CLI/UI callers
-    // that have not yet plumbed `agentAuthSignature` end to end — this
-    // test must explicitly opt into STRICT mode to reassert the spec
-    // contract. Production callers that hold the secret can opt in the
-    // same way; the default (lenient + warn) only applies when the
-    // operator has not decided either way.
+    // PR #229 bot review round 12: strict WM cross-agent auth is now
+    // the DEFAULT (fail-closed). Passing `true` here is redundant but
+    // kept for readability — the matrix below assumes strict mode and
+    // adding the flag makes the intent obvious even if the default
+    // later regresses.
     strictWmCrossAgentAuth: true,
   } as any);
   await node.start();
@@ -340,6 +336,100 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
       res.bindings.length,
       'stale WM-auth token (outside freshness window) must be rejected',
     ).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #229 bot review round 12 (r12-1): the gate defaults to
+  // fail-closed. The three probes below flip `config.strictWmCrossAgentAuth`
+  // and `process.env.DKG_STRICT_WM_AUTH` at runtime to exercise the
+  // effective mode without spinning up a second heavyweight DKGAgent.
+  // -------------------------------------------------------------------------
+  it('r12-1: default (no strictWmCrossAgentAuth set) is fail-closed — impersonation without signature returns 0', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-default');
+    await node!.createContextGraph({ id: cgId, name: 'WM Default', description: '' });
+    await node!.assertion.create(cgId, 'd12');
+    await node!.assertion.write(cgId, 'd12', [
+      { subject: 'urn:wm:alice:fact:d12', predicate: 'http://schema.org/description', object: '"default-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = undefined;
+    delete process.env.DKG_STRICT_WM_AUTH;
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'undefined config must default to fail-closed (r12-1)',
+      ).toBe(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv !== undefined) process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
+  });
+
+  it('r12-1: explicit config opt-out (strictWmCrossAgentAuth=false) degrades to warn (impersonation succeeds)', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-optout');
+    await node!.createContextGraph({ id: cgId, name: 'WM Optout', description: '' });
+    await node!.assertion.create(cgId, 'd12b');
+    await node!.assertion.write(cgId, 'd12b', [
+      { subject: 'urn:wm:alice:fact:d12b', predicate: 'http://schema.org/description', object: '"optout-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = false;
+    delete process.env.DKG_STRICT_WM_AUTH;
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'explicit config=false must allow un-signed cross-agent reads (documents the legacy hole)',
+      ).toBeGreaterThan(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv !== undefined) process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
+  });
+
+  it('r12-1: env opt-in (DKG_STRICT_WM_AUTH=1) overrides config=false — strict wins', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-envwin');
+    await node!.createContextGraph({ id: cgId, name: 'WM EnvWin', description: '' });
+    await node!.assertion.create(cgId, 'd12c');
+    await node!.assertion.write(cgId, 'd12c', [
+      { subject: 'urn:wm:alice:fact:d12c', predicate: 'http://schema.org/description', object: '"envwin-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = false;
+    process.env.DKG_STRICT_WM_AUTH = '1';
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'env opt-in must override config opt-out (fleet-wide tighten scenario)',
+      ).toBe(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv === undefined) delete process.env.DKG_STRICT_WM_AUTH;
+      else process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
   });
 
   it('WM-auth tokens carrying a malformed nonce shape are rejected', async () => {

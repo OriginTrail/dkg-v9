@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/session-start.mjs",
+        "failClosed": false,
+        "timeout": 5
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/scope-guard.mjs",
+        "matcher": "Write|StrReplace|Delete|EditNotebook|MultiEdit|Edit",
+        "failClosed": true,
+        "timeout": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": ".cursor/hooks/post-tool-use.mjs",
+        "failClosed": false,
+        "timeout": 5
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/shell-precheck.mjs",
+        "failClosed": false,
+        "timeout": 5
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": ".cursor/hooks/shell-diff-check.mjs",
+        "failClosed": false,
+        "timeout": 10
+      }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/stop.mjs",
+        "failClosed": false,
+        "timeout": 5,
+        "loop_limit": 1
+      }
+    ]
+  }
+}

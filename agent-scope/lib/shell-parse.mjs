@@ -44,16 +44,25 @@ export function tokenize(cmd) {
   return out;
 }
 
+// File-descriptor duplication (e.g. `2>&1`, `1>&2`, `>&1`, `1>&-`) is NOT a
+// write to a file — the target starting with `&` references another fd, not
+// a path. Without this guard, a harmless `cmd 2>&1` gets blocked because the
+// parser thinks it redirects to a file called `&1`.
+function isFdDupTarget(s) {
+  return typeof s === 'string' && s.startsWith('&');
+}
+
 export function extractRedirections(tokens) {
   const targets = [];
+  const push = (v) => { if (v && !isFdDupTarget(v)) targets.push(v); };
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t === '>' || t === '>>' || t === '&>' || t === '>|') {
-      if (tokens[i + 1]) targets.push(tokens[i + 1]);
+      push(tokens[i + 1]);
     } else if (/^[0-9]*>>?$/.test(t)) {
-      if (tokens[i + 1]) targets.push(tokens[i + 1]);
+      push(tokens[i + 1]);
     } else if (/^([0-9]*>>?|&>)[^\s]+/.test(t)) {
-      targets.push(t.replace(/^([0-9]*>>?|&>)/, ''));
+      push(t.replace(/^([0-9]*>>?|&>)/, ''));
     } else if (t === 'tee' || t === '/usr/bin/tee') {
       for (let j = i + 1; j < tokens.length; j++) {
         const a = tokens[j];

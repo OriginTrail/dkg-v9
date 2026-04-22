@@ -85,12 +85,26 @@ async function main() {
   const approvedWrites = approvedTaskCreateWrites(approvedId);
   const approved = [];
 
+  // Active-task state exemption: the currently active task's manifest and
+  // the `active` pointer file are legitimate persistent state, not
+  // collateral from the current command. Without this, a manifest created
+  // by an earlier `pnpm task create` gets reaped the next time ANY
+  // unrelated shell command runs (because it shows up as untracked in a
+  // protected path). Only shield the active-task id — every other
+  // manifest (including stale ones) is still reverted/deleted.
+  const activeTaskExemptions = new Set();
+  if (taskId) {
+    activeTaskExemptions.add(`agent-scope/tasks/${taskId}.json`);
+    activeTaskExemptions.add('agent-scope/active');
+  }
+
   const entries = parsePorcelain(porcelain);
   const outOfScope = entries.filter(({ path }) => {
     if (!path) return false;
     const d = checkPath(task, path, root);
     if (d !== 'deny' && d !== 'protected') return false;
     if (approvedWrites.has(path)) { approved.push(path); return false; }
+    if (activeTaskExemptions.has(path)) return false;
     return true;
   });
 

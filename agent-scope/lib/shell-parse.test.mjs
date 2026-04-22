@@ -61,6 +61,37 @@ test('extractRedirections: no redirect', () => {
   assert.deepEqual(extractRedirections(tokenize('ls -la')), []);
 });
 
+test('extractRedirections: 2>&1 is fd dup, not a file write', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd arg 2>&1')), []);
+});
+
+test('extractRedirections: 1>&2 is fd dup, not a file write', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd 1>&2')), []);
+});
+
+test('extractRedirections: >&1 is fd dup, not a file write', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd >&1')), []);
+});
+
+test('extractRedirections: 1>&- close fd is not a file write', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd 1>&-')), []);
+});
+
+test('extractRedirections: &>&1 is fd dup, not a file write', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd &>&1')), []);
+});
+
+test('extractRedirections: pipe with 2>&1 and real file write', () => {
+  assert.deepEqual(
+    extractRedirections(tokenize('cmd 2>&1 > out.log')),
+    ['out.log'],
+  );
+});
+
+test('extractRedirections: &>/dev/null is a write to /dev/null, not a fd dup', () => {
+  assert.deepEqual(extractRedirections(tokenize('cmd &>/dev/null')), ['/dev/null']);
+});
+
 // --- destructive targets --------------------------------------------------
 
 test('extractDestructiveTargets: rm -rf', () => {

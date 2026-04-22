@@ -14,6 +14,16 @@
  *
  * Both queries hit /api/query directly (no SPARQL prefix injection
  * needed — we use full IRIs to avoid daemon prefix-handling drift).
+ *
+ * IMPORTANT: we do NOT wrap the query in `GRAPH ?g { … }`. The
+ * query-engine side already scopes the query to the caller-supplied
+ * `contextGraphId` + `subGraphName` (verified via the /api/query
+ * handler in packages/cli/src/daemon.ts and
+ * packages/agent/src/dkg-agent.ts). Adding an explicit GRAPH wrapper
+ * opens the scoping up to every graph the caller can read, which for
+ * a daemon hosting multiple projects means a manifest or template
+ * entity from project B with a collision on this URI could be mixed
+ * into project A's fetch. Codex tier-4g finding N10.
  */
 import {
   ManifestP,
@@ -72,7 +82,11 @@ export async function fetchManifest(
   const mUri = manifestUri(opts.contextGraphId);
 
   // ── 1. Manifest entity properties ──
-  const headSparql = `SELECT ?p ?o WHERE { GRAPH ?g { <${mUri}> ?p ?o } }`;
+  // NO `GRAPH ?g { … }` wrapper: the daemon's /api/query handler
+  // scopes the query to `contextGraphId` + `subGraphName` below, and
+  // wrapping in GRAPH would bypass that scoping and let URIs from
+  // other projects' meta sub-graphs match.
+  const headSparql = `SELECT ?p ?o WHERE { <${mUri}> ?p ?o }`;
   const headResult = await opts.client.query({
     sparql: headSparql,
     contextGraphId: opts.contextGraphId,
@@ -111,7 +125,8 @@ export async function fetchManifest(
   await Promise.all(
     Object.entries(templateRefs).map(async ([key, uri]) => {
       if (!uri) return;
-      const tSparql = `SELECT ?p ?o WHERE { GRAPH ?g { <${uri}> ?p ?o } }`;
+      // Same scoping rationale as the head query above.
+      const tSparql = `SELECT ?p ?o WHERE { <${uri}> ?p ?o }`;
       try {
         const tResult = await opts.client.query({
           sparql: tSparql,

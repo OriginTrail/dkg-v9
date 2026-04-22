@@ -28,7 +28,16 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 import * as osModule from 'node:os';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { ethers } from 'ethers';
+
+// Lazy resolver used by the manifest-install flow: find the
+// @origintrail-official/dkg-mcp package via Node's own resolution
+// algorithm, so the daemon can write workspace-level configs that
+// point at a valid MCP server install regardless of whether it's
+// running from a monorepo checkout, an npm-global `dkg`, or a
+// `pnpm dlx` tarball.
+const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -165,12 +174,75 @@ function manifestRepoRoot(): string {
     throw new Error(
       `manifestRepoRoot: daemon appears to be running outside a dkg-v9 checkout ` +
         `(resolved root ${root} is missing ${missing.join(', ')}). The manifest ` +
-        `install flow bakes absolute monorepo paths into the generated workspace ` +
-        `config, so it is only supported from a checkout today. An npm-global ` +
-        `build must wait for bundled-asset distribution.`,
+        `publish flow reads canonical cursor-rule + AGENTS.md from the repo, ` +
+        `so it is only supported from a checkout today. Install/plan-install ` +
+        `flows use resolveMcpDkgAssets() and work against npm-installed packages.`,
     );
   }
   return root;
+}
+
+/**
+ * Resolve the absolute paths of `@origintrail-official/dkg-mcp`'s
+ * runtime assets (bundled entry + capture-chat hook) that get baked
+ * into the generated `.cursor/mcp.json` / `.cursor/hooks.json` /
+ * `.claude/settings.json`.
+ *
+ * Tries three sources, in order:
+ *   1. Node module resolution of `@origintrail-official/dkg-mcp/package.json`.
+ *      Works for npm-global installs, per-workspace `node_modules`, and
+ *      monorepo checkouts (pnpm symlinks the workspace package in).
+ *   2. The daemon's own monorepo layout (`packages/mcp-dkg/...`) as a
+ *      fallback for checkouts where the import graph somehow didn't
+ *      surface dkg-mcp on the require paths.
+ *   3. Throws with a clear, actionable error — callers should turn
+ *      this into a 500 on `/manifest/plan-install` + `/manifest/install`.
+ *
+ * The returned paths MUST exist on disk; the manifest installer
+ * embeds them in free-form JSON/YAML without further validation, and
+ * a missing path would silently break Cursor/Claude wiring on the
+ * operator's machine.
+ *
+ * Fixes Codex tier-4g finding N7: before this, both install routes
+ * called `manifestRepoRoot()` and 500'd when the daemon ran from a
+ * published `@origintrail-official/dkg` package.
+ */
+interface McpDkgAssets {
+  packageDir: string;
+  distEntry: string;       // <pkg>/dist/index.js
+  captureScript: string;   // <pkg>/hooks/capture-chat.mjs
+  source: 'node-resolution' | 'repo-fallback';
+}
+function resolveMcpDkgAssets(): McpDkgAssets {
+  try {
+    const pkgJsonPath = daemonRequire.resolve('@origintrail-official/dkg-mcp/package.json');
+    const packageDir = dirname(pkgJsonPath);
+    const distEntry = resolve(packageDir, 'dist', 'index.js');
+    const captureScript = resolve(packageDir, 'hooks', 'capture-chat.mjs');
+    if (existsSync(distEntry) && existsSync(captureScript)) {
+      return { packageDir, distEntry, captureScript, source: 'node-resolution' };
+    }
+    // Resolution worked but assets are missing (e.g. a pruned install).
+    // Fall through to repo-layout path so checkouts still work.
+  } catch {
+    // Not resolvable via node — e.g. the daemon is running from a
+    // plain `tsx` on source without any `node_modules`. Fall back to
+    // the monorepo layout below.
+  }
+  const daemonDir = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = resolve(daemonDir, '..', '..', '..');
+  const packageDir = resolve(repoRoot, 'packages', 'mcp-dkg');
+  const distEntry = resolve(packageDir, 'dist', 'index.js');
+  const captureScript = resolve(packageDir, 'hooks', 'capture-chat.mjs');
+  if (existsSync(distEntry) && existsSync(captureScript)) {
+    return { packageDir, distEntry, captureScript, source: 'repo-fallback' };
+  }
+  throw new Error(
+    `resolveMcpDkgAssets: could not locate @origintrail-official/dkg-mcp. ` +
+      `Tried Node module resolution and the monorepo layout at ${packageDir}. ` +
+      `Install @origintrail-official/dkg-mcp alongside the daemon or run ` +
+      `from a built dkg-v9 checkout (pnpm -r build).`,
+  );
 }
 
 /**
@@ -366,7 +438,11 @@ function buildManifestInstallContext(
     if (tools.length === 0) tools = ['cursor'];
   }
 
-  const repoRoot = manifestRepoRoot();
+  // Resolve the MCP package via Node's resolver first, so the install
+  // flow works when the daemon is running from a published
+  // `@origintrail-official/dkg` package (no monorepo checkout). Falls
+  // back to the repo layout. Codex tier-4g finding N7.
+  const mcpDkgAssets = resolveMcpDkgAssets();
   // `daemonApiUrl` must come from the daemon's own trusted listening
   // socket, NOT from `req.headers.host` / `x-forwarded-proto`. Those
   // headers are attacker-controlled on any direct HTTP request: a
@@ -397,10 +473,14 @@ function buildManifestInstallContext(
       daemonTokenFile: typeof body.daemonTokenFile === 'string'
         ? body.daemonTokenFile
         : `${osModule.homedir()}/.dkg/auth.token`,
-      mcpDkgDistAbsPath: resolve(repoRoot, 'packages/mcp-dkg/dist/index.js'),
-      mcpDkgPackageDir: resolve(repoRoot, 'packages/mcp-dkg'),
-      mcpDkgSrcAbsPath: resolve(repoRoot, 'packages/mcp-dkg/src/index.ts'),
-      captureScriptPath: resolve(repoRoot, 'packages/mcp-dkg/hooks/capture-chat.mjs'),
+      mcpDkgDistAbsPath: mcpDkgAssets.distEntry,
+      mcpDkgPackageDir: mcpDkgAssets.packageDir,
+      // Legacy {{mcpDkgSrcAbsPath}} placeholder: only populated when
+      // we're running from a monorepo checkout (src/ doesn't ship in
+      // the published tarball). Modern templates reference the dist
+      // entry so this being stale is fine.
+      mcpDkgSrcAbsPath: resolve(mcpDkgAssets.packageDir, 'src', 'index.ts'),
+      captureScriptPath: mcpDkgAssets.captureScript,
       tools,
       agentNickname: rawNickname,
       // Cryptographic agent URI derived from the daemon's wallet (the
@@ -6887,6 +6967,22 @@ async function handleRequest(
     try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
     catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
 
+    // Authorization gate (Codex tier-4g finding on 6921): publish
+    // rewrites + promotes the project's onboarding templates into
+    // Shared Working Memory. Without an owner-check, any participant
+    // who reaches the daemon with a valid bearer token could overwrite
+    // the manifest and poison every future install (malicious hook
+    // URLs, swapped agent URIs, etc.). Only the CG's registered
+    // curator/creator may publish.
+    try {
+      await agent.assertContextGraphOwner(contextGraphId, requestAgentAddress, 'publish a project manifest');
+    } catch (authErr: unknown) {
+      const msg = authErr instanceof Error ? authErr.message : String(authErr);
+      // Distinguish "not the owner" from "CG has no registered owner".
+      const code = /has no registered owner/.test(msg) ? 400 : 403;
+      return jsonResponse(res, code, { error: msg });
+    }
+
     try {
       const requestedNetwork = typeof body.networkLabel === 'string' ? body.networkLabel : null;
       const networkLabel: 'testnet' | 'mainnet' | 'devnet' =
@@ -7190,7 +7286,20 @@ async function handleRequest(
         // from a peer that's happy to serve us. Gating on
         // `cleanResponse` makes the classification symmetric with the
         // synced-flip below.
-        if (result.denied && !cleanResponse) {
+        //
+        // Codex tier-4g finding (curated CG catch-up, 15:14:16): for
+        // curated context graphs, `cleanResponse` is NOT proof of
+        // authorisation. A non-curator peer that simply doesn't have
+        // this graph yet will return `emptyResponses=1`, and a
+        // requester who genuinely isn't on the allowlist would then
+        // end up with `cleanResponse=true` alongside `denied=true` and
+        // silently get a `done` status. For curated CGs, an explicit
+        // `denied` signal from any peer must always win — the requester
+        // cannot infer access from a non-curator's "I don't have it".
+        // `localAllowed.length > 0` at route entry is our curated
+        // signal (captured in scope by this async IIFE).
+        const isCurated = localAllowed.length > 0;
+        if (result.denied && (isCurated || !cleanResponse)) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
           // Only unsubscribe if the CG was only known via auto-discovery,

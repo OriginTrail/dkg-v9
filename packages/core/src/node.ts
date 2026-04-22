@@ -240,6 +240,16 @@ export class DKGNode {
     const ts = () => new Date().toISOString();
     const short = (id: string) => id.slice(-8);
     let allHealthy = true;
+    // `onlyWaitingOnGraceWindow` stays true as long as every reason we
+    // marked a relay unhealthy this tick was "we just redialed and are
+    // still inside the reservation grace window". That's a benign
+    // waiting state — we don't want to count it against the watchdog's
+    // exponential backoff, because doubling the next delay to 20s/40s/…
+    // for a ≤15s grace means a genuinely missing reservation can go
+    // unchecked for multiple minutes after a single forced redial.
+    // Codex tier-4g finding on the `allHealthy = false; continue` line
+    // a few blocks below.
+    let onlyWaitingOnGraceWindow = true;
 
     // Snapshot advertised self-multiaddrs once per tick. The presence of
     // *any* /p2p-circuit self-address is the authoritative signal that
@@ -278,12 +288,19 @@ export class DKGNode {
         const lastForcedRedial = this.relayReservationRedialAt.get(relayPidStr) ?? 0;
         if (now - lastForcedRedial < RELAY_RESERVATION_GRACE_MS) {
           // We just redialed; give libp2p time to finish negotiating a new
-          // reservation before declaring failure.
+          // reservation before declaring failure. This is a benign wait,
+          // so do NOT clear `onlyWaitingOnGraceWindow` — keeping it true
+          // means the tail doesn't apply the exponential backoff, which
+          // would otherwise starve the next check well past the grace
+          // window itself.
           allHealthy = false;
           continue;
         }
 
         allHealthy = false;
+        // Actual corrective action below (drop + redial); this is a
+        // real failure the watchdog must back off on.
+        onlyWaitingOnGraceWindow = false;
         console.log(
           `[${ts()}] Relay watchdog: no circuit reservation anywhere (0 /p2p-circuit self-addrs); ` +
           `dropping + redialing ${short(relayPidStr)} to force reserve`,
@@ -323,8 +340,10 @@ export class DKGNode {
         continue;
       }
 
-      // Transport is down — classic disconnect path.
+      // Transport is down — classic disconnect path. Count against
+      // backoff (this is a real failure, not a grace-window wait).
       allHealthy = false;
+      onlyWaitingOnGraceWindow = false;
       console.log(`[${ts()}] Relay watchdog: ${short(relayPidStr)} disconnected, redialing…`);
       const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
       await new Promise(r => setTimeout(r, delayMs));
@@ -338,6 +357,17 @@ export class DKGNode {
 
     if (allHealthy) {
       this.relayWatchdogConsecutiveFailures = 0;
+    } else if (onlyWaitingOnGraceWindow) {
+      // Every unhealthy relay this tick was just the reservation
+      // grace window after a forced redial. Don't inflate the backoff
+      // — the next scheduled tick needs to actually arrive while the
+      // grace window is still the active state, otherwise a missing
+      // reservation can sit uncorrected for minutes.
+      const nextDelay = Math.min(
+        RELAY_WATCHDOG_BASE_INTERVAL_MS * Math.pow(2, this.relayWatchdogConsecutiveFailures),
+        RELAY_WATCHDOG_MAX_INTERVAL_MS,
+      );
+      console.log(`[${ts()}] Relay watchdog: reservation grace window pending; next check in ${Math.round(nextDelay / 1000)}s`);
     } else {
       this.relayWatchdogConsecutiveFailures++;
       const nextDelay = Math.min(

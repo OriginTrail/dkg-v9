@@ -31,10 +31,14 @@
  *   {{daemonApiUrl}}        local daemon API URL
  *   {{daemonTokenFile}}     relative path to auth.token
  *   {{workspaceAbsPath}}    absolute workspace path
- *   {{mcpDkgDistAbsPath}}   absolute path to packages/mcp-dkg/dist/index.js (LEGACY)
- *   {{mcpDkgPackageDir}}    absolute path to packages/mcp-dkg (for `pnpm --dir`)
- *   {{mcpDkgSrcAbsPath}}    absolute path to packages/mcp-dkg/src/index.ts
- *   {{captureScriptPath}}   absolute path to packages/mcp-dkg/hooks/capture-chat.mjs
+ *   {{mcpDkgDistAbsPath}}   absolute path to @origintrail-official/dkg-mcp/dist/index.js
+ *                           (what Cursor/Claude run; resolved via Node module
+ *                           resolution so npm-global installs work too)
+ *   {{mcpDkgPackageDir}}    absolute path to the resolved @origintrail-official/dkg-mcp package
+ *   {{mcpDkgSrcAbsPath}}    absolute path to src/index.ts (monorepo checkouts only —
+ *                           NOT shipped in the published tarball; kept for
+ *                           legacy templates and `tsx`-based dev flows)
+ *   {{captureScriptPath}}   absolute path to @origintrail-official/dkg-mcp/hooks/capture-chat.mjs
  *   {{network}}             testnet / mainnet / devnet
  */
 

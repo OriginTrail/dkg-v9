@@ -589,12 +589,16 @@ async function selfRegisterAgent(cfg, state) {
 // URI that doesn't exist yet.
 async function applyPendingAnnotations(cfg, sessionKey, turnUri, promote = false) {
   if (!cfg.project) return 0;
+  // NO `GRAPH ?g { … }` wrapper here. The daemon's /api/query handler
+  // already scopes the query to `contextGraphId` + `subGraphName` below;
+  // explicit GRAPH would open the match up to every graph this token
+  // can read, so a pending annotation written from a sibling project on
+  // the same daemon (same sessionKey) would get pulled into this turn.
+  // Codex tier-4g finding N9.
   const sparql = `SELECT ?pending ?p ?o WHERE {
-  GRAPH ?g {
-    ?pending <http://dkg.io/ontology/chat/pendingForSession> "${sessionKey}" ;
-             ?p ?o .
-    FILTER NOT EXISTS { ?pending <http://dkg.io/ontology/chat/appliedToTurn> ?_t }
-  }
+  ?pending <http://dkg.io/ontology/chat/pendingForSession> "${sessionKey}" ;
+           ?p ?o .
+  FILTER NOT EXISTS { ?pending <http://dkg.io/ontology/chat/appliedToTurn> ?_t }
 }`;
   let bindings = [];
   try {
@@ -637,7 +641,9 @@ async function applyPendingAnnotations(cfg, sessionKey, turnUri, promote = false
   for (const pending of byPending.keys()) {
     let allTriples = byPending.get(pending);
     try {
-      const objSparql = `SELECT ?s ?p WHERE { GRAPH ?g { ?s ?p <${pending}> } }`;
+      // Scoping via contextGraphId + subGraphName below; no GRAPH wrapper
+      // so we don't match references from other projects' sub-graphs.
+      const objSparql = `SELECT ?s ?p WHERE { ?s ?p <${pending}> }`;
       const r2 = await postJson(cfg.api, '/api/query', cfg.token, {
         sparql: objSparql,
         contextGraphId: cfg.project,
@@ -680,6 +686,20 @@ async function applyPendingAnnotations(cfg, sessionKey, turnUri, promote = false
       object: `<${turnUri}>`,
     });
     const applyAssertion = `agent-annotate-applied-${pending.replace(/[^A-Za-z0-9]+/g, '-').slice(-30)}`;
+    // Collect every co-minted entity URI that appears as a SUBJECT in
+    // the rewritten quad set (Findings / Questions / Decisions / Tasks
+    // / Comments / mention-targets). The /promote endpoint filters the
+    // exported assertion by subject root, so if we only list `turnUri`
+    // the rewritten annotation triples whose subject is one of these
+    // co-minted entities get silently dropped from the SWM export and
+    // peers never see them. See Codex tier-4g finding N8.
+    const promoteEntities = new Set([turnUri]);
+    for (const t of rewritten) {
+      if (!t.subject) continue;
+      if (t.subject === pending) continue; // the appliedToTurn marker
+      if (t.subject === turnUri) continue; // already covered
+      promoteEntities.add(t.subject);
+    }
     try {
       await postJson(cfg.api, `/api/assertion/${encodeURIComponent(applyAssertion)}/write`, cfg.token, {
         contextGraphId: cfg.project,
@@ -695,7 +715,7 @@ async function applyPendingAnnotations(cfg, sessionKey, turnUri, promote = false
         await postJson(cfg.api, `/api/assertion/${encodeURIComponent(applyAssertion)}/promote`, cfg.token, {
           contextGraphId: cfg.project,
           subGraphName: cfg.subGraph,
-          entities: [turnUri],
+          entities: Array.from(promoteEntities),
         }).catch(() => { /* non-fatal */ });
       }
       applied++;

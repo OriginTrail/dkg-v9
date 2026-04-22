@@ -9,6 +9,7 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./package.json": "./package.json",
     "./client": {
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"

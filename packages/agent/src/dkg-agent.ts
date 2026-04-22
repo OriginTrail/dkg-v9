@@ -1082,21 +1082,14 @@ export class DKGAgent {
       this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
     };
 
-    this.node.libp2p.addEventListener('peer:connect', (evt) => {
-      const remotePeer = evt.detail.toString();
-      setTimeout(() => {
-        this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
-          handleSyncError(remotePeer, err);
-        });
-      }, 3000);
-    });
-
-    // Also fire on connection:open so that a *reconnecting* peer (same
-    // peer-id, new connection after a prior drop) triggers a fresh sync
-    // attempt. peer:connect fires only on the first connection to a new
-    // peer, so without this handler a peer that temporarily disconnected
-    // after its first sync failed would never get a retry. The cooldown
-    // dedupes overlapping direct+relayed connections for the same peer.
+    // Single source of truth for "new or reconnecting peer → trigger
+    // catch-up sync": the `connection:open` listener below. It fires
+    // both on the first connection to a new peer AND on every
+    // subsequent reconnect for that same peer, so it fully subsumes
+    // `peer:connect`. Registering both produced a double-queued
+    // `trySyncFromPeer` for every new peer (one from each handler),
+    // doubling initial catch-up traffic and racing the sync/store
+    // path on first-contact peers. Codex tier-4g finding on this line.
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -5831,6 +5824,32 @@ export class DKGAgent {
     }
     if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
       throw new Error(`Only the paranet owner can manage policies for "${paranetId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
+    }
+  }
+
+  /**
+   * Public owner-check used by HTTP routes that need to gate curator-only
+   * actions (manifest publish, SWM template rewrites, etc.). Throws a
+   * caller-friendly "Only the …" error when the caller isn't the CG's
+   * registered owner/curator; returns silently when they are.
+   *
+   * The `action` string is interpolated into the error message so the
+   * 403 response can tell the user exactly what they tried to do
+   * ("publish a project manifest", "overwrite onboarding templates", …).
+   */
+  async assertContextGraphOwner(paranetId: string, callerAgentAddress: string | undefined, action: string): Promise<void> {
+    const owner = await this.getContextGraphOwner(paranetId);
+    if (!owner) {
+      throw new Error(`Context graph "${paranetId}" has no registered owner; cannot ${action}.`);
+    }
+    if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
+      const caller = callerAgentAddress
+        ? `did:dkg:agent:${callerAgentAddress}`
+        : `did:dkg:agent:${this.defaultAgentAddress ?? this.peerId}`;
+      throw new Error(
+        `Only the context graph curator can ${action} for "${paranetId}". ` +
+        `Owner=${owner}, caller=${caller}.`,
+      );
     }
   }
 

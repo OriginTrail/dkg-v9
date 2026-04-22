@@ -991,30 +991,38 @@ export class DKGAgent {
         // event so the UI can surface a notification instead of leaving
         // the invitee's Join modal stuck on "Join request sent…" forever.
         //
-        // IMPORTANT: this payload is NOT signed by the curator (same as
-        // join-approved today), so we deliberately do NOT mutate any
-        // local subscription/ACL state here — a malicious or stale peer
-        // could otherwise forge a rejection to hide a project the user
-        // has legitimately been approved for. We only surface a UI
-        // notification; cleanup of any phantom auto-discovery entry is
-        // left to the normal catch-up denial path (daemon), which is
-        // gated on the curator's actual ACL response. Proper signing is
-        // tracked as a follow-up for the whole approve/reject pair.
+        // We deliberately do NOT mutate local subscription/ACL state —
+        // cleanup of phantom auto-discovery is left to the daemon's
+        // catch-up denial path, which is gated on the curator's actual
+        // ACL response.
         if (payload.type === 'join-rejected') {
           const { contextGraphId, agentAddress: rejectedAddr } = payload;
-          // Codex tier-4h N14: `agentAddress` was effectively optional
-          // before, so any peer could forge `{ type: 'join-rejected',
-          // contextGraphId: '…' }` and every recipient emitted a UI
-          // rejection notification — even for CGs they never applied
-          // to join. Require an explicit `agentAddress` matching one
-          // of THIS node's local agents; drop otherwise.
           if (!contextGraphId || !rejectedAddr) {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
+          // The rejection target must be one of our local agents (Codex
+          // tier-4h N14). This alone isn't enough though: a malicious
+          // peer that knows a target's agent address can still forge a
+          // rejection for any CG, driving our UI into a false "denied"
+          // state. So also require the SENDER to be the CG's curator
+          // — Codex tier-4k N27. The sender's peer ID is passed in by
+          // the router; we match it against the CG's recorded curator
+          // DID (direct peer-ID DID for legacy CGs) or, for
+          // wallet-scoped curators, the current peer ID published by
+          // the curator agent in the registry. Anything else is
+          // dropped with a short `skipped` ACK.
           const isLocalAgent = [...this.localAgents.keys()].some(
             (addr) => addr.toLowerCase() === rejectedAddr.toLowerCase(),
           );
           if (!isLocalAgent) {
+            return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+          }
+          const senderIsCurator = await this.senderIsContextGraphCurator(contextGraphId, peerId.toString());
+          if (!senderIsCurator) {
+            this.log.warn(
+              createOperationContext('system'),
+              `Dropping join-rejected for "${contextGraphId}" from ${peerId.toString()} — sender is not the CG curator`,
+            );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
@@ -5927,6 +5935,46 @@ export class DKGAgent {
     // callers must supply callerAgentAddress to operate on non-default CGs.
     if (ownerDid === peerDid) return true;
     if (this.defaultAgentAddress && ownerDid === `did:dkg:agent:${this.defaultAgentAddress}`) return true;
+    return false;
+  }
+
+  /**
+   * Return true when `senderPeerId` is currently acting as the curator
+   * of `contextGraphId`. Used as a minimal anti-spoof gate on join
+   * lifecycle notifications (approve/reject) — those arrive unsigned
+   * over p2p, so without this check any peer that knows a local
+   * agent's address could forge a rejection and drive our UI into a
+   * false "denied" state (Codex tier-4k N27).
+   *
+   * Resolution order:
+   *  1. If the CG's recorded curator is a peer-ID DID
+   *     (`did:dkg:agent:<libp2p-peer-id>`, legacy/creator path), match
+   *     directly against `senderPeerId`.
+   *  2. Otherwise the CG was registered with a wallet-scoped curator
+   *     (`did:dkg:agent:0x…`). Consult the agent registry and accept
+   *     the sender iff the curator agent's currently advertised peer
+   *     ID matches. Registry lookup is cheap (local graph query).
+   *
+   * A missing curator / registry failure is treated as "not curator"
+   * — we'd rather drop a real rejection than surface a forged one.
+   */
+  private async senderIsContextGraphCurator(contextGraphId: string, senderPeerId: string): Promise<boolean> {
+    try {
+      const owner = await this.getContextGraphOwner(contextGraphId);
+      if (!owner) return false;
+      const ownerTail = owner.replace(/^did:dkg:agent:/, '');
+      if (ownerTail === senderPeerId) return true;
+      // Wallet-scoped curator: resolve via registry. The curator's
+      // peer ID is whatever they currently advertise — `findAgents()`
+      // returns the freshest mapping we know about.
+      if (/^0x[0-9a-fA-F]{40}$/.test(ownerTail)) {
+        const agents = await this.discovery.findAgents();
+        const match = agents.find((a) => a.agentAddress?.toLowerCase() === ownerTail.toLowerCase());
+        if (match && match.peerId === senderPeerId) return true;
+      }
+    } catch {
+      // Any lookup failure → err on the side of "not curator" and drop.
+    }
     return false;
   }
 

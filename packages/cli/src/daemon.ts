@@ -7073,10 +7073,29 @@ async function handleRequest(
       // Strip supportedTools the operator didn't pick — planner uses
       // supportedTools to gate claude-code wiring, and we want the same
       // gating to apply for any tool the operator deselected.
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Fail fast when the intersection of requested tools and the
+      // manifest's supportedTools is empty (Codex tier-4k N28). Without
+      // this, `plan-install` happily returns a "successful" plan that
+      // writes AGENTS.md / config.yaml but no usable Cursor/Claude
+      // wiring, because the planner gates each wiring block on
+      // `supportedTools.includes(…)`. Operators then hit a confusing
+      // "install succeeded but nothing works" state. Return 400 with
+      // the actionable options so the UI can surface the choice.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
       const manifest = {
         ...fetched,
-        supportedTools: fetched.supportedTools.filter((t) =>
-          (ctx.context.tools as readonly string[]).includes(t)),
+        supportedTools: filteredSupportedTools,
       };
       const plan = planInstallImpl({ ...ctx.context, manifest });
       const markdown = buildReviewMarkdownImpl(manifest, plan);
@@ -7122,10 +7141,26 @@ async function handleRequest(
       const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
       const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Same fail-fast as `/manifest/plan-install` (Codex N28): refuse to
+      // run the install if the operator's selected tools don't intersect
+      // what the manifest actually supports — otherwise we silently
+      // write generic config without any of the editor wiring the user
+      // asked for.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
       const manifest = {
         ...fetched,
-        supportedTools: fetched.supportedTools.filter((t) =>
-          (ctx.context.tools as readonly string[]).includes(t)),
+        supportedTools: filteredSupportedTools,
       };
       const plan = planInstallImpl({ ...ctx.context, manifest });
       const written = await writeInstallImpl(plan);

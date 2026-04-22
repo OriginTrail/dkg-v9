@@ -21,6 +21,7 @@ const PHASE_COLORS: Record<string, string> = {
   chain: '#f59e0b',
   'chain:sign': '#fbbf24',
   'chain:submit': '#d97706',
+  'chain:writeahead': '#ea580c',
   'chain:metadata': '#f97316',
   broadcast: '#22c55e',
   decode: '#14b8a6',

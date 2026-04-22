@@ -102,6 +102,11 @@ describe('Phase-sequence contracts', () => {
       'chain:sign:start',
       'chain:sign:end',
       'chain:submit:start',
+      // P-1 write-ahead boundary: straddles the adapter call so phase
+      // listeners (e.g. the CLI daemon's operations journal) can
+      // checkpoint BEFORE `eth_sendRawTransaction` hits the wire.
+      'chain:writeahead:start',
+      'chain:writeahead:end',
       'chain:submit:end',
       'chain:metadata:start',
       'chain:metadata:end',
@@ -191,6 +196,9 @@ describe('Phase-sequence contracts', () => {
       'prepare:end',
       'chain:start',
       'chain:submit:start',
+      // P-1 write-ahead boundary for the update path.
+      'chain:writeahead:start',
+      'chain:writeahead:end',
       'chain:submit:end',
       'chain:end',
       'store:start',

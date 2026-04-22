@@ -1259,6 +1259,22 @@ export class DKGPublisher implements Publisher {
 
       onPhase?.('chain:sign', 'end');
       onPhase?.('chain:submit', 'start');
+      // P-1: write-ahead boundary. Spec axiom 4 / §06 require the node
+      // to persist a "publish attempt about to hit the wire" record
+      // BEFORE any `eth_sendRawTransaction` RPC is issued, so that a
+      // crash between "tx on wire" and "receipt observed" can be
+      // recovered without a double-submit. Phase listeners (e.g. the
+      // CLI daemon's operations journal) treat `chain:writeahead:start`
+      // as the cue to checkpoint the publish. The corresponding
+      // `:end` fires after the adapter returns (or throws), whichever
+      // comes first.
+      //
+      // Follow-up (P-1.2): to persist the actual signed txHash,
+      // split the EVM adapter's sign/broadcast flow and expose a
+      // pre-broadcast `onTxSigned(txHash)` hook on
+      // `V10PublishDirectParams`. That turns this marker from a
+      // coarse boundary into a real write-ahead log entry.
+      onPhase?.('chain:writeahead', 'start');
       this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         if (!v10ACKs || v10ACKs.length === 0) {
@@ -1380,10 +1396,12 @@ export class DKGPublisher implements Publisher {
         }
 
         status = 'confirmed';
+        onPhase?.('chain:writeahead', 'end');
         onPhase?.('chain:submit', 'end');
         onPhase?.('chain:metadata', 'start');
         this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
       } catch (err) {
+        onPhase?.('chain:writeahead', 'end');
         onPhase?.('chain:submit', 'end');
         this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1511,6 +1529,11 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
+    // P-1: write-ahead boundary for the KC-update path. See the
+    // equivalent marker in the publish path above for rationale; both
+    // paths currently emit a coarse phase boundary, with a follow-up
+    // (P-1.2) to plumb the actual signed txHash via an adapter hook.
+    onPhase?.('chain:writeahead', 'start');
 
     // Compute real serialized byte size — must match the publish path serializer
     const updateNquadsStr = allSkolemizedQuads
@@ -1540,6 +1563,7 @@ export class DKGPublisher implements Publisher {
         ];
         if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
           this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+          onPhase?.('chain:writeahead', 'end');
           onPhase?.('chain:submit', 'end');
           onPhase?.('chain', 'end');
           return {
@@ -1580,6 +1604,7 @@ export class DKGPublisher implements Publisher {
     }
 
     if (!txResult.success) {
+      onPhase?.('chain:writeahead', 'end');
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
       return {
@@ -1591,6 +1616,7 @@ export class DKGPublisher implements Publisher {
         publicQuads: allSkolemizedQuads,
       };
     }
+    onPhase?.('chain:writeahead', 'end');
     onPhase?.('chain:submit', 'end');
     onPhase?.('chain', 'end');
 

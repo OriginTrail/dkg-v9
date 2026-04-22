@@ -1211,6 +1211,20 @@ export async function runSetup(options: SetupOptions): Promise<void> {
         `openclaw.json at ${effectiveConfigPathForMigration} is not writable: ${err?.message ?? err}`,
       );
     }
+    // R11-3: `mergeOpenClawConfig` creates `openclaw.json.bak.<ts>` as a
+    // sibling of the config file. A writable config file inside a read-only
+    // directory would pass the file-level check above and then fail at
+    // backup creation AFTER step 5 has already written SKILL.md — the exact
+    // orphan scenario R6-2 was designed to prevent. Check the directory
+    // too.
+    const configDir = dirname(effectiveConfigPathForMigration);
+    try {
+      accessSync(configDir, fsConstants.W_OK);
+    } catch (err: any) {
+      throw new Error(
+        `openclaw.json directory ${configDir} is not writable (backup file creation would fail): ${err?.message ?? err}`,
+      );
+    }
 
     // R8-2: also pre-validate the wrong-slot guard `mergeOpenClawConfig`
     // runs at setup.ts:646. Without this, a misconfigured
@@ -1228,30 +1242,21 @@ export async function runSetup(options: SetupOptions): Promise<void> {
       );
     }
 
+    // Migration discovery: only trust the explicit `entry.config.installedWorkspace`
+    // pointer written by a prior merge. No legacy fallback via
+    // `resolveWorkspaceDirFromConfig` here — pre-launch, pre-R2 configs don't
+    // exist at scale, and the config-derived workspace isn't guaranteed to
+    // be where an earlier `--workspace`-overridden install actually put
+    // SKILL.md. A missing pointer simply means no migration cleanup runs
+    // (R11-2 decline of destructive best-guess).
     const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
     if (existingEntry && typeof existingEntry === 'object') {
-      // Post-hotfix: `installedWorkspace` lives inside `entry.config`
-      // (OpenClaw's gateway schema strict-rejects unknown keys on entry
-      // root). Legacy root-level entries from pre-hotfix builds of this PR
-      // are already broken (config reload fails), so we don't read from
-      // the root — a fresh merge will clean up the stale root key and
-      // repopulate the new location.
       const installedFromEntryConfig = typeof existingEntry.config?.installedWorkspace === 'string'
         && existingEntry.config.installedWorkspace.trim()
         ? existingEntry.config.installedWorkspace.trim()
         : undefined;
       if (installedFromEntryConfig) {
         priorInstalledForMigration = installedFromEntryConfig;
-      } else {
-        // R5-2: legacy adapter entry predates the `installedWorkspace`
-        // field. Fall back to the config-derived workspace — same
-        // resolver the daemon's Disconnect path uses. Gated on entry
-        // presence so a fresh install (no prior entry) doesn't trigger
-        // a spurious migration against an unrelated workspace key.
-        const derived = resolveWorkspaceDirFromConfig(rawExisting, effectiveConfigPathForMigration);
-        if (typeof derived === 'string' && derived.trim()) {
-          priorInstalledForMigration = derived.trim();
-        }
       }
     }
   }

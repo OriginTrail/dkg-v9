@@ -1753,66 +1753,42 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(verifySkillRemovedStub).toHaveBeenCalledTimes(1);
   });
 
-  it('scenario 2d: legacy (pre-R2) openclaw.json without installedWorkspace falls back to resolveWorkspaceDirFromConfig and expands ~ (Codex R1-1)', async () => {
-    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120093687
-    // Disconnect previously did a raw `raw?.agents?.defaults?.workspace ?? raw?.workspace`
-    // lookup — no `~` expansion, no relative-path resolution, no `workspaceDir` key,
-    // no default-fallback. Setup's install used `discoverWorkspace` which covered all
-    // of those, so a user with a `~/…` workspace in openclaw.json got SKILL.md
-    // installed at the correct absolute path but left behind at a literal `~/…` path
-    // on Disconnect. Codex R2-1 then made `entry.config.installedWorkspace` the authoritative
-    // path on new installs — but pre-R2 openclaw.json files don't carry that field,
-    // so the config-derived resolver remains the fallback. This scenario locks that
-    // fallback in.
+  it('scenario 2d: legacy (pre-R2) openclaw.json without installedWorkspace SKIPS skill cleanup but still unmerges the config (R11-2)', async () => {
+    // Per R11-2: Disconnect no longer falls back to a config-derived
+    // workspace when `entry.config.installedWorkspace` is missing. That
+    // fallback would have let Disconnect delete a SKILL.md at a
+    // `--workspace`-incongruent path. Instead, legacy entries simply skip
+    // the skill-cleanup step; the config-level unmerge still completes,
+    // and any pre-R2 SKILL.md the adapter owned stays on disk for the
+    // user to clean manually.
 
-    // Seed openclaw.json with a ~-prefixed workspace + merge. Then strip
-    // `installedWorkspace` off the entry to simulate a pre-R2 install.
-    const tildeWorkspace = '~/dkg-r11-temp-scenario2d';
+    // Seed a legacy adapter entry (no `entry.config.installedWorkspace`).
     writeFileSync(openclawConfigPath, JSON.stringify({
       plugins: {},
-      agents: { defaults: { workspace: tildeWorkspace } },
+      agents: { defaults: { workspace: workspaceDir } },
     }, null, 2));
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
     const mergedPre = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     delete mergedPre.plugins.entries['adapter-openclaw'].config.installedWorkspace;
     writeFileSync(openclawConfigPath, JSON.stringify(mergedPre, null, 2));
 
-    // Sanity — the literal ~ survived the merge, installedWorkspace is gone.
-    const merged = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
-    expect(merged.agents.defaults.workspace).toBe(tildeWorkspace);
-    expect(merged.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBeUndefined();
-
-    const { resolveWorkspaceDirFromConfig: realResolver } = await import(
-      '@origintrail-official/dkg-adapter-openclaw'
-    );
-    const resolverSpy = vi.fn((cfg: unknown, path: string) => realResolver(cfg, path));
     const removeSkillSpy = vi.fn();
-    // Stub verifySkillRemoved so the synthetic ~-expanded path (which has no
-    // SKILL.md on disk) doesn't hit the real verifier either way — we're
-    // exercising the resolver/remove path here, not the verify path.
     const verifySkillRemovedStub = vi.fn(() => null);
 
     const config = makeConfig();
     await reverseLocalAgentSetupForUi(config, openclawConfigPath, {
-      resolveWorkspaceDirFromConfig: resolverSpy,
       removeCanonicalNodeSkill: removeSkillSpy,
       verifySkillRemoved: verifySkillRemovedStub,
     });
 
-    // Helper was invoked with the parsed config + the openclaw.json path.
-    expect(resolverSpy).toHaveBeenCalledTimes(1);
-    const [cfgArg, pathArg] = resolverSpy.mock.calls[0];
-    expect(pathArg).toBe(openclawConfigPath);
-    expect((cfgArg as any)?.agents?.defaults?.workspace).toBe(tildeWorkspace);
+    // No legacy-fallback guessing → skill cleanup is skipped entirely.
+    expect(removeSkillSpy).not.toHaveBeenCalled();
+    expect(verifySkillRemovedStub).not.toHaveBeenCalled();
 
-    // Helper returned the ~-expanded absolute path, and that path drove
-    // both the skill removal AND the verify step — NOT the raw literal `~/…`.
-    const expandedAbsolute = join(homedir(), 'dkg-r11-temp-scenario2d');
-    expect(resolverSpy.mock.results[0].value).toBe(expandedAbsolute);
-    expect(removeSkillSpy).toHaveBeenCalledTimes(1);
-    expect(removeSkillSpy.mock.calls[0][0]).toBe(expandedAbsolute);
-    expect(verifySkillRemovedStub).toHaveBeenCalledTimes(1);
-    expect(verifySkillRemovedStub.mock.calls[0][0]).toBe(expandedAbsolute);
+    // Config-level unmerge still completed — the adapter wiring is gone.
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins?.entries?.['adapter-openclaw']).toBeUndefined();
+    expect(after.plugins?.allow ?? []).not.toContain('adapter-openclaw');
   });
 
   it('scenario 2e: skill-removal failure propagates to runtime.lastError AND leaves openclaw.json untouched for retry (Codex R2-2 + R3-2)', async () => {

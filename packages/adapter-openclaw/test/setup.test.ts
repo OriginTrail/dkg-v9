@@ -1603,11 +1603,16 @@ describe('runSetup workspace migration', () => {
     }
   });
 
-  // Codex PR #234 R5-2: legacy adapter entries (pre-R2) lack
-  // `entry.config.installedWorkspace`. Migration must fall back to the
-  // config-derived workspace via `resolveWorkspaceDirFromConfig` so the old
-  // SKILL.md gets retired on the next setup.
-  it('retires legacy adapter-entry skills via the config-derived fallback (R5-2)', async () => {
+  // Codex PR #234 R11-2: legacy adapter entries (pre-R2) lack
+  // `entry.config.installedWorkspace`. Previously we'd fall back to the
+  // config-derived workspace and clean up SKILL.md there, but that's
+  // unsafe — a pre-R2 install done with `--workspace /A` against a config
+  // that declares `/B` would make the fallback delete the wrong file.
+  // Per the pre-launch no-migration stance + R11-2 decline of destructive
+  // best-guess, migration is now SKIPPED for legacy entries. The new
+  // install still lands cleanly at the current workspace; any pre-R2
+  // orphan at the old path stays put (user cleans manually).
+  it('SKIPS migration for legacy adapter entries without entry.config.installedWorkspace (R11-2)', async () => {
     const dkgHome = join(testDir, '.dkg');
     const openclawHome = join(testDir, '.openclaw');
     const legacyWs = join(testDir, 'legacy-workspace');
@@ -1616,11 +1621,9 @@ describe('runSetup workspace migration', () => {
     mkdirSync(newWs, { recursive: true });
     mkdirSync(openclawHome, { recursive: true });
 
-    // Seed a legacy-shaped openclaw.json:
-    //   - `agents.defaults.workspace` points at legacyWs (R5-2 fallback source).
-    //   - `plugins.entries['adapter-openclaw']` is present but has NO
-    //     `installedWorkspace` field (simulates a pre-R2 merge).
-    // Also seed SKILL.md at legacyWs as if an earlier setup installed it.
+    // Seed a legacy-shaped openclaw.json with an adapter entry that lacks
+    // `entry.config.installedWorkspace` AND a SKILL.md at the workspace
+    // that the old fallback would have picked.
     writeFileSync(
       join(openclawHome, 'openclaw.json'),
       JSON.stringify({
@@ -1645,16 +1648,19 @@ describe('runSetup workspace migration', () => {
     process.env.OPENCLAW_HOME = openclawHome;
 
     try {
-      // Re-run setup with a different workspace — migration must fire via
-      // the config-derived fallback even though the entry lacks
-      // `installedWorkspace`.
+      // Re-run setup with a different workspace. New install must land;
+      // legacy SKILL.md must NOT be touched (no fallback = no destructive
+      // cleanup from a guessed path).
       await runSetup({ workspace: newWs, start: false, verify: false });
 
       const newSkill = join(newWs, 'skills', 'dkg-node', 'SKILL.md');
       expect(existsSync(newSkill)).toBe(true);
-      expect(existsSync(legacySkill)).toBe(false);
+      // The legacy SKILL.md survives untouched — no guessing, no deleting.
+      expect(existsSync(legacySkill)).toBe(true);
+      expect(readFileSync(legacySkill, 'utf-8')).toBe('# Legacy-install DKG Node Skill\n');
 
-      // Post-migration the entry now carries the new installedWorkspace.
+      // Post-merge the entry now carries the new installedWorkspace pointer
+      // so future migrations fire correctly with an authoritative target.
       const after = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
       expect(after.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(newWs);
     } finally {

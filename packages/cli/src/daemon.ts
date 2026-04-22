@@ -2596,7 +2596,6 @@ export type ReverseLocalAgentSetupDeps = {
   verifyUnmergeInvariants?: (configPath: string) => string | null;
   removeCanonicalNodeSkill?: (workspaceDir: string) => void;
   verifySkillRemoved?: (installedWorkspace: string) => string | null;
-  resolveWorkspaceDirFromConfig?: (config: unknown, openclawConfigPath: string) => string | null;
 };
 
 export async function reverseLocalAgentSetupForUi(
@@ -2620,34 +2619,29 @@ export async function reverseLocalAgentSetupForUi(
     && deps.verifyUnmergeInvariants
     && deps.removeCanonicalNodeSkill
     && deps.verifySkillRemoved
-    && deps.resolveWorkspaceDirFromConfig
   )
     ? {
         unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
         verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
         removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
         verifySkillRemoved: deps.verifySkillRemoved,
-        resolveWorkspaceDirFromConfig: deps.resolveWorkspaceDirFromConfig,
       }
     : await import('@origintrail-official/dkg-adapter-openclaw');
   const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
   const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
   const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
   const verifySkillRemoved = deps.verifySkillRemoved ?? adapter.verifySkillRemoved;
-  const resolveWorkspaceDirFromConfig =
-    deps.resolveWorkspaceDirFromConfig ?? adapter.resolveWorkspaceDirFromConfig;
 
   // Step 1 — discover the workspace to clean up, reading openclaw.json once.
   // Authoritative source is `plugins.entries['adapter-openclaw'].config.installedWorkspace`
   // persisted at merge time (R2-1, hotfixed to live inside `entry.config`
   // because OpenClaw's gateway schema strict-rejects unknown keys at the
-  // entry root). Config-derived resolver is the pre-R2 / legacy fallback,
-  // but ONLY when the adapter entry exists — an absent entry means the
-  // adapter was never installed (or already disconnected), and the
-  // config-derived fallback would point at a workspace the user may be
-  // using for other purposes (e.g. a user-placed SKILL.md after a prior
-  // clean Disconnect). Gating on entry presence (Codex R5-4) keeps skill
-  // cleanup scoped to adapter-owned state.
+  // entry root). No legacy fallback via `resolveWorkspaceDirFromConfig`:
+  // pre-R2 configs don't exist outside local testing, and the config-
+  // derived workspace isn't guaranteed to be where an earlier
+  // `--workspace`-overridden install actually put SKILL.md (R11-2 decline
+  // of destructive best-guess). A missing pointer simply means no skill
+  // cleanup runs — the config unmerge below still completes.
   let workspaceDir: string | null = null;
   if (existsSync(resolvedPath)) {
     try {
@@ -2660,13 +2654,6 @@ export async function reverseLocalAgentSetupForUi(
           : undefined;
         if (installedFromConfig) {
           workspaceDir = installedFromConfig;
-        } else {
-          // Legacy entry predating R2 (or a pre-hotfix entry where the
-          // field lived at the entry root) — fall back to the config-
-          // derived workspace. The root-level read is skipped intentionally:
-          // an already-broken config with root-level `installedWorkspace`
-          // has been failing gateway validation and isn't a trusted source.
-          workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
         }
       }
       // else: entry already absent → workspaceDir stays null → skill cleanup

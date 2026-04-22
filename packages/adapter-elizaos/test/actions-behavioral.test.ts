@@ -473,6 +473,72 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     )!;
     expect(turnTs.object).toBe(`"2026-06-10T12:00:00.000Z"^^<${XSD_DATETIME}>`);
   });
+
+  // PR #229 bot review round 11 (actions.ts:550). Prior revisions
+  // returned string-valued timestamp fields verbatim and then emitted
+  // the result under `^^xsd:dateTime`. ElizaOS frequently serializes
+  // `createdAt` / `timestamp` as epoch-ms strings (`"1718049600000"`),
+  // so the quad became an invalid literal that breaks SPARQL ORDER BY
+  // and FILTER arithmetic. The new contract coerces every incoming
+  // shape to a real ISO-8601 string before emitting the quad.
+  it('coerces a string epoch-ms timestamp to ISO-8601 before emitting xsd:dateTime (bot review r11-4)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('hi', { id: 'ms-string', roomId: 'r' } as any);
+    // Matches ElizaOS serializers that stringify epoch ms.
+    (msg as any).createdAt = '1718049600000';
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    // Epoch-ms 1718049600000 == 2024-06-10T20:00:00.000Z
+    expect(turnTs.object).toBe(`"2024-06-10T20:00:00.000Z"^^<${XSD_DATETIME}>`);
+    // Must NOT be the raw epoch-ms string — that would be an invalid
+    // xsd:dateTime literal.
+    expect(turnTs.object).not.toContain('"1718049600000"');
+  });
+
+  it('normalises an already-ISO string timestamp via Date (no verbatim passthrough) (bot review r11-4)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('hi', { id: 'iso-string', roomId: 'r' } as any);
+    // Missing-millisecond ISO form — MUST be normalised to the
+    // canonical `.000Z` rendering so readers see a single shape.
+    (msg as any).createdAt = '2026-01-02T03:04:05Z';
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    expect(turnTs.object).toBe(`"2026-01-02T03:04:05.000Z"^^<${XSD_DATETIME}>`);
+  });
+
+  it('falls through to the deterministic synthetic stamp when a string timestamp is unparseable (bot review r11-4)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const msg = makeMessage('hi', { id: 'bogus-string', roomId: 'r' } as any);
+    (msg as any).createdAt = 'not-a-date-at-all';
+    await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    // MUST be a well-formed ISO-8601 literal (the synthetic fallback),
+    // NEVER the raw garbage string.
+    expect(turnTs.object).not.toContain('"not-a-date-at-all"');
+    const body = turnTs.object.match(/^"([^"]+)"\^\^/)?.[1];
+    expect(body).toBeDefined();
+    expect(new Date(body!).toISOString()).toBe(body);
+  });
+
+  it('also coerces an `opts.ts` override when it is a string epoch-ms value (bot review r11-4)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'opts-ts-ms', roomId: 'r' } as any),
+      {} as State,
+      { ts: '1718049600000' },
+    );
+    const turnTs = publishes[0].quads.find(
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+    )!;
+    expect(turnTs.object).toBe(`"2024-06-10T20:00:00.000Z"^^<${XSD_DATETIME}>`);
+  });
 });
 
 // ===========================================================================

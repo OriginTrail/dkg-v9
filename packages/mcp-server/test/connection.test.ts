@@ -190,8 +190,14 @@ describe('DkgClient', () => {
     // hard-coded `http://127.0.0.1`, silently dropping remote hosts,
     // HTTPS, and base paths. These tests pin the fix: the full base
     // URL now routes through to the `fetch()` call site.
-    describe('DKG_NODE_URL full base URL routing (bot review r10-2)', () => {
-      it('routes to a remote HTTPS host with an explicit port and a base path', async () => {
+    describe('DKG_NODE_URL full base URL routing (bot review r10-2 + r11-2)', () => {
+      it('routes to a remote HTTPS host with an explicit port (origin-only)', async () => {
+        // PR #229 bot review round 11 (r11-2): DkgClient's per-request
+        // paths already prefix `/api/...`, so the base URL MUST be
+        // origin-only. If the user sets `DKG_NODE_URL=https://host:8443/api`,
+        // the pathname is intentionally dropped — otherwise requests
+        // would double-up to `/api/api/status` and miss the remote
+        // daemon entirely.
         process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
         const c = await DkgClient.connect();
 
@@ -203,7 +209,7 @@ describe('DkgClient', () => {
         ]);
         globalThis.fetch = fn;
         await c.status();
-        expect(calls[0].url).toBe('https://remote.example:8443/api/api/status');
+        expect(calls[0].url).toBe('https://remote.example:8443/api/status');
       });
 
       it('routes to a remote HTTP host when no port is specified (defaults to :80)', async () => {
@@ -238,22 +244,27 @@ describe('DkgClient', () => {
     });
   });
 
-  describe('normalizeBaseUrl (bot review r10-2)', () => {
-    it('preserves scheme + host + port + base path', () => {
+  describe('normalizeBaseUrl (bot review r10-2 + r11-2)', () => {
+    it('returns origin-only (scheme + host + port) and DROPS the pathname', () => {
+      // r11-2: pathname is intentionally dropped because DkgClient's
+      // per-request routes already hard-code the `/api/...` prefix.
       expect(normalizeBaseUrl('https://remote.example:8443/api')).toBe(
-        'https://remote.example:8443/api',
+        'https://remote.example:8443',
       );
       expect(normalizeBaseUrl('http://10.0.0.1:7777')).toBe(
         'http://10.0.0.1:7777',
       );
+      expect(normalizeBaseUrl('http://node.example:80/some/nested/path')).toBe(
+        'http://node.example:80',
+      );
     });
 
-    it('strips trailing slashes from the base path', () => {
+    it('tolerates trailing slashes (they are dropped with the pathname)', () => {
       expect(normalizeBaseUrl('http://node.example:80/api/')).toBe(
-        'http://node.example:80/api',
+        'http://node.example:80',
       );
       expect(normalizeBaseUrl('http://node.example:80//api//')).toBe(
-        'http://node.example:80//api',
+        'http://node.example:80',
       );
     });
 
@@ -278,12 +289,14 @@ describe('DkgClient', () => {
   // status/whoami` diverged from `DkgClient.connect()` on discovery —
   // this helper centralizes the logic so both surfaces agree.
   describe('resolveDaemonEndpoint (bot review r10-3)', () => {
-    it('resolves from DKG_NODE_URL + DKG_NODE_TOKEN when set', async () => {
+    it('resolves from DKG_NODE_URL + DKG_NODE_TOKEN when set (origin-only)', async () => {
       process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
       process.env.DKG_NODE_TOKEN = 'env-tok';
       const r = await resolveDaemonEndpoint({ requireReachable: true });
-      expect(r.baseOrPort).toBe('https://remote.example:8443/api');
-      expect(r.displayUrl).toBe('https://remote.example:8443/api');
+      // r11-2: pathname is dropped so DkgClient's `/api/...` routes
+      // don't double up on the wire.
+      expect(r.baseOrPort).toBe('https://remote.example:8443');
+      expect(r.displayUrl).toBe('https://remote.example:8443');
       expect(r.token).toBe('env-tok');
       expect(r.tokenSource).toBe('env');
       expect(r.urlSource).toBe('env');

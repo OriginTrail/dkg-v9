@@ -649,9 +649,22 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
 
   const subjectVars = new Set<string>();
   const subjectIris = new Set<string>();
+  const subjectPrefixed = new Set<string>();
   for (const stmt of statements) {
-    // First non-whitespace token is the subject.
-    const m = stmt.match(/^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?)/);
+    // First non-whitespace token is the subject. Accept:
+    //   - variable (`?x`, `$x`)
+    //   - absolute IRI (`<urn:x>`)
+    //   - blank node (`_:b`)
+    //   - RDF literal (`"…"` with optional type/lang tag)
+    //   - prefixed name (`ex:item`) — SPARQL `PNAME_LN` / `PNAME_NS`
+    //     (PR #229 bot review round 11 / dkg-query-engine.ts:654;
+    //     previous revisions fail-closed `_minTrust` to `[]` for
+    //     every query that used standard `PREFIX ex: <urn:> …`
+    //     syntax, which is the recommended SPARQL shape for exact
+    //     entity lookups.)
+    const m = stmt.match(
+      /^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?|[A-Za-z][\w-]*:[A-Za-z_][\w-]*|[A-Za-z][\w-]*:)/,
+    );
     if (!m) return null;
     const subj = m[1];
     if (subj.startsWith('?') || subj.startsWith('$')) {
@@ -669,10 +682,20 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
       subjectIris.add(subj);
       continue;
     }
+    // Prefixed name — treat like an IRI at the clause-emission stage.
+    // The original query still carries the `PREFIX` declarations, so
+    // emitting `ex:item <trustLevel> ?t . FILTER(...)` is valid SPARQL
+    // at the same scope. Rejects `_:bn` (starts with `_:`) and
+    // string literals (start with `"`) naturally because this branch
+    // only runs when subj starts with a letter.
+    if (/^[A-Za-z]/.test(subj) && subj.includes(':')) {
+      subjectPrefixed.add(subj);
+      continue;
+    }
     // Blank-node / literal subject — cannot attach a trust filter.
     return null;
   }
-  if (subjectVars.size === 0 && subjectIris.size === 0) return null;
+  if (subjectVars.size === 0 && subjectIris.size === 0 && subjectPrefixed.size === 0) return null;
 
   const extraClauses: string[] = [];
   let i = 0;
@@ -687,6 +710,13 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
     const trustVar = `?__dkgTrust${i++}`;
     extraClauses.push(
       `${subjectIri} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
+        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
+    );
+  }
+  for (const subjectPfx of subjectPrefixed) {
+    const trustVar = `?__dkgTrust${i++}`;
+    extraClauses.push(
+      `${subjectPfx} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
         `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
     );
   }

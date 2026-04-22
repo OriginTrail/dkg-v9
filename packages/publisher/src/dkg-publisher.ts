@@ -348,6 +348,70 @@ function isInternalOrigin(options: PublishOptions): boolean {
 // Bug 41 flagged this. The fix replaces both byte-level comparisons
 // with the shared case-insensitive helper from `reserved-subjects.ts`,
 // preserving the SSOT property established in Round 12.
+/**
+ * Per-context-graph quorum state derived from the collected V10 ACKs
+ * and the publisher's self-sign eligibility.
+ *
+ * Exported so the quorum decision is testable in isolation. See
+ * {@link computePerCgQuorumState} for the semantics and
+ * {@link DKGPublisher.publish} for the call site.
+ *
+ * PR #229 bot review round 11 (dkg-publisher.ts:1471). Earlier
+ * revisions inlined this logic and tied `selfSignEligible` to
+ * `v10ACKs.length === 0`, which forced every M-of-N publish where a
+ * peer ACK had already arrived to stay tentative even though the
+ * publisher's own participant ACK would satisfy quorum on-chain.
+ * Extracting the helper also prevents future regressions from
+ * silently diverging the quorum math between the gate and the
+ * self-sign block.
+ */
+export interface PerCgQuorumState {
+  readonly perCgRequired: number;
+  readonly collectedAckCount: number;
+  readonly publisherAlreadyAcked: boolean;
+  readonly selfSignEligible: boolean;
+  readonly effectiveAckCount: number;
+  readonly perCgQuorumUnmet: boolean;
+}
+
+export interface PerCgQuorumInputs {
+  readonly perCgRequiredSignatures?: number;
+  readonly collectedAcks:
+    | ReadonlyArray<{ readonly nodeIdentityId: bigint }>
+    | undefined;
+  readonly publisherWalletReady: boolean;
+  readonly publisherNodeIdentityId: bigint;
+  readonly v10ChainReady: boolean;
+}
+
+export function computePerCgQuorumState(
+  input: PerCgQuorumInputs,
+): PerCgQuorumState {
+  const perCgRequired = input.perCgRequiredSignatures ?? 0;
+  const collectedAckCount = input.collectedAcks?.length ?? 0;
+  const publisherAlreadyAcked =
+    !!input.collectedAcks &&
+    input.publisherNodeIdentityId > 0n &&
+    input.collectedAcks.some((a) => a.nodeIdentityId === input.publisherNodeIdentityId);
+  const selfSignEligible =
+    !publisherAlreadyAcked &&
+    input.publisherWalletReady &&
+    input.publisherNodeIdentityId > 0n &&
+    input.v10ChainReady;
+  const effectiveAckCount = selfSignEligible
+    ? collectedAckCount + 1
+    : collectedAckCount;
+  const perCgQuorumUnmet = perCgRequired > 0 && effectiveAckCount < perCgRequired;
+  return {
+    perCgRequired,
+    collectedAckCount,
+    publisherAlreadyAcked,
+    selfSignEligible,
+    effectiveAckCount,
+    perCgQuorumUnmet,
+  };
+}
+
 function rejectReservedSubjectPrefixes(quads: Quad[]): void {
   for (const q of quads) {
     if (isReservedSubject(q.subject)) {
@@ -1449,13 +1513,13 @@ export class DKGPublisher implements Publisher {
     // fallback and BEFORE the on-chain tx is built.
     //
     // Self-signing adds AT MOST ONE ACK (the publisher's own identityId) and
-    // only when the publisher has no peer ACKs at all (see the
-    // `!v10ACKs || v10ACKs.length === 0` gate on the self-sign block below).
-    // If the publisher is a legitimate participant of the CG (the common
-    // case — the publisher created the CG and added themselves to the
-    // participant set), that self-signed ACK satisfies `requiredSignatures
-    // = 1`; the V10 contract enforces "each sig must be from a valid
-    // participant" so a non-participant self-sign is rejected on-chain.
+    // only when that identity is NOT already present among the collected
+    // peer ACKs (dedupe by identityId). If the publisher is a legitimate
+    // participant of the CG (the common case — the publisher created the CG
+    // and added themselves to the participant set), that self-signed ACK
+    // counts toward quorum; the V10 contract enforces "each sig must be
+    // from a valid participant" so a non-participant self-sign is rejected
+    // on-chain.
     //
     // PR #229 bot review round 6 originally argued this should be a strict
     // `perCgRequired > 0 && collectedAckCount < perCgRequired` check, but
@@ -1465,19 +1529,24 @@ export class DKGPublisher implements Publisher {
     // accept the self-signed participant ACK. The right semantic is:
     // "after accounting for the one self-sign we *would* add, do we still
     // fall short?" — which is what `effectiveAckCount` captures below.
-    const perCgRequired = options.perCgRequiredSignatures ?? 0;
-    const collectedAckCount = v10ACKs?.length ?? 0;
-    const selfSignEligible =
-      (!v10ACKs || v10ACKs.length === 0) &&
-      !!this.publisherWallet &&
-      this.publisherNodeIdentityId > 0n &&
-      v10ChainId !== undefined &&
-      v10KavAddress !== undefined;
-    // Self-sign contributes ONE ACK and only when no peer ACKs exist.
-    const effectiveAckCount = selfSignEligible
-      ? Math.max(collectedAckCount, 1)
-      : collectedAckCount;
-    const perCgQuorumUnmet = perCgRequired > 0 && effectiveAckCount < perCgRequired;
+    //
+    // PR #229 bot review round 11 (r11-1): the earlier gate scoped
+    // `selfSignEligible` to `v10ACKs.length === 0`, which incorrectly denied
+    // the publisher's own participant ACK whenever ANY peer ACK had already
+    // arrived. In an M-of-N context graph where (peer ACKs + local
+    // participant ACK) would satisfy quorum, that short-circuit forced a
+    // tentative publish even though the on-chain contract would accept the
+    // combined set. The eligibility check is now "publisher identity is not
+    // already represented in v10ACKs"; the self-sign block below then
+    // APPENDS (not replaces) and dedupes by identityId.
+    const { perCgRequired, collectedAckCount, selfSignEligible, effectiveAckCount, perCgQuorumUnmet } =
+      computePerCgQuorumState({
+        perCgRequiredSignatures: options.perCgRequiredSignatures,
+        collectedAcks: v10ACKs,
+        publisherWalletReady: !!this.publisherWallet,
+        publisherNodeIdentityId: this.publisherNodeIdentityId,
+        v10ChainReady: v10ChainId !== undefined && v10KavAddress !== undefined,
+      });
     if (perCgQuorumUnmet) {
       this.log.warn(
         ctx,
@@ -1488,24 +1557,32 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Self-sign ACK as last resort: single-node mode (no provider), or when
-    // ACK collection was skipped for private data, or when collection failed.
-    // On networks requiring > 1 signature, a single self-signed ACK will be
-    // rejected on-chain by minimumRequiredSignatures — this is intentional:
-    // the contract is the ultimate gatekeeper.
+    // Self-sign ACK: contributes the publisher's own participant ACK when
+    // it is not already represented in the collected set. This covers:
+    //   (a) single-node mode (no provider) — v10ACKs empty;
+    //   (b) ACK collection skipped for private data / failed — v10ACKs empty;
+    //   (c) PR #229 bot review r11-1: M-of-N CG where peer ACKs arrived but
+    //       the publisher's own participant ACK is still needed to meet
+    //       quorum. We APPEND (dedupe by identityId) rather than overwrite.
+    // On networks whose on-chain minimumRequiredSignatures still cannot be
+    // met, the V10 contract rejects the tx — this gate only prevents us
+    // from DROPPING a legitimate participant ACK we could have produced
+    // locally.
     if (
       !perCgQuorumUnmet &&
-      (!v10ACKs || v10ACKs.length === 0) &&
-      this.publisherWallet &&
-      this.publisherNodeIdentityId > 0n &&
-      v10ChainId !== undefined &&
-      v10KavAddress !== undefined
+      selfSignEligible &&
+      this.publisherWallet
     ) {
-      const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
-      this.log.info(ctx, `Self-signing ACK — ${reason}`);
+      const selfSignReason =
+        !v10ACKs || v10ACKs.length === 0
+          ? !options.v10ACKProvider
+            ? 'no v10ACKProvider (single-node mode)'
+            : 'ACK collection failed/skipped'
+          : 'publisher participant ACK missing from collected set';
+      this.log.info(ctx, `Self-signing ACK — ${selfSignReason}`);
       const ackDigest = computePublishACKDigest(
-        v10ChainId,
-        v10KavAddress,
+        v10ChainId!,
+        v10KavAddress!,
         v10CgId,
         kcMerkleRoot,
         BigInt(kaCount),
@@ -1516,12 +1593,22 @@ export class DKGPublisher implements Publisher {
       const ackSig = ethers.Signature.from(
         await this.publisherWallet.signMessage(ackDigest),
       );
-      v10ACKs = [{
+      const selfAck = {
         peerId: 'self',
         signatureR: ethers.getBytes(ackSig.r),
         signatureVS: ethers.getBytes(ackSig.yParityAndS),
         nodeIdentityId: this.publisherNodeIdentityId,
-      }];
+      };
+      v10ACKs = v10ACKs && v10ACKs.length > 0 ? [...v10ACKs, selfAck] : [selfAck];
+      // Dedupe by identityId — cheap defence even though selfSignEligible
+      // already excludes the already-present case. This keeps invariants
+      // honest if upstream collection ever produces duplicates.
+      const seen = new Set<bigint>();
+      v10ACKs = v10ACKs.filter((a) => {
+        if (seen.has(a.nodeIdentityId)) return false;
+        seen.add(a.nodeIdentityId);
+        return true;
+      });
     }
 
     onPhase?.('chain', 'start');

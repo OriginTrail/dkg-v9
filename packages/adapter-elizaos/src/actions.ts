@@ -530,13 +530,66 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
  *
  * See bot review PR #229, actions.ts:539.
  */
+/**
+ * Coerce a timestamp candidate (string | number) to a well-formed
+ * ISO-8601 `xsd:dateTime` literal body, or `null` if no coercion is
+ * possible. Returns just the lexical form (callers are responsible
+ * for wrapping it in quotes + the `^^xsd:dateTime` type tag).
+ *
+ * PR #229 bot review round 11 (actions.ts:550). Prior revisions
+ * returned string timestamps verbatim and then emitted them under
+ * `^^xsd:dateTime`. ElizaOS frequently serializes epoch milliseconds
+ * as strings (`"1718049600000"`), so the rewritten quad became the
+ * invalid literal `"1718049600000"^^xsd:dateTime` — which breaks
+ * SPARQL ordering / FILTER, and drifts between readers. This helper
+ * normalises every incoming shape (ms number, ms string, ISO string,
+ * RFC-2822 string) to a real `Date.toISOString()` before we commit
+ * it to the RDF layer.
+ */
+function coerceToIsoDateTime(raw: unknown): string | null {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  // Accept a bare integer / float string as epoch milliseconds.
+  // Reject exponent / leading-plus forms to stay conservative —
+  // they're not produced by any standard ElizaOS serializer.
+  if (/^-?\d+(?:\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    const d = new Date(n);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // Already looks like ISO-8601 with a date (YYYY-MM-DD) and a `T`
+  // time component → trust after a round-trip through `Date` to
+  // normalise timezone / fractional-seconds rendering.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // Last resort: parse via `Date.parse` (handles RFC-2822 and some
+  // locale strings). Anything still unparseable returns null so the
+  // caller can fall through to the deterministic synthetic stamp.
+  const parsed = Date.parse(s);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
 function resolveStableTurnTimestamp(
   message: unknown,
   optsAny: { ts?: string; timestamp?: string },
   turnSourceId: string,
 ): string {
-  if (typeof optsAny.ts === 'string' && optsAny.ts.length > 0) return optsAny.ts;
-  if (typeof optsAny.timestamp === 'string' && optsAny.timestamp.length > 0) return optsAny.timestamp;
+  if (typeof optsAny.ts === 'string' && optsAny.ts.length > 0) {
+    const iso = coerceToIsoDateTime(optsAny.ts);
+    if (iso !== null) return iso;
+  }
+  if (typeof optsAny.timestamp === 'string' && optsAny.timestamp.length > 0) {
+    const iso = coerceToIsoDateTime(optsAny.timestamp);
+    if (iso !== null) return iso;
+  }
   const m = message as {
     createdAt?: number | string;
     timestamp?: number | string;
@@ -544,16 +597,11 @@ function resolveStableTurnTimestamp(
     ts?: string;
   } | null | undefined;
   if (m) {
-    if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)) {
-      return new Date(m.createdAt).toISOString();
+    for (const candidate of [m.createdAt, m.timestamp, m.date, m.ts]) {
+      if (candidate === undefined || candidate === null) continue;
+      const iso = coerceToIsoDateTime(candidate);
+      if (iso !== null) return iso;
     }
-    if (typeof m.createdAt === 'string' && m.createdAt.length > 0) return m.createdAt;
-    if (typeof m.timestamp === 'number' && Number.isFinite(m.timestamp)) {
-      return new Date(m.timestamp).toISOString();
-    }
-    if (typeof m.timestamp === 'string' && m.timestamp.length > 0) return m.timestamp;
-    if (typeof m.date === 'string' && m.date.length > 0) return m.date;
-    if (typeof m.ts === 'string' && m.ts.length > 0) return m.ts;
   }
   // Deterministic fallback: hash the turn source id → bounded integer
   // → ISO-8601 string. This is NOT meaningful as a wall-clock; it is a

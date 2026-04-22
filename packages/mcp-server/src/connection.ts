@@ -239,16 +239,26 @@ export async function resolveDaemonEndpoint(options: {
 
 /**
  * Parse a `DKG_NODE_URL` override into a normalized base URL
- * (scheme + host + explicit port + base path, no trailing slash).
- * Returns `undefined` when the URL is unset, malformed, uses a
- * non-http(s) scheme, or resolves to an unusable port — callers
+ * (scheme + host + explicit port, ORIGIN-ONLY, no path, no trailing
+ * slash). Returns `undefined` when the URL is unset, malformed, uses
+ * a non-http(s) scheme, or resolves to an unusable port — callers
  * then fall back to the file-derived local port.
  *
  * Unlike {@link extractPortFromUrl} this preserves the host, the
- * scheme, and the base path so an override like
- * `https://remote.example:8443/api` routes correctly instead of
- * silently collapsing to plaintext `http://127.0.0.1:8443`.
+ * scheme, and the explicit port so an override like
+ * `https://remote.example:8443` routes correctly instead of silently
+ * collapsing to plaintext `http://127.0.0.1:8443`.
  * (PR #229 bot review round 10.)
+ *
+ * PR #229 bot review round 11 (connection.ts:276). Earlier revisions
+ * of this helper preserved the URL pathname (e.g. `/api`), but every
+ * {@link DkgClient} route already starts with `/api/...`, so an
+ * override of `DKG_NODE_URL=https://remote.example:8443/api` produced
+ * `.../api/api/status` on the wire — the remote daemon was
+ * unreachable. We now normalize to ORIGIN-ONLY and ignore the
+ * pathname entirely. If a base path is ever required at this layer,
+ * the per-request paths in `DkgClient` would need to be decoupled
+ * from the hard-coded `/api/` prefix at the same time.
  */
 export function normalizeBaseUrl(raw: string): string | undefined {
   if (!raw) return undefined;
@@ -270,9 +280,8 @@ export function normalizeBaseUrl(raw: string): string | undefined {
     ? `${u.hostname}:${u.port}`
     : `${u.hostname}:${explicitPort}`;
 
-  // Strip trailing slashes from the pathname so concatenation is
-  // clean: `/api/` + `/status` -> `/api/status`. An empty path maps
-  // to "" (not "/") because DkgClient paths start with `/`.
-  const path = u.pathname.replace(/\/+$/, '');
-  return `${u.protocol}//${hostPart}${path}`;
+  // Origin-only: DkgClient's per-request paths hard-code the
+  // `/api/...` prefix, so any additional pathname here would double
+  // up (see r11-2 rationale above). Deliberately drop `u.pathname`.
+  return `${u.protocol}//${hostPart}`;
 }

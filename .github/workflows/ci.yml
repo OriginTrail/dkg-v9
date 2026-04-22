@@ -217,11 +217,32 @@ jobs:
           echo "::warning::blazegraph never became ready within 60s; ST-1 parity test will report"
         continue-on-error: true
 
+      - name: Create Blazegraph quads-mode namespace
+        # The `kb` namespace shipped by lyrasis/blazegraph defaults to
+        # triples mode (quads=false), so any GRAPH <…> { … } clause is
+        # silently dropped on insert and the conformance suite gets
+        # surprising results (deleteByPattern over-deletes because all
+        # triples land in the default graph regardless of intent).
+        # Create a dedicated quads-mode namespace `dkgq` so the rest of
+        # the suite exercises real named-graph semantics — same
+        # behavior as production deployments. continue-on-error so a
+        # failure here surfaces as the storage suite's missing-engine
+        # error rather than a separate red lane.
+        run: |
+          set -e
+          curl -sf -X POST -H 'Content-Type: text/plain' \
+            --data-binary $'com.bigdata.rdf.store.AbstractTripleStore.quads=true\ncom.bigdata.rdf.sail.truthMaintenance=false\ncom.bigdata.rdf.sail.namespace=dkgq\ncom.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers=false' \
+            http://localhost:9999/bigdata/namespace
+          # Verify the namespace responds to SPARQL.
+          curl -sf "http://localhost:9999/bigdata/namespace/dkgq/sparql?query=ASK%20%7B%7D" >/dev/null
+          echo "blazegraph dkgq (quads) namespace ready"
+        continue-on-error: true
+
       - name: "Core (442 tests)"
         run: pnpm --filter @origintrail-official/dkg-core test
       - name: "Storage (78 tests)"
         env:
-          BLAZEGRAPH_URL: http://localhost:9999/bigdata/namespace/kb/sparql
+          BLAZEGRAPH_URL: http://localhost:9999/bigdata/namespace/dkgq/sparql
         run: pnpm --filter @origintrail-official/dkg-storage test
       - name: "Chain unit (46 tests)"
         run: pnpm --filter @origintrail-official/dkg-chain test

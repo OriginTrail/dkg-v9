@@ -1,0 +1,228 @@
+/**
+ * Targeted coverage for two small agent modules that were almost entirely
+ * untested:
+ *   - op-wallets.ts           (5% → ~100%)
+ *   - workspace-config.ts     (5% → ~100%)
+ *
+ * Both modules run against real FS + real ethers Wallets — no mocks.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, mkdirSync, statSync, rmSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { ethers } from 'ethers';
+import { loadOpWallets, generateWallets } from '../src/op-wallets.js';
+import {
+  parseWorkspaceConfig,
+  parseAgentsMdFrontmatter,
+  loadWorkspaceConfig,
+} from '../src/workspace-config.js';
+
+describe('op-wallets — loadOpWallets + generateWallets', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-opw-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('generateWallets returns exactly `count` wallets, each valid ethers-derivable pair', () => {
+    const cfg = generateWallets(5);
+    expect(cfg.wallets).toHaveLength(5);
+    for (const w of cfg.wallets) {
+      const derived = new ethers.Wallet(w.privateKey);
+      expect(derived.address.toLowerCase()).toBe(w.address.toLowerCase());
+    }
+    // Uniqueness — random wallet generation must not collide.
+    const addrs = new Set(cfg.wallets.map(w => w.address));
+    expect(addrs.size).toBe(5);
+  });
+
+  it('loadOpWallets creates wallets.json on first run with the default count', async () => {
+    const out = await loadOpWallets(dir);
+    expect(out.wallets).toHaveLength(3); // DEFAULT_WALLET_COUNT
+
+    const raw = readFileSync(join(dir, 'wallets.json'), 'utf-8');
+    const parsed = JSON.parse(raw);
+    expect(parsed.wallets).toHaveLength(3);
+
+    // POSIX 0o600 — the file MUST NOT be world-readable (private keys).
+    const stat = statSync(join(dir, 'wallets.json'));
+    if (process.platform !== 'win32') {
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('loadOpWallets creates parent directory when missing (mkdir recursive)', async () => {
+    const nested = join(dir, 'nested', 'path');
+    const out = await loadOpWallets(nested, 2);
+    expect(out.wallets).toHaveLength(2);
+    expect(statSync(join(nested, 'wallets.json')).isFile()).toBe(true);
+  });
+
+  it('loadOpWallets is idempotent — second call returns the same wallets (file preserved)', async () => {
+    const out1 = await loadOpWallets(dir, 4);
+    const out2 = await loadOpWallets(dir, 4);
+    expect(out2.wallets).toEqual(out1.wallets);
+  });
+
+  it('loadOpWallets re-validates each wallet — throws on address mismatch', async () => {
+    const bogus = {
+      wallets: [{
+        address: '0xdeadbeef00000000000000000000000000000000', // does not derive from below key
+        privateKey: '0x' + '1'.repeat(64),
+      }],
+    };
+    writeFileSync(join(dir, 'wallets.json'), JSON.stringify(bogus));
+    await expect(loadOpWallets(dir)).rejects.toThrow(/Address mismatch in wallets.json/);
+  });
+
+  it('loadOpWallets propagates read-errors other than ENOENT (invalid JSON → SyntaxError)', async () => {
+    writeFileSync(join(dir, 'wallets.json'), 'this is not json');
+    await expect(loadOpWallets(dir)).rejects.toThrow();
+  });
+
+  it('loadOpWallets regenerates when the file exists but wallets array is empty', async () => {
+    // Empty wallets array → the `config.wallets?.length > 0` guard fails and
+    // we fall through to the regenerate branch.
+    writeFileSync(join(dir, 'wallets.json'), JSON.stringify({ wallets: [] }));
+    const out = await loadOpWallets(dir, 2);
+    expect(out.wallets).toHaveLength(2);
+  });
+});
+
+describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => {
+  it('requires contextGraph (string, non-empty) and node (string, non-empty)', () => {
+    expect(() => parseWorkspaceConfig(null)).toThrow(/root must be an object/);
+    expect(() => parseWorkspaceConfig('string')).toThrow(/root must be an object/);
+    expect(() => parseWorkspaceConfig({ node: 'n' })).toThrow(/`contextGraph` is required/);
+    expect(() => parseWorkspaceConfig({ contextGraph: '' })).toThrow(/`contextGraph` is required/);
+    expect(() => parseWorkspaceConfig({ contextGraph: 'cg' })).toThrow(/`node` is required/);
+    expect(() => parseWorkspaceConfig({ contextGraph: 'cg', node: '' })).toThrow(/`node` is required/);
+    expect(() => parseWorkspaceConfig({ contextGraph: 'cg', node: 42 })).toThrow(/`node` is required/);
+  });
+
+  it('applies defaults: autoShare=true, extractionPolicy=structural-plus-semantic', () => {
+    const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'n' });
+    expect(out.autoShare).toBe(true);
+    expect(out.extractionPolicy).toBe('structural-plus-semantic');
+  });
+
+  it('rejects non-boolean autoShare', () => {
+    expect(() => parseWorkspaceConfig({
+      contextGraph: 'cg', node: 'n', autoShare: 'yes',
+    })).toThrow(/`autoShare` must be boolean/);
+  });
+
+  it('rejects unknown extractionPolicy values', () => {
+    expect(() => parseWorkspaceConfig({
+      contextGraph: 'cg', node: 'n', extractionPolicy: 'bogus',
+    })).toThrow(/extractionPolicy.*must be one of/);
+  });
+
+  it('accepts all three documented extractionPolicy values', () => {
+    for (const p of ['structural-only', 'structural-plus-semantic', 'semantic-required'] as const) {
+      const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'n', extractionPolicy: p });
+      expect(out.extractionPolicy).toBe(p);
+    }
+  });
+
+  it('preserves explicit autoShare=false', () => {
+    const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'n', autoShare: false });
+    expect(out.autoShare).toBe(false);
+  });
+});
+
+describe('workspace-config — parseAgentsMdFrontmatter', () => {
+  it('extracts the `dkg:` frontmatter block and validates it', () => {
+    const md = `---
+title: Example
+dkg:
+  contextGraph: my-graph
+  node: node-a
+---
+
+# Body
+`;
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg).toEqual({
+      contextGraph: 'my-graph',
+      node: 'node-a',
+      autoShare: true,
+      extractionPolicy: 'structural-plus-semantic',
+    });
+  });
+
+  it('throws when frontmatter is missing', () => {
+    expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/missing YAML frontmatter/);
+  });
+
+  it('throws when frontmatter exists but lacks a `dkg:` key', () => {
+    const md = `---
+title: just a title
+---
+body
+`;
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/missing `dkg` key/);
+  });
+});
+
+describe('workspace-config — loadWorkspaceConfig priority order (spec §22)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-wc-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('throws when no recognised config file exists', () => {
+    expect(() => loadWorkspaceConfig(dir)).toThrow(/no workspace configuration found/);
+  });
+
+  it('prefers .dkg/config.yaml over .dkg/config.json and AGENTS.md', () => {
+    mkdirSync(join(dir, '.dkg'));
+    writeFileSync(join(dir, '.dkg', 'config.yaml'), 'contextGraph: from-yaml\nnode: n-yaml\n');
+    writeFileSync(join(dir, '.dkg', 'config.json'), JSON.stringify({ contextGraph: 'from-json', node: 'n-json' }));
+    writeFileSync(join(dir, 'AGENTS.md'),
+      '---\ndkg:\n  contextGraph: from-md\n  node: n-md\n---\n',
+    );
+
+    const loaded = loadWorkspaceConfig(dir);
+    expect(loaded.cfg.contextGraph).toBe('from-yaml');
+    expect(loaded.source.endsWith('config.yaml')).toBe(true);
+  });
+
+  it('falls back to .dkg/config.json when config.yaml is absent', () => {
+    mkdirSync(join(dir, '.dkg'));
+    writeFileSync(join(dir, '.dkg', 'config.json'),
+      JSON.stringify({ contextGraph: 'from-json', node: 'n-json', autoShare: false }),
+    );
+    const loaded = loadWorkspaceConfig(dir);
+    expect(loaded.cfg.contextGraph).toBe('from-json');
+    expect(loaded.cfg.autoShare).toBe(false);
+    expect(loaded.source.endsWith('config.json')).toBe(true);
+  });
+
+  it('falls back to AGENTS.md frontmatter when neither .dkg/config.{yaml,json} exists', () => {
+    writeFileSync(join(dir, 'AGENTS.md'),
+      '---\ndkg:\n  contextGraph: from-md\n  node: n-md\n  extractionPolicy: semantic-required\n---\n# body\n',
+    );
+    const loaded = loadWorkspaceConfig(dir);
+    expect(loaded.cfg.contextGraph).toBe('from-md');
+    expect(loaded.cfg.extractionPolicy).toBe('semantic-required');
+    expect(loaded.source.endsWith('AGENTS.md')).toBe(true);
+  });
+
+  it('propagates parse errors from the chosen source file (invalid yaml)', () => {
+    mkdirSync(join(dir, '.dkg'));
+    // YAML that resolves to a non-object (a string) → parseWorkspaceConfig rejects
+    writeFileSync(join(dir, '.dkg', 'config.yaml'), 'just-a-string\n');
+    expect(() => loadWorkspaceConfig(dir)).toThrow(/root must be an object/);
+  });
+});

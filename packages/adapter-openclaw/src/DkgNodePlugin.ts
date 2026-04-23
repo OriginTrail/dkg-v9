@@ -26,6 +26,7 @@ import {
   type DkgMemorySession,
   type DkgMemorySessionResolver,
 } from './DkgMemoryPlugin.js';
+import { installProbe } from './ProbeRegistrationMode.js';
 import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
@@ -235,6 +236,16 @@ export class DkgNodePlugin {
   private initialized = false;
   private crossChannelHookRegistered = false;
   private crossChannelHookCleanup: (() => void) | null = null;
+  /**
+   * Counter for registration-mode probe diagnostics. Incremented on each
+   * register() call when DKG_PROBE_REGISTRATION_MODE=1 for sequencing logs.
+   */
+  private probeRegisterCallCount = 0;
+  /**
+   * Track hook fires per (event, mechanism) for the registration-mode probe.
+   * Maps "event:via" to fire count.
+   */
+  private probeHookFireCounts = new Map<string, number>();
 
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
@@ -242,6 +253,12 @@ export class DkgNodePlugin {
    * On subsequent calls (gateway multi-phase init): re-registers tools into the new registry.
    */
   register(api: OpenClawPluginApi): void {
+
+    // --- Env-gated registration-mode probe ---
+    if (process.env.DKG_PROBE_REGISTRATION_MODE === '1') {
+      this.runRegistrationModeProbe(api);
+    }
+
     this.warnOnLegacyGameConfig(api);
 
     const registrationMode = api.registrationMode ?? 'full';
@@ -1400,6 +1417,87 @@ export class DkgNodePlugin {
     }
   }
 }
+  /**
+   * Env-gated diagnostic probe for registration-mode behavior.
+   * Fires only when DKG_PROBE_REGISTRATION_MODE=1. Logs:
+   *   - Each register() call with mode, call count, and API surface availability
+   *   - Each hook dispatch with event name, registration mechanism, and mode
+   */
+  private runRegistrationModeProbe(api: OpenClawPluginApi): void {
+    this.probeRegisterCallCount++;
+    const mode = api.registrationMode ?? 'full';
+    const hasOn = typeof api.on === 'function';
+    const hasRegisterHook = typeof api.registerHook === 'function';
+    const hasGlobalHookMap = !!(globalThis as any)[Symbol.for('openclaw.internalHookHandlers')];
+
+    api.logger.info?.(
+      '[dkg-probe] register() called: mode=' + mode + ', call#=' + this.probeRegisterCallCount + ', ' +
+      'api.on=' + (hasOn ? 'function' : 'undefined') + ', api.registerHook=' + (hasRegisterHook ? 'function' : 'undefined') + ', ' +
+      'globalThis-hook-map=' + (hasGlobalHookMap ? 'present' : 'absent'),
+    );
+
+    // Helper to make a probe handler factory
+    const makeProbeHandler = (eventName: string, via: string) => {
+      return () => {
+        const key = eventName + ':' + via;
+        const count = (this.probeHookFireCounts.get(key) ?? 0) + 1;
+        this.probeHookFireCounts.set(key, count);
+        api.logger.info?.(
+          '[dkg-probe] HOOK FIRED: event=' + eventName + ' via=' + via + ' mode=' + mode + ' fire#=' + count,
+        );
+      };
+    };
+
+    // Events to probe: both typed hooks and internal hook names
+    const events = ['before_prompt_build', 'agent_end', 'before_compaction', 'before_reset', 'message_received', 'message_sent'];
+
+    for (const eventName of events) {
+      // Attempt via api.on (typed hooks)
+      if (hasOn) {
+        try {
+          (api as any).on(eventName, makeProbeHandler(eventName, 'api.on'));
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] api.on(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+
+      // Attempt via api.registerHook (internal hooks)
+      if (hasRegisterHook) {
+        try {
+          (api as any).registerHook(eventName, makeProbeHandler(eventName, 'api.registerHook'), { name: 'dkg-probe-' + eventName });
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] api.registerHook(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+
+      // Attempt via globalThis internal-hook map
+      if (hasGlobalHookMap) {
+        try {
+          const hookKey = Symbol.for('openclaw.internalHookHandlers');
+          const hookMap = (globalThis as any)[hookKey] as Map<string, Array<() => void>> | undefined;
+          if (hookMap) {
+            if (!hookMap.has(eventName)) {
+              hookMap.set(eventName, []);
+            }
+            hookMap.get(eventName)!.push(makeProbeHandler(eventName, 'globalThis'));
+          }
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] globalThis-hook-map insertion for ' + eventName + ' threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+    }
+
+    api.logger.debug?.('[dkg-probe] Probe handlers registered for all mechanisms and events');
+  }
+
+
+
 
 /** Convert a human-readable name into a URL-safe slug (e.g. "My Research Context Graph" → "my-research-context-graph"). */
 function slugify(name: string): string {

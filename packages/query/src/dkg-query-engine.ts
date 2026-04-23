@@ -138,6 +138,29 @@ export function resolveViewGraphs(
       //
       // P-13: when the caller demands more than SelfAttested, the root data
       // graph is dropped — only quorum-verified sub-graphs survive.
+      //
+      // P-13 review follow-up: today the /_verified_memory/* sub-graphs
+      // carry no per-graph trust metadata — any graph in that prefix was
+      // populated by *some* quorum-verified write path, which we treat as
+      // at least `Endorsed`. We cannot yet distinguish `PartiallyVerified`
+      // vs `ConsensusVerified` without knowing the quorum size, so a caller
+      // asking for those higher tiers would silently receive merely
+      // Endorsed data. Reject such requests until Q-1 lands per-graph
+      // trust tagging; Endorsed itself remains honoured.
+      if (
+        opts?.minTrust !== undefined &&
+        opts.minTrust > TrustLevel.Endorsed
+      ) {
+        // Use the "Invalid minTrust" prefix so the daemon's /api/query
+        // classifier maps this rejection to HTTP 400 instead of 500.
+        throw new Error(
+          `Invalid minTrust=${opts.minTrust} for verified-memory: values above Endorsed are not yet ` +
+          `supported — the engine cannot currently prove a ` +
+          `\`/_verified_memory/<quorum>\` sub-graph satisfies PartiallyVerified or ConsensusVerified. ` +
+          `Use minTrust=Endorsed (1) to restrict to quorum-verified sub-graphs, or track Q-1 for ` +
+          `per-graph trust tagging. See packages/query/src/query-engine.ts QueryOptions.minTrust.`,
+        );
+      }
       return {
         graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
@@ -254,7 +277,9 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
-      minTrust: options.minTrust,
+      // Back-compat: accept the legacy `_minTrust` underscore form for a
+      // deprecation window. See QueryOptions._minTrust.
+      minTrust: options.minTrust ?? options._minTrust,
     });
 
     const allGraphs = [...resolution.graphs];

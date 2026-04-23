@@ -102,12 +102,17 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
       {
         contextGraphId: CG,
         view: 'verified-memory',
-        minTrust: TrustLevel.ConsensusVerified,
+        // Endorsed is the highest tier the engine currently accepts for
+        // union queries (P-13 review: `PartiallyVerified` / `ConsensusVerified`
+        // are rejected at the resolver until per-graph trust tagging lands
+        // under Q-1). The gap below — per-triple filtering within a
+        // /_verified_memory/* sub-graph — is orthogonal and still unmet.
+        minTrust: TrustLevel.Endorsed,
       },
     );
 
     const names = result.bindings.map((b) => b['name']);
-    // Spec §14: only consensus-verified triples should survive.
+    // Spec §14: only triples at or above the requested trust tier should survive.
     // Today, per-triple filtering inside a sub-graph is not implemented —
     // this assertion fails and documents Q-1. P-13's graph-scope filter
     // alone returns both LowTrust and HighTrust from the mixed sub-graph.

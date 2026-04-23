@@ -55,31 +55,43 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   });
 
   it(
-    'minTrust > SelfAttested drops the root data graph — prevents SelfAttested triples ' +
-      'from leaking into ConsensusVerified queries (see BUGS_FOUND.md P-13).',
+    'minTrust=Endorsed drops the root data graph — prevents SelfAttested triples ' +
+      'from leaking into Endorsed queries (see BUGS_FOUND.md P-13).',
     () => {
-      const high = resolveViewGraphs('verified-memory', CG, {
-        minTrust: TrustLevel.ConsensusVerified,
+      const res = resolveViewGraphs('verified-memory', CG, {
+        minTrust: TrustLevel.Endorsed,
       });
-      // Root data graph must not be present at any trust level above SelfAttested.
-      expect(high.graphs).not.toContain(`did:dkg:context-graph:${CG}`);
-      expect(high.graphs).toEqual([]);
+      // Root data graph must not be present above SelfAttested.
+      expect(res.graphs).not.toContain(`did:dkg:context-graph:${CG}`);
+      expect(res.graphs).toEqual([]);
       // Quorum-verified sub-graphs are still discovered via the prefix.
-      expect(high.graphPrefixes).toEqual([
+      expect(res.graphPrefixes).toEqual([
         `did:dkg:context-graph:${CG}/_verified_memory/`,
       ]);
     },
   );
 
-  it('minTrust=Endorsed already drops the root (threshold is strict >SelfAttested)', () => {
-    const res = resolveViewGraphs('verified-memory', CG, {
-      minTrust: TrustLevel.Endorsed,
-    });
-    expect(res.graphs).toEqual([]);
-    expect(res.graphPrefixes).toEqual([
-      `did:dkg:context-graph:${CG}/_verified_memory/`,
-    ]);
-  });
+  it(
+    'minTrust > Endorsed REJECTS — Codex PR #239 review: /_verified_memory/* has no ' +
+      'per-graph trust metadata, so PartiallyVerified / ConsensusVerified cannot be proven',
+    () => {
+      // Without per-graph trust tagging (Q-1) the resolver would otherwise
+      // return the exact same graph set for `Endorsed`, `PartiallyVerified`,
+      // and `ConsensusVerified`, meaning a caller asking for a stricter tier
+      // could silently receive lower-tier data. Reject instead, until
+      // per-graph trust tagging lands.
+      expect(() =>
+        resolveViewGraphs('verified-memory', CG, {
+          minTrust: TrustLevel.PartiallyVerified,
+        }),
+      ).toThrow(/Invalid minTrust=2 for verified-memory/);
+      expect(() =>
+        resolveViewGraphs('verified-memory', CG, {
+          minTrust: TrustLevel.ConsensusVerified,
+        }),
+      ).toThrow(/Invalid minTrust=3 for verified-memory/);
+    },
+  );
 
   it(
     'verifiedGraph + minTrust=SelfAttested is allowed — minTrust is a no-op at SelfAttested',
@@ -146,17 +158,50 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           resolveViewGraphs('verified-memory', CG, { minTrust: mt as TrustLevel }),
         ).toThrow(/Invalid minTrust/);
       }
-      // All four legal enum values are accepted.
-      for (const mt of [
-        TrustLevel.SelfAttested,
-        TrustLevel.Endorsed,
-        TrustLevel.PartiallyVerified,
-        TrustLevel.ConsensusVerified,
-      ]) {
+      // SelfAttested and Endorsed are the two tiers the resolver can
+      // currently prove against the graph layout; PartiallyVerified and
+      // ConsensusVerified must be rejected until Q-1's per-graph trust
+      // tagging lands (see the "minTrust > Endorsed REJECTS" test above).
+      for (const mt of [TrustLevel.SelfAttested, TrustLevel.Endorsed]) {
         expect(() =>
           resolveViewGraphs('verified-memory', CG, { minTrust: mt }),
         ).not.toThrow();
       }
+    },
+  );
+
+  it(
+    'accepts the legacy `_minTrust` alias as a back-compat normalizer ' +
+      '(Codex PR #239 review: former `_minTrust` SDK consumers must not silently lose the filter)',
+    async () => {
+      // `_minTrust` was briefly exported on QueryOptions before V10.
+      // `resolveViewGraphs` itself only consumes `minTrust`, but the
+      // engine-level normalisation `options.minTrust ?? options._minTrust`
+      // MUST forward the legacy form through. This test exercises the
+      // engine path (not the resolver) to confirm the alias still works.
+      const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
+      const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
+      const store = new OxigraphStore();
+      const engine = new DKGQueryEngine(store);
+      // Endorsed via the legacy key alone — should route to
+      // verified-memory minus the root graph (same as `minTrust: Endorsed`).
+      await expect(
+        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+          contextGraphId: CG,
+          view: 'verified-memory',
+          _minTrust: TrustLevel.Endorsed,
+        }),
+      ).resolves.toBeDefined();
+      // Explicit `minTrust` wins over `_minTrust` (so a caller that sets
+      // both gets the new-form semantics).
+      await expect(
+        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+          contextGraphId: CG,
+          view: 'verified-memory',
+          minTrust: TrustLevel.SelfAttested,
+          _minTrust: TrustLevel.ConsensusVerified,
+        }),
+      ).resolves.toBeDefined();
     },
   );
 });

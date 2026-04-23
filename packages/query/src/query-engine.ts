@@ -66,6 +66,14 @@ export interface QueryOptions {
    * until Q-1 lands.
    */
   minTrust?: TrustLevel;
+  /**
+   * @deprecated Use `minTrust`. Legacy alias retained during V10-rc for
+   * SDK consumers that adopted the underscore form before we renamed the
+   * field. Engines MUST fall back to this value when `minTrust` is
+   * undefined (via `options.minTrust ?? options._minTrust`). This alias
+   * will be removed in a future V10 minor — migrate to `minTrust`.
+   */
+  _minTrust?: TrustLevel;
 }
 
 export interface QueryEngine {

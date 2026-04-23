@@ -6625,26 +6625,47 @@ async function handleRequest(
       const callerAgentAddress = requestToken
         ? agent.resolveAgentByToken(requestToken)
         : undefined;
-      // A-1 follow-up review: close the auth-disabled / node-token hole.
-      // The guard above only fires for agent-scoped tokens. Requests
-      // from the node-level admin token — or any daemon started with
-      // `auth.enabled=false` — arrive here with
-      // `callerAgentAddress=undefined`, at which point
-      // `view: 'working-memory'` + a foreign `agentAddress` used to
-      // fall through and hit the query engine with the impersonation
-      // intact. Fail closed at the HTTP boundary: WM reads for an
-      // agent *other than* the node-default require an agent-scoped
-      // bearer token. Reading the node-default WM (which the admin
-      // effectively owns) is still allowed without agent scope, so
-      // admin + service scripts keep working.
-      if (view === 'working-memory' && typeof agentAddress === 'string' && !callerAgentAddress) {
+      // A-1 follow-up review: close the auth-disabled WM hole WITHOUT
+      // regressing existing node-token clients.
+      //
+      // Three cases land here with `callerAgentAddress === undefined`:
+      //
+      //   (a) `requestToken` is set but did not resolve to an
+      //       agent-scoped identity — that is the node-level admin
+      //       token (`~/.dkg/auth.token`). Admin is already trusted
+      //       to run as any local agent — `packages/adapter-openclaw`
+      //       relies on this: it uses the admin token AND passes a
+      //       session-specific `agentAddress` for each local agent.
+      //       Keep the legacy "skip the A-1 guard" behaviour here.
+      //
+      //   (b) `requestToken` is falsy because auth is DISABLED at
+      //       the daemon level. There is no bearer identity to
+      //       distinguish admin from attacker — this is the hole
+      //       Codex flagged: `view: 'working-memory'` + a foreign
+      //       `agentAddress` used to silently fall through. Fail
+      //       closed: an unauthenticated caller may only read the
+      //       node-default agent's WM. Foreign WM reads require at
+      //       least a bearer token (admin or agent-scoped).
+      //
+      //   (c) `requestToken` is falsy because auth is enabled but
+      //       the middleware rejected the caller — we never reach
+      //       this line in that case.
+      //
+      // So gate the 403 on `!requestToken` (case b); leave the admin
+      // path (case a) alone to preserve adapter-openclaw and other
+      // node-token clients.
+      if (
+        !requestToken &&
+        view === 'working-memory' &&
+        typeof agentAddress === 'string'
+      ) {
         const targetLower = agentAddress.toLowerCase();
         const defaultLower = (agent.getDefaultAgentAddress() ?? '').toLowerCase();
         if (!defaultLower || targetLower !== defaultLower) {
           return jsonResponse(res, 403, {
             error:
-              `working-memory reads for agentAddress=${agentAddress} require an agent-scoped bearer token. ` +
-              `Node-level / unauthenticated callers may only read the node-default agent's WM.`,
+              `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
+              `An unauthenticated / auth-disabled caller may only read the node-default agent's WM.`,
           });
         }
       }

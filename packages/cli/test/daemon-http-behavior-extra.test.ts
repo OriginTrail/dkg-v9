@@ -829,12 +829,15 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         `seed triple should be visible under its owning agent via the node-level admin path — got ${JSON.stringify(adminBindings)}`,
       ).toBeGreaterThan(0);
 
-      // A-1 follow-up review: the node-level admin token MUST NOT be
-      // able to impersonate a *different* registered agent and read
-      // that agent's WM. The previous implementation let the request
-      // fall through because `callerAgentAddress` was undefined; the
-      // daemon now returns 403 explicitly when view='working-memory'
-      // points at a foreign agentAddress without an agent-scoped token.
+      // A-1 follow-up review (2nd iteration): the node-level admin
+      // token is the designated "admin bypass" for the WM isolation
+      // check. `packages/adapter-openclaw` relies on this: it
+      // authenticates `/api/query` with `~/.dkg/auth.token` and
+      // passes session-specific `agentAddress` for *each* local
+      // agent. So admin + foreign agentAddress must keep returning
+      // 200 (not 403) — the actual hole Codex flagged is the
+      // *unauthenticated* / auth-disabled case, which is covered by
+      // the new suite below (`A-1 follow-up: auth-disabled WM hole`).
       const adminCrossRes = await fetch(urlFor(d, '/api/query'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
@@ -845,9 +848,10 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           agentAddress: agentB.agentAddress,
         }),
       });
-      expect(adminCrossRes.status).toBe(403);
-      const adminCrossBody = await adminCrossRes.json().catch(() => ({}) as any);
-      expect(adminCrossBody?.error ?? '').toMatch(/agent-scoped bearer token/);
+      expect(
+        adminCrossRes.status,
+        'admin token must keep working as the bypass for cross-agent WM reads — 403 here would break adapter-openclaw',
+      ).toBe(200);
     },
     60_000,
   );
@@ -992,6 +996,110 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
       ).toMatch(/agentAddress/);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// A-1 follow-up (Codex PR #242 iteration 2) — auth-disabled WM hole
+// ---------------------------------------------------------------------------
+//
+// The A-1 isolation guard rides on `callerAgentAddress`, which the daemon
+// only resolves from an agent-scoped bearer token. When auth is DISABLED
+// on the daemon, there is no token at all and any HTTP caller can point
+// `view: 'working-memory'` at any `agentAddress` and read that agent's
+// WM. Codex flagged this explicitly. The daemon now returns 403 in this
+// narrow case (no token + WM + foreign agentAddress), while preserving
+// the admin-token bypass for `packages/adapter-openclaw` and other
+// in-repo clients that use `~/.dkg/auth.token` to run as each local
+// agent in turn.
+//
+// Uses its own daemon fixture because it flips `auth.enabled=false`.
+
+describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', () => {
+  let d: Daemon | undefined;
+  beforeAll(async () => {
+    d = await startDaemon({ authEnabled: false });
+  }, 60_000);
+  afterAll(async () => {
+    if (d) await stopDaemon(d, 'SIGTERM', 10_000);
+  });
+
+  it(
+    'unauthenticated WM read of the node-default agent is allowed (200)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      expect(identityRes.status).toBe(200);
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      const cgId = 'a1-noauth-self-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: defaultAgentAddress,
+        }),
+      });
+      // Not 403 — the node-default WM is readable without auth.
+      expect(res.status).toBe(200);
+    },
+    60_000,
+  );
+
+  it(
+    'unauthenticated WM read of a *foreign* registered agent is rejected (403)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      // Register a second agent on the auth-disabled daemon so we
+      // have a real foreign address to aim at.
+      const regRes = await fetch(urlFor(daem, '/api/agent/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'a1-noauth-agent-b-' + Math.random().toString(36).slice(2, 6) }),
+      });
+      expect([200, 201]).toContain(regRes.status);
+      const regBody = await regRes.json();
+      const bAddr: string = regBody.agentAddress;
+      expect(bAddr.toLowerCase()).not.toBe(defaultAgentAddress.toLowerCase());
+
+      const cgId = 'a1-noauth-foreign-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: bAddr,
+        }),
+      });
+      expect(res.status).toBe(403);
+      const body = await res.json().catch(() => ({}) as any);
+      expect(body?.error ?? '').toMatch(/require authentication|auth-disabled/i);
+    },
+    60_000,
+  );
 });
 
 // ---------------------------------------------------------------------------

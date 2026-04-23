@@ -1556,6 +1556,16 @@ export class DkgNodePlugin {
       // namespace and returns empty bindings. Apply to both the explicit
       // arg and the node-peerId fallback (the latter is typically already
       // bare, but normalize defensively in case the source ever changes).
+      // Strict type check on `agent_address`: a non-string (e.g. number
+      // passed through by a permissive host) must fail fast, not silently
+      // fall through to the node-peerId default. Otherwise a caller
+      // intending a cross-agent WM read but with a malformed value would
+      // get the node's own WM back — wrong namespace, wrong data, no
+      // error. Only distinguish "absent" from "malformed": undefined means
+      // "use the default"; any other non-string is a caller bug.
+      if (args.agent_address !== undefined && typeof args.agent_address !== 'string') {
+        return this.error('"agent_address" must be a string.');
+      }
       let agentAddress = typeof args.agent_address === 'string' && args.agent_address.trim() !== ''
         ? args.agent_address.trim()
         : undefined;

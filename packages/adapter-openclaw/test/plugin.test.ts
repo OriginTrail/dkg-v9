@@ -515,6 +515,25 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).toBe('0xabc123');
     });
 
+    it('dkg_query rejects a non-string agent_address instead of silently falling back to the node peerId', async () => {
+      // Permissive hosts can pass through non-string values. If the
+      // handler treated those as "missing", `view: "working-memory"`
+      // would default to this node's peerId — a caller intending a
+      // cross-agent WM read with a malformed value would silently get
+      // the node's own WM back. Surface the bug instead: reject with
+      // a clear type-error, don't leak namespaces.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: 12345,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('agent_address');
+      expect(result.content[0].text).toContain('string');
+    });
+
     it('dkg_query normalizes DID-form agent_address for WM reads (Bug B43)', async () => {
       // The daemon's WM view scopes graphs by the bare peer ID. A
       // DID-prefixed value (`did:dkg:agent:<peerId>`) lands the query

@@ -66,6 +66,10 @@ export class ChatTurnWriter {
 
   onAgentEnd(event: AgentEndContext, ctx?: any): void {
     try {
+      // B5 — skip dkg-ui channel; DkgChannelPlugin.queueTurnPersistence
+      // owns UI-channel persistence with richer metadata (correlation IDs,
+      // attachment refs). Avoids double-persist under different sessionIds.
+      if (ctx?.channelId === "dkg-ui") return;
       const sessionId = this.deriveSessionId(ctx);
       if (!sessionId) return;
       const { user, assistant } = this.computeDelta(event.messages, this.loadWatermark(sessionId));
@@ -94,6 +98,9 @@ export class ChatTurnWriter {
 
   onMessageReceived(ev: InternalMessageEvent): void {
     try {
+      // B5 — skip dkg-ui channel; DkgChannelPlugin owns UI persistence.
+      const channelId = (ev as any)?.context?.channelId ?? (ev as any)?.channelId;
+      if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
       this.pendingUserMessages.set(conversationKey, ev.text);
@@ -104,6 +111,11 @@ export class ChatTurnWriter {
 
   onMessageSent(ev: InternalMessageEvent): void {
     try {
+      // B5 — skip dkg-ui channel; DkgChannelPlugin owns UI persistence.
+      // Internal-hook envelope carries channelId on event.context per
+      // openclaw/src/infra/outbound/deliver.ts.
+      const channelId = (ev as any)?.context?.channelId ?? (ev as any)?.channelId;
+      if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
       const userText = this.pendingUserMessages.get(conversationKey) || "";
@@ -148,13 +160,25 @@ export class ChatTurnWriter {
     return { user: this.stripRecalledMemory(user), assistant: this.stripRecalledMemory(assistant) };
   }
 
+  /**
+   * Strip `<recalled-memory>` blocks from assistant text before persistence.
+   * Prevents the per-turn auto-recall block from boomeranging into future
+   * turn queries if the model verbatim-quotes system-context. Handles:
+   *   - well-formed `<recalled-memory>...</recalled-memory>` (any attrs, case-insensitive)
+   *   - orphaned open tag at end-of-text (truncated model output)
+   * The tag shape is load-bearing — keep in sync with
+   * `formatRecalledMemoryBlock` in DkgNodePlugin.ts.
+   */
   private stripRecalledMemory(text: string): string {
     if (!text) return "";
-    const orphanMarker = "<!--TRUNCATED_FROM_SAVED_MEMORY-->";
-    if (text.includes(orphanMarker) && !text.includes("<!--END_SAVED_MEMORY-->")) {
-      return text.split(orphanMarker)[0].trim();
-    }
-    return text;
+    // (a) well-formed pairs
+    let out = text.replace(
+      /<recalled-memory(\s[^>]*)?>[\s\S]*?<\/recalled-memory>/gi,
+      "",
+    );
+    // (b) orphaned open tag → strip from open-tag to end-of-string
+    out = out.replace(/<recalled-memory(\s[^>]*)?>[\s\S]*$/i, "");
+    return out.trim();
   }
 
   private sanitize(part: string): string {

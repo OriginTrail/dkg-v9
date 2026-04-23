@@ -114,22 +114,41 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("strips orphan TRUNCATED_FROM_SAVED_MEMORY marker (I1)", async () => {
+  it("strips well-formed <recalled-memory> block from assistant text before persist (I1)", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
       messages: [
         { role: "user", content: "query" },
-        { role: "assistant", content: "answer<!--TRUNCATED_FROM_SAVED_MEMORY-->after" },
+        {
+          role: "assistant",
+          content: "prefix <recalled-memory>\n[1] (agent-context-wm) secret\n</recalled-memory> suffix",
+        },
       ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flushMicrotasks();
-    expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
-      "openclaw:ch:sk",
-      "query",
-      "answer",
-      expect.any(Object),
-    );
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[2]).not.toContain("recalled-memory");
+    expect(call[2]).not.toContain("secret");
+    expect(call[2]).toContain("prefix");
+    expect(call[2]).toContain("suffix");
+  });
+
+  it("strips orphaned <recalled-memory> open tag when closing tag is missing (I1 truncation)", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "query" },
+        {
+          role: "assistant",
+          content: "answer text <recalled-memory>\n[1] (agent-context-wm) truncated",
+        },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[2]).toBe("answer text");
   });
 
   it("stores user message on onMessageReceived", () => {

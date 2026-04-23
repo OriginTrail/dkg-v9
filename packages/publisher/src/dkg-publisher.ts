@@ -1259,22 +1259,6 @@ export class DKGPublisher implements Publisher {
 
       onPhase?.('chain:sign', 'end');
       onPhase?.('chain:submit', 'start');
-      // P-1: write-ahead boundary. Spec axiom 4 / §06 require the node
-      // to persist a "publish attempt about to hit the wire" record
-      // BEFORE any `eth_sendRawTransaction` RPC is issued, so that a
-      // crash between "tx on wire" and "receipt observed" can be
-      // recovered without a double-submit. Phase listeners (e.g. the
-      // CLI daemon's operations journal) treat `chain:writeahead:start`
-      // as the cue to checkpoint the publish. The corresponding
-      // `:end` fires after the adapter returns (or throws), whichever
-      // comes first.
-      //
-      // Follow-up (P-1.2): to persist the actual signed txHash,
-      // split the EVM adapter's sign/broadcast flow and expose a
-      // pre-broadcast `onTxSigned(txHash)` hook on
-      // `V10PublishDirectParams`. That turns this marker from a
-      // coarse boundary into a real write-ahead log entry.
-      onPhase?.('chain:writeahead', 'start');
       this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         if (!v10ACKs || v10ACKs.length === 0) {
@@ -1308,12 +1292,29 @@ export class DKGPublisher implements Publisher {
         const pubSig = ethers.Signature.from(
           await this.publisherWallet.signMessage(pubMsgHash),
         );
-        // P-1 review: `chain:writeahead:end` must bracket only the
-        // adapter send/wait call so phase listeners actually observe
-        // "tx hit the wire boundary". The previous placement delayed
-        // the `end` marker until after the local confirmed-metadata
-        // and authorship-proof inserts completed, which made the
-        // reported phase duration measure unrelated local work.
+        // P-1 review: emit `chain:writeahead:start` *immediately* before
+        // the adapter call and pair it with a single `try/finally` so
+        // `start` and `end` are always balanced. An earlier version
+        // emitted `start` up above, before ACK collection / V10
+        // readiness checks / `signMessage()` — if any of those threw,
+        // listeners saw an unmatched `start` and could checkpoint a
+        // publish that never reached the wire.
+        //
+        // Spec axiom 4 / §06 require the node to persist a "publish
+        // attempt about to hit the wire" record BEFORE any
+        // `eth_sendRawTransaction` RPC is issued so that a crash
+        // between "tx on wire" and "receipt observed" can be recovered
+        // without a double-submit. Phase listeners (e.g. the CLI
+        // daemon's operations journal) treat `chain:writeahead:start`
+        // as the cue to checkpoint the publish; `:end` fires once
+        // the adapter returns or throws.
+        //
+        // Follow-up (P-1.2): to persist the actual signed txHash,
+        // split the EVM adapter's sign/broadcast flow and expose a
+        // pre-broadcast `onTxSigned(txHash)` hook on
+        // `V10PublishDirectParams`. That turns this marker from a
+        // coarse boundary into a real write-ahead log entry.
+        onPhase?.('chain:writeahead', 'start');
         try {
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
@@ -1537,13 +1538,10 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
-    // P-1: write-ahead boundary for the KC-update path. See the
-    // equivalent marker in the publish path above for rationale; both
-    // paths currently emit a coarse phase boundary, with a follow-up
-    // (P-1.2) to plumb the actual signed txHash via an adapter hook.
-    onPhase?.('chain:writeahead', 'start');
 
-    // Compute real serialized byte size — must match the publish path serializer
+    // Compute real serialized byte size — must match the publish path serializer.
+    // Done BEFORE `chain:writeahead:start` so any error during serialization
+    // does not leave an unmatched write-ahead boundary.
     const updateNquadsStr = allSkolemizedQuads
       .map(
         (q: { subject: string; predicate: string; object: string; graph?: string }) =>
@@ -1552,11 +1550,16 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
-    // P-1 review: bracket the adapter send/wait with a single try/finally so
-    // `chain:writeahead:end` fires exactly once when the on-chain call
-    // returns or throws — never after the local store writes that follow.
+    // P-1 review: emit `chain:writeahead:start` immediately before the
+    // try/finally that emits `:end`, so start/end are always balanced
+    // regardless of where inside the adapter the call throws. See the
+    // equivalent marker in the publish path above for the full
+    // rationale; both paths currently emit a coarse phase boundary,
+    // with a follow-up (P-1.2) to plumb the actual signed txHash via
+    // an adapter hook.
     let txResult: { success: boolean; hash: string; blockNumber?: number };
     let earlyReturn: PublishResult | undefined;
+    onPhase?.('chain:writeahead', 'start');
     try {
       if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
         try {

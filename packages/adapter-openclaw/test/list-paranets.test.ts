@@ -297,19 +297,29 @@ describe('dkg_query tool', () => {
     expect(body.contextGraphId).toBeUndefined();
   });
 
-  it('passes view=shared-working-memory through to the daemon body', async () => {
+  it('passes view=shared-working-memory through to the daemon body (context_graph_id required with view)', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
-    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', view: 'shared-working-memory' });
+    await tool.execute('call-3', {
+      sparql: 'SELECT * WHERE { ?s ?p ?o }',
+      context_graph_id: 'my-cg',
+      view: 'shared-working-memory',
+    });
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.view).toBe('shared-working-memory');
+    expect(body.contextGraphId).toBe('my-cg');
   });
 
-  it('omits view when not set (daemon applies the default WM semantics)', async () => {
+  it('omits view on the wire when not set (daemon then routes via the legacy data-graph path)', async () => {
+    // When `view` is absent, the daemon's DKGQueryEngine.query takes the
+    // "Legacy routing (V9 compat)" branch (see the `if (options?.view)`
+    // skip path), NOT working-memory semantics. The tool MUST forward
+    // the absence faithfully — a silent default here would change
+    // semantics for every caller that omits `view`.
     ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );

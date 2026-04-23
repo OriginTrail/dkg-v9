@@ -118,17 +118,23 @@ describe('DkgNodePlugin', () => {
     const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
     expect(subSchema).toBe('boolean');
 
-    // dkg_query: `view` is an enum mirroring the daemon's GET_VIEWS. The
-    // legacy `include_shared_memory` boolean has been removed — agents pick
-    // the memory layer explicitly (WM / SWM / VM), matching the HTTP surface.
+    // dkg_query: `view` is an enum covering the two tool-safe layers of
+    // the daemon's GET_VIEWS. Working-memory is intentionally EXCLUDED —
+    // WM reads need an `agentAddress` this tool has no way to plumb
+    // safely (admitting WM would silently fall back to the node peerId
+    // namespace and return the wrong agent's data). Callers needing WM
+    // use HTTP `/api/query` directly. The legacy `include_shared_memory`
+    // boolean has been removed — there is no exact replacement because
+    // the old `true` path queried the data graph ∪ SWM (union), which
+    // no single `view` reproduces.
     const queryProps = byName.get('dkg_query')!.parameters.properties;
     expect(queryProps).not.toHaveProperty('include_shared_memory');
     expect(queryProps.view.type).toBe('string');
     expect(queryProps.view.enum).toEqual([
-      'working-memory',
       'shared-working-memory',
       'verified-memory',
     ]);
+    expect(queryProps.view.enum).not.toContain('working-memory');
   });
 
   // ---------------------------------------------------------------------------
@@ -454,16 +460,14 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
-    it('dkg_query rejects the legacy include_shared_memory field with a migration hint covering BOTH true and false cases', async () => {
-      // The boolean was removed in favor of `view`. A single replacement
-      // suggestion is unsafe: `include_shared_memory: true` mapped to
-      // "data-graph ∪ SWM" (closest to `view: "shared-working-memory"`),
-      // while `include_shared_memory: false` mapped to the legacy data-
-      // graph path (no view at all). A one-line hint that named only
-      // `shared-working-memory` would silently flip semantics for
-      // callers who previously sent `false`. Name all three layers AND
-      // the omit-entirely option, so callers with either legacy intent
-      // can migrate without changing behavior.
+    it('dkg_query rejects the legacy include_shared_memory field with a hint that names the union-semantics break', async () => {
+      // The boolean was removed in favor of `view`. There is NO
+      // one-line replacement: legacy `true` unioned the data graph with
+      // SWM (engine wraps sparql in both and merges), which no single
+      // `view` reproduces. `view: "shared-working-memory"` reads only
+      // SWM and silently drops data-graph triples for `true` callers.
+      // The hint must surface this break explicitly and name the HTTP
+      // escape hatch for callers who need the exact union.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
@@ -473,17 +477,36 @@ describe('DkgNodePlugin', () => {
       const msg = result.content[0].text;
       expect(msg).toContain('include_shared_memory');
       expect(msg).toContain('view');
-      // All three layers named so the caller can pick.
-      expect(msg).toContain('working-memory');
+      // Surface the non-equivalence.
+      expect(msg).toMatch(/no exact|no single `view`/i);
+      // Name the HTTP escape hatch for callers who need the original
+      // union semantics — otherwise they have no migration path at all.
+      expect(msg).toContain('/api/query');
+      expect(msg).toContain('includeSharedMemory');
+      // Also name the SWM closest-intent replacement + the omit path.
       expect(msg).toContain('shared-working-memory');
-      expect(msg).toContain('verified-memory');
-      // Must also document the omit-`view` path for the former `false` case —
-      // otherwise callers who passed `include_shared_memory: false` will be
-      // steered toward `shared-working-memory` and get a different result.
       expect(msg).toMatch(/omit/i);
     });
 
-    it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
+    it('dkg_query rejects `view: "working-memory"` with a pointer to HTTP for agent-scoped WM reads', async () => {
+      // WM reads require an `agentAddress` the tool has no way to plumb
+      // safely. Admitting WM would silently fall back to the node
+      // peerId namespace and return data from the wrong agent. Close
+      // the hole at the tool boundary.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const msg = result.content[0].text;
+      expect(msg).toContain('working-memory');
+      expect(msg).toContain('agentAddress');
+      expect(msg).toContain('/api/query');
+    });
+
+    it('dkg_query rejects an invalid `view` string with the list of valid layers (working-memory excluded)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
@@ -491,9 +514,29 @@ describe('DkgNodePlugin', () => {
       });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(result.content[0].text).toContain('view');
-      expect(result.content[0].text).toContain('working-memory');
       expect(result.content[0].text).toContain('shared-working-memory');
       expect(result.content[0].text).toContain('verified-memory');
+      // Error must NOT advertise bare `working-memory` as an accepted value —
+      // it's explicitly excluded from this tool's enum. Assert the exact
+      // valid-views list the handler emits, so substring matches inside
+      // `shared-working-memory` can't spoof this check.
+      expect(result.content[0].text).toContain('must be one of: shared-working-memory, verified-memory');
+    });
+
+    it('dkg_query rejects a `view` without `context_graph_id` locally (no daemon round-trip)', async () => {
+      // Engine throws "view '…' requires a contextGraphId" — catch it at
+      // the tool boundary so callers see a clean, tool-shaped error
+      // instead of a cryptic 500 from a round-trip.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'shared-working-memory',
+        // context_graph_id intentionally omitted
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const msg = result.content[0].text;
+      expect(msg).toContain('context_graph_id');
+      expect(msg).toContain('shared-working-memory');
     });
 
     it('dkg_query description accurately describes the no-`view` routing (legacy path, not WM)', () => {
@@ -515,8 +558,15 @@ describe('DkgNodePlugin', () => {
         logger: {},
       });
       const query = tools.find((t) => t.name === 'dkg_query')!;
-      expect(query.description).not.toMatch(/omit.*WM|omit.*working-memory|default.*WM.*semantics|default.*working-memory/i);
+      // Positive: description must call out the legacy routing for the omit case.
       expect(query.description).toMatch(/legacy/i);
+      // Negative: specifically guard against re-introducing the misleading
+      // "omit → WM default" phrasing. Use targeted substrings that would
+      // only appear in the wrong claim, not the correct HTTP escape-hatch
+      // sentence that mentions working-memory by name.
+      expect(query.description).not.toMatch(/omit[^.]*default[^.]*working-memory/i);
+      expect(query.description).not.toMatch(/default[^.]*WM semantics/i);
+      expect(query.description).not.toMatch(/Omit `?view`? for the default/i);
     });
 
     it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {

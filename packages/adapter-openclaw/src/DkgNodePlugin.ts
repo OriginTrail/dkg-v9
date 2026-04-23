@@ -1122,24 +1122,31 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store. Pass `view` to pick which memory ' +
-          'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
-          'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
-          '`context_graph_id` is required. Omit `view` for a cross-graph query routed via the legacy ' +
-          'data-graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
-          'for named-graph targeting in that mode.',
+          'layer to read: `shared-working-memory` (SWM — gossip-replicated) or `verified-memory` (VM ' +
+          '— on-chain anchored); when `view` is supplied, `context_graph_id` is also required. Omit ' +
+          '`view` for a cross-graph query routed via the legacy data-graph path (unscoped, or scoped ' +
+          'when `context_graph_id` is set); use `GRAPH ?g { ... }` for named-graph targeting in that ' +
+          'mode. Working-memory (WM) reads are per-agent and require an `agentAddress` the tool has ' +
+          'no way to plumb safely — call POST `/api/query` directly with `view: "working-memory"` ' +
+          'and the caller identity if you need WM.',
         parameters: {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
-            context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
+            context_graph_id: {
+              type: 'string',
+              description:
+                'CG scope. Optional when `view` is omitted (unscoped cross-graph query); required ' +
+                'when `view` is set (view-based routing always targets a single CG).',
+            },
             view: {
               type: 'string',
-              enum: ['working-memory', 'shared-working-memory', 'verified-memory'],
+              enum: ['shared-working-memory', 'verified-memory'],
               description:
-                'Memory layer to read. `working-memory` is per-agent WM (requires the daemon to ' +
-                'resolve caller identity); `shared-working-memory` reads provisional gossip-replicated ' +
+                'Memory layer to read. `shared-working-memory` reads provisional gossip-replicated ' +
                 'data; `verified-memory` reads on-chain anchored data. Omit to use the legacy cross-' +
-                'graph data-path routing (not layer-scoped).',
+                'graph data-path routing (not layer-scoped). Working-memory is intentionally not in ' +
+                'this enum — it needs an agentAddress not exposed on this tool; use HTTP for WM.',
             },
           },
           required: ['sparql'],
@@ -1475,22 +1482,22 @@ export class DkgNodePlugin {
       if (args.paranet_id !== undefined) {
         return this.error('"paranet_id" is not a supported parameter. Use "context_graph_id".');
       }
-      // `include_shared_memory` was removed in favor of `view` — the latter
-      // mirrors the HTTP `/api/query` surface (WM / SWM / VM as three
-      // explicit layers) and gives callers access to VM reads, which the old
-      // boolean could never express. Reject the legacy field loudly rather
-      // than silently ignoring it, so stale code surfaces the rename instead
-      // of quietly dropping its intent. The error message doesn't recommend a
-      // specific view: the old `true` maps to SWM reads while `false` mapped
-      // to the legacy data-graph routing (omit `view` entirely), so a single
-      // replacement string would flip semantics for half of callers. Name all
-      // three layers and let the caller pick the one matching their intent.
+      // `include_shared_memory` was removed in favor of `view`. There is no
+      // one-line replacement: the legacy `true` path unioned the data graph
+      // with SWM (`DKGQueryEngine.query`, line ~229 — wraps the sparql in
+      // both graphs and merges), while `false` used the legacy data-graph
+      // path alone. `view: "shared-working-memory"` reads ONLY SWM and
+      // would drop data-graph-only triples for `true` callers; `view:
+      // "verified-memory"` has different semantics entirely. Surface the
+      // break explicitly rather than pretending a clean migration exists.
       if (args.include_shared_memory !== undefined) {
         return this.error(
-          '"include_shared_memory" is no longer supported. Pick a memory layer explicitly with ' +
-            '`view`: "working-memory" | "shared-working-memory" | "verified-memory". To preserve ' +
-            'the legacy `include_shared_memory: true` behavior, use `view: "shared-working-memory"`; ' +
-            'to preserve `include_shared_memory: false`, omit `view` entirely.',
+          '"include_shared_memory" is no longer supported. There is no exact `view` replacement ' +
+            'for the legacy union-semantics: `true` previously queried the data graph ∪ SWM ' +
+            '(no single `view` reproduces this union). Closest-intent replacements: omit `view` ' +
+            'for the legacy data-graph path, or `view: "shared-working-memory"` for SWM-only, or ' +
+            '`view: "verified-memory"` for on-chain data. If you need the original union exactly, ' +
+            'call POST /api/query directly with `includeSharedMemory: true`.',
         );
       }
       // `context_graph_id` is optional on this tool (omit → unscoped query
@@ -1499,19 +1506,43 @@ export class DkgNodePlugin {
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
-      // Schema declares `view` as an enum. Accept only the three valid layer
+      // Schema declares `view` as an enum. Accept only the two valid layer
       // strings — anything else is a typo/misuse and rejected with the list
-      // of valid options, matching the daemon's 400 response shape.
-      const VALID_VIEWS = ['working-memory', 'shared-working-memory', 'verified-memory'] as const;
+      // of valid options. `working-memory` is intentionally NOT accepted
+      // here: the daemon requires `agentAddress` for WM reads (see
+      // `resolveViewGraphs`), and this tool has no safe way to plumb caller
+      // identity — so admitting WM would silently fall back to the node's
+      // peerId namespace and return the wrong agent's data. Callers who
+      // truly need WM must use HTTP `/api/query` with an explicit
+      // `agentAddress` + agent-scoped bearer token.
+      const VALID_VIEWS = ['shared-working-memory', 'verified-memory'] as const;
       type View = (typeof VALID_VIEWS)[number];
       let view: View | undefined;
       if (args.view !== undefined) {
+        if (args.view === 'working-memory') {
+          return this.error(
+            '"view: working-memory" is not supported by this tool. WM reads require an explicit ' +
+              '`agentAddress` to target the right agent namespace — use HTTP POST /api/query ' +
+              'directly with `view: "working-memory"` and `agentAddress`.',
+          );
+        }
         if (typeof args.view !== 'string' || !(VALID_VIEWS as readonly string[]).includes(args.view)) {
           return this.error(
             `"view" must be one of: ${VALID_VIEWS.join(', ')}.`,
           );
         }
         view = args.view as View;
+      }
+      // When a `view` is requested, the daemon requires `context_graph_id`
+      // to scope the view resolution (`DKGQueryEngine.query` throws
+      // "view '…' requires a contextGraphId"). Reject locally so the caller
+      // sees a clear, tool-shaped error instead of a cryptic 500 after a
+      // daemon round-trip.
+      if (view !== undefined && contextGraphId === undefined) {
+        return this.error(
+          `"view: ${view}" requires "context_graph_id". View-based routing always targets a ` +
+            'single CG; omit `view` for an unscoped cross-graph query.',
+        );
       }
       const result = await this.client.query(sparql, {
         contextGraphId,

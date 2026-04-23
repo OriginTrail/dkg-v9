@@ -297,6 +297,11 @@ export class DkgNodePlugin {
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
+      // Retry typed-hook installs if the first register() call used a
+      // setup-runtime api where api.on was undefined. HookSurface records
+      // those as installedVia='none' with installError set; we detect that
+      // and re-install against the current (possibly full-mode) api.
+      this.installHooksIfNeeded(api);
       return;
     }
 
@@ -308,6 +313,39 @@ export class DkgNodePlugin {
       ?? process.env.OPENCLAW_STATE_DIR
       ?? require('os').homedir() + '/.openclaw';
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+    this.installHooksIfNeeded(api);
+
+    api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
+
+    // --- Integration modules ---
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+
+    if (runtimeEnabled) {
+      this.registerLocalAgentIntegration(api, registrationMode);
+    }
+  }
+
+  /**
+   * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase
+   * init. If a prior HookSurface instance has any `installedVia: 'none'`
+   * typed-hook entries (api.on was undefined at first-call), destroy it
+   * and re-create against the new api so the upgraded full-mode api can
+   * receive the handlers.
+   */
+  private installHooksIfNeeded(api: OpenClawPluginApi): void {
+    if (!this.chatTurnWriter) return;
+
+    if (this.hookSurface) {
+      const stats = this.hookSurface.getDispatchStats();
+      const anyTypedFailed = Object.entries(stats).some(
+        ([key, stat]) => key.startsWith('typed:') && stat.installedVia === 'none',
+      );
+      if (!anyTypedFailed) return;
+      // Prior install recorded typed-hook failure; retry against new api.
+      this.hookSurface.destroy();
+      this.hookSurface = null;
+    }
+
     this.hookSurface = new HookSurface(api, api.logger);
 
     // W4a — LLM-driven turn capture via typed hooks
@@ -318,15 +356,6 @@ export class DkgNodePlugin {
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism)
     this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
     this.hookSurface.install('internal', 'message:sent',     (ev) => this.chatTurnWriter!.onMessageSent(ev));
-
-    api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
-
-    // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
-
-    if (runtimeEnabled) {
-      this.registerLocalAgentIntegration(api, registrationMode);
-    }
   }
 
   /**

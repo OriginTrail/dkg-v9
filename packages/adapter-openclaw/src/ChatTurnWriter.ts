@@ -31,7 +31,7 @@ export class ChatTurnWriter {
   private stateDir: string;
   private cachedWatermarks: Map<string, number> = new Map();
   private pendingUserMessages: Map<string, string> = new Map();
-  private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
+  private debounceTimers: Map<string, { timer: NodeJS.Timeout; pendingIndex: number }> = new Map();
   private watermarkFilePath: string;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
@@ -122,10 +122,16 @@ export class ChatTurnWriter {
   }
 
   flushSync(): void {
-    for (const timer of this.debounceTimers.values()) {
-      clearTimeout(timer);
+    let applied = false;
+    for (const [sessionId, entry] of this.debounceTimers.entries()) {
+      clearTimeout(entry.timer);
+      this.cachedWatermarks.set(sessionId, entry.pendingIndex);
+      applied = true;
     }
     this.debounceTimers.clear();
+    if (applied) {
+      this.writeWatermarkFile();
+    }
   }
 
   private computeDelta(messages: ChatTurnMessage[], savedUpTo: number): { user: string; assistant: string } {
@@ -197,13 +203,14 @@ export class ChatTurnWriter {
   }
 
   private saveWatermark(sessionId: string, index: number): void {
-    const timer = this.debounceTimers.get(sessionId);
-    if (timer) clearTimeout(timer);
-    const newTimer = setTimeout(() => {
+    const existing = this.debounceTimers.get(sessionId);
+    if (existing) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
       this.cachedWatermarks.set(sessionId, index);
       this.writeWatermarkFile();
+      this.debounceTimers.delete(sessionId);
     }, 50);
-    this.debounceTimers.set(sessionId, newTimer);
+    this.debounceTimers.set(sessionId, { timer, pendingIndex: index });
   }
 
   private async persistOne(

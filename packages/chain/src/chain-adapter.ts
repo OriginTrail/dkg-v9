@@ -211,6 +211,23 @@ export interface V10PublishDirectParams {
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * Write-ahead hook invoked by the adapter *immediately before the
+   * concrete publish tx is broadcast* — i.e. after `approve()` and any
+   * allowance top-up, and right before the `publishDirect` RPC actually
+   * hits the wire. This is the cue phase listeners must use to persist
+   * WAL / recovery state: any error before this fires means no publish
+   * tx ever existed.
+   *
+   * Optional; legacy callers that don't need a precise WAL boundary can
+   * omit it. Adapters SHOULD invoke it exactly once per successful
+   * broadcast; adapters that cannot provide tx-broadcast granularity
+   * (e.g. `NoChainAdapter`) SHOULD NOT invoke it at all.
+   *
+   * See P-1 / P-1.2 in BUGS_FOUND.md and the `chain:writeahead` phase
+   * in `packages/publisher/src/dkg-publisher.ts`.
+   */
+  onBroadcast?: () => void;
 }
 
 export interface V10UpdateKCParams {
@@ -227,6 +244,12 @@ export interface V10UpdateKCParams {
   publisherNodeIdentityId?: bigint;
   publisherSignature?: { r: Uint8Array; vs: Uint8Array };
   ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * Write-ahead hook fired just before the concrete update tx is
+   * broadcast. See {@link V10PublishDirectParams.onBroadcast} for full
+   * semantics.
+   */
+  onBroadcast?: () => void;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----

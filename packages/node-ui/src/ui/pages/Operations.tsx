@@ -28,6 +28,12 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
   store: 'Inserting triples into the local triple store and data graph.',
   chain: 'Submitting on-chain tx and waiting for confirmation.',
+  // Codex PR #241 review (iter-2): the legend renders one row per
+  // entry in `PHASE_LEGEND_ENTRIES`, including the sub-phase
+  // `chain:writeahead`. Without a matching description here the
+  // hover tooltip came back empty. Describe the boundary explicitly
+  // so operators can see what recovery state the WAL entry covers.
+  'chain:writeahead': 'Publish/update tx about to hit the wire — recovery window for "broadcast without receipt" crashes.',
   broadcast: 'Broadcasting to network peers via GossipSub.',
   parse: 'Validating and parsing the SPARQL query syntax.',
   execute: 'Running the SPARQL query against the local triple store.',

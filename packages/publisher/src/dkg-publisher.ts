@@ -1292,37 +1292,41 @@ export class DKGPublisher implements Publisher {
         const pubSig = ethers.Signature.from(
           await this.publisherWallet.signMessage(pubMsgHash),
         );
-        // P-1 review: emit `chain:writeahead:start` *immediately* before
-        // the adapter call and pair it with a single `try/finally` so
-        // `start` and `end` are always balanced. An earlier version
-        // emitted `start` up above, before ACK collection / V10
-        // readiness checks / `signMessage()` — if any of those threw,
-        // listeners saw an unmatched `start` and could checkpoint a
-        // publish that never reached the wire.
+        // P-1 review (iter-2): `chain:writeahead:start` now fires
+        // *from inside* the adapter via the `onBroadcast` callback,
+        // which the adapter invokes immediately before the real
+        // `publishDirect` broadcast — after any TRAC `approve()` tx
+        // and allowance top-up. Listeners that checkpoint on
+        // `:start` therefore only record recovery state for a
+        // publish tx that is actually about to hit the wire.
         //
-        // Spec axiom 4 / §06 require the node to persist a "publish
-        // attempt about to hit the wire" record BEFORE any
-        // `eth_sendRawTransaction` RPC is issued so that a crash
-        // between "tx on wire" and "receipt observed" can be recovered
-        // without a double-submit. Phase listeners (e.g. the CLI
-        // daemon's operations journal) treat `chain:writeahead:start`
-        // as the cue to checkpoint the publish; `:end` fires once
-        // the adapter returns or throws.
+        // The surrounding `try/finally` still guarantees
+        // `:end` always pairs with `:start`: if the adapter throws
+        // BEFORE invoking `onBroadcast` (e.g. revert during
+        // `approve()`, `estimateGas`, ACK preflight) neither
+        // `:start` nor `:end` fires, so listeners see no WAL
+        // boundary for a broadcast that never happened. If the
+        // adapter throws AFTER invoking `onBroadcast` (revert on
+        // the publish tx itself), `:start` has fired and the
+        // `finally` emits `:end` — this is the recoverable-crash
+        // window spec axiom 4 / §06 asks nodes to persist.
         //
-        // Scope caveat (tracked as P-1.2): this marker brackets the
-        // entire adapter broadcast *window*, not a specific tx hash.
-        // `createKnowledgeAssetsV10` may internally broadcast an ERC20
-        // `approve()` tx before the actual publish tx when the TRAC
-        // allowance is insufficient (see
-        // `packages/chain/src/evm-adapter.ts` — `token.approve(kaAddress,
-        // MaxUint256)` before the publish call). A crash between the
-        // approve and the publish is recoverable (a new run just re-
-        // observes the allowance and skips the second approve), but a
-        // true per-tx write-ahead log would need a pre-broadcast
-        // `onTxSigned(txHash)` hook wired through the adapter so this
-        // phase can carry the actual publish txHash. That upgrade is
-        // P-1.2, tracked separately.
-        onPhase?.('chain:writeahead', 'start');
+        // Spec axiom 4 / §06: nodes persist a "publish attempt
+        // about to hit the wire" record BEFORE any
+        // `eth_sendRawTransaction` RPC so that a crash between
+        // "tx on wire" and "receipt observed" can be recovered
+        // without a double-submit. Older adapters that don't
+        // invoke `onBroadcast` fall back to the previous behaviour
+        // (no `:start` / `:end` on that path) — the publisher
+        // emits neither and listeners simply see the parent `chain`
+        // phase; adapters upgrading to the new hook regain the
+        // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
+        let wroteAhead = false;
+        const emitWriteAheadStart = () => {
+          if (wroteAhead) return;
+          wroteAhead = true;
+          onPhase?.('chain:writeahead', 'start');
+        };
         try {
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
@@ -1344,9 +1348,10 @@ export class DKGPublisher implements Publisher {
               r: ack.signatureR,
               vs: ack.signatureVS,
             })),
+            onBroadcast: emitWriteAheadStart,
           });
         } finally {
-          onPhase?.('chain:writeahead', 'end');
+          if (wroteAhead) onPhase?.('chain:writeahead', 'end');
         }
 
         onChainResult.tokenAmount = tokenAmount;
@@ -1558,19 +1563,25 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
-    // P-1 review: emit `chain:writeahead:start` immediately before the
-    // try/finally that emits `:end`, so start/end are always balanced
-    // regardless of where inside the adapter the call throws. See the
-    // equivalent marker in the publish path above for the full
-    // rationale; both paths currently emit a coarse phase boundary
-    // that can include an internal TRAC `approve()` broadcast when
-    // the KA contract allowance is insufficient (see the scope caveat
-    // on the publish path). The follow-up (P-1.2) is to plumb the
-    // actual signed txHash for the update call via a pre-broadcast
-    // adapter hook.
+    // P-1 review (iter-2): `chain:writeahead:start` fires from inside
+    // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +
+    // `approve()`, RIGHT BEFORE the real `updateDirect` broadcast.
+    // This keeps the WAL boundary precise (listeners only record
+    // recovery state when a concrete update tx is imminent) while the
+    // outer try/finally still guarantees balanced `:start`/`:end`
+    // when the adapter throws after invoking `onBroadcast`. The V9
+    // fallback path (`updateKnowledgeAssets`) does not yet support
+    // the hook — it retains the coarse phase boundary that brackets
+    // the whole adapter call. See the equivalent marker in the
+    // publish path above for the full rationale.
     let txResult: { success: boolean; hash: string; blockNumber?: number };
     let earlyReturn: PublishResult | undefined;
-    onPhase?.('chain:writeahead', 'start');
+    let wroteAhead = false;
+    const emitWriteAheadStart = () => {
+      if (wroteAhead) return;
+      wroteAhead = true;
+      onPhase?.('chain:writeahead', 'start');
+    };
     try {
       if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
         try {
@@ -1581,6 +1592,7 @@ export class DKGPublisher implements Publisher {
             mintAmount: 0,
             publisherAddress: this.publisherAddress,
             v10Origin: true,
+            onBroadcast: emitWriteAheadStart,
           });
         } catch (v10Err) {
           const errorName = enrichEvmError(v10Err);
@@ -1601,6 +1613,10 @@ export class DKGPublisher implements Publisher {
             txResult = { success: false, hash: '' };
           } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
             this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            // V9 fallback has no `onBroadcast` hook — emit
+            // `:start` unconditionally so the legacy path still
+            // brackets the broadcast window with balanced events.
+            emitWriteAheadStart();
             try {
               txResult = await this.chain.updateKnowledgeAssets({
                 batchId: kcId,
@@ -1617,6 +1633,9 @@ export class DKGPublisher implements Publisher {
           }
         }
       } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+        // Legacy V9-only adapter path — same "no hook, emit coarsely"
+        // semantic as the fallback above.
+        emitWriteAheadStart();
         txResult = await this.chain.updateKnowledgeAssets({
           batchId: kcId,
           newMerkleRoot: kcMerkleRoot,
@@ -1627,7 +1646,7 @@ export class DKGPublisher implements Publisher {
         throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
       }
     } finally {
-      onPhase?.('chain:writeahead', 'end');
+      if (wroteAhead) onPhase?.('chain:writeahead', 'end');
     }
 
     if (earlyReturn) {

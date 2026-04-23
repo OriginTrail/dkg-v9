@@ -1294,6 +1294,14 @@ export class EVMChainAdapter implements ChainAdapter {
       vs: params.ackSignatures.map((s) => ethers.hexlify(s.vs)),
     };
 
+    // P-1 review (follow-up): fire the write-ahead hook AFTER allowance
+    // checks + optional `approve()` and IMMEDIATELY before the
+    // `publishDirect` broadcast, so listeners see `chain:writeahead:start`
+    // only when a concrete publish tx is about to hit the wire. Errors
+    // above this line (approve revert, gas estimate rejection, etc.) never
+    // create an unmatched WAL boundary. The hook is best-effort: any throw
+    // inside it must not abort the broadcast.
+    try { params.onBroadcast?.(); } catch { /* swallow — listener contract */ }
     const tx = await ka.publishDirect(publishParamsStruct, params.paymaster);
 
     const receipt = await tx.wait();
@@ -1600,6 +1608,11 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
+    // P-1 review (follow-up): fire the write-ahead hook immediately
+    // before the real `updateDirect` broadcast — after allowance +
+    // approve — so listeners never checkpoint a WAL record for an
+    // update tx that never hit the wire. Best-effort; swallow throws.
+    try { params.onBroadcast?.(); } catch { /* swallow */ }
     const tx = await ka.updateDirect(updateParams, ethers.ZeroAddress);
 
     const receipt = await tx.wait();

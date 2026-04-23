@@ -309,6 +309,10 @@ export class MockChainAdapter implements ChainAdapter {
       return this.txResult(false);
     }
 
+    // P-1 review (follow-up): see `createKnowledgeAssetsV10` — fire the
+    // write-ahead hook right before the mock's synthetic tx is assigned.
+    try { params.onBroadcast?.(); } catch { /* swallow */ }
+
     existing.merkleRoot = params.newMerkleRoot;
     const txIndex = this.txIndexInBlock;
     const blockNumber = this.nextBlock;
@@ -794,6 +798,12 @@ export class MockChainAdapter implements ChainAdapter {
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }
+
+    // P-1 review (follow-up): mirror the EVM adapter's write-ahead
+    // hook so mock-backed publisher tests observe the same phase
+    // boundary contract (`chain:writeahead:start` fires only when a
+    // concrete broadcast is imminent).
+    try { params.onBroadcast?.(); } catch { /* swallow */ }
 
     const kcId = this.nextBatchId++;
     this.collections.set(kcId, {

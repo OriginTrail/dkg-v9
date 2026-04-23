@@ -6,7 +6,10 @@ export {
   validateReadOnlySparql,
   detectSparqlQueryForm,
   emptyResultForForm,
+  classifySparqlForm,
+  emptyQueryResultForKind,
   type SparqlGuardResult,
   type SparqlQueryForm,
+  type SparqlForm,
   type EmptyQueryResultShape,
 } from './sparql-guard.js';

@@ -9,7 +9,10 @@ import {
   REMOVED_VIEWS,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
-import { validateReadOnlySparql, detectSparqlQueryForm, emptyResultForForm } from './sparql-guard.js';
+import {
+  validateReadOnlySparql,
+  emptyQueryResultForKind,
+} from './sparql-guard.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -30,6 +33,14 @@ export interface ViewResolution {
  * prefixes) that the query engine should target.
  *
  * Spec reference: §12 GET — Declared State Views.
+ *
+ * Trust-level semantics for `verified-memory` (P-13):
+ *   The root content graph `did:dkg:context-graph:{id}` holds chain-confirmed
+ *   data at only `TrustLevel.SelfAttested` (on-chain anchoring proves the
+ *   publisher signed it, not that a quorum endorsed it). Higher-trust data
+ *   lives in per-quorum sub-graphs under `/_verified_memory/{quorum}`.
+ *   When `minTrust > SelfAttested`, the root data graph is excluded from
+ *   the resolution so low-trust triples cannot leak into a high-trust query.
  */
 export function resolveViewGraphs(
   view: GetView,
@@ -39,10 +50,12 @@ export function resolveViewGraphs(
     verifiedGraph?: string;
     assertionName?: string;
     /**
-     * Spec §12/§14 trust-gradient filter. When set, the verified-memory
-     * resolution narrows to anchored quorum sub-graphs
-     * (`.../_verified_memory/…`) only — the root data graph is removed
-     * because it can contain mixed-trust finalized data.
+     * Spec §12/§14 trust-gradient filter (P-13). When set above
+     * `TrustLevel.SelfAttested`, the verified-memory resolution narrows
+     * to anchored quorum sub-graphs (`.../_verified_memory/…`) only —
+     * the root data graph is removed because it can carry mixed-trust
+     * finalized data. Values above `Endorsed` are rejected until
+     * per-graph trust tagging (Q-1) lands; see body for details.
      */
     minTrust?: TrustLevel;
   },
@@ -75,7 +88,60 @@ export function resolveViewGraphs(
         graphPrefixes: [],
       };
     case 'verified-memory': {
+      // P-13 review (iter-6): `minTrust` is a verified-memory concept
+      // — it is the only view whose graph resolution is actually
+      // gated by per-graph trust. The earlier iterations ran the
+      // numeric/enum validation at the top of `resolveViewGraphs`,
+      // but that meant a caller who passes a generic options object
+      // (e.g. `{ agentAddress, minTrust }`) across views would get
+      // a 400 on `working-memory`/`shared-working-memory` too,
+      // where the option is documented as ignored. Keep the
+      // validation here so only verified-memory consumers see it.
+      if (opts?.minTrust !== undefined) {
+        const mt: unknown = opts.minTrust;
+        const validLevels = [
+          TrustLevel.SelfAttested,
+          TrustLevel.Endorsed,
+          TrustLevel.PartiallyVerified,
+          TrustLevel.ConsensusVerified,
+        ];
+        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
+          // "minTrust" + "must be one of" mirrors the daemon's 400
+          // classifier wording so the HTTP path maps to a client error.
+          throw new Error(
+            `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
+            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
+            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
+            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+          );
+        }
+      }
+
+      const requireHighTrust =
+        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       if (opts?.verifiedGraph) {
+        // P-13 review (iter-6): every `/_verified_memory/<id>` graph
+        // is populated only by quorum-verified write paths, so the
+        // floor for those sub-graphs is implicitly `Endorsed`. A
+        // caller pinning an exact `verifiedGraph` + `minTrust=Endorsed`
+        // therefore asks for the same data the engine would union
+        // from the prefix and must succeed. Only values ABOVE
+        // `Endorsed` need to be rejected — the engine still cannot
+        // prove a single named sub-graph satisfies
+        // `PartiallyVerified` / `ConsensusVerified` until per-graph
+        // trust metadata (Q-1) lands.
+        if (opts.minTrust !== undefined && opts.minTrust > TrustLevel.Endorsed) {
+          // Use the exact phrase "cannot be combined with" so the
+          // daemon's `/api/query` error classifier maps this to HTTP
+          // 400 (see packages/cli/src/daemon.ts). Without that
+          // wording the error escapes as a 500.
+          throw new Error(
+            `verified-memory: verifiedGraph cannot be combined with minTrust above Endorsed ` +
+            `(got minTrust=${opts.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
+            `PartiallyVerified or ConsensusVerified; drop verifiedGraph to union across all ` +
+            `quorum-verified sub-graphs, or use minTrust=Endorsed to read the specific sub-graph.`,
+          );
+        }
         return {
           graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
           graphPrefixes: [],
@@ -86,19 +152,28 @@ export function resolveViewGraphs(
       // finalization).  Any quorum-specific verified-memory sub-graphs live
       // under `_verified_memory/` and are unioned in as well.
       //
-      // Spec §12/§14 (P-13): when `minTrust` is set, drop the root data
-      // graph — it may carry mixed-trust content — and return ONLY the
-      // quorum-anchored `_verified_memory/` prefix. Downstream trust
-      // enforcement (per-triple trustLevel filter) is handled when the
-      // query is rewritten by the engine.
-      if (opts?.minTrust !== undefined) {
-        return {
-          graphs: [],
-          graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
-        };
-      }
+      // P-13 (graph-scope) + Q-1 (per-triple) working together:
+      //   - Graph-scope (this function): when `minTrust > SelfAttested`
+      //     the root content graph is dropped (via `requireHighTrust`)
+      //     and only `/_verified_memory/<quorum>` sub-graphs survive.
+      //     That sub-graph prefix is populated only by quorum-verified
+      //     write paths, so the floor for those graphs is implicitly
+      //     `Endorsed`.
+      //   - Per-triple (DKGQueryEngine.queryWithView): when
+      //     `minTrust` is set, `injectMinTrustFilter` rewrites the user
+      //     SPARQL so every subject MUST carry an explicit
+      //     `<http://dkg.io/ontology/trustLevel> "N"` literal with
+      //     `N ≥ minTrust`. Subjects without such metadata are
+      //     silently rejected (fail-closed — see bot review L1).
+      //
+      // Together this satisfies spec §14 for values above `Endorsed`:
+      // even though the engine cannot yet distinguish a
+      // `PartiallyVerified`-quorum sub-graph from a `ConsensusVerified`
+      // one at the graph level, a caller asking for `ConsensusVerified`
+      // data only ever sees quads whose triples carry the matching
+      // per-triple trust literal, so sub-threshold data cannot leak.
       return {
-        graphs: [contextGraphDataUri(contextGraphId)],
+        graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
@@ -213,7 +288,9 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
-      minTrust: options._minTrust,
+      // Back-compat: accept the legacy `_minTrust` underscore form for a
+      // deprecation window. See QueryOptions._minTrust.
+      minTrust: options.minTrust ?? options._minTrust,
     });
 
     const allGraphs = [...resolution.graphs];
@@ -224,42 +301,56 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     if (allGraphs.length === 0) {
-      // r17-2: preserve query-form shape so CONSTRUCT/DESCRIBE callers
-      // that branch on `result.quads !== undefined` don't misread a
-      // legitimately-empty view as a bindings-only SELECT. The empty
-      // `quads: []` is structurally compatible with `Quad[]`; the cast
-      // is just to satisfy the nominal `QueryResult` contract.
-      return emptyResultForForm(detectSparqlQueryForm(sparql)) as QueryResult;
+      // PR #239 / r17-2: a zero-graph resolution (e.g. a `verified-memory`
+      // query with `minTrust=Endorsed` on a context graph that has not
+      // been populated with any `/_verified_memory/*` sub-graphs yet) must
+      // still respect the requested query form. Returning `{ bindings: [] }`
+      // for an ASK would look like a SELECT result and break clients that
+      // rely on ASK's boolean binding; CONSTRUCT/DESCRIBE must carry
+      // `quads: []`. Delegate to the shared kind-aware empty-result helper.
+      return emptyQueryResultForKind(sparql);
     }
 
     // Spec §14 trust-gradient filter — only enforced on verified-memory
     // where on-chain-anchored trust metadata is expected to live.
-    // When _minTrust is set, rewrite the query so every subject matched
-    // by the user's pattern MUST carry an explicit
+    // When `minTrust` (or legacy `_minTrust`) is set, rewrite the query so
+    // every subject matched by the user's pattern MUST carry an explicit
     // `http://dkg.io/ontology/trustLevel` literal whose integer value is
     // ≥ minTrust. Subjects with no trust metadata are rejected.
     //
     // Bot review L1: previously, when `injectMinTrustFilter()` could not
     // safely rewrite the query (e.g. explicit GRAPH, non-BGP first
     // clause, multi-subject WHERE), we silently ran the ORIGINAL
-    // unfiltered SPARQL. That turned `_minTrust` into a no-op in exactly
-    // the shapes most likely to span sensitive data, and a caller had
-    // no signal that their trust threshold was being ignored. Now the
-    // rewriter MUST succeed or we fail closed — returning an empty
-    // bindings set is the correct behaviour for "no subject meets the
-    // trust threshold" when we cannot prove the threshold was applied.
+    // unfiltered SPARQL. That turned the trust threshold into a no-op in
+    // exactly the shapes most likely to span sensitive data, and a caller
+    // had no signal that their threshold was being ignored. Now the
+    // rewriter MUST succeed or we fail closed — returning an empty result
+    // is the correct behaviour for "no subject meets the trust threshold"
+    // when we cannot prove the threshold was applied.
     let effectiveSparql = sparql;
-    if (view === 'verified-memory' && options._minTrust !== undefined) {
-      const rewritten = injectMinTrustFilter(sparql, options._minTrust);
+    const effectiveMinTrust = options.minTrust ?? options._minTrust;
+    // `SelfAttested` (0) is the floor and means "no per-triple filter
+    // needed". Skip the rewrite at that level so SELECT queries that
+    // predate trust tagging still see every triple — the graph-scope
+    // resolution above keeps the root data graph in scope at
+    // SelfAttested, so the per-triple filter would otherwise reject
+    // every quad that lacks a `dkg:trustLevel` literal (i.e. every
+    // pre-Q-1 quad).
+    if (
+      view === 'verified-memory' &&
+      effectiveMinTrust !== undefined &&
+      effectiveMinTrust > TrustLevel.SelfAttested
+    ) {
+      const rewritten = injectMinTrustFilter(sparql, effectiveMinTrust);
       if (!rewritten) {
         console.warn(
-          `[DKGQueryEngine] _minTrust=${options._minTrust} requested for a query shape ` +
+          `[DKGQueryEngine] minTrust=${effectiveMinTrust} requested for a query shape ` +
             `injectMinTrustFilter cannot safely rewrite; returning empty result (fail-closed)`,
         );
-        // r17-2: preserve the query form so CONSTRUCT/DESCRIBE callers
-        // see `{ bindings: [], quads: [] }` rather than a shapeless deny.
-        // Cast to QueryResult — `quads: []` is structurally `Quad[]`.
-        return emptyResultForForm(detectSparqlQueryForm(sparql)) as QueryResult;
+        // Preserve the query form so CONSTRUCT/DESCRIBE callers see
+        // `{ bindings: [], quads: [] }` rather than a shapeless deny, and
+        // ASK callers see `{ bindings: [{ result: 'false' }] }`.
+        return emptyQueryResultForKind(sparql);
       }
       effectiveSparql = rewritten;
     }

@@ -437,15 +437,20 @@ describe('[A-12] DID format drift in agent.endorse', () => {
   });
 
   it('PROD-BUG: passing a libp2p PeerId to buildEndorsementQuads yields a non-spec did:dkg:agent: URI', () => {
-    // PR #229 bot review round 19 (r19-3): the regression target moved
-    // from the quad SUBJECT to the `dkg:endorsedBy` quad OBJECT (see
-    // sibling test above). The A-12 drift still manifests there if the
-    // caller passes a peer-id string instead of the 0x-address form —
-    // dkg-agent.ts:4056 still passes `this.peerId` into
-    // `buildEndorsementQuads`, which now produces
-    //   <urn:dkg:endorsement:…> dkg:endorsedBy <did:dkg:agent:12D3KooW…>
-    // violating spec §5. Pin that exact shape so any silent fix on one
-    // side without updating the caller flips this assertion.
+    // PR #229 bot review round 19 (r19-3) + A-12 (v10-rc merge): the
+    // helper `buildEndorsementQuads` mints whatever subject form the
+    // caller passes it. If a caller passes a libp2p Peer ID string
+    // like `12D3KooW…` instead of the 0x-address form, the resulting
+    // `dkg:endorsedBy` quad OBJECT is `did:dkg:agent:12D3KooW…`,
+    // violating spec §5 (agent DIDs MUST be the 0x-address form).
+    //
+    // dkg-agent.ts has been migrated to always pass an EVM address
+    // (via `opts.agentAddress ?? this.defaultAgentAddress` and
+    // `canonicalAgentDidSubject`), but this helper-level test pins
+    // the invariant at the boundary so any future caller that
+    // reintroduces the bug by passing a peer-id flips this
+    // assertion. The regression target is the OBJECT of the
+    // `dkg:endorsedBy` predicate (see the sibling test above).
     const peerIdStr = '12D3KooWFakePeerIdDoesNotMatterForShapeAssertion';
     const quads = buildEndorsementQuads(peerIdStr, 'did:dkg:ka:0x1/1', CG);
 

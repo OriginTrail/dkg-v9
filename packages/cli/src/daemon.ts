@@ -43,7 +43,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -6633,12 +6633,53 @@ async function handleRequest(
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
+    // P-13: accept `minTrust` as a string ("SelfAttested"|"Endorsed"|
+    // "PartiallyVerified"|"ConsensusVerified") or the matching integer
+    // (0..3). Unrecognised values fail closed with a 400 rather than
+    // silently dropping the filter, because a dropped filter leaks
+    // low-trust data into a query that asked for high-trust only.
+    const TRUST_LEVELS: Record<string, number> = {
+      selfattested: 0,
+      endorsed: 1,
+      partiallyverified: 2,
+      consensusverified: 3,
+    };
+    // PR #239 Codex iter-5: also accept the legacy `_minTrust` underscore
+    // form as a deprecation-window alias, so SDK consumers that adopted
+    // the underscore shape before the rename get the same trust gate the
+    // canonical `minTrust` does. `minTrust` wins if both are present.
+    const rawMinTrust = parsed.minTrust ?? parsed._minTrust;
+    const minTrustSrcField = parsed.minTrust !== undefined && parsed.minTrust !== null
+      ? 'minTrust'
+      : '_minTrust';
     if (!sparql || !String(sparql).trim())
       return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
       return jsonResponse(res, 400, {
         error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
       });
+    }
+    // PR #239 Codex iter-7: gate minTrust normalization/validation behind
+    // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
+    // ignores `minTrust` outside VM, so the HTTP layer must match that —
+    // otherwise a reused options object like
+    //   { view: "working-memory", minTrust: 99 }
+    // would 400 on a request where the field is semantically irrelevant.
+    // Keep view === undefined NOT rejecting either: resolveViewGraphs
+    // treats "no view" as implicit working-memory semantics.
+    let minTrust: number | undefined;
+    if (view === 'verified-memory' && rawMinTrust !== undefined && rawMinTrust !== null) {
+      if (typeof rawMinTrust === 'number' && Number.isInteger(rawMinTrust) && rawMinTrust >= 0 && rawMinTrust <= 3) {
+        minTrust = rawMinTrust;
+      } else if (typeof rawMinTrust === 'string') {
+        const canon = rawMinTrust.toLowerCase().replace(/[_-]/g, '');
+        if (canon in TRUST_LEVELS) minTrust = TRUST_LEVELS[canon];
+      }
+      if (minTrust === undefined) {
+        return jsonResponse(res, 400, {
+          error: `Invalid ${minTrustSrcField} "${rawMinTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
+        });
+      }
     }
     const ctx = createOperationContext("query");
     tracker.start(ctx, {
@@ -6650,6 +6691,102 @@ async function handleRequest(
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
       const execT0 = Date.now();
+      // A-1 review: `callerAgentAddress` must come from an
+      // *agent-scoped* bearer token, not the node-level default.
+      // `resolveAgentAddress(token)` silently falls back to
+      // `defaultAgentAddress` / `peerId` for node-level tokens, which
+      // would make every node-level `/api/query` look like an
+      // agent-scoped WM read and deny legitimate cross-agent reads
+      // (e.g. OpenClaw sessions authenticating with
+      // `~/.dkg/auth.token` and supplying a different `agentAddress`
+      // in the body). `resolveAgentByToken` returns `undefined` for
+      // node-level tokens, so only genuine agent-scoped identities
+      // ever reach the A-1 guard.
+      const callerAgentAddress = requestToken
+        ? agent.resolveAgentByToken(requestToken)
+        : undefined;
+      // A-1 follow-up review (iteration 2): close the auth-disabled WM
+      // hole WITHOUT regressing existing node-token clients.
+      //
+      // When we reach this line with `callerAgentAddress === undefined`,
+      // the caller is one of:
+      //
+      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
+      //       `validTokens`). Admin is already trusted to run as any
+      //       local agent — `packages/adapter-openclaw` relies on this
+      //       by passing a session-specific `agentAddress` alongside the
+      //       admin token. Keep the legacy "skip the A-1 guard" here.
+      //
+      //   (b) unauthenticated (auth disabled at daemon level, OR no
+      //       Authorization header, OR a bogus / mismatched bearer that
+      //       the auth middleware never validated because `authEnabled`
+      //       is false). This is the hole Codex flagged: a raw
+      //       `Authorization: Bearer junk` used to set `requestToken`
+      //       truthy, sliding past a `!requestToken` check and letting
+      //       foreign WM reads through.
+      //
+      //   (c) auth-enabled + rejected — we never reach this line
+      //       because `httpAuthGuard` has already 401'd the request.
+      //
+      // Gate the 403 on "not a known admin token" (i.e. the caller is
+      // not in `validTokens`), which fails closed for (b) regardless of
+      // what garbage they put in the header, and leaves (a) alone.
+      //
+      // Codex PR #242 iter-8: `validTokens` contains BOTH the
+      // node-level admin token (`~/.dkg/auth.token`) AND any
+      // per-agent tokens the node has issued. Treating every
+      // validToken as "admin" means an authenticated agent could
+      // use its OWN token to skip the A-1 guard and read another
+      // local agent's WM via `agentAddress`. Restrict the admin
+      // bypass to tokens that are NOT bound to a specific agent
+      // (`resolveAgentByToken(token) === undefined`), which is the
+      // current signal for "node-level / admin-scoped".
+      //
+      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
+      // also NOT fire for authenticated agent callers. An agent
+      // querying its OWN WM (`callerAgentAddress === agentAddress`)
+      // was previously being rejected here unless the target happened
+      // to be the node default / peerId alias, and genuine cross-agent
+      // reads were surfacing as a 403 (leaking existence) instead of
+      // the intended silent empty-per-kind result from
+      // `DKGAgent.query`. Only gate the self-alias fallback when the
+      // caller has no recognised identity at all — neither a
+      // node-level admin token nor an agent-scoped bearer. Authenticated
+      // agent callers flow straight into `agent.query()` below, which
+      // enforces the isolation invariant by returning an empty-per-kind
+      // result for any target that is not `callerAgentAddress`.
+      const isAdminToken =
+        !!requestToken
+        && validTokens.has(requestToken)
+        && callerAgentAddress === undefined;
+      const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
+      if (
+        !hasRecognisedIdentity &&
+        view === 'working-memory' &&
+        typeof agentAddress === 'string'
+      ) {
+        // Codex (iteration 4): the daemon's canonical "own WM" identity is
+        // whatever `agent.resolveAgentAddress(undefined)` returns — i.e.
+        // `defaultAgentAddress ?? peerId`. Several in-repo paths still
+        // authenticate under the legacy peerId alias (node-level tokens,
+        // auth-disabled self-reads before a default agent was configured),
+        // so we must accept both the default agent address *and* the bare
+        // peerId as self, otherwise an auth-disabled self-read via the
+        // legacy alias now 403s where it used to return the node's own WM.
+        const targetLower = agentAddress.toLowerCase();
+        const selfAliasesLower = new Set<string>();
+        const defaultAgent = agent.getDefaultAgentAddress();
+        if (defaultAgent) selfAliasesLower.add(defaultAgent.toLowerCase());
+        if (agent.peerId) selfAliasesLower.add(agent.peerId.toLowerCase());
+        if (selfAliasesLower.size === 0 || !selfAliasesLower.has(targetLower)) {
+          return jsonResponse(res, 403, {
+            error:
+              `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
+              `An unauthenticated / auth-disabled caller may only read the node-default agent's WM ` +
+              `(accepted self-aliases: defaultAgentAddress and the node's peerId).`,
+          });
+        }
+      }
       const result = await agent.query(sparql, {
         contextGraphId,
         graphSuffix,
@@ -6660,6 +6797,15 @@ async function handleRequest(
         verifiedGraph,
         assertionName,
         subGraphName,
+        callerAgentAddress,
+        // PR #229 follow-up (round 12 hardening): the daemon admin
+        // token is the authorisation anchor for cross-agent WM reads
+        // (adapter-openclaw and the CLI rely on this). Pass it through
+        // so DKGAgent.query knows to skip the multi-agent signed-proof
+        // gate. Per-agent tokens still go through the regular caller-
+        // matches-target invariant inside DKGAgent.query.
+        adminAuthenticated: isAdminToken,
+        minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
       const execDur = Date.now() - execT0;
@@ -6679,7 +6825,17 @@ async function handleRequest(
         msg.includes("was removed in V10") ||
         msg.includes("agentAddress is required") ||
         msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with")
+        msg.includes("cannot be combined with") ||
+        // A-1 review: DKGAgent.query throws these when the caller sends
+        // a non-string `agentAddress` / `callerAgentAddress` in the
+        // body. Classify as 400 so malformed input is a clean client
+        // error instead of a 500.
+        msg.startsWith("query: 'agentAddress' must be a string") ||
+        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
+        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
+        // so direct callers that forward a string / out-of-range
+        // value get a 400 instead of a 500.
+        msg.startsWith("Invalid minTrust")
       ) {
         return jsonResponse(res, 400, { error: msg });
       }
@@ -7974,20 +8130,51 @@ async function handleRequest(
   // POST /api/endorse
   if (req.method === "POST" && path === "/api/endorse") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
-    if (!contextGraphId || !ual || !agentAddress) {
+    const parsed = JSON.parse(body);
+    const { contextGraphId, ual } = parsed;
+    if (!contextGraphId || !ual) {
       return jsonResponse(res, 400, {
-        error: "Missing contextGraphId, ual, or agentAddress",
+        error: "Missing contextGraphId or ual",
+      });
+    }
+    // A-12 review: the endorser MUST come from the authenticated bearer
+    // token, not from the request body. Trusting body.agentAddress let
+    // any caller with node access publish endorsements as an arbitrary
+    // `did:dkg:agent:0x...`, forging provenance. `requestAgentAddress`
+    // is the token-resolved identity. If the body also includes
+    // `agentAddress`, it must match or we reject with 403. The
+    // registered-local-agent check is implicit: resolveAgentAddress
+    // returns either the token's agent (if it's an agent-scoped
+    // token) or `defaultAgentAddress` (the node's own auto-registered
+    // agent). Both are owned by this node by construction.
+    // Defence in depth: an unauthenticated caller has no agent identity
+    // to attribute an endorsement to. Early return 401 rather than
+    // attempting `.toLowerCase()` on a null/undefined address.
+    if (!requestAgentAddress) {
+      return jsonResponse(res, 401, {
+        error:
+          "Endorsement requires an authenticated agent. Provide a bearer token tied to a registered agent.",
+      });
+    }
+    const bodyAgentAddress = typeof parsed.agentAddress === 'string' ? parsed.agentAddress : undefined;
+    if (
+      bodyAgentAddress &&
+      bodyAgentAddress.toLowerCase() !== requestAgentAddress.toLowerCase()
+    ) {
+      return jsonResponse(res, 403, {
+        error:
+          `Endorser mismatch: authenticated as ${requestAgentAddress} but request body claims ${bodyAgentAddress}. ` +
+          `The endorser is resolved from the bearer token; omit body.agentAddress or use the matching agent's token.`,
       });
     }
     const result = await agent.endorse({
       contextGraphId,
       knowledgeAssetUal: ual,
-      agentAddress,
+      agentAddress: requestAgentAddress,
     });
     return jsonResponse(res, 200, {
       endorsed: true,
-      endorserAddress: agentAddress,
+      endorserAddress: requestAgentAddress,
       ...result,
     });
   }

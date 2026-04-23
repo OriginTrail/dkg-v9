@@ -1,3 +1,15 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
@@ -6,12 +18,12 @@ const PbLong = protobuf.util.Long as unknown as {
   fromNumber(val: number, unsigned?: boolean): { low: number; high: number; unsigned: boolean };
 };
 
-const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
+export const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
   .add(new Field('rootEntity', 1, 'string'))
   .add(new Field('privateMerkleRoot', 2, 'bytes'))
   .add(new Field('privateTripleCount', 3, 'uint32'));
 
-const KAUpdateRequestSchema = new Type('KAUpdateRequest')
+export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('paranetId', 1, 'string'))
   .add(new Field('batchId', 2, 'uint64'))
   .add(new Field('nquads', 3, 'bytes'))

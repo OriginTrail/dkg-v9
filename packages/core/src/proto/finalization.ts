@@ -1,8 +1,20 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-const FinalizationMessageSchema = new Type('FinalizationMessage')
+export const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('ual', 1, 'string'))
   .add(new Field('paranetId', 2, 'string'))
   .add(new Field('kcMerkleRoot', 3, 'bytes'))

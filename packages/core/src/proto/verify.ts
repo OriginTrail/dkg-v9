@@ -1,3 +1,15 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
@@ -9,7 +21,7 @@ const { Type, Field } = protobuf;
  * Sent via direct P2P streams, not GossipSub.
  */
 
-const VerifyProposalSchema = new Type('VerifyProposal')
+export const VerifyProposalSchema = new Type('VerifyProposal')
   .add(new Field('proposalId', 1, 'bytes'))
   .add(new Field('verifiedMemoryId', 2, 'uint64'))
   .add(new Field('batchId', 3, 'uint64'))
@@ -20,7 +32,7 @@ const VerifyProposalSchema = new Type('VerifyProposal')
   .add(new Field('expiresAt', 8, 'string'))
   .add(new Field('contextGraphId', 9, 'string'));
 
-const VerifyApprovalSchema = new Type('VerifyApproval')
+export const VerifyApprovalSchema = new Type('VerifyApproval')
   .add(new Field('proposalId', 1, 'bytes'))
   .add(new Field('agentSignatureR', 2, 'bytes'))
   .add(new Field('agentSignatureVS', 3, 'bytes'))

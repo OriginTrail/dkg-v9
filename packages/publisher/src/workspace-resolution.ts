@@ -34,7 +34,13 @@ export async function resolveWorkspaceSelection(params: {
   return quads;
 }
 
-async function resolveWorkspaceOperation(params: {
+/**
+ * @internal — exported strictly for backwards compatibility with
+ * external consumers that deep-imported this helper before
+ * `@origintrail-official/dkg-publisher` had an `exports` map.
+ * The only in-repo caller is `resolveWorkspaceQuads` in this file.
+ */
+export async function resolveWorkspaceOperation(params: {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;

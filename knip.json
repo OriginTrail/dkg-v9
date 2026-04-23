@@ -18,6 +18,7 @@
     "solady",
     "@vitest/coverage-v8"
   ],
+  "tags": ["-@internal"],
   "workspaces": {
     ".": {
       "entry": [

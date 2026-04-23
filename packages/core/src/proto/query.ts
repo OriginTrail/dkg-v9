@@ -7,16 +7,28 @@
  * replaced with a constrained entity-lookup schema). Do not register a handler
  * for /dkg/query/1.0.0 in Part 1.
  */
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-const QueryRequestSchema = new Type('QueryRequest')
+export const QueryRequestSchema = new Type('QueryRequest')
   .add(new Field('sparql', 1, 'string'))
   .add(new Field('paranetId', 2, 'string'))
   .add(new Field('timeout', 3, 'uint32'));
 
-const QueryResponseSchema = new Type('QueryResponse')
+export const QueryResponseSchema = new Type('QueryResponse')
   .add(new Field('nquads', 1, 'bytes'))
   .add(new Field('bindings', 2, 'bytes'))
   .add(new Field('error', 3, 'string'));

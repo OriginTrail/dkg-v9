@@ -1,3 +1,15 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
@@ -12,7 +24,7 @@ const { Type, Field } = protobuf;
  * with a StorageACK via direct P2P stream `/dkg/10.0.0/storage-ack`.
  */
 
-const PublishIntentSchema = new Type('PublishIntent')
+export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('merkleRoot', 1, 'bytes'))
   .add(new Field('contextGraphId', 2, 'string'))
   .add(new Field('publisherPeerId', 3, 'string'))

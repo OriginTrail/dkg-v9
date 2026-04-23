@@ -1,21 +1,33 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
 /** Manifest entry for one root entity in a shared memory write (no tokenId). */
-const WorkspaceManifestEntrySchema = new Type('WorkspaceManifestEntry')
+export const WorkspaceManifestEntrySchema = new Type('WorkspaceManifestEntry')
   .add(new Field('rootEntity', 1, 'string'))
   .add(new Field('privateMerkleRoot', 2, 'bytes'))
   .add(new Field('privateTripleCount', 3, 'uint32'));
 
 /** CAS condition carried in gossip so receiving peers enforce the same guard. */
-const WorkspaceCASConditionSchema = new Type('WorkspaceCASCondition')
+export const WorkspaceCASConditionSchema = new Type('WorkspaceCASCondition')
   .add(new Field('subject', 1, 'string'))
   .add(new Field('predicate', 2, 'string'))
   .add(new Field('expectedValue', 3, 'string'))
   .add(new Field('expectAbsent', 4, 'bool'));
 
-const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
+export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('paranetId', 1, 'string'))
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('manifest', 3, 'WorkspaceManifestEntry', 'repeated'))

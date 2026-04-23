@@ -1,14 +1,26 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-const KAManifestEntrySchema = new Type('KAManifestEntry')
+export const KAManifestEntrySchema = new Type('KAManifestEntry')
   .add(new Field('tokenId', 1, 'uint64'))
   .add(new Field('rootEntity', 2, 'string'))
   .add(new Field('privateMerkleRoot', 3, 'bytes'))
   .add(new Field('privateTripleCount', 4, 'uint32'));
 
-const PublishRequestSchema = new Type('PublishRequest')
+export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('ual', 1, 'string'))
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('paranetId', 3, 'string'))
@@ -26,7 +38,7 @@ const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('subGraphName', 15, 'string'))
   .add(KAManifestEntrySchema);
 
-const PublishAckSchema = new Type('PublishAck')
+export const PublishAckSchema = new Type('PublishAck')
   .add(new Field('merkleRoot', 1, 'bytes'))
   .add(new Field('identityId', 2, 'uint64'))
   .add(new Field('signatureR', 3, 'bytes'))

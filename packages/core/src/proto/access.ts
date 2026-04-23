@@ -1,15 +1,27 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-const AccessRequestSchema = new Type('AccessRequest')
+export const AccessRequestSchema = new Type('AccessRequest')
   .add(new Field('kaUal', 1, 'string'))
   .add(new Field('requesterPeerId', 2, 'string'))
   .add(new Field('paymentProof', 3, 'bytes'))
   .add(new Field('requesterSignature', 4, 'bytes'))
   .add(new Field('requesterPublicKey', 5, 'bytes'));
 
-const AccessResponseSchema = new Type('AccessResponse')
+export const AccessResponseSchema = new Type('AccessResponse')
   .add(new Field('granted', 1, 'bool'))
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('privateMerkleRoot', 3, 'bytes'))

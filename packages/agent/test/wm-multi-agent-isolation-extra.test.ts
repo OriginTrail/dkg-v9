@@ -250,6 +250,77 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
   );
 
   it(
+    'A-1 (Codex PR #242 iter-9 re-review): default-agent self-reads via peerId alias ' +
+      'must resolve to the same canonical identity. Legacy WM callers ' +
+      '(ChatMemoryManager, SKILL.md examples) use `agentAddress=<peerId>` — an ' +
+      'agent-scoped token whose callerAgentAddress is the default agent\'s EVM ' +
+      'address must be able to read that legacy namespace without falling into ' +
+      "the A-1 mismatch deny branch.",
+    async () => {
+      const cgId = freshCgId('wm-iso-peerid');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso peerId', description: '' });
+
+      const defaultA = node!.getDefaultAgentAddress()!;
+      const peerId = node!.peerId;
+      expect(
+        peerId,
+        'this test needs the node to expose a peerId — otherwise the ' +
+          'alias case we are pinning does not exist',
+      ).toBeTruthy();
+
+      // Seed the legacy peerId-keyed WM namespace for the default
+      // agent (this is the path ChatMemoryManager still writes to).
+      const assertionName = 'legacy-peerid-wm';
+      await node!.publisher.assertionCreate(cgId, assertionName, peerId!);
+      await node!.publisher.assertionWrite(cgId, assertionName, peerId!, [
+        {
+          subject: 'urn:wm:legacy:peerid-note',
+          predicate: 'http://schema.org/description',
+          object: '"legacy peerId-keyed WM"',
+          graph: '',
+        },
+      ]);
+
+      // Authenticated as the default agent (EVM), read with the
+      // peerId alias. Pre-iter-9 this fell into
+      // `callerAddr.toLowerCase() !== targetAddr.toLowerCase()` and
+      // returned 0 bindings even though both identifiers point at
+      // the same identity.
+      const viaPeerId = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: peerId!,
+          callerAgentAddress: defaultA,
+        },
+      );
+      expect(
+        viaPeerId.bindings.length,
+        'default-agent read with agentAddress=peerId must resolve to the same WM namespace',
+      ).toBe(1);
+
+      // And the omitted-agentAddress case: if the caller is the
+      // default agent, the iter-9 default preserves legacy peerId
+      // semantics so pre-existing peerId-keyed data stays
+      // accessible.
+      const viaOmit = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          callerAgentAddress: defaultA,
+          // agentAddress intentionally omitted
+        },
+      );
+      expect(
+        viaOmit.bindings.length,
+        'default-agent omitted-agentAddress must default to peerId-keyed WM for legacy data access',
+      ).toBe(1);
+    },
+  );
+
+  it(
     'A-1 (Codex PR #242 iter-4): cross-agent WM mutation is REJECTED, not silently swallowed ' +
       'as a 0-binding deny. The access-denied fast-path used to return before ' +
       '`validateReadOnlySparql` ran, so `INSERT DATA { ... }` over another agent\'s WM ' +

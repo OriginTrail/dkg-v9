@@ -2826,25 +2826,61 @@ export class DKGAgent {
       );
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
+
+    // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
+    // node's default agent has TWO identifiers that key the same WM
+    // namespace — its EVM address (`this.defaultAgentAddress`) and
+    // the legacy `this.peerId`. In-repo WM callers / docs still use
+    // `peerId` as `agentAddress` (e.g. `ChatMemoryManager`,
+    // `packages/cli/skills/dkg-node/SKILL.md`), and the engine
+    // stores WM under
+    // `did:dkg:context-graph:<cg>/assertion/<agentAddress>/`, so EVM
+    // and peerId hash to DIFFERENT graphs. If the isolation check
+    // compared raw strings, an agent-scoped token with
+    // `callerAgentAddress=<defaultAgent.evm>` querying its own WM
+    // with `agentAddress=<peerId>` (or the reverse) would get a
+    // silent empty deny even though both sides are the same
+    // identity. Canonicalize both sides: when the default agent is
+    // known, fold its `peerId` alias onto its EVM address.
+    const defaultEvmLc = this.defaultAgentAddress?.toLowerCase();
+    const peerIdLc = this.peerId?.toLowerCase();
+    const canonicaliseWmId = (addr: string | undefined): string | undefined => {
+      if (!addr) return undefined;
+      const lc = addr.toLowerCase();
+      if (peerIdLc && lc === peerIdLc && defaultEvmLc) return defaultEvmLc;
+      return lc;
+    };
+
     // An authenticated (agent-bound) /api/query call could previously
     // OMIT `agentAddress` and fall through to the `this.peerId`
     // fallback at the engine call below, reading the node-default WM
     // namespace instead of the caller's own. Default an omitted
     // `agentAddress` to `callerAgentAddress` on working-memory reads
     // so an agent-bound caller cannot escape its own WM by just not
-    // supplying the field. The isolation check below then becomes a
-    // tautology for that case — which is exactly what we want
-    // (caller == target, no cross-read possible).
+    // supplying the field.
+    //
+    // Legacy preservation (Codex iter-9 re-review): if the caller is
+    // the node default agent, default to `this.peerId` instead of
+    // the EVM address. Pre-existing WM data for the default agent
+    // lives under the peerId-keyed namespace; defaulting to the EVM
+    // form would strand that data. The isolation check below is
+    // alias-aware (`canonicaliseWmId`), so both forms resolve to the
+    // same canonical identity and still pass the caller===target
+    // invariant.
+    const callerIsDefaultAgent =
+      !!callerAgentAddressStr
+      && !!defaultEvmLc
+      && callerAgentAddressStr.toLowerCase() === defaultEvmLc;
     const agentAddressStr =
       opts.agentAddress
       ?? (opts.view === 'working-memory' && callerAgentAddressStr
-        ? callerAgentAddressStr
+        ? (callerIsDefaultAgent && this.peerId ? this.peerId : callerAgentAddressStr)
         : undefined);
     if (
       opts.view === 'working-memory' &&
       callerAgentAddressStr &&
       agentAddressStr &&
-      callerAgentAddressStr.toLowerCase() !== agentAddressStr.toLowerCase()
+      canonicaliseWmId(callerAgentAddressStr) !== canonicaliseWmId(agentAddressStr)
     ) {
       this.log.info(
         ctx,

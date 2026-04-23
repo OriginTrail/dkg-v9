@@ -33,3 +33,37 @@ export const PHASE_COLORS: Record<string, string> = {
 };
 
 export const PHASE_FALLBACK_COLOR = '#a78bfa';
+
+/**
+ * Legend entries surfaced on the Operations view.
+ *
+ * P-1 review: previously Operations.tsx maintained a hand-written
+ * legend map that duplicated the colour half of `PHASE_COLORS` —
+ * which meant a change in one needed a matching change in the
+ * other (e.g. `chain:writeahead` drift). Derive the legend from
+ * `PHASE_COLORS` here so there is exactly one source of truth.
+ *
+ * The whitelist pins the subset we want to render in the legend
+ * (legend space is limited; we don't expose every micro-phase).
+ * Colours always come from `PHASE_COLORS` — do NOT hard-code them.
+ */
+const PHASE_LEGEND_ORDER: Array<{ phase: string; label: string }> = [
+  { phase: 'prepare', label: 'Prepare' },
+  { phase: 'store', label: 'Store' },
+  { phase: 'chain', label: 'Chain' },
+  { phase: 'chain:writeahead', label: 'Write-ahead' },
+  { phase: 'broadcast', label: 'Broadcast' },
+  { phase: 'parse', label: 'Parse' },
+  { phase: 'execute', label: 'Execute' },
+  { phase: 'transfer', label: 'Transfer' },
+  { phase: 'verify', label: 'Verify' },
+  { phase: 'decode', label: 'Decode' },
+  { phase: 'validate', label: 'Validate' },
+];
+
+export const PHASE_LEGEND_ENTRIES: Array<{ phase: string; label: string; color: string }> =
+  PHASE_LEGEND_ORDER.map(({ phase, label }) => ({
+    phase,
+    label,
+    color: PHASE_COLORS[phase] ?? PHASE_FALLBACK_COLOR,
+  }));

@@ -1309,11 +1309,19 @@ export class DKGPublisher implements Publisher {
         // as the cue to checkpoint the publish; `:end` fires once
         // the adapter returns or throws.
         //
-        // Follow-up (P-1.2): to persist the actual signed txHash,
-        // split the EVM adapter's sign/broadcast flow and expose a
-        // pre-broadcast `onTxSigned(txHash)` hook on
-        // `V10PublishDirectParams`. That turns this marker from a
-        // coarse boundary into a real write-ahead log entry.
+        // Scope caveat (tracked as P-1.2): this marker brackets the
+        // entire adapter broadcast *window*, not a specific tx hash.
+        // `createKnowledgeAssetsV10` may internally broadcast an ERC20
+        // `approve()` tx before the actual publish tx when the TRAC
+        // allowance is insufficient (see
+        // `packages/chain/src/evm-adapter.ts` — `token.approve(kaAddress,
+        // MaxUint256)` before the publish call). A crash between the
+        // approve and the publish is recoverable (a new run just re-
+        // observes the allowance and skips the second approve), but a
+        // true per-tx write-ahead log would need a pre-broadcast
+        // `onTxSigned(txHash)` hook wired through the adapter so this
+        // phase can carry the actual publish txHash. That upgrade is
+        // P-1.2, tracked separately.
         onPhase?.('chain:writeahead', 'start');
         try {
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
@@ -1554,9 +1562,12 @@ export class DKGPublisher implements Publisher {
     // try/finally that emits `:end`, so start/end are always balanced
     // regardless of where inside the adapter the call throws. See the
     // equivalent marker in the publish path above for the full
-    // rationale; both paths currently emit a coarse phase boundary,
-    // with a follow-up (P-1.2) to plumb the actual signed txHash via
-    // an adapter hook.
+    // rationale; both paths currently emit a coarse phase boundary
+    // that can include an internal TRAC `approve()` broadcast when
+    // the KA contract allowance is insufficient (see the scope caveat
+    // on the publish path). The follow-up (P-1.2) is to plumb the
+    // actual signed txHash for the update call via a pre-broadcast
+    // adapter hook.
     let txResult: { success: boolean; hash: string; blockNumber?: number };
     let earlyReturn: PublishResult | undefined;
     onPhase?.('chain:writeahead', 'start');

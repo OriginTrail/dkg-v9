@@ -10,9 +10,13 @@ import {
   fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
 } from '../api.js';
 // P-1 review: shared phase palette — single source of truth for
-// phase → colour. Previously Dashboard and Operations kept two
-// independent maps that drifted.
-import { PHASE_COLORS, PHASE_FALLBACK_COLOR } from '../phase-colors.js';
+// phase → colour AND the Operations legend. Previously Dashboard
+// and Operations kept two independent maps that drifted.
+import {
+  PHASE_COLORS,
+  PHASE_FALLBACK_COLOR,
+  PHASE_LEGEND_ENTRIES,
+} from '../phase-colors.js';
 
 const STATUS_COLORS: Record<string, string> = {
   success: '#22c55e',
@@ -52,19 +56,6 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   gossip: 'Propagate updates across the peer-to-peer network',
   system: 'Internal system maintenance operation',
 };
-
-const PHASE_LEGEND_ENTRIES = [
-  { phase: 'prepare', label: 'Prepare', color: '#3b82f6' },
-  { phase: 'store', label: 'Store', color: '#8b5cf6' },
-  { phase: 'chain', label: 'Chain', color: '#f59e0b' },
-  { phase: 'broadcast', label: 'Broadcast', color: '#22c55e' },
-  { phase: 'parse', label: 'Parse', color: '#3b82f6' },
-  { phase: 'execute', label: 'Execute', color: '#8b5cf6' },
-  { phase: 'transfer', label: 'Transfer', color: '#60a5fa' },
-  { phase: 'verify', label: 'Verify', color: '#22c55e' },
-  { phase: 'decode', label: 'Decode', color: '#14b8a6' },
-  { phase: 'validate', label: 'Validate', color: '#2dd4bf' },
-];
 
 const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text)' };
 

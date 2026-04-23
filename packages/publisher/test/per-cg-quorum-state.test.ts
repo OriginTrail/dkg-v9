@@ -164,3 +164,84 @@ describe('computePerCgQuorumState (bot review r11-1)', () => {
     expect(s.effectiveAckCount).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR #229 bot review (post-v10-rc-merge, r21-6): selfSignEligible must
+// also gate on actual CG participation. Counting a self-sign that the V10
+// contract would reject as `InvalidSignerNotParticipant` silently turned
+// every non-participant publish into a guaranteed reverted on-chain tx
+// AND incorrectly cleared the local quorum gate.
+// ---------------------------------------------------------------------------
+describe('computePerCgQuorumState — r21-6 CG participation gate', () => {
+  it('chain says publisher IS a participant → self-sign counts (no behavioural change)', () => {
+    const s = computePerCgQuorumState(
+      baseInputs({
+        perCgRequiredSignatures: 1,
+        publisherIsCgParticipant: true,
+      }),
+    );
+    expect(s.selfSignEligible).toBe(true);
+    expect(s.effectiveAckCount).toBe(1);
+    expect(s.perCgQuorumUnmet).toBe(false);
+  });
+
+  it('chain says publisher is NOT a participant → self-sign denied even if every other condition is met', () => {
+    const s = computePerCgQuorumState(
+      baseInputs({
+        perCgRequiredSignatures: 1,
+        publisherIsCgParticipant: false,
+      }),
+    );
+    expect(s.selfSignEligible).toBe(false);
+    expect(s.effectiveAckCount).toBe(0);
+    expect(s.perCgQuorumUnmet).toBe(true);
+  });
+
+  it('non-participant publisher with one peer ACK STILL fails M-of-N (the bot finding)', () => {
+    // Pre-r21-6: this returned effective=2 (peer + bogus self-sign),
+    // perCgQuorumUnmet=false. The publisher would build a tx with
+    // 2 sigs, the V10 contract would reject the publisher signature
+    // as non-participant, and the publish would revert on-chain
+    // even though the local quorum gate said "ready".
+    const s = computePerCgQuorumState(
+      baseInputs({
+        perCgRequiredSignatures: 2,
+        collectedAcks: [{ nodeIdentityId: PEER_A }],
+        publisherIsCgParticipant: false,
+      }),
+    );
+    expect(s.selfSignEligible).toBe(false);
+    expect(s.effectiveAckCount).toBe(1);
+    expect(s.perCgQuorumUnmet).toBe(true);
+  });
+
+  it('participant set unknown (undefined) → preserves historical lenient path', () => {
+    // Adapters that don't expose a CG registry (basic mocks,
+    // descriptive-name SWM domains that resolve to v10CgId=0n) MUST
+    // still let the publish exercise the data-flow path; the V10
+    // contract is the final authority on participation.
+    const s = computePerCgQuorumState(
+      baseInputs({
+        perCgRequiredSignatures: 1,
+        publisherIsCgParticipant: undefined,
+      }),
+    );
+    expect(s.selfSignEligible).toBe(true);
+    expect(s.effectiveAckCount).toBe(1);
+    expect(s.perCgQuorumUnmet).toBe(false);
+  });
+
+  it('non-participant + already-ACKed publisher: dedupe still wins (selfSignEligible=false either way)', () => {
+    const s = computePerCgQuorumState(
+      baseInputs({
+        perCgRequiredSignatures: 1,
+        collectedAcks: [{ nodeIdentityId: PUBLISHER_ID }],
+        publisherIsCgParticipant: false,
+      }),
+    );
+    expect(s.publisherAlreadyAcked).toBe(true);
+    expect(s.selfSignEligible).toBe(false);
+    expect(s.effectiveAckCount).toBe(1);
+    expect(s.perCgQuorumUnmet).toBe(false);
+  });
+});

@@ -76,17 +76,81 @@ export function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/;
 
 /**
- * Extract the `dkg:` block from AGENTS.md YAML frontmatter. Accepts a
- * full-file source string and returns the validated config.
+ * PR #229 bot review (post-v10-rc-merge, r21-4): also accept a fenced
+ * code block tagged with the `dkg-config` info-string anywhere in
+ * the document. The repo's own `AGENTS.md` (and the wider AGENTS.md
+ * convention popularised by Cursor / Continue / Codex CLI) is plain
+ * Markdown WITHOUT YAML frontmatter, so the frontmatter-only third
+ * tier is unusable for the projects that actually rely on AGENTS.md
+ * as their workspace-config carrier. By recognising
+ *
+ *   ```dkg-config
+ *   contextGraph: my-project
+ *   node: http://127.0.0.1:9201
+ *   ```
+ *
+ * (or `yaml dkg-config` / `json dkg-config` for editors that want
+ * syntax highlighting), `loadWorkspaceConfig` works on plain
+ * Markdown agent files without forcing the project to add a YAML
+ * frontmatter block that would also need to be hidden in every
+ * Markdown renderer downstream.
+ *
+ * The fence info-string is the discriminator (NOT a heading or
+ * proximity rule) so the parser stays oblivious to surrounding
+ * prose, embedded snippets, and code samples. The first matching
+ * fence wins; later ones are ignored so a project can demote a
+ * draft block by renaming the info-string to something else.
+ */
+const DKG_CONFIG_FENCE_RE =
+  /(^|\n)```(?:\s*(?:yaml|yml|json)\s+)?dkg-config\s*\r?\n([\s\S]*?)\r?\n```/i;
+
+/**
+ * Extract the `dkg:` workspace config from an AGENTS.md file. Tries:
+ *   1. YAML frontmatter (`---\n…\n---\n`) with a top-level `dkg:` key
+ *      (canonical spec §22 shape).
+ *   2. A fenced code block tagged ```dkg-config``` (or ```yaml
+ *      dkg-config``` / ```json dkg-config```) anywhere in the
+ *      document — supports the plain-Markdown AGENTS.md convention
+ *      that the rest of the AI-coding-agent ecosystem uses.
+ *
+ * Throws a descriptive error if neither carrier is present so an
+ * adopter who genuinely intended to embed config but mistyped the
+ * fence info-string sees a real diagnostic instead of "no workspace
+ * configuration found".
  */
 export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
-  const m = FRONTMATTER_RE.exec(src);
-  if (!m) throw new Error('AGENTS.md: missing YAML frontmatter');
-  const fm = yaml.load(m[1]) as Record<string, unknown> | null;
-  if (!fm || typeof fm !== 'object' || !('dkg' in fm)) {
-    throw new Error('AGENTS.md frontmatter: missing `dkg` key');
+  const fm = FRONTMATTER_RE.exec(src);
+  if (fm) {
+    const parsed = yaml.load(fm[1]) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== 'object' || !('dkg' in parsed)) {
+      throw new Error('AGENTS.md frontmatter: missing `dkg` key');
+    }
+    return parseWorkspaceConfig(parsed.dkg);
   }
-  return parseWorkspaceConfig(fm.dkg);
+  const fence = DKG_CONFIG_FENCE_RE.exec(src);
+  if (fence) {
+    // The fenced block speaks the same shape as `.dkg/config.yaml`
+    // / `.dkg/config.json` directly (NOT the frontmatter shape that
+    // wraps the schema under a top-level `dkg:` key) so the body of
+    // the fence is identical to a standalone config file. This
+    // keeps the three carriers symmetric and avoids forcing
+    // AGENTS.md authors to add an indentation level.
+    const body = fence[2];
+    let parsed: unknown;
+    try {
+      parsed = yaml.load(body);
+    } catch (err) {
+      throw new Error(
+        `AGENTS.md \`dkg-config\` fenced block did not parse as YAML/JSON: ${(err as Error).message}`,
+      );
+    }
+    return parseWorkspaceConfig(parsed);
+  }
+  throw new Error(
+    'AGENTS.md: no workspace config found — expected either YAML '
+      + 'frontmatter with a top-level `dkg:` key, or a fenced code block '
+      + 'tagged ```dkg-config```.',
+  );
 }
 
 function pathExists(p: string): boolean {

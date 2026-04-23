@@ -26,7 +26,7 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
-import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
@@ -93,6 +93,50 @@ function isValidJournalEntry(value: unknown): value is PreBroadcastJournalEntry 
     typeof v.tokenAmount === 'string' &&
     typeof v.createdAt === 'number'
   );
+}
+
+/**
+ * PR #229 bot review (post-v10-rc-merge, r21-5): atomically rewrite the
+ * NDJSON WAL with `entries` only. Used by the chain-event reconciler
+ * to drop a single pre-broadcast journal entry once the matching
+ * on-chain `KnowledgeBatchCreated` is observed — without this, the
+ * WAL grows unbounded across restarts and the recovery loop would
+ * keep replaying the same already-confirmed intent on every
+ * subsequent start.
+ *
+ * Atomic via tmp-file + `renameSync`: a crash between `write` and
+ * `rename` leaves the previous WAL intact (worst case: we replay an
+ * already-confirmed entry on the next start, which the deduper
+ * tolerates because the confirm path is idempotent). Permissions
+ * mirror `appendWalEntrySync` (0o600 — pubkeys / merkle roots / token
+ * amounts must not leak beyond the node operator).
+ */
+function rewriteWalSync(filePath: string, entries: PreBroadcastJournalEntry[]): void {
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+  } catch {
+    /* best-effort; openSync below will surface the real error */
+  }
+  if (entries.length === 0) {
+    // Compact "no surviving entries" case: just remove the file. A
+    // missing WAL is treated identically to an empty WAL by
+    // `readWalEntriesSync`, and skipping the rewrite avoids a
+    // spurious zero-byte file lingering on disk.
+    if (existsSync(filePath)) {
+      try { unlinkSync(filePath); } catch { /* tolerate races */ }
+    }
+    return;
+  }
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const body = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, filePath);
 }
 
 function appendWalEntrySync(filePath: string, entry: PreBroadcastJournalEntry): void {
@@ -382,6 +426,29 @@ export interface PerCgQuorumInputs {
   readonly publisherWalletReady: boolean;
   readonly publisherNodeIdentityId: bigint;
   readonly v10ChainReady: boolean;
+  /**
+   * PR #229 bot review (post-v10-rc-merge, r21-6): authoritative
+   * answer to "is this publisher's identity allowed to ACK for this
+   * specific context graph?" sourced from the on-chain participant
+   * set (`ChainAdapter.getContextGraphParticipants(cgId)`).
+   *
+   * - `true`  — the chain confirms the publisher is a CG participant,
+   *             so the self-signed ACK can satisfy quorum.
+   * - `false` — the chain confirms the publisher is NOT a CG participant.
+   *             Self-sign is NOT eligible: any tx we'd build would be
+   *             rejected by the V10 contract's "each sig must come from
+   *             a valid participant" check, so counting it locally just
+   *             burns a reverted on-chain publish.
+   * - `undefined` — the participant set is unknown (mock adapter without
+   *             a ContextGraph registry, integration fixtures using a
+   *             descriptive non-numeric `v10CgDomain`, etc.). We
+   *             preserve the historical lenient behaviour: the V10
+   *             contract is the final authority either way, and
+   *             refusing to self-sign here would silently regress every
+   *             single-node mock test that already passes the on-chain
+   *             check via the participant-creator default.
+   */
+  readonly publisherIsCgParticipant?: boolean;
 }
 
 export function computePerCgQuorumState(
@@ -393,11 +460,21 @@ export function computePerCgQuorumState(
     !!input.collectedAcks &&
     input.publisherNodeIdentityId > 0n &&
     input.collectedAcks.some((a) => a.nodeIdentityId === input.publisherNodeIdentityId);
+  // r21-6: when the chain authoritatively says the publisher is NOT a
+  // CG participant, the self-signed ACK cannot satisfy quorum — the
+  // V10 contract will reject the tx as `InvalidSignerNotParticipant`,
+  // and counting it toward `effectiveAckCount` here would silently
+  // burn a reverted on-chain publish AND falsely mark a tentative
+  // publish as "ready". `undefined` (participant set unknown) keeps
+  // the historical behaviour so adapters without a CG registry are
+  // not regressed.
+  const cgParticipationDenies = input.publisherIsCgParticipant === false;
   const selfSignEligible =
     !publisherAlreadyAcked &&
     input.publisherWalletReady &&
     input.publisherNodeIdentityId > 0n &&
-    input.v10ChainReady;
+    input.v10ChainReady &&
+    !cgParticipationDenies;
   const effectiveAckCount = selfSignEligible
     ? collectedAckCount + 1
     : collectedAckCount;
@@ -545,6 +622,119 @@ export class DKGPublisher implements Publisher {
       if (entry.merkleRoot.toLowerCase() === needle) return entry;
     }
     return undefined;
+  }
+
+  /**
+   * PR #229 bot review (post-v10-rc-merge, r21-5): runtime caller of
+   * the recovered WAL. The previous round (r6/r8) added the WAL
+   * fsync + reload but left the in-memory `preBroadcastJournal`
+   * unconsumed — `confirmByMerkleRoot` only walked
+   * `pendingPublishes` (always empty after a restart), so a chain
+   * event that confirmed a pre-crash publish was silently dropped on
+   * the floor and the WAL grew without bound.
+   *
+   * This method closes the loop. The chain-event poller calls it
+   * AFTER the in-memory `confirmByMerkleRoot` returns false, with
+   * the on-chain data extracted from the matching
+   * `KnowledgeBatchCreated` / `KCCreated` event. We:
+   *
+   *   1. Look up a surviving WAL entry by `merkleRoot`.
+   *   2. Sanity-check the on-chain publisher matches the persisted
+   *      one — a mismatch means a different node confirmed an
+   *      identical batch (extremely unlikely, but treat the WAL
+   *      entry as still-pending and DO NOT drop it).
+   *   3. Drop the entry from the in-memory journal AND atomically
+   *      rewrite the WAL file with the surviving entries (so the
+   *      next restart doesn't re-discover the same already-confirmed
+   *      intent and try to re-recover it).
+   *   4. Emit a structured `WAL_RECOVERY_MATCH` log + an
+   *      `EventBus` event so operators can observe the recovery
+   *      stream end-to-end (matches the existing
+   *      `WAL recovery: loaded …` log on the constructor side).
+   *
+   * Promotion of the actual KA tentative→confirmed status quads
+   * isn't done here — the WAL entry deliberately doesn't persist
+   * the per-KA UALs (only the batch-level `kaCount` + KA range from
+   * the on-chain event), and the runtime store may have evicted
+   * the tentative quads during the crash window. A complete
+   * re-issue path is tracked separately; this fix delivers what the
+   * bot actually flagged: "WAL reload has no runtime caller →
+   * crash-window publishes accumulate forever". That's now
+   * resolved.
+   *
+   * Returns the recovered entry on success (so callers can record
+   * structured telemetry / surface it through their own
+   * observability pipeline) or `undefined` when no WAL entry
+   * matches the merkle root.
+   */
+  recoverFromWalByMerkleRoot(
+    merkleRootHex: string,
+    onChainData: { publisherAddress: string; startKAId: bigint; endKAId: bigint },
+    ctx?: OperationContext,
+  ): PreBroadcastJournalEntry | undefined {
+    const opCtx = ctx ?? createOperationContext('publish');
+    const entry = this.findWalEntryByMerkleRoot(merkleRootHex);
+    if (!entry) return undefined;
+    const onChainAddr = onChainData.publisherAddress.toLowerCase();
+    const persistedAddr = entry.publisherAddress.toLowerCase();
+    if (onChainAddr !== persistedAddr) {
+      // A different publisher confirmed a batch with our merkle root.
+      // This should be ~impossible in practice (merkle roots are
+      // derived from publisher-specific signing material), but
+      // refusing to drop the WAL entry here keeps the recovery
+      // optimistic: if our own confirmation arrives later it will
+      // still match and clear the entry, and if the cross-publisher
+      // collision turns out to be real it surfaces in the log.
+      this.log.warn(
+        opCtx,
+        `WAL_RECOVERY_PUBLISHER_MISMATCH merkleRoot=${merkleRootHex} ` +
+          `persisted=${entry.publisherAddress} onChain=${onChainData.publisherAddress} — ` +
+          `WAL entry retained for re-evaluation`,
+      );
+      return undefined;
+    }
+    const idx = this.preBroadcastJournal.findIndex(
+      (e) => e.publishOperationId === entry.publishOperationId,
+    );
+    if (idx >= 0) this.preBroadcastJournal.splice(idx, 1);
+    if (this.publishWalFilePath) {
+      try {
+        rewriteWalSync(this.publishWalFilePath, this.preBroadcastJournal);
+      } catch (rewriteErr) {
+        // Recovery itself succeeded (in-memory journal is current);
+        // a rewrite failure just means the WAL file may still
+        // contain the dropped entry until the next successful
+        // rewrite. We log loudly so operators can intervene if the
+        // disk is wedged, but don't throw — that would mask the
+        // useful recovery telemetry.
+        this.log.warn(
+          opCtx,
+          `WAL_RECOVERY_REWRITE_FAILED merkleRoot=${merkleRootHex} ` +
+            `op=${entry.publishOperationId}: ${rewriteErr instanceof Error ? rewriteErr.message : String(rewriteErr)}`,
+        );
+      }
+    }
+    this.log.info(
+      opCtx,
+      `WAL_RECOVERY_MATCH op=${entry.publishOperationId} merkleRoot=${merkleRootHex} ` +
+        `cg=${entry.contextGraphId.slice(0, 16)}… kas=${onChainData.startKAId}..${onChainData.endKAId} ` +
+        `(${this.preBroadcastJournal.length} entries surviving)`,
+    );
+    try {
+      this.eventBus.emit('publisher.walRecoveryMatch', {
+        publishOperationId: entry.publishOperationId,
+        contextGraphId: entry.contextGraphId,
+        merkleRoot: entry.merkleRoot,
+        publisherAddress: entry.publisherAddress,
+        startKAId: onChainData.startKAId.toString(),
+        endKAId: onChainData.endKAId.toString(),
+      });
+    } catch {
+      // EventBus emit failures are observability-only; never let
+      // them bubble out of the recovery path and abort the chain
+      // event handler.
+    }
+    return entry;
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
@@ -1539,6 +1729,48 @@ export class DKGPublisher implements Publisher {
     // combined set. The eligibility check is now "publisher identity is not
     // already represented in v10ACKs"; the self-sign block below then
     // APPENDS (not replaces) and dedupes by identityId.
+    // r21-6: ask the chain whether our identity is actually allowed
+    // to ACK for this CG before letting the self-sign satisfy quorum
+    // locally. The V10 contract rejects "self-sign by a non-
+    // participant" with `InvalidSignerNotParticipant`, so without
+    // this gate we'd happily build a tx that's guaranteed to revert
+    // AND mark a tentative publish as locally "ready" based on a
+    // signature that doesn't count. We only run the lookup when:
+    //   - the adapter exposes `getContextGraphParticipants` (real EVM,
+    //     non-trivial mock fixtures), AND
+    //   - we have a positive numeric CG id (descriptive SWM names
+    //     resolve to `0n`, which the V10 contract itself rejects
+    //     before any participant check matters).
+    // A returned `null` ⇒ adapter declines to answer (pre-init or
+    // contract not deployed); we preserve the historical lenient
+    // path by treating the answer as unknown.
+    let publisherIsCgParticipant: boolean | undefined;
+    if (
+      this.publisherNodeIdentityId > 0n &&
+      v10CgId > 0n &&
+      typeof this.chain.getContextGraphParticipants === 'function'
+    ) {
+      try {
+        const participants = await this.chain.getContextGraphParticipants(v10CgId);
+        if (participants) {
+          publisherIsCgParticipant = participants.some(
+            (id) => id === this.publisherNodeIdentityId,
+          );
+        }
+      } catch (lookupErr) {
+        // Lookup failures must not promote a false-positive quorum.
+        // We log and treat the result as "unknown" so the V10 contract
+        // remains the authority — the lenient path is preserved while
+        // the "definitely not a participant" denial only fires when
+        // the chain actually returned that answer.
+        this.log.warn(
+          ctx,
+          `getContextGraphParticipants(${v10CgId}) failed: ${lookupErr instanceof Error ? lookupErr.message : String(lookupErr)} ` +
+            `— self-sign eligibility falls back to legacy behaviour (V10 contract is the final authority)`,
+        );
+      }
+    }
+
     const { perCgRequired, collectedAckCount, selfSignEligible, effectiveAckCount, perCgQuorumUnmet } =
       computePerCgQuorumState({
         perCgRequiredSignatures: options.perCgRequiredSignatures,
@@ -1546,6 +1778,7 @@ export class DKGPublisher implements Publisher {
         publisherWalletReady: !!this.publisherWallet,
         publisherNodeIdentityId: this.publisherNodeIdentityId,
         v10ChainReady: v10ChainId !== undefined && v10KavAddress !== undefined,
+        publisherIsCgParticipant,
       });
     if (perCgQuorumUnmet) {
       this.log.warn(

@@ -378,6 +378,53 @@ const CHAT_AGENT_ACTOR = `${CHAT_NS}actor:agent`;
 
 type ChatQuad = { subject: string; predicate: string; object: string; graph: string };
 
+/**
+ * PR #229 bot review (post-v10-rc-merge, r21-3): per-runtime tracker
+ * of which `schema:Conversation` session roots have already been
+ * emitted by THIS process. The canonical writer in
+ * `packages/node-ui/src/chat-memory.ts` (search for `isNewSession`)
+ * does the exact same guard for the exact same reason — re-emitting
+ * `?session rdf:type schema:Conversation` on every turn trips DKG
+ * Working-Memory Rule 4 (entity exclusivity) and rejects the second
+ * persisted turn in the same room even though only the message
+ * nodes are new. Per-runtime keying so two concurrent agents in the
+ * same process do not silently suppress each other's session
+ * declarations.
+ *
+ * Falls open after process restart by design: if the session root
+ * was previously persisted and the WM read shows it, the in-process
+ * tracker hasn't been rehydrated and we'll re-emit. The triple-store
+ * deduplicates byte-identical `(s,p,o,g)` quads, so the re-emission
+ * is a no-op write at the storage layer — the WM Rule-4 check fires
+ * only on cross-call repetition within a single process, which is
+ * exactly the case this cache is designed to cover.
+ */
+let emittedSessionRootsByRuntime: WeakMap<object, Set<string>> = new WeakMap();
+let emittedSessionRootsAnon: Set<string> = new Set();
+
+function shouldEmitSessionRoot(runtime: unknown, sessionUri: string): boolean {
+  let seen: Set<string>;
+  if (runtime !== null && typeof runtime === 'object') {
+    let s = emittedSessionRootsByRuntime.get(runtime as object);
+    if (!s) {
+      s = new Set<string>();
+      emittedSessionRootsByRuntime.set(runtime as object, s);
+    }
+    seen = s;
+  } else {
+    seen = emittedSessionRootsAnon;
+  }
+  if (seen.has(sessionUri)) return false;
+  seen.add(sessionUri);
+  return true;
+}
+
+/** Test-only: drop every recorded session-root emission. */
+export function __resetEmittedSessionRootsForTests(): void {
+  emittedSessionRootsByRuntime = new WeakMap();
+  emittedSessionRootsAnon = new Set();
+}
+
 function buildSessionEntityQuads(sessionUri: string, sessionId: string): ChatQuad[] {
   return [
     { subject: sessionUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Conversation`, graph: '' },
@@ -762,8 +809,7 @@ export async function persistChatTurnImpl(
   // (`onAssistantReplyHandler`, r16-2) already plumbs a real boolean
   // here, so this only changes behaviour for ambiguous external
   // callers — and the change is in the safe direction.
-  const userTurnPersisted = optsAny.userTurnPersisted === true;
-  const headlessAssistantReply = mode === 'assistant-reply' && !userTurnPersisted;
+  const userTurnPersistedRaw = optsAny.userTurnPersisted === true;
   // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
   // fallback is NOT stable: two separate calls for the same logical
   // message (e.g. retry, rebroadcast) would fabricate different turn
@@ -775,6 +821,27 @@ export async function persistChatTurnImpl(
   // upstream contract instead of silently corrupting the chat graph.
   const rawMemoryId = (message as any)?.id;
   const explicitUserMessageId = mode === 'assistant-reply' ? optsAny.userMessageId : undefined;
+  // PR #229 bot review (post-v10-rc-merge, r21-2): on the
+  // append-only assistant path, falling back to `message.id`
+  // (the assistant-reply Memory's own id) when `userMessageId`
+  // is missing produces a `turnSourceId` based on the assistant
+  // id rather than the user id. The append-only branch then
+  // writes `hasAssistantMessage` onto a brand-new turn URI that
+  // has no matching `hasUserMessage` edge, so the reader
+  // (`getSessionGraphDelta`) never resolves it and the reply is
+  // unreadable. The append-only path is ONLY safe when the
+  // caller can prove BOTH (a) `userTurnPersisted: true` AND
+  // (b) the user message id that the prior `onChatTurn` write
+  // keyed the canonical turn under. Refuse to take the cheap
+  // path when (b) is missing — fall through to the safe
+  // headless full-envelope path that emits both edges on a
+  // distinct headless turn URI (also fixed in r21-1).
+  const userTurnPersisted =
+    userTurnPersistedRaw
+    && mode === 'assistant-reply'
+    && typeof explicitUserMessageId === 'string'
+    && explicitUserMessageId.length > 0;
+  const headlessAssistantReply = mode === 'assistant-reply' && !userTurnPersisted;
   const turnSourceId = explicitUserMessageId
     ?? (typeof rawMemoryId === 'string' && rawMemoryId.length > 0 ? rawMemoryId : undefined);
   if (!turnSourceId) {
@@ -813,6 +880,31 @@ export async function persistChatTurnImpl(
   const userMsgUri = `${CHAT_NS}msg:user:${turnKey}`;
   const assistantMsgUri = `${CHAT_NS}msg:agent:${turnKey}`;
   const turnUri = `${CHAT_NS}turn:${turnKey}`;
+  // PR #229 bot review (post-v10-rc-merge, r21-1): the headless
+  // assistant-reply path MUST NOT mutate the canonical
+  // `${CHAT_NS}turn:${turnKey}` subject. If the real user-turn
+  // was actually persisted earlier (typical case: the caller
+  // conservatively set `userTurnPersisted: false` after a
+  // restart/replay even though the prior write succeeded), the
+  // canonical turn already carries `dkg:hasUserMessage →
+  // ${userMsgUri}` (the real user message). Stamping a SECOND
+  // `dkg:hasUserMessage → ${userStubUri}` onto that same
+  // canonical subject leaves the reader's
+  // `SELECT ?u ?a WHERE { ?turn hasUserMessage ?u . ... } LIMIT 1`
+  // free to bind the stub instead of the real user message —
+  // resurrecting the blank-turn regression that round 8 / r15-2
+  // / r20-1 already paid down.
+  //
+  // Fix: route the headless envelope onto a DEDICATED
+  // `${CHAT_NS}headless-turn:` URI. The reader still discovers it
+  // via `?turn rdf:type dkg:ChatTurn`, but the canonical
+  // turn URI is left alone for the (potentially-already-
+  // persisted) real user-turn. The two URIs cannot collide and
+  // the `dkg:headlessTurn "true"` marker on the headless
+  // envelope keeps it filterable at query time. Mirrors the
+  // existing `msg:user:` ↔ `msg:user-stub:` separation r15-2
+  // introduced.
+  const headlessTurnUri = `${CHAT_NS}headless-turn:${turnKey}`;
   // Bot review (PR #229 follow-up, actions.ts:539): `new Date().toISOString()`
   // broke idempotence. Re-firing onChatTurn / onAssistantReply for the
   // same message reuses the same {turnUri, userMsgUri, assistantMsgUri}
@@ -898,8 +990,12 @@ export async function persistChatTurnImpl(
           : turnSourceId;
       const stubTurnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(stubSourceId)}`;
       const userStubUri = `${CHAT_NS}msg:user-stub:${stubTurnKey}`;
+      // r21-1: assistant message lives on its own URI keyed by
+      // the stub turn key so it cannot collide with a real
+      // canonical assistant message URI for the same `turnKey`.
+      const headlessAssistantMsgUri = `${CHAT_NS}msg:agent-headless:${stubTurnKey}`;
       const assistantQuads = buildAssistantMessageQuads(
-        assistantMsgUri,
+        headlessAssistantMsgUri,
         userStubUri,
         sessionUri,
         assistantTs,
@@ -907,16 +1003,26 @@ export async function persistChatTurnImpl(
         turnKey,
       ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
       quads = [
-        ...buildSessionEntityQuads(sessionUri, sessionId),
+        // r21-3: only emit the session root the first time this
+        // runtime sees this `sessionUri` in the current process.
+        // Re-emitting `?session rdf:type schema:Conversation`
+        // on every turn trips DKG WM Rule 4 (entity exclusivity)
+        // and fails the second persisted turn in the same room.
+        ...(shouldEmitSessionRoot(runtime, sessionUri)
+          ? buildSessionEntityQuads(sessionUri, sessionId)
+          : []),
         ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, turnKey),
         ...assistantQuads,
         ...buildHeadlessAssistantTurnEnvelopeQuads(
-          turnUri,
+          // r21-1: headless envelope MUST land on the dedicated
+          // `headless-turn:` URI so it cannot pollute the
+          // canonical `turn:` URI used by the user-first path.
+          headlessTurnUri,
           sessionUri,
           turnKey,
           ts,
           userStubUri,
-          assistantMsgUri,
+          headlessAssistantMsgUri,
           characterName,
           userId,
           roomId,
@@ -940,7 +1046,16 @@ export async function persistChatTurnImpl(
       ?? '';
 
     quads = [
-      ...buildSessionEntityQuads(sessionUri, sessionId),
+      // r21-3: only emit the session root the first time this
+      // runtime sees this `sessionUri` in the current process —
+      // identical guard to the headless branch above and to the
+      // canonical writer in `node-ui/src/chat-memory.ts:519`.
+      // Re-emitting `?session rdf:type schema:Conversation` on
+      // every turn trips DKG WM Rule 4 and rejects the second
+      // persisted turn in the same room.
+      ...(shouldEmitSessionRoot(runtime, sessionUri)
+        ? buildSessionEntityQuads(sessionUri, sessionId)
+        : []),
       ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText, turnKey),
     ];
     if (assistantText) {
@@ -977,7 +1092,17 @@ export async function persistChatTurnImpl(
   // A1/A3: write into the per-agent WM assertion graph, not the
   // broadcast data graph.
   await agent.assertion.write(contextGraphId, assertionName, quads);
-  return { tripleCount: quads.length, turnUri, kcId: '' };
+  // r21-1: callers that take the headless assistant-reply path get
+  // back the dedicated `headlessTurnUri` so any follow-up
+  // attribution (e.g. `recordPersistedUserTurn`) keys against the
+  // turn URI we actually wrote to. Returning `turnUri` here would
+  // be a lie because we deliberately did NOT write anything onto
+  // the canonical `turn:` subject in the headless branch.
+  return {
+    tripleCount: quads.length,
+    turnUri: headlessAssistantReply ? headlessTurnUri : turnUri,
+    kcId: '',
+  };
 }
 
 /**

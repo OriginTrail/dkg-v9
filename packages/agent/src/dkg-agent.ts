@@ -775,6 +775,21 @@ export class DKGAgent {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
+        // r21-5 (PR #229 bot review, post-v10-rc-merge): wire the
+        // publisher's WAL reconciler so chain confirmations that
+        // arrive after a process restart actually drain the
+        // pre-broadcast journal. Without this, `recoverFromWalByMerkleRoot`
+        // had no runtime caller and surviving WAL entries
+        // accumulated forever (the original P-1 finding).
+        onUnmatchedBatchCreated: async ({ merkleRoot, publisherAddress, startKAId, endKAId }) => {
+          const merkleRootHex = ethers.hexlify(merkleRoot);
+          const recovered = this.publisher.recoverFromWalByMerkleRoot(
+            merkleRootHex,
+            { publisherAddress, startKAId, endKAId },
+            ctx,
+          );
+          return recovered !== undefined;
+        },
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 

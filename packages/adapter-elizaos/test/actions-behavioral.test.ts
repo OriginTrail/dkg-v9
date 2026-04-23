@@ -19,7 +19,7 @@
  * instead of in node-ui later.
  */
 import { describe, it, expect } from 'vitest';
-import { persistChatTurnImpl, dkgPersistChatTurn } from '../src/actions.js';
+import { persistChatTurnImpl, dkgPersistChatTurn, __resetEmittedSessionRootsForTests } from '../src/actions.js';
 import { dkgKnowledgeProvider } from '../src/provider.js';
 import type { IAgentRuntime, Memory, State, HandlerCallback } from '../src/types.js';
 
@@ -354,11 +354,25 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       { mode: 'assistant-reply' }, // deliberately omit userMessageId
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:asst-only-mem';
+    // PR #229 round 21 (r21-1): the headless envelope now lands on a
+    // DEDICATED `headless-turn:` URI so it cannot overwrite a
+    // canonical `turn:` URI that a real `onChatTurn` write may have
+    // already populated (the prior revision wrote onto
+    // `urn:dkg:chat:turn:…` and resurrected the blank-turn regression
+    // r15-2 had paid down). The reader finds the headless turn via
+    // `?turn rdf:type dkg:ChatTurn`, so the URI namespace change is
+    // transparent to consumers — but the test must follow the new
+    // subject so the assertions are real (otherwise the assertion
+    // would silently pass on an absent canonical-turn quad).
+    const turnUri = 'urn:dkg:chat:headless-turn:r:asst-only-mem';
     // r15-2: stub lives in `msg:user-stub:` namespace keyed on the
     // assistant memory id.
     const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-only-mem';
-    const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:asst-only-mem';
+    // r21-1: the headless assistant message also gets a dedicated
+    // `msg:agent-headless:` URI keyed on the stub turn key so it
+    // cannot collide with a canonical `msg:agent:` URI written by
+    // a real user-first onChatTurn → onAssistantReply pair.
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent-headless:r:asst-only-mem';
 
     // Full envelope with BOTH edges — what the node-ui reader wants.
     expect(quads).toContainEqual(expect.objectContaining({
@@ -414,7 +428,13 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       { mode: 'assistant-reply' },
     );
     const tsQuad = (i: number) => publishes[i].quads.find(
-      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:turn:'),
+      // r21-1: headless turn lives under `headless-turn:` now, NOT
+      // `turn:`. Match the new prefix so this idempotence test
+      // exercises the actual headless envelope — matching `turn:`
+      // would silently return undefined on every call and the
+      // .object equality below would compare undefined === undefined
+      // (false-positive green).
+      (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:headless-turn:'),
     )!;
     // Bot review (PR #229 follow-up, actions.ts:539): re-firing the same
     // hook must not mint a fresh `schema:dateCreated`, otherwise downstream
@@ -422,7 +442,17 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(tsQuad(0).object).toBe(tsQuad(1).object);
   });
 
-  it('targets the SAME turnUri as the matching user-turn call when userMessageId is supplied', async () => {
+  it('targets the SAME turnUri as the matching user-turn call when both userMessageId and userTurnPersisted are supplied (append-only)', async () => {
+    // PR #229 round 21 (r21-2): the append-only path requires BOTH
+    // `userMessageId` AND `userTurnPersisted: true`. Anything less
+    // (the previous test shape `{ userMessageId: 'mem-1' }` alone)
+    // takes the safe headless path and lands the assistant link on
+    // a `headless-turn:` URI instead of the canonical `turn:` URI
+    // the user-turn write produced — that would actually FAIL the
+    // intent of this assertion ("assistant-reply joins the same
+    // turn as its user-turn"). Pin the explicit contract here so
+    // the append-only path stays correct under r21-2's stricter
+    // gating.
     const { agent, publishes } = makeCapturingAgent();
     const userOut = await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -433,10 +463,15 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       agent, makeRuntime(),
       makeMessage('the answer is 42', { id: 'asst-mem-2', roomId: 'r' } as any),
       {} as State,
-      { mode: 'assistant-reply', userMessageId: 'mem-1' },
+      { mode: 'assistant-reply', userMessageId: 'mem-1', userTurnPersisted: true },
     );
     const linkQuad = publishes[1].quads.find((q) => q.predicate === `${DKG_ONT}hasAssistantMessage`)!;
     expect(linkQuad.subject).toBe(userOut.turnUri);
+    // And the user-turn URI is the canonical (NOT headless) one — sanity
+    // check so a future drift of `persistChatTurnImpl`'s return value
+    // toward `headless-turn:` for the user-turn call would also flip
+    // this test red.
+    expect(userOut.turnUri).toBe('urn:dkg:chat:turn:r:mem-1');
   });
 
   // ---------------------------------------------------------------------
@@ -747,7 +782,14 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply', userMessageId: 'mem-1', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    // r21-1: headless envelope subject MUST be the dedicated
+    // `headless-turn:` URI so it cannot stomp on the canonical
+    // `turn:r:mem-1` subject (which a real `onChatTurn` write may
+    // have populated even though the caller passed
+    // `userTurnPersisted: false`). The reader still discovers the
+    // turn via `?turn rdf:type dkg:ChatTurn`, but the canonical
+    // turn URI is left untouched.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:mem-1';
     // r15-2: the headless stub lives in the `msg:user-stub:` namespace
     // keyed on the ASSISTANT memory id (not the user message id) so it
     // can't collide with any canonical `msg:user:` URI the user-turn
@@ -768,6 +810,12 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     // NOT be written by the headless path — a concurrent onChatTurn
     // may have already written real author/text onto that subject.
     expect(quads.some((q) => q.subject === 'urn:dkg:chat:msg:user:r:mem-1')).toBe(false);
+    // r21-1 partner guard: the canonical `turn:r:mem-1` subject MUST
+    // also remain pristine. Stamping headless ChatTurn quads onto it
+    // is the bug r21-1 paid down — assert that NOTHING in this
+    // headless write touched the canonical turn URI, regardless of
+    // predicate.
+    expect(quads.some((q) => q.subject === 'urn:dkg:chat:turn:r:mem-1')).toBe(false);
   });
 
   it('userTurnPersisted=true → append-only even without userMessageId (well-known caller opt-in)', async () => {
@@ -817,7 +865,16 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     // are also expected — without them the reader's two-edge join
     // would drop the reply, which is the exact unreadable-reply bug
     // r20-1 prevents.
-    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    //
+    // r21-1: the typed envelope now lives on the dedicated
+    // `headless-turn:` URI (NOT canonical `turn:`), so the reader
+    // contract is checked there instead.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:mem-1';
+    // r21-1 guard: the canonical `turn:` subject MUST NOT be
+    // touched — it would silently overwrite a real `onChatTurn`
+    // write whose paired user-turn the caller failed to assert
+    // durability for. Pin it.
+    expect(quads.some((q) => q.subject === 'urn:dkg:chat:turn:r:mem-1')).toBe(false);
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
     }));
@@ -855,13 +912,19 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply', userMessageId: 'mem-r20-b', userTurnPersisted: 'true' as unknown as boolean },
     );
     for (const [i, suffix] of [[0, 'mem-r20-a'], [1, 'mem-r20-b']] as const) {
-      const turnUri = `urn:dkg:chat:turn:r:${suffix}`;
+      // r21-1: headless turn lives under `headless-turn:` now.
+      const turnUri = `urn:dkg:chat:headless-turn:r:${suffix}`;
       expect(publishes[i].quads).toContainEqual(expect.objectContaining({
         subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
       }));
       expect(publishes[i].quads).toContainEqual(expect.objectContaining({
         subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
       }));
+      // r21-1 guard: canonical `turn:r:<suffix>` MUST stay pristine
+      // so a paired user-turn write isn't clobbered.
+      expect(publishes[i].quads.some((q) =>
+        q.subject === `urn:dkg:chat:turn:r:${suffix}`,
+      )).toBe(false);
     }
   });
 
@@ -874,7 +937,8 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:asst-5';
+    // r21-1: headless envelope landed on the dedicated subject.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:asst-5';
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
     }));
@@ -926,7 +990,8 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:asst-stub-2';
+    // r21-1: headless turn landed on the dedicated subject.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:asst-stub-2';
     // The ChatTurn itself IS partOf the session (turn enumeration works).
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${SCHEMA}isPartOf`, object: 'urn:dkg:chat:session:r',
@@ -942,7 +1007,8 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:asst-stub-3';
+    // r21-1: headless turn landed on the dedicated subject.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:asst-stub-3';
     // r15-2: reader contract is satisfied via the stub URI, not the
     // canonical user-message URI (so a concurrent real user-turn can
     // coexist without clobbering each other).
@@ -1028,7 +1094,10 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
       { mode: 'assistant-reply', userMessageId: 'parent-msg', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    const turnUri = 'urn:dkg:chat:turn:r:parent-msg';
+    // r21-1: headless envelope landed on the dedicated subject so it
+    // cannot stomp on the canonical `turn:r:parent-msg` URI which a
+    // real `onChatTurn` write may have populated.
+    const turnUri = 'urn:dkg:chat:headless-turn:r:parent-msg';
     const hasUserEdges = quads.filter((q) =>
       q.subject === turnUri && q.predicate === `${DKG_ONT}hasUserMessage`,
     );
@@ -1082,5 +1151,155 @@ describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required f
       inReplyTo: 'mem-0',
     };
     expect(m.id).toBe('mem-1');
+  });
+});
+
+// ===========================================================================
+// PR #229 round 21 — r21-3: schema:Conversation session root is emitted at
+// MOST ONCE per (runtime, session) per process. Emitting it on every turn
+// trips DKG Working-Memory Rule 4 (entity exclusivity) and rejects the
+// second persisted turn in the same room — see node-ui/src/chat-memory.ts
+// (search `isNewSession`) for the canonical writer that does the same
+// guard for the same reason.
+// ===========================================================================
+describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitted once per (runtime, session)', () => {
+  it('user-turn path emits the schema:Conversation triple on the FIRST call but skips it on subsequent calls in the same room', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('first', { id: 'r21-3-u1', roomId: 'room-once' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('second', { id: 'r21-3-u2', roomId: 'room-once' } as any),
+      {} as State, {},
+    );
+    const sessionUri = 'urn:dkg:chat:session:room-once';
+    const conversationQuad = (i: number) => publishes[i].quads.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(conversationQuad(0)).toHaveLength(1);
+    // r21-3: second turn must NOT re-declare `?session a schema:Conversation`.
+    // Storage already has the triple from turn 1; re-emitting it forces
+    // the WM Rule-4 entity-exclusivity guard to reject the whole write.
+    expect(conversationQuad(1)).toHaveLength(0);
+  });
+
+  it('headless assistant-reply path is gated by the SAME per-(runtime, session) cache as the user-turn path', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('headless 1', { id: 'r21-3-a1', roomId: 'room-h' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('headless 2', { id: 'r21-3-a2', roomId: 'room-h' } as any),
+      {} as State,
+      { mode: 'assistant-reply' },
+    );
+    const sessionUri = 'urn:dkg:chat:session:room-h';
+    const conversationQuad = (i: number) => publishes[i].quads.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(conversationQuad(0)).toHaveLength(1);
+    expect(conversationQuad(1)).toHaveLength(0);
+  });
+
+  it('two DIFFERENT runtimes pipelining the same session id BOTH emit the session root (cache is per-runtime, not global)', async () => {
+    // Defence-in-depth: a single global cache would silently suppress
+    // the second runtime's session declaration, leaving its
+    // assertion graph WITHOUT the `?session a schema:Conversation`
+    // triple — the reader would then drop every turn that runtime
+    // wrote because `getSession` traversal starts at that subject.
+    // The cache is keyed on the runtime object so two parallel
+    // agents in the same process each get one session-root write.
+    __resetEmittedSessionRootsForTests();
+    const { agent: a1, publishes: p1 } = makeCapturingAgent();
+    const { agent: a2, publishes: p2 } = makeCapturingAgent();
+    const runtime1 = makeRuntime();
+    const runtime2 = makeRuntime();
+    await persistChatTurnImpl(
+      a1, runtime1,
+      makeMessage('rt1', { id: 'r21-3-rt1', roomId: 'shared-room' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      a2, runtime2,
+      makeMessage('rt2', { id: 'r21-3-rt2', roomId: 'shared-room' } as any),
+      {} as State, {},
+    );
+    const sessionUri = 'urn:dkg:chat:session:shared-room';
+    const conv = (qs: any[]) => qs.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(conv(p1[0].quads)).toHaveLength(1);
+    expect(conv(p2[0].quads)).toHaveLength(1);
+  });
+
+  it('different sessions on the same runtime each get one session-root write', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('a', { id: 'r21-3-sa-1', roomId: 'session-A' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('b', { id: 'r21-3-sb-1', roomId: 'session-B' } as any),
+      {} as State, {},
+    );
+    const conv = (qs: any[], session: string) => qs.filter(
+      (q) => q.subject === `urn:dkg:chat:session:${session}`
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(conv(publishes[0].quads, 'session-A')).toHaveLength(1);
+    expect(conv(publishes[1].quads, 'session-B')).toHaveLength(1);
+  });
+
+  it('non-session quads (user message, turn envelope) STILL get emitted on every turn — only the session-root quad is gated', async () => {
+    // Regression guard: the gate must NOT accidentally short-circuit
+    // the rest of the user-turn quads. We assert the second turn
+    // still writes its `msg:user:` subject + `turn:` envelope,
+    // because dropping those would make the second turn invisible.
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('first', { id: 'r21-3-c1', roomId: 'room-c' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('second', { id: 'r21-3-c2', roomId: 'room-c' } as any),
+      {} as State, {},
+    );
+    const turn2 = publishes[1].quads;
+    expect(turn2.some((q) =>
+      q.subject === 'urn:dkg:chat:msg:user:room-c:r21-3-c2'
+      && q.predicate === `${SCHEMA}text`
+      && q.object === '"second"',
+    )).toBe(true);
+    expect(turn2.some((q) =>
+      q.subject === 'urn:dkg:chat:turn:room-c:r21-3-c2'
+      && q.predicate === RDF_TYPE
+      && q.object === `${DKG_ONT}ChatTurn`,
+    )).toBe(true);
   });
 });

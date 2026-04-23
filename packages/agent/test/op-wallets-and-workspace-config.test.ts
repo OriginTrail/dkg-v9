@@ -156,8 +156,13 @@ dkg:
     });
   });
 
-  it('throws when frontmatter is missing', () => {
-    expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/missing YAML frontmatter/);
+  it('throws a descriptive error when neither frontmatter nor a fenced `dkg-config` block is present', () => {
+    // r21-4: the message must list BOTH supported carriers so an
+    // adopter who tried (e.g.) `dkg_config` (underscore) instead of
+    // `dkg-config` (hyphen) sees the canonical fence info-string in
+    // the diagnostic rather than guessing.
+    expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/no workspace config found/i);
+    expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/dkg-config/);
   });
 
   it('throws when frontmatter exists but lacks a `dkg:` key', () => {
@@ -167,6 +172,107 @@ title: just a title
 body
 `;
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/missing `dkg` key/);
+  });
+
+  // -------------------------------------------------------------------
+  // PR #229 round 21 — r21-4: plain-Markdown AGENTS.md MUST also be a
+  // valid carrier for the workspace config (the canonical AGENTS.md
+  // convention used by Cursor / Continue / Codex CLI is plain MD with
+  // no YAML frontmatter — the spec's frontmatter-only third tier is
+  // unusable for those projects). Recognise a fenced
+  // ```dkg-config```  block (with optional `yaml`/`yml`/`json`
+  // language hint) anywhere in the document.
+  // -------------------------------------------------------------------
+  it('r21-4: parses a plain-MD `dkg-config` fenced block with no frontmatter (raw fence)', () => {
+    const md = [
+      '# Project Agents',
+      '',
+      'This project uses DKG shared memory.',
+      '',
+      '```dkg-config',
+      'contextGraph: my-graph',
+      'node: http://127.0.0.1:9201',
+      'autoShare: false',
+      'extractionPolicy: structural-only',
+      '```',
+      '',
+      'More prose below.',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg).toEqual({
+      contextGraph: 'my-graph',
+      node: 'http://127.0.0.1:9201',
+      autoShare: false,
+      extractionPolicy: 'structural-only',
+    });
+  });
+
+  it('r21-4: accepts the `yaml dkg-config` info-string variant for editor syntax-highlighting', () => {
+    const md = [
+      '# Body',
+      '',
+      '```yaml dkg-config',
+      'contextGraph: g',
+      'node: n',
+      '```',
+    ].join('\n');
+    expect(parseAgentsMdFrontmatter(md).contextGraph).toBe('g');
+  });
+
+  it('r21-4: accepts the `json dkg-config` info-string variant', () => {
+    const md = [
+      '# Body',
+      '',
+      '```json dkg-config',
+      '{ "contextGraph": "g", "node": "n" }',
+      '```',
+    ].join('\n');
+    expect(parseAgentsMdFrontmatter(md).node).toBe('n');
+  });
+
+  it('r21-4: frontmatter takes priority over a fenced block when both are present', () => {
+    // Defence-in-depth: if a project somehow ends up with both
+    // carriers, the canonical spec-§22 frontmatter wins so a single
+    // pass of the parser produces a deterministic, predictable
+    // answer.
+    const md = [
+      '---',
+      'dkg:',
+      '  contextGraph: from-frontmatter',
+      '  node: n',
+      '---',
+      '',
+      '```dkg-config',
+      'contextGraph: from-fence',
+      'node: n',
+      '```',
+    ].join('\n');
+    expect(parseAgentsMdFrontmatter(md).contextGraph).toBe('from-frontmatter');
+  });
+
+  it('r21-4: surfaces a descriptive error when the fenced block contains malformed YAML', () => {
+    const md = [
+      '# Body',
+      '',
+      '```dkg-config',
+      'contextGraph: [unterminated',
+      '```',
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg-config.*did not parse/i);
+  });
+
+  it('r21-4: ignores fenced blocks with a non-`dkg-config` info-string (no false positives on yaml snippets in docs)', () => {
+    const md = [
+      '# Body',
+      '',
+      'Here is an example yaml snippet, NOT a config:',
+      '',
+      '```yaml',
+      'contextGraph: should-be-ignored',
+      'node: should-be-ignored',
+      '```',
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
   });
 });
 
@@ -224,5 +330,31 @@ describe('workspace-config — loadWorkspaceConfig priority order (spec §22)', 
     // YAML that resolves to a non-object (a string) → parseWorkspaceConfig rejects
     writeFileSync(join(dir, '.dkg', 'config.yaml'), 'just-a-string\n');
     expect(() => loadWorkspaceConfig(dir)).toThrow(/root must be an object/);
+  });
+
+  it('r21-4: falls back to a plain-MD AGENTS.md with a fenced `dkg-config` block (no frontmatter)', () => {
+    // PR #229 round 21 (r21-4): the previous frontmatter-only third
+    // tier was effectively dead in workspaces whose AGENTS.md is
+    // plain Markdown (the canonical AGENTS.md convention). This
+    // pin walks the full priority chain end-to-end: no
+    // `.dkg/config.yaml`, no `.dkg/config.json`, AGENTS.md present
+    // but with NO frontmatter — only a fenced `dkg-config` block.
+    // Pre-r21-4 this threw `missing YAML frontmatter`. Post-r21-4
+    // it must round-trip the fence body through `parseWorkspaceConfig`.
+    writeFileSync(join(dir, 'AGENTS.md'), [
+      '# Project Agents',
+      '',
+      '```dkg-config',
+      'contextGraph: plain-md-graph',
+      'node: http://127.0.0.1:9201',
+      'autoShare: true',
+      '```',
+      '',
+      'Other prose.',
+    ].join('\n'));
+    const loaded = loadWorkspaceConfig(dir);
+    expect(loaded.cfg.contextGraph).toBe('plain-md-graph');
+    expect(loaded.cfg.node).toBe('http://127.0.0.1:9201');
+    expect(loaded.source.endsWith('AGENTS.md')).toBe(true);
   });
 });

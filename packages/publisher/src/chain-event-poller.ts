@@ -56,6 +56,27 @@ export interface ChainEventPollerConfig {
   onProfileEvent?: OnProfileEvent;
   /** Persistent cursor for surviving restarts. */
   cursorPersistence?: CursorPersistence;
+  /**
+   * PR #229 bot review (post-v10-rc-merge, r21-5): post-restart WAL
+   * reconciler. Called when an on-chain `KnowledgeBatchCreated`
+   * arrives whose `merkleRoot` does NOT match any in-memory pending
+   * publish (the common case after a process crash that wiped
+   * `pendingPublishes` but persisted the WAL). Implementations
+   * should look the merkle root up in the recovered
+   * `preBroadcastJournal`, drop the matching entry from both memory
+   * and the WAL file, and emit any reconciliation telemetry.
+   * Returning `true` means the recovery path matched — useful for
+   * tests / observability — and `false` means no surviving WAL
+   * record matched (which is benign: the on-chain event was simply
+   * not produced by this node).
+   */
+  onUnmatchedBatchCreated?: (info: {
+    merkleRoot: Uint8Array;
+    publisherAddress: string;
+    startKAId: bigint;
+    endKAId: bigint;
+    blockNumber: number;
+  }) => Promise<boolean | void>;
 }
 
 /**
@@ -79,6 +100,7 @@ export class ChainEventPoller {
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly cursorPersistence?: CursorPersistence;
+  private readonly onUnmatchedBatchCreated?: ChainEventPollerConfig['onUnmatchedBatchCreated'];
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
   private headKnown = false;
@@ -112,6 +134,7 @@ export class ChainEventPoller {
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.cursorPersistence = config.cursorPersistence;
+    this.onUnmatchedBatchCreated = config.onUnmatchedBatchCreated;
   }
 
   async start(): Promise<void> {
@@ -347,6 +370,35 @@ export class ChainEventPoller {
 
     if (confirmed) {
       this.log.info(ctx, `Confirmed tentative publish via chain event (block ${event.blockNumber})`);
+      return;
+    }
+
+    // r21-5: in-memory pending map didn't match. After a process
+    // restart the map is empty by construction, so the only durable
+    // record of "we signed and were about to broadcast this batch"
+    // is the WAL. Hand the event off to the unmatched-batch reconciler
+    // (DKGAgent wires this to `DKGPublisher.recoverFromWalByMerkleRoot`),
+    // which drops the surviving WAL entry once the on-chain confirmation
+    // proves the broadcast actually landed. We swallow handler errors so
+    // a buggy reconciler can't take down the whole poller — every
+    // chain event after the throw would be skipped, which would mask
+    // genuine `KCCreated` confirmations and resurrect the original
+    // "WAL accumulates forever" bug from a different angle.
+    if (this.onUnmatchedBatchCreated) {
+      try {
+        await this.onUnmatchedBatchCreated({
+          merkleRoot,
+          publisherAddress,
+          startKAId,
+          endKAId,
+          blockNumber: event.blockNumber,
+        });
+      } catch (recoverErr) {
+        this.log.warn(
+          ctx,
+          `onUnmatchedBatchCreated callback failed for merkleRoot=${ethers.hexlify(merkleRoot)}: ${recoverErr instanceof Error ? recoverErr.message : String(recoverErr)}`,
+        );
+      }
     }
   }
 

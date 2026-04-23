@@ -64,21 +64,39 @@ packages/cli/src/
 │   │   ├── connect.ts               # /api/connect, /api/update, /api/subscribe
 │   │   ├── paranet.ts               # /api/paranet/create|list|rename|exists
 │   │   │                            # NOT a pure alias — see below
-│   │   ├── shared-memory.ts         # /api/shared-memory/*   (publish/query/subscribe
-│   │   │                            #   to a CG's `_shared_memory` graph; interacts
-│   │   │                            #   with the same SWM state as context-graph.ts)
-│   │   ├── query-remote.ts          # /api/query-remote, /api/query-remote-sparql
-│   │   │                            #   (RPC-over-libp2p variants of /api/query)
-│   │   ├── sync.ts                  # /api/sync/catchup-status, /api/sync/trigger,
-│   │   │                            #   /api/sync/shared-memory
-│   │   ├── local-agent-integrations.ts # /api/local-agent-integrations*
-│   │   │                            #   (OpenClaw registrar, heartbeat, list)
-│   │   ├── verify.ts                # /api/verify (verified-memory single-KA verify)
-│   │   ├── ccl.ts                   # /api/ccl/eval, /api/ccl/policy/*
-│   │   ├── memory.ts                # /api/memory/* (L1/L2 memory ingest/query)
-│   │   ├── epcis.ts                 # /api/epcis/* (EPCIS 2.0 event ingest/query)
-│   │   ├── identity.ts              # /api/identity*, /api/wallets*
+│   │   ├── shared-memory.ts         # /api/shared-memory/write,
+│   │   │                            #   /api/shared-memory/publish,
+│   │   │                            #   /api/shared-memory/conditional-write
+│   │   │                            #   (writes into a CG's `_shared_memory` graph;
+│   │   │                            #   query/subscribe flow through /api/query +
+│   │   │                            #   /api/context-graph/subscribe — there is no
+│   │   │                            #   dedicated /api/shared-memory/query|subscribe)
+│   │   ├── query-remote.ts          # /api/query-remote  (RPC-over-libp2p variant
+│   │   │                            #   of /api/query — the SPARQL form rides on
+│   │   │                            #   the same endpoint via a `sparql` body field;
+│   │   │                            #   no separate /api/query-remote-sparql route)
+│   │   ├── sync.ts                  # /api/sync/catchup-status  (the only
+│   │   │                            #   /api/sync/* route on the wire today;
+│   │   │                            #   programmatic sync triggers flow through
+│   │   │                            #   /api/context-graph/subscribe and
+│   │   │                            #   /api/update)
+│   │   ├── settings.ts              # /api/settings/shared-memory-ttl,
+│   │   │                            #   /api/settings/workspace-ttl
+│   │   │                            #   (runtime-tunable SWM retention)
+│   │   ├── local-agent-integrations.ts # /api/local-agent-integrations*,
+│   │   │                            #   /api/integrations, /api/register-adapter,
+│   │   │                            #   /api/openclaw-agents
+│   │   ├── verify.ts                # /api/verify (verified-memory single-KA verify),
+│   │   │                            #   /api/endorse
+│   │   ├── ccl.ts                   # /api/ccl/eval, /api/ccl/policy/*,
+│   │   │                            #   /api/ccl/results
+│   │   ├── memory.ts                # /api/memory/turn, /api/memory/search
+│   │   ├── epcis.ts                 # /api/epcis/events, /api/epcis/capture
+│   │   ├── identity.ts              # /api/identity, /api/identity/ensure,
+│   │   │                            #   /api/wallet, /api/wallets, /api/wallets/balances
 │   │   │                            #   (ensureIdentity, keystore wallet CRUD)
+│   │   ├── chain.ts                 # /api/chain/rpc-health
+│   │   ├── host.ts                  # /api/host/info, /api/shutdown
 │   │   ├── files.ts                 # /api/file/*
 │   │   ├── genui.ts                 # /api/genui/render
 │   │   ├── events.ts                # /api/events  (SSE)
@@ -160,6 +178,7 @@ packages/agent/src/
 Acceptance criteria:
 
 - `DKGAgent` remains the primary public export. The classes that are currently re‑exported from `packages/agent/src/index.ts` (`ProfileManager`, `DiscoveryClient`) and documented in `packages/agent/README.md` stay exported and importable from the same paths — this refactor is a pure file move, not a semver break. New sub‑modules under `agent/` are package‑internal (`@internal` JSDoc) unless a sub‑module is explicitly promoted to the public API in a separate PR.
+- **Packaging boundary for `@internal`**: `packages/agent/package.json` today publishes the whole `dist/` tree and has no `exports` map, so `@internal` JSDoc on its own does **not** prevent third parties from deep‑importing `@origintrail-official/dkg-agent/dist/agent/query.js`, etc. To make the boundary real, the refactor PR that introduces the `agent/` sub‑tree **must** ship an `exports` map in `packages/agent/package.json` that pins the public surface to the package entry (`"."`) and blocks deep paths (`"./*": null` or an explicit allow‑list of curated sub‑paths). Until that map lands, every sub‑module under `agent/` is technically reachable from userland — we will treat that as an unsupported deep‑import path in release notes, and the `exports` map closes it in the same PR to avoid a window where the JSDoc and the published package disagree.
 - Each sub‑module receives its dependencies via constructor (no `this.parent` reach‑backs).
 - Existing `import { DKGAgent, ProfileManager, DiscoveryClient } from '@origintrail-official/dkg-agent'` keeps working unchanged.
 - `agent/query.ts` is the natural landing site for the A‑1.2 follow‑up: it can carry an `AuthenticatedHandle` that pre‑binds `callerAgentAddress`, removing the "trusted in‑process caller" exemption introduced by PR #242.
@@ -201,9 +220,9 @@ End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC. The implemen
   A repo‑wide `typecheck` script per package is itself a Phase‑2 follow‑up, not a prerequisite.
 
 - **Risk:** lifting code accidentally widens trust boundaries (e.g. dropping the A‑1 `callerAgentAddress` check during a route move or during the `DKGAgent` split).
-  **Mitigation:** two-layer coverage, *both* required before each route or module split merges.
-  1. Agent-layer: `packages/agent/test/wm-multi-agent-isolation-extra.test.ts` locks the in‑process `DKGAgent.query()` guard and the non‑string `agentAddress` rejection — it catches regressions in the per‑module split (e.g. if `agent/query.ts` forgets to thread `callerAgentAddress`).
-  2. HTTP-layer: the `A-1 — /api/query enforces working-memory isolation across agent tokens` block in `packages/cli/test/daemon-http-behavior-extra.test.ts` drives the production path end‑to‑end — daemon child process, real bearer tokens, seeded data under the default agent's WM, cross‑agent read through `/api/query`. It catches regressions in the *route* split (e.g. if `routes/query.ts` stops forwarding `requestAgentAddress` as `callerAgentAddress`, or reverts the agent‑scoped/node‑level token distinction added in PR #242).
+  **Mitigation:** two-layer coverage, landing in phases. Both layers must be present and green before any `DKGAgent` sub‑module split or `/api/query` route extraction merges.
+  1. *Agent-layer (exists today)* — `packages/agent/test/wm-multi-agent-isolation-extra.test.ts` registers two distinct agents on one `DKGAgent`, writes WM under each, and asserts the structural graph‑URI scoping invariant plus the in‑process `DKGAgent.query(view:'working-memory', agentAddress: OTHER)` guard. This catches regressions in the per‑module split (e.g. if `agent/query.ts` forgets to thread `callerAgentAddress`). Note: this file does **not** currently exercise non‑string `agentAddress` rejection — that test will be added alongside the `agent/query.ts` extraction PR, to lock the rejection message at the module boundary rather than only at the daemon.
+  2. *HTTP-layer (lands with PR #242, then extended)* — `packages/cli/test/daemon-http-behavior-extra.test.ts` gets an `A-1 follow-up: auth-disabled /api/query fails closed on foreign WM` block in PR #242 that covers the daemon‑child‑process path with `authEnabled: false` and an invalid bearer. Before the `/api/query` route extraction merges, that block must be extended to also cover the **authEnabled: true** branch (agent‑scoped bearer attempting a foreign‑WM read → `401/403`; node‑level admin bearer → bypass allowed). This catches regressions in the route split (e.g. if `routes/query.ts` stops forwarding `requestAgentAddress` as `callerAgentAddress`, or reverts the agent‑scoped/node‑level token distinction added in PR #242).
   If a future route or module lift removes the agent-layer test's relevance (say by moving the guard into a scoped handle) the HTTP-layer test still locks the externally observable contract — do not delete it.
 
 - **Risk:** golden‑sequence tests (e.g. `packages/publisher/test/phase-sequences.test.ts`) break when phases get re‑ordered during a split.

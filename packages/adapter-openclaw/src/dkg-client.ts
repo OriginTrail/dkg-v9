@@ -235,6 +235,163 @@ export class DkgDaemonClient {
     });
   }
 
+  /**
+   * Promote a Working Memory assertion (or a subset of its root entities) to
+   * Shared Working Memory. `entities` defaults to `"all"` server-side when
+   * omitted; callers can pin specific root entity URIs via an array.
+   */
+  async promoteAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { entities?: string[] | 'all'; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/promote`, {
+      contextGraphId,
+      entities: opts?.entities,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Discard a Working Memory assertion without promoting it. Returns
+   * `{ discarded: true }` on success; the daemon surfaces 400 for invalid
+   * names or missing assertions.
+   */
+  async discardAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ): Promise<{ discarded: boolean }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/discard`, {
+      contextGraphId,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Dump all quads from a single Working Memory assertion's graph. This is
+   * not a SPARQL endpoint — the daemon returns every quad in the assertion
+   * as `{ quads, count }`. For ad-hoc SPARQL use `query()` with
+   * `view: 'working-memory'` + `assertionName` instead.
+   */
+  async queryAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ): Promise<{ quads: unknown[]; count: number }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/query`, {
+      contextGraphId,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Fetch the lifecycle descriptor for an assertion (creation time, author,
+   * latest extraction status, promotion state). Throws a 404-bearing error
+   * when no record exists for the given (contextGraphId, name, agentAddress).
+   */
+  async getAssertionHistory(
+    contextGraphId: string,
+    name: string,
+    opts?: { agentAddress?: string; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ contextGraphId });
+    if (opts?.agentAddress) params.set('agentAddress', opts.agentAddress);
+    if (opts?.subGraphName) params.set('subGraphName', opts.subGraphName);
+    return this.get(
+      `/api/assertion/${encodeURIComponent(name)}/history?${params.toString()}`,
+    );
+  }
+
+  /**
+   * Import a document (markdown, PDF, etc.) into a Working Memory assertion
+   * via multipart/form-data. The daemon runs its extraction pipeline and
+   * writes the resulting triples into the assertion's graph.
+   *
+   * Callers pass raw file bytes (Buffer/Uint8Array) and a filename; the
+   * client constructs the multipart form locally using Node 18+ globals
+   * (`FormData`, `Blob`). When `contentType` is supplied, the daemon's
+   * `normalizeDetectedContentType` picks it up from the explicit form field;
+   * otherwise the daemon falls back to the file part's Content-Type header
+   * (set here from the Blob's `type`).
+   */
+  async importAssertionFile(
+    contextGraphId: string,
+    name: string,
+    fileBuffer: Buffer | Uint8Array,
+    fileName: string,
+    opts?: { contentType?: string; ontologyRef?: string; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    // Copy into a fresh ArrayBuffer so TypeScript's BlobPart union is satisfied
+    // regardless of whether `fileBuffer` is a Node `Buffer` (ArrayBufferLike) or
+    // a `Uint8Array` over a `SharedArrayBuffer`. The extra copy is a bounded
+    // allocation of the uploaded file's bytes — fine for the import-file path.
+    const bytes = new Uint8Array(fileBuffer.byteLength);
+    bytes.set(fileBuffer);
+    const blob = new Blob([bytes], { type: opts?.contentType ?? 'application/octet-stream' });
+    form.append('file', blob, fileName);
+    form.append('contextGraphId', contextGraphId);
+    if (opts?.contentType) form.append('contentType', opts.contentType);
+    if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
+    if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
+
+    const res = await fetch(
+      `${this.baseUrl}/api/assertion/${encodeURIComponent(name)}/import-file`,
+      {
+        method: 'POST',
+        headers: { Accept: 'application/json', ...this.authHeaders() },
+        body: form,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(
+        `DKG daemon /api/assertion/${name}/import-file responded ${res.status}: ${text}`,
+      );
+    }
+    return res.json() as Promise<Record<string, unknown>>;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-graphs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create a named sub-graph inside a context graph. Sub-graphs partition a
+   * CG into organizational regions that assertions can target at
+   * create/write/import time.
+   */
+  async createSubGraph(
+    contextGraphId: string,
+    subGraphName: string,
+  ): Promise<{ created: string; contextGraphId: string }> {
+    return this.post('/api/sub-graph/create', { contextGraphId, subGraphName });
+  }
+
+  /**
+   * List all registered sub-graphs for a context graph, with best-effort
+   * per-sub-graph entity / triple counts.
+   */
+  async listSubGraphs(
+    contextGraphId: string,
+  ): Promise<{
+    contextGraphId: string;
+    subGraphs: Array<{
+      name: string;
+      uri: string;
+      description?: string;
+      createdBy?: string;
+      createdAt?: string;
+      entityCount: number;
+      tripleCount: number;
+    }>;
+  }> {
+    const params = new URLSearchParams({ contextGraphId });
+    return this.get(`/api/sub-graph/list?${params.toString()}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Chat turn persistence  (reuses the existing ChatMemoryManager pathway)
   // ---------------------------------------------------------------------------

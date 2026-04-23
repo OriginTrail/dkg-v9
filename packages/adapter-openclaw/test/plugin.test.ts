@@ -35,6 +35,7 @@ describe('DkgNodePlugin', () => {
     expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
 
     const toolNames = registeredTools.map(t => t.name);
+    // Existing 11 active tools
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
     expect(toolNames).toContain('dkg_list_context_graphs');
@@ -46,9 +47,66 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(toolNames).toContain('dkg_list_paranets');
-    expect(toolNames).toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(13);
+    // 9 new tools (assertion lifecycle + sub-graph management)
+    expect(toolNames).toContain('dkg_assertion_create');
+    expect(toolNames).toContain('dkg_assertion_write');
+    expect(toolNames).toContain('dkg_assertion_promote');
+    expect(toolNames).toContain('dkg_assertion_discard');
+    expect(toolNames).toContain('dkg_assertion_import_file');
+    expect(toolNames).toContain('dkg_assertion_query');
+    expect(toolNames).toContain('dkg_assertion_history');
+    expect(toolNames).toContain('dkg_sub_graph_create');
+    expect(toolNames).toContain('dkg_sub_graph_list');
+    // Legacy V9 paranet aliases are removed as of v10-rc (`dkg_list_paranets`, `dkg_paranet_create`).
+    expect(toolNames).not.toContain('dkg_list_paranets');
+    expect(toolNames).not.toContain('dkg_paranet_create');
+    expect(registeredTools.length).toBe(20);
+  });
+
+  it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
+    const plugin = new DkgNodePlugin();
+    const registeredTools: OpenClawTool[] = [];
+
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registerTool: (tool) => registeredTools.push(tool),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    };
+
+    plugin.register(mockApi);
+
+    const byName = new Map(registeredTools.map(t => [t.name, t] as const));
+
+    const expectRequired = (name: string, required: string[]) => {
+      const tool = byName.get(name);
+      expect(tool, `${name} should be registered`).toBeTruthy();
+      const props = tool!.parameters.properties;
+      for (const key of required) {
+        expect(props, `${name}.${key} should be declared in parameters.properties`).toHaveProperty(key);
+      }
+      expect(tool!.parameters.required).toEqual(expect.arrayContaining(required));
+    };
+
+    expectRequired('dkg_assertion_create', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_write', ['context_graph_id', 'name', 'quads']);
+    expectRequired('dkg_assertion_promote', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_import_file', ['context_graph_id', 'name', 'file_path']);
+    expectRequired('dkg_assertion_query', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
+    expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
+    expectRequired('dkg_sub_graph_list', ['context_graph_id']);
+
+    // dkg_assertion_write.quads is an array of {subject,predicate,object}
+    const writeTool = byName.get('dkg_assertion_write')!;
+    expect(writeTool.parameters.properties.quads.type).toBe('array');
+    expect(writeTool.parameters.properties.quads.items).toBeDefined();
+
+    // dkg_subscribe / dkg_query include_shared_memory is a boolean, not a string
+    expect(byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type).toBe('boolean');
+    expect(byName.get('dkg_query')!.parameters.properties.include_shared_memory.type).toBe('boolean');
   });
 
   it('all tools have name, description, parameters, and execute', () => {

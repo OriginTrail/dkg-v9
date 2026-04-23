@@ -1071,19 +1071,21 @@ export class DkgNodePlugin {
       {
         name: 'dkg_subscribe',
         description:
-          'Subscribe to a context graph to receive its data and updates. Subscription is immediate; ' +
-          'data sync from connected peers happens in the background and may take time depending on ' +
-          'the context graph size. Use dkg_list_context_graphs to check sync status afterward.',
+          'Subscribe to a context graph to receive its data and updates from connected peers. ' +
+          'Call this once before querying or publishing to a remotely-authored context graph. ' +
+          'Subscription is immediate; peer catch-up runs in the background — use dkg_list_context_graphs to ' +
+          'check sync status afterward. Returns `{ subscribed, catchup: { jobId, status, includeSharedMemory } }`. ' +
+          'Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id` (removal planned in a future cleanup).',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: {
               type: 'string',
-              description: 'Context Graph ID to subscribe to (e.g. "my-research")',
+              description: 'Context Graph ID to subscribe to (lowercase slug, hyphens allowed, e.g. "my-research").',
             },
             include_shared_memory: {
-              type: 'string',
-              description: 'Set to "false" to skip syncing shared memory data. Default: true.',
+              type: 'boolean',
+              description: 'Whether to also catch up Shared Working Memory data from peers. Default: true (both SWM and Verified Memory sync).',
             },
           },
           required: ['context_graph_id'],
@@ -1093,29 +1095,31 @@ export class DkgNodePlugin {
       {
         name: 'dkg_publish',
         description:
-          'Publish knowledge to a DKG context graph as an array of quads (subject/predicate/object). ' +
-          'Data is first written to Shared Working Memory, then published to Verified Memory on-chain. ' +
-          'Object values that look like URIs (http://, https://, urn:, did:) are treated as URIs; ' +
-          'all other values become string literals automatically.',
+          'Publish knowledge quads to a DKG context graph. Use this when you already have a curated quad set ' +
+          'you want pushed to Verified Memory (on-chain) in one shot — it writes to Shared Working Memory first, ' +
+          'then publishes all SWM content and clears it. Returns `{ kcId, kaCount, quadsPublished }`. ' +
+          'For the canonical stepwise flow (create assertion → write → promote → publish) use the dkg_assertion_* ' +
+          'tools plus this one. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
-            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "testing", "my-research")' },
+            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "testing", "my-research").' },
             quads: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  subject: { type: 'string', description: 'Subject URI (e.g. "https://example.org/wine/cabernet")' },
-                  predicate: { type: 'string', description: 'Predicate URI (e.g. "https://schema.org/name")' },
-                  object: { type: 'string', description: 'Object — URI or plain literal value (e.g. "Cabernet Sauvignon" or "https://schema.org/Product")' },
-                  graph: { type: 'string', description: 'Optional named graph URI' },
+                  subject: { type: 'string', description: 'Subject URI (e.g. "https://example.org/wine/cabernet").' },
+                  predicate: { type: 'string', description: 'Predicate URI (e.g. "https://schema.org/name").' },
+                  object: { type: 'string', description: 'Object — URI or plain literal value (e.g. "Cabernet Sauvignon" or "https://schema.org/Product").' },
+                  graph: { type: 'string', description: 'Optional named graph URI.' },
                 },
                 required: ['subject', 'predicate', 'object'],
               },
               description:
-                'Array of quads to publish. Each quad has subject (URI), predicate (URI), and object (URI or literal string). ' +
-                'URIs are auto-detected by prefix (http://, https://, urn:, did:); everything else becomes a literal.',
+                'Array of quads to publish. Each quad is `{subject, predicate, object, graph?}`. ' +
+                'URIs are auto-detected by prefix (http://, https://, urn:, did:); anything else becomes a string literal. ' +
+                'Example: `[{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }]`.',
             },
           },
           required: ['context_graph_id', 'quads'],
@@ -1126,14 +1130,16 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Run a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE) against the local DKG triple store. ' +
-          'Use GRAPH ?g { ... } to match across named graphs. ' +
-          'Queries are local and fast — no network round-trip.',
+          'Use this for cross-assertion or cross-context-graph queries. Use `GRAPH ?g { ... }` to match across ' +
+          'named graphs. Queries are local and fast — no network round-trip. Returns the raw query result ' +
+          '(bindings for SELECT, quads for CONSTRUCT, etc.). Accepts `paranet_id` as a deprecated V9 alias ' +
+          'for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
-            sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE)' },
-            context_graph_id: { type: 'string', description: 'Optional context graph scope — omit to query all data' },
-            include_shared_memory: { type: 'string', description: 'Set to "true" to also search shared memory (working/ephemeral) data. Default: false.' },
+            sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE).' },
+            context_graph_id: { type: 'string', description: 'Optional context graph scope — omit to query all data across all subscribed CGs.' },
+            include_shared_memory: { type: 'boolean', description: 'Whether to also search Shared Working Memory data in addition to Verified Memory. Default: false.' },
           },
           required: ['sparql'],
         },
@@ -1142,13 +1148,15 @@ export class DkgNodePlugin {
       {
         name: 'dkg_find_agents',
         description:
-          'Discover DKG agents on the network. Call with no parameters to list all known agents. ' +
-          'Filter by framework (e.g. "OpenClaw", "ElizaOS") or by skill_type URI to find agents offering a specific capability.',
+          'Discover DKG agents on the P2P network. Call with no parameters to list all known agents, or filter ' +
+          'by framework or skill_type URI. Returns `{ agents: [...] }`. ' +
+          'Requires a live P2P network — returns an empty list when the node has no peers. ' +
+          'Non-fatal when the network is unreachable; errors from the daemon are surfaced as a tool error.',
         parameters: {
           type: 'object',
           properties: {
-            framework: { type: 'string', description: 'Filter by framework name (e.g. "OpenClaw", "ElizaOS")' },
-            skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis")' },
+            framework: { type: 'string', description: 'Filter by framework name (e.g. "OpenClaw", "ElizaOS").' },
+            skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
           },
           required: [],
         },
@@ -1157,13 +1165,15 @@ export class DkgNodePlugin {
       {
         name: 'dkg_send_message',
         description:
-          'Send an end-to-end encrypted chat message to another DKG agent by their peer ID or name. ' +
-          'Both agents must be online. Use dkg_find_agents first to discover peer IDs.',
+          'Send an end-to-end encrypted chat message to another DKG agent by peer ID or name. ' +
+          'Use dkg_find_agents first to discover peer IDs. Returns the daemon\'s delivery receipt. ' +
+          'Requires a live P2P connection to the target peer — fails with a clear error when the target is ' +
+          'offline, unreachable, or when this node has no P2P network available.',
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Recipient peer ID (starts with 12D3KooW...) or agent name' },
-            text: { type: 'string', description: 'Message text to send' },
+            peer_id: { type: 'string', description: 'Recipient peer ID (starts with 12D3KooW...) or agent name.' },
+            text: { type: 'string', description: 'Message text to send (UTF-8).' },
           },
           required: ['peer_id', 'text'],
         },
@@ -1172,14 +1182,17 @@ export class DkgNodePlugin {
       {
         name: 'dkg_read_messages',
         description:
-          'Read P2P messages received from other DKG agents. Returns both sent and received messages. ' +
-          'Filter by peer ID/name, limit results, or fetch messages since a timestamp.',
+          'Read P2P chat messages exchanged with other DKG agents (both sent and received). ' +
+          'Use this after dkg_send_message to retrieve replies, or to audit recent DM history. ' +
+          'Returns `{ messages: [...] }`. ' +
+          'Requires the P2P network subsystem to be up — returns an empty list when the node has no peers ' +
+          'or messaging is unavailable; does not throw on transient network issues.',
         parameters: {
           type: 'object',
           properties: {
-            peer: { type: 'string', description: 'Filter by peer ID or agent name (optional)' },
-            limit: { type: 'string', description: 'Maximum number of messages to return (default: 100)' },
-            since: { type: 'string', description: 'Only return messages after this timestamp in ms (optional)' },
+            peer: { type: 'string', description: 'Filter by peer ID or agent name (optional).' },
+            limit: { type: 'string', description: 'Maximum number of messages to return (default: 100, max 1000).' },
+            since: { type: 'string', description: 'Only return messages after this Unix-ms timestamp (optional).' },
           },
           required: [],
         },
@@ -1188,41 +1201,207 @@ export class DkgNodePlugin {
       {
         name: 'dkg_invoke_skill',
         description:
-          'Invoke a remote agent\'s skill over the DKG network. ' +
-          'Use dkg_find_agents with skill_type first to discover which agents offer the skill you need.',
+          "Invoke a remote agent's skill over the DKG network. Use dkg_find_agents with skill_type first to " +
+          'discover which agents offer the skill. Returns the remote agent\'s response. ' +
+          'Requires an active P2P connection to the target peer — fails with a clear error when the peer is ' +
+          'offline, does not advertise the skill, or when this node has no P2P network available.',
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Target agent peer ID (starts with 12D3KooW...) or agent name' },
-            skill_uri: { type: 'string', description: 'Skill URI to invoke (e.g. "ImageAnalysis")' },
-            input: { type: 'string', description: 'Input data as UTF-8 text' },
+            peer_id: { type: 'string', description: 'Target agent peer ID (starts with 12D3KooW...) or agent name.' },
+            skill_uri: { type: 'string', description: 'Skill URI to invoke (e.g. "ImageAnalysis").' },
+            input: { type: 'string', description: 'Input data as UTF-8 text (semantics are skill-specific).' },
           },
           required: ['peer_id', 'skill_uri', 'input'],
         },
         execute: async (_toolCallId, args) => this.handleInvokeSkill(args),
       },
 
-      // Legacy V9 tool name aliases for backward compatibility with existing agents/prompts
+      // ── Assertion lifecycle (Working Memory) ───────────────────────────────
       {
-        name: 'dkg_list_paranets',
-        description: '[Deprecated: use dkg_list_context_graphs] List all context graphs (formerly paranets).',
-        parameters: { type: 'object', properties: {}, required: [] },
-        execute: async (_toolCallId, _params) => this.handleListContextGraphs(),
-      },
-      {
-        name: 'dkg_paranet_create',
-        description: '[Deprecated: use dkg_context_graph_create] Create a new context graph (formerly paranet).',
+        name: 'dkg_assertion_create',
+        description:
+          'Create a per-agent Working Memory assertion graph inside a context graph. This is step 1 of the ' +
+          'canonical write flow (create → write → promote → publish). Returns `{ assertionUri, alreadyExists }` — ' +
+          'idempotent: a duplicate name returns `{ assertionUri: null, alreadyExists: true }` instead of erroring. ' +
+          'The assertion is private to this agent until promoted to Shared Working Memory.',
         parameters: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Context graph name' },
-            description: { type: 'string', description: 'Optional description' },
-            paranet_id: { type: 'string', description: 'Optional custom ID slug' },
+            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "my-research").' },
+            name: { type: 'string', description: 'Assertion name — lowercase letters, digits, and hyphens (e.g. "chat-turns", "notes-2026-04").' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name inside the context graph (the sub-graph must be pre-registered via dkg_sub_graph_create).' },
           },
-          required: ['name'],
+          required: ['context_graph_id', 'name'],
         },
-        execute: async (_toolCallId, args) =>
-          this.handleContextGraphCreate({ ...args, id: args.paranet_id ?? args.id }),
+        execute: async (_toolCallId, args) => this.handleAssertionCreate(args),
+      },
+      {
+        name: 'dkg_assertion_write',
+        description:
+          'Append quads into an existing Working Memory assertion. Step 2 of the canonical write flow — the ' +
+          'assertion must have been created first via dkg_assertion_create (idempotent). Returns `{ written }` ' +
+          'with the number of quads accepted by the daemon. Object values that look like URIs ' +
+          '(http://, https://, urn:, did:) are passed as URIs; anything else is wrapped as a string literal. ' +
+          'Example quad: `{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }`.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name (must already exist — call dkg_assertion_create first).' },
+            quads: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  subject: { type: 'string', description: 'Subject URI.' },
+                  predicate: { type: 'string', description: 'Predicate URI.' },
+                  object: { type: 'string', description: 'Object — URI or plain literal value (URI auto-detected by prefix).' },
+                  graph: { type: 'string', description: 'Optional named graph URI.' },
+                },
+                required: ['subject', 'predicate', 'object'],
+              },
+              description: 'Array of quads to append. Non-empty.',
+            },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at create time).' },
+          },
+          required: ['context_graph_id', 'name', 'quads'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionWrite(args),
+      },
+      {
+        name: 'dkg_assertion_promote',
+        description:
+          'Promote a Working Memory assertion (or selected root entities from it) into Shared Working Memory. ' +
+          'Step 3 of the canonical flow — after promotion the data is visible to other agents in the context ' +
+          'graph and is eligible for dkg_publish. Returns the daemon promotion result (promoted entities + ' +
+          'diagnostics). Fails with 400 if the assertion is empty, the name is invalid, or a selected entity ' +
+          "isn't present in the assertion.",
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name to promote.' },
+            entities: {
+              type: 'array',
+              items: { type: 'string', description: 'Root entity URI to promote.' },
+              description: 'Which entities to promote: omit or pass the string "all" to promote every root entity in the assertion; or pass an array of root entity URIs to promote only those. Default: "all".',
+            },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+          },
+          required: ['context_graph_id', 'name'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionPromote(args),
+      },
+      {
+        name: 'dkg_assertion_discard',
+        description:
+          'Discard a Working Memory assertion without promoting it. Use this for lifecycle cleanup when you ' +
+          'no longer want the WM data (e.g., aborted draft, failed extraction). Returns `{ discarded: true }`. ' +
+          'Idempotent-friendly but errors (400) if the assertion does not exist or the name/context graph is invalid.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name to discard.' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at create time).' },
+          },
+          required: ['context_graph_id', 'name'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionDiscard(args),
+      },
+      {
+        name: 'dkg_assertion_import_file',
+        description:
+          'Import a local document (markdown, PDF, etc.) into a Working Memory assertion. The daemon reads the ' +
+          'file, runs its extraction pipeline (Phase 1 conversion → Phase 2 markdown triple extraction), and ' +
+          'writes the resulting triples into the named assertion graph. text/markdown skips Phase 1; other ' +
+          'content types require a registered converter (otherwise extraction returns status "skipped"). ' +
+          'Returns `{ assertionUri, fileHash, rootEntity?, detectedContentType, extraction: { status, tripleCount, ... } }`.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name to write into (will be created if it doesn\'t exist — but you can also pre-create it with dkg_assertion_create for explicitness).' },
+            file_path: { type: 'string', description: 'Absolute local path to the file to import. The tool reads the file and streams it as multipart/form-data to the daemon.' },
+            content_type: { type: 'string', description: 'Optional MIME type override (e.g. "text/markdown", "application/pdf"). If omitted, the daemon infers from the file extension / filename.' },
+            ontology_ref: { type: 'string', description: 'Optional ontology URI to guide Phase 2 extraction (e.g. the CG\'s `_ontology` URI).' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must be pre-registered via dkg_sub_graph_create).' },
+          },
+          required: ['context_graph_id', 'name', 'file_path'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionImportFile(args),
+      },
+      {
+        name: 'dkg_assertion_query',
+        description:
+          'Dump all quads currently stored in a single Working Memory assertion\'s graph. Use this to read ' +
+          'back what was just written before promoting, or to inspect an in-flight extraction. This is NOT a ' +
+          'SPARQL endpoint — it returns every quad in the assertion. For ad-hoc SPARQL across assertions or ' +
+          'context graphs, use dkg_query instead. Returns `{ quads, count }`.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name to dump quads from.' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+          },
+          required: ['context_graph_id', 'name'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionQuery(args),
+      },
+      {
+        name: 'dkg_assertion_history',
+        description:
+          'Fetch the lifecycle descriptor for a Working Memory assertion — creation time, author, latest ' +
+          'extraction status, promotion state, etc. Use this to audit what happened to an assertion after an ' +
+          'import, or to check whether a promotion has been committed. Returns the daemon descriptor, or 404 ' +
+          'if no lifecycle record exists for the assertion under the given agent address.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name to fetch history for.' },
+            agent_address: { type: 'string', description: 'Optional author agent address (defaults to this node\'s default agent address when omitted).' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+          },
+          required: ['context_graph_id', 'name'],
+        },
+        execute: async (_toolCallId, args) => this.handleAssertionHistory(args),
+      },
+
+      // ── Sub-graph management ──────────────────────────────────────────────
+      {
+        name: 'dkg_sub_graph_create',
+        description:
+          'Create a named sub-graph inside a context graph. Sub-graphs are optional organizational partitions ' +
+          'that let assertions be committed into a scoped region of the CG. Returns `{ created, contextGraphId }`. ' +
+          'Fails with 400 if the sub-graph name is invalid, already exists, or the context graph is not found.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Parent context graph ID.' },
+            sub_graph_name: { type: 'string', description: 'Sub-graph name (lowercase letters, digits, hyphens; must not start with "_" — reserved for daemon-internal graphs).' },
+          },
+          required: ['context_graph_id', 'sub_graph_name'],
+        },
+        execute: async (_toolCallId, args) => this.handleSubGraphCreate(args),
+      },
+      {
+        name: 'dkg_sub_graph_list',
+        description:
+          'List all registered sub-graphs for a context graph, with per-sub-graph entity and triple counts. ' +
+          'Use this to discover what sub-graphs exist before writing assertions into one. Returns ' +
+          '`{ contextGraphId, subGraphs: [{ name, uri, description, createdBy, createdAt, entityCount, tripleCount }] }`. ' +
+          'Counts are best-effort — they degrade to zero on transient query failure without erroring.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Context graph ID to list sub-graphs for.' },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleSubGraphList(args),
       },
     ];
   }
@@ -1286,7 +1465,9 @@ export class DkgNodePlugin {
     try {
       const sparql = String(args.sparql);
       const contextGraphId = (args.context_graph_id ?? args.paranet_id) ? String(args.context_graph_id ?? args.paranet_id) : undefined;
-      const includeSharedMemory = args.include_shared_memory === 'true' || args.include_shared_memory === true;
+      // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
+      const raw = args.include_shared_memory;
+      const includeSharedMemory = raw === true || raw === 'true';
       const result = await this.client.query(sparql, {
         contextGraphId,
         includeSharedMemory: includeSharedMemory || undefined,
@@ -1381,7 +1562,11 @@ export class DkgNodePlugin {
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
-      const includeSharedMemory = args.include_shared_memory === 'false' ? false : undefined;
+      // Accept both the new boolean schema and legacy "false"/"true" string forms
+      // so v1 callers and upgraded v2 callers both work without agent-side changes.
+      const raw = args.include_shared_memory;
+      const includeSharedMemory =
+        raw === false || raw === 'false' ? false : raw === true || raw === 'true' ? true : undefined;
       const result = await this.client.subscribe(contextGraphId, {
         includeSharedMemory,
       });
@@ -1394,6 +1579,176 @@ export class DkgNodePlugin {
   private async handleWalletBalances(): Promise<OpenClawToolResult> {
     try {
       const result = await this.client.getWalletBalances();
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  // ── Assertion lifecycle handlers ────────────────────────────────────────
+
+  private async handleAssertionCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const result = await this.client.createAssertion(contextGraphId, name, { subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionWrite(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      const rawQuads = args.quads;
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
+        return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
+      }
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      // Mirror dkg_publish: auto-detect URI vs literal for the object so agents can pass
+      // raw values without manually wrapping string literals in quotes.
+      const quads = rawQuads.map((q: any) => {
+        const objVal = String(q.object ?? '');
+        return {
+          subject: String(q.subject ?? ''),
+          predicate: String(q.predicate ?? ''),
+          object: isUri(objVal) ? objVal : `"${objVal.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+          graph: q.graph ? String(q.graph) : '',
+        };
+      });
+      const result = await this.client.writeAssertion(contextGraphId, name, quads, { subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionPromote(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      // Accept the string "all", an explicit array of URIs, or `undefined` → defaults to "all" in daemon.
+      let entities: string[] | 'all' | undefined;
+      const raw = args.entities;
+      if (raw === undefined || raw === null || raw === 'all') {
+        entities = undefined;
+      } else if (Array.isArray(raw)) {
+        entities = raw.map((e: any) => String(e));
+      } else {
+        return this.error('"entities" must be the string "all" or an array of root entity URIs.');
+      }
+      const result = await this.client.promoteAssertion(contextGraphId, name, { entities, subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionDiscard(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const result = await this.client.discardAssertion(contextGraphId, name, { subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionImportFile(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      const filePath = String(args.file_path ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      if (!filePath) return this.error('"file_path" is required.');
+      const contentType = args.content_type ? String(args.content_type) : undefined;
+      const ontologyRef = args.ontology_ref ? String(args.ontology_ref) : undefined;
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+
+      let buffer: Buffer;
+      let fileName: string;
+      try {
+        const { readFile } = await import('node:fs/promises');
+        const { basename } = await import('node:path');
+        buffer = await readFile(filePath);
+        fileName = basename(filePath);
+      } catch (err: any) {
+        return this.error(`Failed to read file at "${filePath}": ${err.message ?? String(err)}`);
+      }
+
+      const result = await this.client.importAssertionFile(contextGraphId, name, buffer, fileName, {
+        contentType,
+        ontologyRef,
+        subGraphName,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const result = await this.client.queryAssertion(contextGraphId, name, { subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionHistory(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const agentAddress = args.agent_address ? String(args.agent_address) : undefined;
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const result = await this.client.getAssertionHistory(contextGraphId, name, { agentAddress, subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleSubGraphCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const subGraphName = String(args.sub_graph_name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!subGraphName) return this.error('"sub_graph_name" is required.');
+      const result = await this.client.createSubGraph(contextGraphId, subGraphName);
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleSubGraphList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      const result = await this.client.listSubGraphs(contextGraphId);
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

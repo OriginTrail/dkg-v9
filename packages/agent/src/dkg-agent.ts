@@ -13,6 +13,7 @@ import {
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
+  TrustLevel,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -29,6 +30,8 @@ import {
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
+  emptyQueryResultForKind,
+  validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -36,7 +39,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
@@ -2732,6 +2735,42 @@ export class DKGAgent {
       verifiedGraph?: string;
       assertionName?: string;
       subGraphName?: string;
+      /**
+       * EVM address of the authenticated caller, as resolved by an
+       * outer layer (typically the daemon's per-request auth token).
+       * When set, the agent layer enforces that `view: 'working-memory'`
+       * queries can only read this caller's own WM — cross-agent reads
+       * via a foreign `agentAddress` are silently denied.
+       *
+       * Undefined = no caller authentication context (in-process call
+       * from trusted code). Backwards-compatible with callers that
+       * predate A-1 — they bypass the isolation check.
+       *
+       * Invariant: on a `view: 'working-memory'` read, the agent layer
+       * rejects (silently, with an empty-per-kind result) any
+       * `agentAddress` that differs from `callerAgentAddress`. If
+       * `agentAddress` is omitted, it defaults to `callerAgentAddress`
+       * so an authenticated caller cannot escape isolation by omission.
+       * See spec §04 / RFC-29 for the policy source.
+       */
+      callerAgentAddress?: string;
+      /**
+       * Minimum trust level for the verified-memory view (spec §14, P-13).
+       * When set to `TrustLevel.Endorsed`, the root content graph is
+       * excluded from resolution so only quorum-verified sub-graphs survive.
+       * Values above `Endorsed` (`PartiallyVerified`, `ConsensusVerified`)
+       * are currently rejected — see `QueryOptions.minTrust` in
+       * `packages/query/src/query-engine.ts` for the full rationale and
+       * the Q-1 gap tracking per-graph trust tagging.
+       * Ignored for views other than `verified-memory`.
+       */
+      minTrust?: TrustLevel;
+      /**
+       * @deprecated Use `minTrust`. Legacy underscore alias preserved for
+       * V10-rc SDK consumers. When both are supplied, `minTrust` wins.
+       * See QueryOptions._minTrust for the deprecation policy.
+       */
+      _minTrust?: TrustLevel;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -2745,9 +2784,133 @@ export class DKGAgent {
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
 
+    // Validate the SPARQL query is read-only BEFORE any access-denied
+    // fast-path. `DKGQueryEngine.query` runs this guard too, but the
+    // three early returns below (canReadContextGraph deny, WM
+    // isolation deny, private-CG deny) short-circuit before reaching
+    // it. Without this check, a caller can send `INSERT DATA { ... }`
+    // through a cross-agent WM request and get a 200 empty result
+    // instead of the 400 rejection that plain queries receive —
+    // effectively silently swallowing a mutation attempt. Run it
+    // once here so the deny path and the engine path share the same
+    // input contract.
+    const readOnlyGuard = validateReadOnlySparql(sparql);
+    if (!readOnlyGuard.safe) {
+      throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
+    }
+
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      return { bindings: [] };
+      // A-1 follow-up review: synthetic deny must match the SPARQL form
+      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+      // instead of a SELECT-shaped `{ bindings: [] }`.
+      return emptyQueryResultForKind(sparql);
+    }
+
+    // A-1: Working-Memory isolation. When the caller is authenticated
+    // (an outer layer like the daemon's `/api/query` route has resolved
+    // the request to a specific agent and passed `callerAgentAddress`),
+    // a WM query must not be allowed to read a different agent's
+    // private memory. Cross-agent WM reads are silently denied (empty
+    // bindings) rather than thrown — that matches the spec-safe
+    // "deny without leaking existence" semantics used elsewhere in
+    // this file for private context graphs.
+    //
+    // When `callerAgentAddress` is undefined we assume a trusted
+    // in-process caller (e.g. ChatMemoryManager running inside the
+    // daemon process) and leave the legacy behaviour intact. Those
+    // call sites are tracked as follow-up A-1.2 for migration to an
+    // authenticated scoped handle.
+    // A-1 review: `/api/query` passes the raw JSON body through, so
+    // `agentAddress` / `callerAgentAddress` can arrive as any JSON type
+    // (number, array, object, null). Before this guard `.toLowerCase()`
+    // would throw and the daemon turned a bad request into a 500.
+    //
+    // A-1 follow-up review: simply coercing non-strings to `undefined`
+    // meant malformed input like `{ view: 'working-memory',
+    // agentAddress: 123 }` silently fell through to the
+    // `this.peerId` fallback below — so a caller could land in the
+    // node-default WM namespace and get a 200 with real data.
+    // Reject non-string `agentAddress` / `callerAgentAddress` up
+    // front and let the daemon classify the resulting error as 400.
+    if (opts.agentAddress !== undefined && typeof opts.agentAddress !== 'string') {
+      throw new Error(
+        `query: 'agentAddress' must be a string, got ${typeof opts.agentAddress}`,
+      );
+    }
+    if (opts.callerAgentAddress !== undefined && typeof opts.callerAgentAddress !== 'string') {
+      throw new Error(
+        `query: 'callerAgentAddress' must be a string, got ${typeof opts.callerAgentAddress}`,
+      );
+    }
+    const callerAgentAddressStr = opts.callerAgentAddress;
+
+    // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
+    // node's default agent has TWO identifiers that key the same WM
+    // namespace — its EVM address (`this.defaultAgentAddress`) and
+    // the legacy `this.peerId`. In-repo WM callers / docs still use
+    // `peerId` as `agentAddress` (e.g. `ChatMemoryManager`,
+    // `packages/cli/skills/dkg-node/SKILL.md`), and the engine
+    // stores WM under
+    // `did:dkg:context-graph:<cg>/assertion/<agentAddress>/`, so EVM
+    // and peerId hash to DIFFERENT graphs. If the isolation check
+    // compared raw strings, an agent-scoped token with
+    // `callerAgentAddress=<defaultAgent.evm>` querying its own WM
+    // with `agentAddress=<peerId>` (or the reverse) would get a
+    // silent empty deny even though both sides are the same
+    // identity. Canonicalize both sides: when the default agent is
+    // known, fold its `peerId` alias onto its EVM address.
+    const defaultEvmLc = this.defaultAgentAddress?.toLowerCase();
+    const peerIdLc = this.peerId?.toLowerCase();
+    const canonicaliseWmId = (addr: string | undefined): string | undefined => {
+      if (!addr) return undefined;
+      const lc = addr.toLowerCase();
+      if (peerIdLc && lc === peerIdLc && defaultEvmLc) return defaultEvmLc;
+      return lc;
+    };
+
+    // An authenticated (agent-bound) /api/query call could previously
+    // OMIT `agentAddress` and fall through to the `this.peerId`
+    // fallback at the engine call below, reading the node-default WM
+    // namespace instead of the caller's own. Default an omitted
+    // `agentAddress` to `callerAgentAddress` on working-memory reads
+    // so an agent-bound caller cannot escape its own WM by just not
+    // supplying the field.
+    //
+    // Legacy preservation (Codex iter-9 re-review): if the caller is
+    // the node default agent, default to `this.peerId` instead of
+    // the EVM address. Pre-existing WM data for the default agent
+    // lives under the peerId-keyed namespace; defaulting to the EVM
+    // form would strand that data. The isolation check below is
+    // alias-aware (`canonicaliseWmId`), so both forms resolve to the
+    // same canonical identity and still pass the caller===target
+    // invariant.
+    const callerIsDefaultAgent =
+      !!callerAgentAddressStr
+      && !!defaultEvmLc
+      && callerAgentAddressStr.toLowerCase() === defaultEvmLc;
+    const agentAddressStr =
+      opts.agentAddress
+      ?? (opts.view === 'working-memory' && callerAgentAddressStr
+        ? (callerIsDefaultAgent && this.peerId ? this.peerId : callerAgentAddressStr)
+        : undefined);
+    if (
+      opts.view === 'working-memory' &&
+      callerAgentAddressStr &&
+      agentAddressStr &&
+      canonicaliseWmId(callerAgentAddressStr) !== canonicaliseWmId(agentAddressStr)
+    ) {
+      this.log.info(
+        ctx,
+        `WM query denied: caller=${callerAgentAddressStr} cannot read agentAddress=${agentAddressStr} — A-1 isolation`,
+      );
+      // A-1 follow-up review: preserve the SPARQL query-form shape on
+      // denial so ASK clients see `{ bindings: [{ result: 'false' }] }`
+      // and CONSTRUCT / DESCRIBE clients see `{ bindings: [], quads: [] }`.
+      // Returning a SELECT-shaped `{ bindings: [] }` on every form leaks
+      // the fact that access was denied (versus an empty match) via the
+      // changed response shape.
+      return emptyQueryResultForKind(sparql);
     }
 
     // When no context graph is specified, exclude private CGs the caller cannot
@@ -2761,7 +2924,7 @@ export class DKGAgent {
       // aggregates (ASK, COUNT) or projections that omit graph/subject.
       if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
         this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return { bindings: [] };
+        return emptyQueryResultForKind(sparql);
       }
     }
 
@@ -2771,10 +2934,15 @@ export class DKGAgent {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
-      agentAddress: opts.agentAddress ?? (opts.view === 'working-memory' ? this.peerId : undefined),
+      agentAddress: agentAddressStr ?? (opts.view === 'working-memory' ? this.peerId : undefined),
       verifiedGraph: opts.verifiedGraph,
       assertionName: opts.assertionName,
       subGraphName: opts.subGraphName,
+      // PR #239 Codex iter-5: fall back to the deprecated underscore alias
+      // here (and only here — we do not propagate both fields further) so
+      // callers on the legacy shape still get the trust gate without
+      // engines needing to know about both names.
+      minTrust: opts.minTrust ?? opts._minTrust,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -4468,8 +4636,26 @@ export class DKGAgent {
     agentAddress?: string;
   }): Promise<PublishResult> {
     const { buildEndorsementQuads } = await import('./endorse.js');
+    // A-12: spec §03 / §22 require the endorser DID to be the
+    // Ethereum-address form. Passing a libp2p peer id here produced
+    // a `did:dkg:agent:${peerId}` URI (12D3KooW-prefixed in practice),
+    // which is non-spec. Prefer the per-call agentAddress, then the
+    // node's default agent address, then fall back to the peer id
+    // only if no EVM identity is known (kept for backward
+    // compatibility with test harnesses; runtime always has a
+    // defaultAgentAddress after auto-registration).
+    //
+    // A-12 review: normalise the address casing through
+    // `canonicalAgentDidSubject` so the endorsement DID converges
+    // with the profile DID for the same wallet (checksum vs
+    // lowercase inputs previously produced two distinct RDF
+    // subjects). Callers must also verify the address is owned by
+    // this node before calling — /api/endorse does that via the
+    // bearer token; see packages/cli/src/daemon.ts.
+    const raw = opts.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const endorser = canonicalAgentDidSubject(raw);
     const quads = buildEndorsementQuads(
-      this.peerId,
+      endorser,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );

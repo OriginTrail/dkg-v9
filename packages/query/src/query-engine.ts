@@ -61,10 +61,22 @@ export interface QueryOptions {
    *     `/_verified_memory/<quorum>` sub-graph satisfies these higher
    *     tiers, and silently downgrading to `Endorsed` would leak
    *     merely-endorsed data into a caller asking for stronger trust.
-   *     Callers must either drop `minTrust` to `Endorsed` (1), or pin
-   *     a specific `verifiedGraph` whose trust tier they already trust
-   *     out-of-band (and in that case `minTrust` must stay at
-   *     `SelfAttested`).
+   *     Callers must drop `minTrust` to `Endorsed` (1), or use the
+   *     exact-graph path below and accept `Endorsed` as the ceiling.
+   *
+   * View gating (iter-6): `minTrust` is **ignored** on the
+   * `working-memory` and `shared-working-memory` views — those views
+   * have their own access-control story and do not union across trust
+   * tiers. The validation therefore only fires on `verified-memory`
+   * queries, so callers who reuse a generic options object across
+   * views are not forced to strip the field on every call.
+   *
+   * Exact-graph path (iter-6): when `verifiedGraph` is set, the engine
+   * targets the single `_verified_memory/<id>` sub-graph. Because
+   * every graph in that prefix is populated only by quorum-verified
+   * write paths (implicit `Endorsed` floor), `minTrust=Endorsed` is
+   * honoured on this path. Values **above** `Endorsed` are still
+   * rejected for the same Q-1 reason as the union path.
    *
    * Known gap (tracked as Q-1): surviving `/_verified_memory/*` graphs
    * are not filtered per-triple against a `dkg:trustLevel` predicate.

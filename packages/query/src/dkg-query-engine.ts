@@ -55,33 +55,6 @@ export function resolveViewGraphs(
       `See migration guide for details.`,
     );
   }
-  // P-13 review: the /api/query route normalises string minTrust values
-  // (e.g. "ConsensusVerified") to the numeric TrustLevel enum, but
-  // direct callers (DKGAgent.query, DKGQueryEngine.query, SDK users)
-  // could otherwise pass anything here. A value like '99' or the string
-  // 'ConsensusVerified' would be compared numerically against
-  // `TrustLevel.SelfAttested` via JS coercion and silently mis-route
-  // the query. Validate once, at the shared entry point, so every
-  // code path fails closed with a 400-mappable error.
-  if (opts?.minTrust !== undefined) {
-    const mt: unknown = opts.minTrust;
-    const validLevels = [
-      TrustLevel.SelfAttested,
-      TrustLevel.Endorsed,
-      TrustLevel.PartiallyVerified,
-      TrustLevel.ConsensusVerified,
-    ];
-    if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
-      // "minTrust" + "must be one of" mirrors the daemon's 400
-      // classifier wording so the HTTP path maps to a client error.
-      throw new Error(
-        `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
-        `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
-        `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
-        `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
-      );
-    }
-  }
   switch (view) {
     case 'working-memory': {
       if (!opts?.agentAddress) {
@@ -104,26 +77,58 @@ export function resolveViewGraphs(
         graphPrefixes: [],
       };
     case 'verified-memory': {
+      // P-13 review (iter-6): `minTrust` is a verified-memory concept
+      // — it is the only view whose graph resolution is actually
+      // gated by per-graph trust. The earlier iterations ran the
+      // numeric/enum validation at the top of `resolveViewGraphs`,
+      // but that meant a caller who passes a generic options object
+      // (e.g. `{ agentAddress, minTrust }`) across views would get
+      // a 400 on `working-memory`/`shared-working-memory` too,
+      // where the option is documented as ignored. Keep the
+      // validation here so only verified-memory consumers see it.
+      if (opts?.minTrust !== undefined) {
+        const mt: unknown = opts.minTrust;
+        const validLevels = [
+          TrustLevel.SelfAttested,
+          TrustLevel.Endorsed,
+          TrustLevel.PartiallyVerified,
+          TrustLevel.ConsensusVerified,
+        ];
+        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
+          // "minTrust" + "must be one of" mirrors the daemon's 400
+          // classifier wording so the HTTP path maps to a client error.
+          throw new Error(
+            `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
+            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
+            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
+            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+          );
+        }
+      }
+
       const requireHighTrust =
         opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       if (opts?.verifiedGraph) {
-        // P-13 review: callers MUST NOT be able to combine a specific
-        // `verifiedGraph` URI with a `minTrust` above SelfAttested unless
-        // the engine can prove the named sub-graph already satisfies the
-        // threshold. Today we have no such per-graph trust metadata, so
-        // silently ignoring `minTrust` would let a caller request
-        // ConsensusVerified and receive whatever trust level happens to
-        // live under that `_verified_memory/<id>` graph. Reject instead.
-        if (requireHighTrust) {
+        // P-13 review (iter-6): every `/_verified_memory/<id>` graph
+        // is populated only by quorum-verified write paths, so the
+        // floor for those sub-graphs is implicitly `Endorsed`. A
+        // caller pinning an exact `verifiedGraph` + `minTrust=Endorsed`
+        // therefore asks for the same data the engine would union
+        // from the prefix and must succeed. Only values ABOVE
+        // `Endorsed` need to be rejected — the engine still cannot
+        // prove a single named sub-graph satisfies
+        // `PartiallyVerified` / `ConsensusVerified` until per-graph
+        // trust metadata (Q-1) lands.
+        if (opts.minTrust !== undefined && opts.minTrust > TrustLevel.Endorsed) {
           // Use the exact phrase "cannot be combined with" so the
           // daemon's `/api/query` error classifier maps this to HTTP
           // 400 (see packages/cli/src/daemon.ts). Without that
           // wording the error escapes as a 500.
           throw new Error(
-            `verified-memory: verifiedGraph cannot be combined with minTrust above SelfAttested ` +
-            `(got minTrust=${opts!.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
-            `the trust threshold; drop verifiedGraph to union across all quorum-verified sub-graphs, or ` +
-            `drop minTrust to read the specific sub-graph verbatim.`,
+            `verified-memory: verifiedGraph cannot be combined with minTrust above Endorsed ` +
+            `(got minTrust=${opts.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
+            `PartiallyVerified or ConsensusVerified; drop verifiedGraph to union across all ` +
+            `quorum-verified sub-graphs, or use minTrust=Endorsed to read the specific sub-graph.`,
           );
         }
         return {

@@ -445,6 +445,51 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
+    it('dkg_query rejects a stringified include_shared_memory instead of silently coercing to false', async () => {
+      // Schema declares include_shared_memory as boolean. A permissive host
+      // might still pass `"true"` through. If we silently coerced it to
+      // `false`, the caller would miss SWM data they thought they were
+      // requesting — a worse failure mode than a loud error.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        include_shared_memory: 'true',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('include_shared_memory');
+      expect(result.content[0].text).toContain('boolean');
+    });
+
+    it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_subscribe')!.execute('tc', {
+        context_graph_id: 'ctx',
+        include_shared_memory: 'true',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('include_shared_memory');
+      expect(result.content[0].text).toContain('boolean');
+    });
+
+    it('dkg_assertion_promote description points to dkg_shared_memory_publish as the next step', () => {
+      // dkg_publish is a one-shot write-AND-publish helper. After promote the
+      // data is already in SWM, so the correct finalizer is
+      // dkg_shared_memory_publish — calling dkg_publish would append
+      // duplicates. The promote description must steer agents correctly.
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const promote = tools.find((t) => t.name === 'dkg_assertion_promote')!;
+      expect(promote.description).toContain('dkg_shared_memory_publish');
+      expect(promote.description).toMatch(/NOT dkg_publish/);
+    });
+
     it('dkg_assertion_write escapes every N-Triples ECHAR control character in literal objects', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
       await byName.get('dkg_assertion_write')!.execute('tc', {

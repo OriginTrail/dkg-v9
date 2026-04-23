@@ -1253,7 +1253,8 @@ export class DkgNodePlugin {
         name: 'dkg_assertion_promote',
         description:
           'Step 3 of the canonical flow. Promote an assertion (or selected root entities) from Working Memory ' +
-          'into Shared Working Memory, making it eligible for dkg_publish.',
+          'into Shared Working Memory. Finalize with dkg_shared_memory_publish (NOT dkg_publish — that helper ' +
+          'expects fresh quads and would append duplicates to SWM).',
         parameters: {
           type: 'object',
           properties: {
@@ -1471,6 +1472,13 @@ export class DkgNodePlugin {
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
+      // Schema declares include_shared_memory as boolean. If a caller supplies
+      // a string ("true") or any other non-boolean, reject it — silently
+      // coercing to `false` would make callers quietly miss SWM data they
+      // thought they were requesting.
+      if (args.include_shared_memory !== undefined && typeof args.include_shared_memory !== 'boolean') {
+        return this.error('"include_shared_memory" must be a boolean.');
+      }
       const includeSharedMemory = args.include_shared_memory === true;
       const result = await this.client.query(sparql, {
         contextGraphId,
@@ -1566,8 +1574,16 @@ export class DkgNodePlugin {
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
-      const raw = args.include_shared_memory;
-      const includeSharedMemory = raw === false ? false : raw === true ? true : undefined;
+      // Schema declares include_shared_memory as boolean. Reject non-boolean
+      // explicitly (same rationale as handleQuery): silent coercion to the
+      // daemon default would make callers quietly miss SWM data they asked
+      // for. `undefined` is the only non-boolean we accept — it maps to the
+      // daemon's default.
+      if (args.include_shared_memory !== undefined && typeof args.include_shared_memory !== 'boolean') {
+        return this.error('"include_shared_memory" must be a boolean.');
+      }
+      const includeSharedMemory =
+        args.include_shared_memory === false ? false : args.include_shared_memory === true ? true : undefined;
       const result = await this.client.subscribe(contextGraphId, {
         includeSharedMemory,
       });

@@ -159,8 +159,8 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 |---|---|---|
 | `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
 | `dkg_wallet_balances` | `GET /api/wallets/balances` | TRAC / ETH balances |
-| `dkg_list_context_graphs` | `GET /api/context-graph/list` | List subscribed projects |
-| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple (local) context graph. Multi-sig / on-chain registration is HTTP-only — see §6 |
+| `dkg_list_context_graphs` | `GET /api/context-graph/list` | List all context graphs the node knows about — each entry carries `subscribed` and `synced` flags (discovered-but-not-subscribed entries are present too) |
+| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only |
 | `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
 | `dkg_assertion_create` | `POST /api/assertion/create` | Start a WM assertion |
 | `dkg_assertion_write` | `POST /api/assertion/{name}/write` | Append triples to a WM assertion |
@@ -296,7 +296,12 @@ Implications:
 - `POST /api/context-graph/create` — create a context graph.
   Body: `{ id, name, description?, accessPolicy? (0=open, 1=private), allowedAgents?: [...], allowedPeers?: [...], private?, register?, participantIdentityIds?, requiredSignatures? }`.
 
-  Whether the CG stays local depends on the node's chain configuration. On a chain-disabled node (`chainId: 'none'` or a mock), the CG is local-only until a `/api/context-graph/register` call promotes it. On a chain-enabled node with an on-chain identity, `createContextGraph()` auto-registers on-chain as a best-effort side-effect — the CG is created locally first, then a registration is attempted; failures are logged as warnings (not surfaced on the create response) and the CG remains local. The explicit `register: true` flag triggers an additional registration attempt after create and is mainly useful on chain-disabled nodes or as an explicit retry hook — **on chain-enabled nodes it usually duplicates the auto-register work and returns `200` with `registered: false` + `registerError` + `hint` because the CG is already registered, which looks like a failure but isn't one**. If you want "created and registered in one call", pass `register: true` only on a node where you know the auto-register path didn't run (i.e. chain-disabled at the daemon level, or you've just enabled the chain adapter).
+  Whether the CG stays local depends on the node's chain adapter configuration — there are four distinct regimes:
+
+  - **No chain adapter** (`chainId: 'none'`): CG is local-only permanently. Both `register: true` and a follow-up `/api/context-graph/register` call throw `On-chain registration requires a configured chain adapter`. This is a terminal state — the node operator must configure a chain adapter before on-chain promotion is possible.
+  - **Mock chain adapter** (`chainId` starts with `mock`): the create-time auto-register path is deliberately skipped to avoid polluting test runs. The CG stays local on create; explicit `register: true` or `/api/context-graph/register` may succeed depending on what the mock implements.
+  - **Real chain adapter WITH on-chain identity**: `createContextGraph()` auto-registers on-chain as a best-effort side-effect. Failures are logged as warnings (not surfaced on the create response) and the CG remains local. Passing `register: true` in this regime usually duplicates the auto-register work and returns `200` with `registered: false` + `registerError` + `hint` because the CG is already registered — looks like a failure but isn't one. Use `register: true` here only as an explicit retry hook when the auto-register path failed.
+  - **Real chain adapter WITHOUT on-chain identity**: no auto-register on create; CG stays local until `/api/context-graph/register` or `register: true` promotes it.
   - **Simple CG** (default): pass `{ id, name }`. Creator alone publishes to VM. Add `accessPolicy: 1` + `allowedAgents` for a curated CG.
   - **Multi-sig CG**: pass `participantIdentityIds: [...]` + `requiredSignatures: M`. Use `register: true` so the participant set and threshold are anchored on-chain. `requiredSignatures` is optional when `private: true`.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, revealOnChain?, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory.

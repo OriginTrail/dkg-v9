@@ -647,6 +647,41 @@ export function mergeOpenClawConfig(
     log('Added "group:plugins" to tools.alsoAllow');
   }
 
+  // Ensure tools.profile exposes plugin-registered tools. OpenClaw's
+  // `CORE_TOOL_PROFILES` allowlist (applied at registry resolution) filters
+  // plugin-registered tools out of the default `"coding"` profile, making
+  // `dkg_*` invisible to the agent even when the plugin loads in full mode.
+  if (!config.tools.profile) {
+    config.tools.profile = 'full';
+    log('Set tools.profile = "full" to expose plugin tools');
+  } else if (config.tools.profile === 'coding') {
+    config.tools.profile = 'full';
+    log('Upgraded tools.profile from "coding" to "full" to expose plugin tools');
+  }
+  // If the user explicitly set "minimal" or "messaging", respect that — they may
+  // have restricted the profile intentionally and can re-expand with alsoAllow.
+
+  // Ensure channels.dkg-ui has at least one non-`enabled` key so OpenClaw's
+  // loader keeps the plugin in `full` runtime mode (not `setup-runtime`, where
+  // api.registerTool is a noop — see openclaw/src/plugins/loader.ts:816 and
+  // openclaw/src/config/channel-configured-shared.ts:21 for the check).
+  if (!config.channels || typeof config.channels !== 'object') {
+    config.channels = {};
+  }
+  const dkgUiChannel = config.channels['dkg-ui'];
+  if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
+    config.channels['dkg-ui'] = { enabled: true, port: 9201 };
+    log('Created channels.dkg-ui with port 9201 to keep plugin in full runtime mode');
+  } else {
+    // Check whether the existing entry has any non-`enabled` key.
+    const hasNonEnabledKey = Object.keys(dkgUiChannel).some((k) => k !== 'enabled');
+    if (!hasNonEnabledKey) {
+      config.channels['dkg-ui'] = { ...dkgUiChannel, port: 9201 };
+      log('Added port 9201 to channels.dkg-ui to keep plugin in full runtime mode');
+    }
+    // Otherwise leave the user's customizations alone.
+  }
+
   // Elect the adapter into OpenClaw's memory slot. Combined with
   // "kind": "memory" in openclaw.plugin.json and api.registerMemoryCapability(...)
   // inside DkgNodePlugin.register(), this replaces the default memory-core

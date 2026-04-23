@@ -524,6 +524,115 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.daemonUrl).toBe('http://127.0.0.1:9400');
   });
+
+  // PR A — tools.profile patch. Ensures plugin-registered `dkg_*` tools are
+  // visible to the agent by upgrading the common default `"coding"` profile
+  // (whose allowlist filters out plugin tools) to `"full"`, while respecting
+  // explicit restrictive profiles ("minimal", "messaging").
+  it('tools.profile: upgrades "coding" → "full"', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('full');
+  });
+
+  it('tools.profile: respects explicit "minimal" (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'minimal' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('minimal');
+  });
+
+  it('tools.profile: respects explicit "messaging" (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'messaging' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('messaging');
+  });
+
+  it('tools.profile: sets "full" when absent', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('full');
+  });
+
+  // PR A — channels.dkg-ui patch. Without at least one non-`enabled` key on
+  // the channel entry, OpenClaw's loader demotes the plugin to setup-runtime
+  // mode where `api.registerTool` is a noop. A port pin is the cheapest
+  // non-`enabled` key that satisfies `hasMeaningfulChannelConfigShallow`.
+  it('channels.dkg-ui: creates { enabled: true, port: 9201 } when missing', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+  });
+
+  it('channels.dkg-ui: adds port to degenerate { enabled: true }', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+  });
+
+  it('channels.dkg-ui: preserves existing user port (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true, port: 9300 } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
+
+  it('is idempotent on tools.profile + channels.dkg-ui — byte-identical output on second run', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackupCount).toBe(firstBackupCount);
+  });
 });
 
 // ---------------------------------------------------------------------------

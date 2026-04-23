@@ -1072,7 +1072,8 @@ export class DkgNodePlugin {
         name: 'dkg_subscribe',
         description:
           'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
-          'a remotely-authored CG. v9 `paranet_id` alias removed; use `context_graph_id`.',
+          'a remotely-authored CG. Accepts `paranet_id` as a deprecated v9 alias for `context_graph_id` (normalized ' +
+          'at the handler; errors only when both are supplied and disagree).',
         parameters: {
           type: 'object',
           properties: {
@@ -1097,7 +1098,7 @@ export class DkgNodePlugin {
           'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
           'all SWM in the CG to Verified Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
           '(write → promote → publish) use `dkg_assertion_create/write/promote` followed by ' +
-          '`dkg_shared_memory_publish`. v9 `paranet_id` alias removed; use `context_graph_id`.',
+          '`dkg_shared_memory_publish`. Accepts `paranet_id` as a deprecated v9 alias for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
@@ -1127,7 +1128,8 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs. v9 `paranet_id` alias removed; use `context_graph_id`.',
+          '`GRAPH ?g { ... }` for named graphs. Accepts `paranet_id` as a deprecated v9 alias for ' +
+          '`context_graph_id`; errors only when both are supplied and disagree.',
         parameters: {
           type: 'object',
           properties: {
@@ -1147,8 +1149,9 @@ export class DkgNodePlugin {
       {
         name: 'dkg_find_agents',
         description:
-          'Discover DKG agents on the P2P network. Requires a live P2P network — returns an empty list when ' +
-          'no peers are reachable.',
+          'List DKG agents known to this node — combines the local registry (this node + cached peers from the ' +
+          'identity layer) with live P2P connection status. Works offline: returns locally-known agents with ' +
+          'their last-seen `connectionStatus` even when no peers are currently reachable.',
         parameters: {
           type: 'object',
           properties: {
@@ -1177,7 +1180,9 @@ export class DkgNodePlugin {
       {
         name: 'dkg_read_messages',
         description:
-          'Read P2P chat messages (sent + received). Returns an empty list when the P2P network is unavailable.',
+          'Read locally-persisted chat history (messages sent + received through the DKG node). Backed by the ' +
+          'node\'s local message store, so it returns full history offline. Optional filters: `peer` (peer ID or ' +
+          'agent name), `limit`, `since` (Unix-ms cutoff).',
         parameters: {
           type: 'object',
           properties: {
@@ -1429,7 +1434,9 @@ export class DkgNodePlugin {
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const resolved = resolveContextGraphId(args);
+      if (resolved.error) return this.error(resolved.error);
+      const contextGraphId = resolved.value;
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
@@ -1463,21 +1470,16 @@ export class DkgNodePlugin {
     try {
       const sparql = String(args.sparql);
       // `context_graph_id` is optional on this tool (omit → unscoped query across
-      // all subscribed CGs). That makes a leftover v9 `paranet_id` dangerous: a
-      // caller that used to scope via `paranet_id` would now silently widen to
-      // every subscribed CG. Reject the legacy key explicitly whenever the
-      // normalized `context_graph_id` is missing or empty — not just when it's
-      // strictly `undefined` — so `{ context_graph_id: "", paranet_id: "x" }`
-      // also fails fast instead of falling through to unscoped.
-      const rawContextGraphId = typeof args.context_graph_id === 'string'
-        ? args.context_graph_id.trim()
-        : '';
-      const contextGraphId = rawContextGraphId ? rawContextGraphId : undefined;
-      if (args.paranet_id !== undefined && !contextGraphId) {
-        return this.error(
-          '"paranet_id" is a removed v9 alias. Use "context_graph_id" (or omit it for an unscoped query).',
-        );
-      }
+      // all subscribed CGs). The shared resolver normalizes the legacy
+      // `paranet_id` alias: if only `paranet_id` is supplied, scope the query to
+      // it (preserving v9 caller compat); if both are supplied they must agree.
+      // The silent-widening bug the normalized empty-check fix targeted is
+      // still closed — a blank `context_graph_id` with a populated
+      // `paranet_id` now correctly falls through to a scoped query on the
+      // `paranet_id` value, not an unscoped one.
+      const resolved = resolveContextGraphId(args);
+      if (resolved.error) return this.error(resolved.error);
+      const contextGraphId = resolved.value;
       // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
       const raw = args.include_shared_memory;
       const includeSharedMemory = raw === true || raw === 'true';
@@ -1571,7 +1573,9 @@ export class DkgNodePlugin {
 
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const resolved = resolveContextGraphId(args);
+      if (resolved.error) return this.error(resolved.error);
+      const contextGraphId = resolved.value;
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
@@ -1817,6 +1821,33 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+/**
+ * Normalize the `context_graph_id` / `paranet_id` pair into a single resolved
+ * value without breaking v9 callers.
+ *
+ * - Trims both fields and discards empty / whitespace values.
+ * - If only one is populated → return that value.
+ * - If both are populated and AGREE → return the shared value.
+ * - If both are populated and DISAGREE → return an `error` so the caller can
+ *   surface a clear "values conflict" message instead of silently picking one.
+ * - If neither is populated → return `{ value: undefined }`. Whether that's a
+ *   fatal error depends on the tool (required for publish/subscribe, optional
+ *   for query's unscoped mode) — the caller decides.
+ */
+function resolveContextGraphId(args: Record<string, unknown>): { value?: string; error?: string } {
+  const normalize = (raw: unknown): string => (typeof raw === 'string' ? raw.trim() : '');
+  const contextGraph = normalize(args.context_graph_id);
+  const paranet = normalize(args.paranet_id);
+  if (contextGraph && paranet && contextGraph !== paranet) {
+    return {
+      error:
+        '"paranet_id" (deprecated v9 alias) and "context_graph_id" conflict — both were supplied with different values. Remove the duplicate or align them.',
+    };
+  }
+  const value = contextGraph || paranet || undefined;
+  return { value };
 }
 
 /**

@@ -429,15 +429,17 @@ describe('DkgNodePlugin', () => {
       expect(bad.content[0].text).toContain('non-empty array');
     });
 
-    it('dkg_query rejects a standalone paranet_id instead of silently widening to all CGs', async () => {
-      const { fetchMock, byName } = setupPluginWithFetch({});
-      const bad = await byName.get('dkg_query')!.execute('tc', {
+    it('dkg_query normalizes lone paranet_id into contextGraphId so v9 callers keep working', async () => {
+      // Previously a lone `paranet_id` either silently widened the query (bug)
+      // or was rejected outright (breaks v9 callers). The handler now
+      // normalizes it via the shared resolver — scoped query preserved.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         paranet_id: 'my-cg',
       });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(bad.content[0].text).toContain('paranet_id');
-      expect(bad.content[0].text).toContain('context_graph_id');
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('my-cg');
     });
 
     it('dkg_assertion_write escapes N-Triples control characters in literal objects', async () => {
@@ -547,14 +549,14 @@ describe('DkgNodePlugin', () => {
   // the daemon is never called. Guards against accidental re-introduction.
   // ---------------------------------------------------------------------------
 
-  describe('paranet_id legacy alias removed from handlers', () => {
+  describe('paranet_id v9 alias normalization (back-compat via shared resolver)', () => {
     const originalFetch = globalThis.fetch;
     afterEach(() => {
       globalThis.fetch = originalFetch;
     });
 
     const build = () => {
-      const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+      const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
       globalThis.fetch = fetchMock as unknown as typeof fetch;
       const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
       const tools: OpenClawTool[] = [];
@@ -568,55 +570,71 @@ describe('DkgNodePlugin', () => {
       return { fetchMock, byName: new Map(tools.map((t) => [t.name, t] as const)) };
     };
 
-    it('dkg_subscribe rejects lone paranet_id without context_graph_id', async () => {
+    it('dkg_subscribe normalizes lone paranet_id into contextGraphId', async () => {
       const { fetchMock, byName } = build();
-      const result = await byName.get('dkg_subscribe')!.execute('tc', { paranet_id: 'legacy' });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('context_graph_id');
+      await byName.get('dkg_subscribe')!.execute('tc', { paranet_id: 'legacy' });
+      // The subscribe client sends `{ paranetId, ... }` in the POST body
+      // (historical wire name); what matters is the adapter successfully
+      // resolved the legacy input and handed a non-empty CG id downstream
+      // instead of short-circuiting with a missing-field error.
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect(body.paranetId ?? body.contextGraphId).toBe('legacy');
     });
 
-    it('dkg_publish short-circuits with missing-field error when only paranet_id is supplied', async () => {
-      // Handler no longer coerces `paranet_id` into `context_graph_id` and no longer silently
-      // sends `contextGraphId: ''` to the daemon. Lone `paranet_id` triggers the explicit
-      // required-field guard. Covers permissive MCP hosts that don't enforce required fields
-      // at the schema layer.
+    it('dkg_publish normalizes lone paranet_id and reaches the daemon', async () => {
       const { fetchMock, byName } = build();
-      const result = await byName.get('dkg_publish')!.execute('tc', {
+      await byName.get('dkg_publish')!.execute('tc', {
         paranet_id: 'legacy',
         quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
       });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('context_graph_id');
+      expect(fetchMock).toHaveBeenCalled();
     });
 
-    it('dkg_query rejects a standalone paranet_id instead of silently widening the query', async () => {
+    it('dkg_query normalizes lone paranet_id into a scoped query, not an unscoped one', async () => {
       const { fetchMock, byName } = build();
-      const result = await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
-      // Previously a lone `paranet_id` (no `context_graph_id`) would slip through
-      // as `contextGraphId: undefined`, turning a scoped query into an unscoped
-      // one across all subscribed CGs and leaking unrelated data. The handler
-      // now rejects the legacy key explicitly so the mistake is visible.
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('paranet_id');
-      expect(result.content[0].text).toContain('context_graph_id');
+      await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('legacy');
     });
 
-    it('dkg_query also rejects paranet_id when context_graph_id is empty/whitespace (not just undefined)', async () => {
+    it('dkg_query normalizes paranet_id when context_graph_id is empty/whitespace (fixes silent-widening bug)', async () => {
       const { fetchMock, byName } = build();
-      // Blank or whitespace-only `context_graph_id` used to pass the
-      // `!== undefined` check and fall through to `contextGraphId: undefined`,
-      // widening the query. The normalized check now catches both the empty
-      // string and a whitespace-padded value.
       for (const blank of ['', '   ', '\t\n']) {
         fetchMock.mockClear();
-        const result = await byName.get('dkg_query')!.execute('tc', {
+        await byName.get('dkg_query')!.execute('tc', {
           sparql: 'ASK {}',
           context_graph_id: blank,
           paranet_id: 'legacy',
         });
-        expect(fetchMock).not.toHaveBeenCalled();
-        expect(result.content[0].text).toContain('paranet_id');
+        const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+        // Blank CG + populated paranet_id → query scoped to the paranet_id value,
+        // NOT silently unscoped across every subscribed CG.
+        expect(body.contextGraphId).toBe('legacy');
       }
+    });
+
+    it('dkg_query errors when context_graph_id and paranet_id are supplied but disagree', async () => {
+      const { fetchMock, byName } = build();
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'ASK {}',
+        context_graph_id: 'new-name',
+        paranet_id: 'different-legacy',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('conflict');
+    });
+
+    it('dkg_publish errors when context_graph_id and paranet_id disagree (shared resolver)', async () => {
+      const { fetchMock, byName } = build();
+      const result = await byName.get('dkg_publish')!.execute('tc', {
+        context_graph_id: 'new-name',
+        paranet_id: 'different-legacy',
+        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
     });
   });
 

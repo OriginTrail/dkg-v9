@@ -546,10 +546,16 @@ export class DkgDaemonClient {
     contextGraphId: string,
     opts?: { rootEntities?: string[]; clearAfter?: boolean },
   ): Promise<Record<string, unknown>> {
+    // Default `clearAfter` to `false` for subset publishes so unpublished root
+    // entities aren't dropped from SWM as a side-effect of publishing a few.
+    // Full-publish callers (rootEntities omitted) keep the "publish + clear"
+    // semantic. Explicit `clearAfter` on the opts always wins.
+    const hasSubset = Array.isArray(opts?.rootEntities) && opts!.rootEntities!.length > 0;
+    const clearAfter = opts?.clearAfter ?? !hasSubset;
     return this.post('/api/shared-memory/publish', {
       contextGraphId,
       selection: opts?.rootEntities ?? 'all',
-      clearAfter: opts?.clearAfter ?? true,
+      clearAfter,
     });
   }
 

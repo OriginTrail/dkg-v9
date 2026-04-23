@@ -1443,7 +1443,7 @@ export class DkgNodePlugin {
         return {
           subject: String(q.subject ?? ''),
           predicate: String(q.predicate ?? ''),
-          object: isUri(objVal) ? objVal : `"${objVal.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+          object: isUri(objVal) ? objVal : `"${escapeRdfLiteral(objVal)}"`,
           graph: q.graph ? String(q.graph) : '',
         };
       });
@@ -1458,6 +1458,16 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
+      // `context_graph_id` is optional on this tool (omit → unscoped query across
+      // all subscribed CGs). That makes a leftover v9 `paranet_id` dangerous: a
+      // caller that used to scope via `paranet_id` would now silently widen to
+      // every subscribed CG. Reject the legacy key explicitly so the mistake is
+      // visible instead of leaking unrelated data.
+      if (args.paranet_id !== undefined && args.context_graph_id === undefined) {
+        return this.error(
+          '"paranet_id" is a removed v9 alias. Use "context_graph_id" (or omit it for an unscoped query).',
+        );
+      }
       const contextGraphId = args.context_graph_id ? String(args.context_graph_id) : undefined;
       // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
       const raw = args.include_shared_memory;
@@ -1613,7 +1623,7 @@ export class DkgNodePlugin {
         return {
           subject: String(q.subject ?? ''),
           predicate: String(q.predicate ?? ''),
-          object: isUri(objVal) ? objVal : `"${objVal.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
+          object: isUri(objVal) ? objVal : `"${escapeRdfLiteral(objVal)}"`,
           graph: q.graph ? String(q.graph) : '',
         };
       });
@@ -1800,6 +1810,22 @@ function isUri(value: string): boolean {
 }
 
 /**
+ * Escape a plain-text string for use as an RDF/N-Triples literal body.
+ * Covers the five mandatory escapes from the N-Triples spec (\\, ", \n, \r, \t);
+ * returns only the escaped body (caller wraps in `"..."`).
+ * Without tab/CR/LF handling, agents writing multi-line strings would produce
+ * malformed RDF literals that the triple store rejects.
+ */
+function escapeRdfLiteral(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+/**
  * Infer the MIME type from a file path's extension. Covers the common document
  * formats the daemon's import-file pipeline has (or is likely to register)
  * converters for. Returns `undefined` for anything else — callers should fall
@@ -1814,7 +1840,11 @@ function inferContentTypeFromExtension(filePath: string): string | undefined {
   if (/\.(md|markdown)$/.test(lower)) return 'text/markdown';
   if (/\.pdf$/.test(lower)) return 'application/pdf';
   if (/\.docx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (/\.pptx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (/\.xlsx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   if (/\.html?$/.test(lower)) return 'text/html';
+  if (/\.xml$/.test(lower)) return 'application/xml';
+  if (/\.epub$/.test(lower)) return 'application/epub+zip';
   if (/\.txt$/.test(lower)) return 'text/plain';
   if (/\.csv$/.test(lower)) return 'text/csv';
   return undefined;

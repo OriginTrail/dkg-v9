@@ -404,6 +404,24 @@ describe('DkgDaemonClient', () => {
     expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
   });
 
+  it('publishSharedMemory defaults clearAfter=false for subset publishes to protect unpublished roots', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-3', status: 'ok', kas: [] }), { status: 200 }));
+
+    await client.publishSharedMemory('ctx', { rootEntities: ['urn:a'] });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a'], clearAfter: false });
+  });
+
+  it('publishSharedMemory honors explicit clearAfter=true with rootEntities when caller opts in', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-4', status: 'ok', kas: [] }), { status: 200 }));
+
+    await client.publishSharedMemory('ctx', { rootEntities: ['urn:a'], clearAfter: true });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body.clearAfter).toBe(true);
+  });
+
   // ---------------------------------------------------------------------------
   // Chat turn persistence
   // ---------------------------------------------------------------------------

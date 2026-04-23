@@ -307,8 +307,12 @@ describe('DkgNodePlugin', () => {
       const cases: Array<[string, string]> = [
         ['doc.pdf', 'application/pdf'],
         ['doc.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+        ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
         ['page.html', 'text/html'],
         ['page.htm', 'text/html'],
+        ['feed.xml', 'application/xml'],
+        ['book.epub', 'application/epub+zip'],
         ['notes.txt', 'text/plain'],
         ['data.csv', 'text/csv'],
       ];
@@ -381,14 +385,16 @@ describe('DkgNodePlugin', () => {
       expect(body).toEqual({ contextGraphId: 'ctx', selection: 'all', clearAfter: true });
     });
 
-    it('dkg_shared_memory_publish forwards explicit root_entities as selection array', async () => {
+    it('dkg_shared_memory_publish forwards explicit root_entities as selection array with clearAfter=false (subset safety default)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-2', status: 'ok', kas: [] });
       await byName.get('dkg_shared_memory_publish')!.execute('tc', {
         context_graph_id: 'ctx',
         root_entities: ['urn:a', 'urn:b'],
       });
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: true });
+      // Subset publishes default to clearAfter=false so roots NOT in `selection`
+      // aren't clobbered as a side-effect of publishing a subset.
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
     });
 
     it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
@@ -400,6 +406,38 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       expect(bad.content[0].text).toContain('root_entities');
       expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_query rejects a standalone paranet_id instead of silently widening to all CGs', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        paranet_id: 'my-cg',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('paranet_id');
+      expect(bad.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_assertion_write escapes N-Triples control characters in literal objects', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [
+          {
+            subject: 'https://example.org/a',
+            predicate: 'https://schema.org/text',
+            object: 'line1\nline2\tcol\rend"with quote\\and backslash',
+          },
+        ],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Must escape \n \r \t " \ per N-Triples spec; unescaped control chars
+      // would produce malformed RDF the triple store rejects.
+      expect(body.quads[0].object).toBe(
+        '"line1\\nline2\\tcol\\rend\\"with quote\\\\and backslash"',
+      );
     });
   });
 
@@ -530,12 +568,16 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
-    it('dkg_query ignores paranet_id (contextGraphId is undefined when only paranet_id supplied)', async () => {
+    it('dkg_query rejects a standalone paranet_id instead of silently widening the query', async () => {
       const { fetchMock, byName } = build();
-      await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
-      const init = fetchMock.mock.calls[0][1] as RequestInit;
-      const body = JSON.parse(init.body as string);
-      expect(body.contextGraphId).toBeUndefined();
+      const result = await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
+      // Previously a lone `paranet_id` (no `context_graph_id`) would slip through
+      // as `contextGraphId: undefined`, turning a scoped query into an unscoped
+      // one across all subscribed CGs and leaking unrelated data. The handler
+      // now rejects the legacy key explicitly so the mistake is visible.
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('context_graph_id');
     });
   });
 

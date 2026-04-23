@@ -282,6 +282,106 @@ describe('ProfileManager', () => {
     expect(manager.profileKcId).toBe(result.kcId);
   });
 
+  it(
+    'A-12 upgrade: republishing after the DID form change drops the legacy ' +
+      'did:dkg:agent:<peerId> subject alongside the new address-form subject',
+    async () => {
+      // Codex review on PR #243: ProfileManager.publishProfile only
+      // deleted triples under the NEW rootEntity before publish, so an
+      // upgraded node that previously published
+      // `did:dkg:agent:<peerId>` would keep the old profile alongside
+      // the new `did:dkg:agent:0x...` profile. `findAgents` then
+      // returned the same node twice and the local data graph no
+      // longer matched the updated manifest. This test simulates the
+      // upgrade by publishing in legacy form first, then
+      // republishing in the new form, and asserting the legacy
+      // subject is gone.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+      const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const manager = new ProfileManager(publisher, store);
+
+      const peerId = 'QmLegacyUpgrade';
+      const addr = '0x' + 'ab'.repeat(20);
+
+      // Legacy publish (no agentAddress) → DID = did:dkg:agent:<peerId>
+      await manager.publishProfile({ peerId, name: 'Legacy', skills: [] });
+      const graph = 'did:dkg:context-graph:agents';
+      const legacyCount = await store.countQuads(graph);
+      expect(legacyCount).toBeGreaterThan(0);
+
+      const legacySubject = `did:dkg:agent:${peerId}`;
+      const newSubject = `did:dkg:agent:${addr}`;
+
+      // Sanity: legacy subject really was written.
+      const legacyRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(legacyRows.type).toBe('bindings');
+      if (legacyRows.type === 'bindings') {
+        expect(legacyRows.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Upgrade publish — same peerId, now with an agentAddress.
+      await manager.publishProfile({
+        peerId,
+        agentAddress: addr,
+        name: 'Upgraded',
+        skills: [],
+      });
+
+      // The legacy subject must no longer appear in the data graph.
+      const stillLegacy = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(stillLegacy.type).toBe('bindings');
+      if (stillLegacy.type === 'bindings') {
+        expect(
+          stillLegacy.bindings.length,
+          'legacy did:dkg:agent:<peerId> subject must be removed on A-12 upgrade',
+        ).toBe(0);
+      }
+
+      // The new subject is the sole profile root in the data graph.
+      const newRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${newSubject}> ?p ?o } }`,
+      );
+      expect(newRows.type).toBe('bindings');
+      if (newRows.type === 'bindings') {
+        expect(newRows.bindings.length).toBeGreaterThan(0);
+        const nameTriples = newRows.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"Upgraded"')).toBe(true);
+      }
+    },
+  );
+
+  it(
+    'A-12 casing: checksum-case and lowercase agentAddress converge to the same DID subject',
+    () => {
+      const checksum = '0xAb5801a7D398351b8bE11C439e05C5B3259aec9B';
+      const lower = checksum.toLowerCase();
+      const profileChecksum = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: checksum,
+        name: 'Checksum',
+        skills: [],
+      });
+      const profileLower = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: lower,
+        name: 'Lower',
+        skills: [],
+      });
+      expect(profileChecksum.rootEntity).toBe(profileLower.rootEntity);
+      expect(profileChecksum.rootEntity).toBe(`did:dkg:agent:${lower}`);
+    },
+  );
+
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
     const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');

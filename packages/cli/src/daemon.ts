@@ -7879,20 +7879,51 @@ async function handleRequest(
   // POST /api/endorse
   if (req.method === "POST" && path === "/api/endorse") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
-    if (!contextGraphId || !ual || !agentAddress) {
+    const parsed = JSON.parse(body);
+    const { contextGraphId, ual } = parsed;
+    if (!contextGraphId || !ual) {
       return jsonResponse(res, 400, {
-        error: "Missing contextGraphId, ual, or agentAddress",
+        error: "Missing contextGraphId or ual",
+      });
+    }
+    // A-12 review: the endorser MUST come from the authenticated bearer
+    // token, not from the request body. Trusting body.agentAddress let
+    // any caller with node access publish endorsements as an arbitrary
+    // `did:dkg:agent:0x...`, forging provenance. `requestAgentAddress`
+    // is the token-resolved identity. If the body also includes
+    // `agentAddress`, it must match or we reject with 403. The
+    // registered-local-agent check is implicit: resolveAgentAddress
+    // returns either the token's agent (if it's an agent-scoped
+    // token) or `defaultAgentAddress` (the node's own auto-registered
+    // agent). Both are owned by this node by construction.
+    // Defence in depth: an unauthenticated caller has no agent identity
+    // to attribute an endorsement to. Early return 401 rather than
+    // attempting `.toLowerCase()` on a null/undefined address.
+    if (!requestAgentAddress) {
+      return jsonResponse(res, 401, {
+        error:
+          "Endorsement requires an authenticated agent. Provide a bearer token tied to a registered agent.",
+      });
+    }
+    const bodyAgentAddress = typeof parsed.agentAddress === 'string' ? parsed.agentAddress : undefined;
+    if (
+      bodyAgentAddress &&
+      bodyAgentAddress.toLowerCase() !== requestAgentAddress.toLowerCase()
+    ) {
+      return jsonResponse(res, 403, {
+        error:
+          `Endorser mismatch: authenticated as ${requestAgentAddress} but request body claims ${bodyAgentAddress}. ` +
+          `The endorser is resolved from the bearer token; omit body.agentAddress or use the matching agent's token.`,
       });
     }
     const result = await agent.endorse({
       contextGraphId,
       knowledgeAssetUal: ual,
-      agentAddress,
+      agentAddress: requestAgentAddress,
     });
     return jsonResponse(res, 200, {
       endorsed: true,
-      endorserAddress: agentAddress,
+      endorserAddress: requestAgentAddress,
       ...result,
     });
   }

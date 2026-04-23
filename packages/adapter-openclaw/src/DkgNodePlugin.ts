@@ -237,8 +237,6 @@ export class DkgNodePlugin {
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
-  private crossChannelHookRegistered = false;
-  private crossChannelHookCleanup: (() => void) | null = null;
   /**
    * Counter for registration-mode probe diagnostics. Incremented on each
    * register() call when DKG_PROBE_REGISTRATION_MODE=1 for sequencing logs.
@@ -299,12 +297,6 @@ export class DkgNodePlugin {
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
-      // api.on (typed plugin hooks) is only wired in `full` mode.
-      // The first call is usually `setup-runtime` (noop); a later
-      // multi-phase call may arrive with `full` — register then.
-      if (!this.crossChannelHookRegistered && runtimeEnabled) {
-        this.registerCrossChannelPersistence(api);
-      }
       return;
     }
 
@@ -328,11 +320,6 @@ export class DkgNodePlugin {
     this.hookSurface.install('internal', 'message:sent',     (ev) => this.chatTurnWriter!.onMessageSent(ev));
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
-
-    // --- Cross-channel turn persistence ---
-    if (runtimeEnabled) {
-      this.registerCrossChannelPersistence(api);
-    }
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
@@ -397,23 +384,6 @@ export class DkgNodePlugin {
       // surprise `/api/status` probe.
       void this.refreshMemoryResolverState(api);
     }
-  }
-
-  /**
-   * Register cross-channel turn persistence via the gateway's internal
-   * hook system (`message:received` + `message:sent`). Fires for ALL
-   * OpenClaw channels (Telegram, WhatsApp, API, etc.). The DKG UI
-   * channel bridge already persists with richer data (correlation IDs,
-   * attachment refs) via DkgChannelPlugin.queueTurnPersistence, so
-   * `dkg-ui` is skipped here.
-   *
-   * Registers directly into the gateway's global hook map because
-   * external plugins only receive `setup-runtime` mode where both
-   * `api.on` and `api.registerHook` are noops.
-   */
-  private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
-    // Retired: cross-channel persistence now wired via HookSurface.
-    return;
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {
@@ -705,16 +675,10 @@ export class DkgNodePlugin {
   async stop(): Promise<void> {
     try { this.chatTurnWriter?.flushSync(); } catch { /* best effort */ }
     try { this.hookSurface?.destroy(); } catch { /* best effort */ }
-    this.chatTurnWriter?.flushSync();
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
-    }
-    if (this.crossChannelHookCleanup) {
-      this.crossChannelHookCleanup();
-      this.crossChannelHookCleanup = null;
-      this.crossChannelHookRegistered = false;
     }
     await this.channelPlugin?.stop();
   }

@@ -15,6 +15,7 @@
  *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
+import { GET_VIEWS, type GetView } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
@@ -23,6 +24,7 @@ import {
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
 import {
   DkgMemoryPlugin,
+  toAgentPeerId,
   type DkgMemorySession,
   type DkgMemorySessionResolver,
 } from './DkgMemoryPlugin.js';
@@ -1121,16 +1123,41 @@ export class DkgNodePlugin {
       {
         name: 'dkg_query',
         description:
-          'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs.',
+          'Read-only SPARQL query against the local triple store. Pass `view` to pick which memory ' +
+          'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
+          'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
+          '`context_graph_id` is also required. For WM reads, `agent_address` selects whose WM to ' +
+          'read — it defaults to this node\'s agent address (the same default the adapter uses for ' +
+          'memory-plugin reads). Omit `view` for a cross-graph query routed via the legacy data-' +
+          'graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
+          'for named-graph targeting in that mode.',
         parameters: {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
-            context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
-            include_shared_memory: {
-              type: 'boolean',
-              description: 'Also search Shared Working Memory. Default: false.',
+            context_graph_id: {
+              type: 'string',
+              description:
+                'CG scope. Optional when `view` is omitted (unscoped cross-graph query); required ' +
+                'when `view` is set (view-based routing always targets a single CG).',
+            },
+            view: {
+              type: 'string',
+              description:
+                'Memory layer to read. Accepted values: `working-memory` (per-agent WM; uses ' +
+                '`agent_address` or falls back to this node\'s agent address), `shared-working-memory` ' +
+                '(provisional, gossip-replicated), or `verified-memory` (on-chain anchored). Omit to ' +
+                'use the legacy cross-graph data-path routing (not layer-scoped). Validation is ' +
+                'handler-side (not a JSON-schema enum) so strict-schema hosts still surface the ' +
+                'tailored migration guidance on invalid values.',
+            },
+            agent_address: {
+              type: 'string',
+              description:
+                "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
+                'agent address (matches the default the memory plugin uses for its own WM reads). ' +
+                'Ignored for non-WM views. Supply an explicit value to read another local agent\'s ' +
+                'WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],
@@ -1466,23 +1493,106 @@ export class DkgNodePlugin {
       if (args.paranet_id !== undefined) {
         return this.error('"paranet_id" is not a supported parameter. Use "context_graph_id".');
       }
+      // `include_shared_memory` was removed in favor of `view`. There is no
+      // one-line replacement: the legacy `true` path unioned the data graph
+      // with SWM (`DKGQueryEngine.query`, line ~229 — wraps the sparql in
+      // both graphs and merges), while `false` used the legacy data-graph
+      // path alone. `view: "shared-working-memory"` reads ONLY SWM and
+      // would drop data-graph-only triples for `true` callers; `view:
+      // "verified-memory"` has different semantics entirely. Surface the
+      // break explicitly rather than pretending a clean migration exists.
+      if (args.include_shared_memory !== undefined) {
+        return this.error(
+          '"include_shared_memory" is no longer supported. There is no exact `view` replacement ' +
+            'for the legacy union-semantics: `true` previously queried the data graph ∪ SWM ' +
+            '(no single `view` reproduces this union). Closest-intent replacements: omit `view` ' +
+            'for the legacy data-graph path, or `view: "shared-working-memory"` for SWM-only, or ' +
+            '`view: "verified-memory"` for on-chain data. If you need the original union exactly, ' +
+            'call POST /api/query directly with `includeSharedMemory: true`.',
+        );
+      }
       // `context_graph_id` is optional on this tool (omit → unscoped query
       // across all subscribed CGs). Trim whitespace so that
       // `{ context_graph_id: "   " }` behaves like an omission rather than
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
-      // Schema declares include_shared_memory as boolean. If a caller supplies
-      // a string ("true") or any other non-boolean, reject it — silently
-      // coercing to `false` would make callers quietly miss SWM data they
-      // thought they were requesting.
-      if (args.include_shared_memory !== undefined && typeof args.include_shared_memory !== 'boolean') {
-        return this.error('"include_shared_memory" must be a boolean.');
+      // Handler-side view validation (no JSON-schema enum, so strict-schema
+      // hosts still surface these tailored errors). Use the shared
+      // `GET_VIEWS` constant from `@origintrail-official/dkg-core` as the
+      // single source of truth — maintaining a local mirror invited drift
+      // whenever a view was added/removed upstream.
+      let view: GetView | undefined;
+      if (args.view !== undefined) {
+        if (typeof args.view !== 'string' || !(GET_VIEWS as readonly string[]).includes(args.view)) {
+          return this.error(
+            `"view" must be one of: ${GET_VIEWS.join(', ')}.`,
+          );
+        }
+        view = args.view as GetView;
       }
-      const includeSharedMemory = args.include_shared_memory === true;
+      // When a `view` is requested, the daemon requires `context_graph_id`
+      // to scope the view resolution (`DKGQueryEngine.query` throws
+      // "view '…' requires a contextGraphId"). Reject locally so the caller
+      // sees a clear, tool-shaped error instead of a cryptic 500 after a
+      // daemon round-trip.
+      if (view !== undefined && contextGraphId === undefined) {
+        return this.error(
+          `"view: ${view}" requires "context_graph_id". View-based routing always targets a ` +
+            'single CG; omit `view` for an unscoped cross-graph query.',
+        );
+      }
+      // For WM reads the daemon requires an agentAddress (see
+      // `resolveViewGraphs:60`). Accept an explicit `agent_address` on the
+      // tool and fall back to this node's agent address — the same default
+      // the memory plugin uses for its own WM reads (see
+      // `memorySessionResolver.getDefaultAgentAddress` above). Without the
+      // fallback, callers without an explicit address would get "agentAddress
+      // is required for the working-memory view" from the engine.
+      //
+      // B43: normalize DID-form addresses (`did:dkg:agent:<peerId>`) to raw
+      // peer IDs for WM routing, same as `DkgMemoryPlugin` does at its
+      // boundary. The daemon's WM view scopes graphs by the bare peer ID;
+      // forwarding a DID-prefixed value lands the query in a non-existent
+      // namespace and returns empty bindings. Apply to both the explicit
+      // arg and the node-peerId fallback (the latter is typically already
+      // bare, but normalize defensively in case the source ever changes).
+      // Strict validation on `agent_address`: anything *present but bogus*
+      // (non-string, or empty/whitespace-only) must fail fast, not silently
+      // fall through to the node-peerId default. A caller intending a
+      // cross-agent WM read with a malformed value would otherwise get the
+      // node's own WM back — wrong namespace, wrong data, no error.
+      // `undefined` (field genuinely absent) still takes the default.
+      if (args.agent_address !== undefined) {
+        if (typeof args.agent_address !== 'string') {
+          return this.error('"agent_address" must be a string.');
+        }
+        if (args.agent_address.trim() === '') {
+          return this.error('"agent_address" must be a non-empty string.');
+        }
+      }
+      let agentAddress = typeof args.agent_address === 'string'
+        ? args.agent_address.trim()
+        : undefined;
+      if (view === 'working-memory' && agentAddress === undefined) {
+        if (this.nodePeerId === undefined) {
+          await this.ensureNodePeerId().catch(() => {});
+        }
+        agentAddress = this.nodePeerId;
+        if (agentAddress === undefined) {
+          return this.error(
+            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
+              "or retry once the node's agent address is available.",
+          );
+        }
+      }
+      if (view === 'working-memory' && agentAddress !== undefined) {
+        agentAddress = toAgentPeerId(agentAddress);
+      }
       const result = await this.client.query(sparql, {
         contextGraphId,
-        includeSharedMemory: includeSharedMemory || undefined,
+        view,
+        agentAddress,
       });
       return this.json(result);
     } catch (err: any) {

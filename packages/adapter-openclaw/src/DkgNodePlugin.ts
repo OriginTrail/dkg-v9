@@ -26,7 +26,6 @@ import {
   type DkgMemorySession,
   type DkgMemorySessionResolver,
 } from './DkgMemoryPlugin.js';
-import { installProbe } from './ProbeRegistrationMode.js';
 import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
@@ -1416,7 +1415,7 @@ export class DkgNodePlugin {
       return this.daemonError(err);
     }
   }
-}
+
   /**
    * Env-gated diagnostic probe for registration-mode behavior.
    * Fires only when DKG_PROBE_REGISTRATION_MODE=1. Logs:
@@ -1495,9 +1494,7 @@ export class DkgNodePlugin {
 
     api.logger.debug?.('[dkg-probe] Probe handlers registered for all mechanisms and events');
   }
-
-
-
+}
 
 /** Convert a human-readable name into a URL-safe slug (e.g. "My Research Context Graph" → "my-research-context-graph"). */
 function slugify(name: string): string {

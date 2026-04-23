@@ -2780,16 +2780,28 @@ export class DKGAgent {
     // authenticated scoped handle.
     // A-1 review: `/api/query` passes the raw JSON body through, so
     // `agentAddress` / `callerAgentAddress` can arrive as any JSON type
-    // (number, array, object, null). Narrow both to strings before
-    // comparing — otherwise `.toLowerCase()` throws and a malformed
-    // request turns into a 500 instead of a clean 400 / deny. Types
-    // that survive the narrow are safe to compare case-insensitively;
-    // anything else is treated as "no authenticated caller" for the
-    // purpose of the working-memory guard.
-    const callerAgentAddressStr =
-      typeof opts.callerAgentAddress === 'string' ? opts.callerAgentAddress : undefined;
-    const agentAddressStr =
-      typeof opts.agentAddress === 'string' ? opts.agentAddress : undefined;
+    // (number, array, object, null). Before this guard `.toLowerCase()`
+    // would throw and the daemon turned a bad request into a 500.
+    //
+    // A-1 follow-up review: simply coercing non-strings to `undefined`
+    // meant malformed input like `{ view: 'working-memory',
+    // agentAddress: 123 }` silently fell through to the
+    // `this.peerId` fallback below — so a caller could land in the
+    // node-default WM namespace and get a 200 with real data.
+    // Reject non-string `agentAddress` / `callerAgentAddress` up
+    // front and let the daemon classify the resulting error as 400.
+    if (opts.agentAddress !== undefined && typeof opts.agentAddress !== 'string') {
+      throw new Error(
+        `query: 'agentAddress' must be a string, got ${typeof opts.agentAddress}`,
+      );
+    }
+    if (opts.callerAgentAddress !== undefined && typeof opts.callerAgentAddress !== 'string') {
+      throw new Error(
+        `query: 'callerAgentAddress' must be a string, got ${typeof opts.callerAgentAddress}`,
+      );
+    }
+    const callerAgentAddressStr = opts.callerAgentAddress;
+    const agentAddressStr = opts.agentAddress;
     if (
       opts.view === 'working-memory' &&
       callerAgentAddressStr &&

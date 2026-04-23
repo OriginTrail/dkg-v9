@@ -725,8 +725,8 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
   }
 
   it(
-    'authenticated cross-agent WM read returns 200 with empty bindings ' +
-      '(caller=B cannot read agentAddress=A)',
+    'seeded-WM cross-agent read returns 200 with empty bindings while the ' +
+      'owning identity sees the seeded triple (proves A-1 isolation is active)',
     async () => {
       const d = daemon!;
       const cgId = 'a1-wm-http-' + Math.random().toString(36).slice(2, 8);
@@ -737,41 +737,102 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
       });
       expect([200, 201]).toContain(create.status);
 
-      const agentA = await registerAgent(d, 'a1-http-agent-a');
-      const agentB = await registerAgent(d, 'a1-http-agent-b');
-      expect(agentA.agentAddress).not.toBe(agentB.agentAddress);
-      expect(agentA.authToken).not.toBe(agentB.authToken);
+      // Codex review on PR #242: without seeded data in A's WM, an
+      // empty `cross.bindings` is meaningless — it'd pass even if
+      // /api/query stopped forwarding `callerAgentAddress` and the
+      // isolation guard was bypassed. Seed a triple into the default
+      // agent's WM (that's our "A"), then prove B (agent-scoped
+      // token) cannot read it while the node-level admin (no
+      // agent-scope, callerAgentAddress=undefined) can.
 
-      // B authenticates with its own bearer token but asks for A's
-      // working-memory by setting `agentAddress: <A>`. The /api/query
-      // route resolves `requestAgentAddress` from B's token and forwards
-      // it as `callerAgentAddress`. DKGAgent.query must see the
-      // caller/target mismatch and return empty bindings (A-1).
+      // Resolve the default agent's address via /api/agent/identity
+      // under the node-level token. This is "A".
+      const identityRes = await fetch(urlFor(d, '/api/agent/identity'), {
+        headers: authHeaders(d),
+      });
+      expect(identityRes.status).toBe(200);
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+      expect(defaultAgentAddress).toMatch(/^0x[0-9a-fA-F]{40}$|^12D3/);
+
+      // Create a WM assertion for that default agent and write one
+      // triple into it. `agent.assertion.write` on the daemon uses
+      // defaultAgentAddress, so this lands in default ("A")'s WM
+      // namespace.
+      const assertionName = 'a1-probe-' + Math.random().toString(36).slice(2, 8);
+      const createAssertionRes = await fetch(urlFor(d, '/api/assertion/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ contextGraphId: cgId, name: assertionName }),
+      });
+      expect([200, 201]).toContain(createAssertionRes.status);
+
+      const seedSubject = 'urn:a1-seed:probe-' + Math.random().toString(36).slice(2, 8);
+      const writeRes = await fetch(
+        urlFor(d, `/api/assertion/${encodeURIComponent(assertionName)}/write`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+          body: JSON.stringify({
+            contextGraphId: cgId,
+            quads: [
+              {
+                subject: seedSubject,
+                predicate: 'https://schema.org/name',
+                object: '"seed-a"',
+              },
+            ],
+          }),
+        },
+      );
+      expect(writeRes.status).toBe(200);
+
+      // Register agent B on the same daemon (gets its own scoped token).
+      const agentB = await registerAgent(d, 'a1-http-agent-b');
+      expect(agentB.agentAddress).not.toBe(defaultAgentAddress);
+
+      // Cross-agent read: B (agent-scoped token) asks for the default
+      // agent's WM. /api/query resolves `callerAgentAddress=B` via the
+      // agent-token index and forwards it. DKGAgent.query sees
+      // caller≠target and returns empty bindings — even though the
+      // seed triple is physically present.
       const cross = await queryAsAgent(d, agentB, {
-        sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+        sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
         contextGraphId: cgId,
         view: 'working-memory',
-        agentAddress: agentA.agentAddress,
+        agentAddress: defaultAgentAddress,
       });
       expect(cross.status).toBe(200);
       expect(cross.body?.result?.bindings ?? []).toEqual([]);
 
-      // Sanity: B reading B's own WM is still allowed (no leak, but also
-      // not over-blocked). Should return 200 with an empty array for a
-      // fresh context graph — the point is the request does not error
-      // and does not get mis-denied by the A-1 guard.
-      const own = await queryAsAgent(d, agentB, {
-        sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
-        contextGraphId: cgId,
-        view: 'working-memory',
-        agentAddress: agentB.agentAddress,
+      // Sanity: the node-level admin token is NOT agent-scoped, so
+      // `requestToken` resolves through `resolveAgentByToken` to
+      // undefined and `callerAgentAddress` is not forwarded. The A-1
+      // guard is skipped and the seeded triple surfaces — proving
+      // `cross` above really was blocked by isolation, not by missing
+      // data.
+      const adminRes = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: defaultAgentAddress,
+        }),
       });
-      expect(own.status).toBe(200);
+      expect(adminRes.status).toBe(200);
+      const adminBody = await adminRes.json();
+      const adminBindings = adminBody?.result?.bindings ?? [];
+      expect(
+        adminBindings.length,
+        `seed triple should be visible under its owning agent via the node-level admin path — got ${JSON.stringify(adminBindings)}`,
+      ).toBeGreaterThan(0);
     },
     60_000,
   );
 
-  it('rejects /api/query when agentAddress is not a string (400, not 500)', async () => {
+  it('rejects /api/query when agentAddress is not a string (400)', async () => {
     const d = daemon!;
     const cgId = 'a1-wm-badtype-' + Math.random().toString(36).slice(2, 8);
     const create = await fetch(urlFor(d, '/api/context-graph/create'), {
@@ -784,9 +845,9 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
     // Codex review on PR #242: the original A-1 guard called
     // `opts.agentAddress.toLowerCase()` without checking the type, so a
     // caller sending `{ agentAddress: 123 }` would trigger a TypeError
-    // and turn bad input into a 500. The narrowed guard must either
-    // reject at the view resolver (400, "agentAddress is required")
-    // OR succeed cleanly with empty bindings — either way, NOT 500.
+    // and turn bad input into a 500. The current guard must reject
+    // non-string agentAddress up front AND be classified as 400 by
+    // the daemon — not just "anything but 500". Pin 400 explicitly.
     for (const badValue of [123, true, null, { nested: 'x' }, ['arr']]) {
       const res = await fetch(urlFor(d, '/api/query'), {
         method: 'POST',
@@ -798,9 +859,19 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           agentAddress: badValue,
         }),
       });
-      expect(res.status, `agentAddress=${JSON.stringify(badValue)} produced ${res.status}`).not.toBe(500);
-      expect(res.status).toBeGreaterThanOrEqual(200);
-      expect(res.status).toBeLessThan(500);
+      const body = await res.json().catch(() => ({} as any));
+      expect(
+        res.status,
+        `agentAddress=${JSON.stringify(badValue)} produced ${res.status} ${JSON.stringify(body)}`,
+      ).toBe(400);
+      // Accept either wording:
+      //   - "agentAddress must be a string" — from DKGAgent.query's type guard
+      //   - "agentAddress is required" — from resolveViewGraphs if the bad
+      //     value was coerced to undefined upstream (e.g. null).
+      expect(
+        body?.error ?? '',
+        `error should mention agentAddress — got ${JSON.stringify(body)}`,
+      ).toMatch(/agentAddress/);
     }
   });
 });

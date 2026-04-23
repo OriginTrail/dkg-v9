@@ -6611,6 +6611,20 @@ async function handleRequest(
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
       const execT0 = Date.now();
+      // A-1 review: `callerAgentAddress` must come from an
+      // *agent-scoped* bearer token, not the node-level default.
+      // `resolveAgentAddress(token)` silently falls back to
+      // `defaultAgentAddress` / `peerId` for node-level tokens, which
+      // would make every node-level `/api/query` look like an
+      // agent-scoped WM read and deny legitimate cross-agent reads
+      // (e.g. OpenClaw sessions authenticating with
+      // `~/.dkg/auth.token` and supplying a different `agentAddress`
+      // in the body). `resolveAgentByToken` returns `undefined` for
+      // node-level tokens, so only genuine agent-scoped identities
+      // ever reach the A-1 guard.
+      const callerAgentAddress = requestToken
+        ? agent.resolveAgentByToken(requestToken)
+        : undefined;
       const result = await agent.query(sparql, {
         contextGraphId,
         graphSuffix,
@@ -6620,12 +6634,7 @@ async function handleRequest(
         verifiedGraph,
         assertionName,
         subGraphName,
-        // A-1: forward the authenticated caller (resolved from the
-        // Bearer token) so DKGAgent.query can enforce Working-Memory
-        // isolation across agents. Without this the /api/query route
-        // would accept any `agentAddress` in the request body, letting
-        // one agent read another agent's WM.
-        callerAgentAddress: requestAgentAddress,
+        callerAgentAddress,
         operationCtx: ctx,
       });
       const execDur = Date.now() - execT0;
@@ -6645,7 +6654,13 @@ async function handleRequest(
         msg.includes("was removed in V10") ||
         msg.includes("agentAddress is required") ||
         msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with")
+        msg.includes("cannot be combined with") ||
+        // A-1 review: DKGAgent.query throws these when the caller sends
+        // a non-string `agentAddress` / `callerAgentAddress` in the
+        // body. Classify as 400 so malformed input is a clean client
+        // error instead of a 500.
+        msg.startsWith("query: 'agentAddress' must be a string") ||
+        msg.startsWith("query: 'callerAgentAddress' must be a string")
       ) {
         return jsonResponse(res, 400, { error: msg });
       }

@@ -349,6 +349,9 @@ export class DkgNodePlugin {
 
     this.hookSurface = new HookSurface(api, api.logger);
 
+    // W3 — auto-recall every turn via before_prompt_build typed hook
+    this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+
     // W4a — LLM-driven turn capture via typed hooks
     this.hookSurface.install('typed', 'agent_end',        (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
     this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx));
@@ -1239,6 +1242,66 @@ export class DkgNodePlugin {
   }
 
   /**
+   * W3 — auto-recall handler for the `before_prompt_build` typed hook.
+   *
+   * Fires every turn. Takes the last user message from the run, calls
+   * `DkgMemorySearchManager.searchNarrow` (WM-only, top 5, 250ms budget
+   * via `Promise.race`), and returns an `appendSystemContext` block that
+   * OpenClaw merges into the system prompt.
+   *
+   * Returns `undefined` (not `{}` or empty string) on any of:
+   *   - no memoryPlugin registered
+   *   - no user message in event.messages
+   *   - query shorter than 2 chars
+   *   - timeout exceeded
+   *   - zero hits returned
+   *
+   * Per plan v2.1 A2: empty-string returns break prompt caching. Every
+   * early-return path must return `undefined`.
+   */
+  private async handleBeforePromptBuild(
+    event: any,
+    ctx: any,
+  ): Promise<{ appendSystemContext: string } | undefined> {
+    if (!this.memoryPlugin) return undefined;
+
+    const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
+    const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
+    if (!lastUser) return undefined;
+
+    const query = extractUserTextFromContent(lastUser.content);
+    if (!query || query.length < 2) return undefined;
+
+    try {
+      const manager = new DkgMemorySearchManager({
+        client: this.client,
+        resolver: this.memorySessionResolver,
+        sessionKey: ctx?.sessionKey,
+        logger: this.memoryResolverApi?.logger,
+      });
+
+      // 250ms budget. Racing with setTimeout means the underlying SPARQL
+      // queries may complete in the background after we've returned —
+      // acceptable v1 trade-off; tighter AbortSignal threading is a
+      // follow-up (plan N4 would thread through client.query).
+      const hits = await Promise.race([
+        manager.searchNarrow(query, { maxResults: 5 }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+      ]);
+      if (!hits || hits.length === 0) return undefined;
+
+      const block = formatRecalledMemoryBlock(
+        hits.map((h) => ({ snippet: h.snippet, layer: String(h.layer ?? 'unknown'), score: h.score })),
+      );
+      return { appendSystemContext: block };
+    } catch {
+      // Never throw out of a prompt-build handler — return undefined so
+      // OpenClaw's prompt-merge step sees no-op and the turn proceeds.
+      return undefined;
+    }
+  }
+
+  /**
    * Agent-callable recall button. Runs the full 6-layer SPARQL fan-out
    * (agent-context WM/SWM/VM + project CG WM/SWM/VM when resolved) via
    * `DkgMemorySearchManager`, returns trust-weighted ranked hits.
@@ -1529,4 +1592,41 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+/**
+ * Extract user-visible text from a message's `content` field. Handles
+ * both plain string and multi-modal array forms. Filters to text parts
+ * only — image/tool-use parts contribute nothing to the recall query.
+ */
+function extractUserTextFromContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((p: any) => p?.type === 'text' && typeof p?.text === 'string')
+      .map((p: any) => p.text)
+      .join(' ')
+      .trim();
+  }
+  return '';
+}
+
+/**
+ * Format the top-N memory hits as a `<recalled-memory>` block for the
+ * W3 auto-recall handler to return via `appendSystemContext`. The tag
+ * shape is load-bearing for `ChatTurnWriter.stripRecalledMemory` —
+ * keep in sync.
+ */
+function formatRecalledMemoryBlock(
+  hits: ReadonlyArray<{ snippet: string; layer: string; score: number }>,
+): string {
+  const lines = [
+    '<recalled-memory>',
+    'The following snippets from your memory are relevant to the current turn:',
+    ...hits.map(
+      (h, i) => `  [${i + 1}] (${h.layer}, score=${h.score.toFixed(2)}) ${h.snippet}`,
+    ),
+    '</recalled-memory>',
+  ];
+  return lines.join('\n');
 }

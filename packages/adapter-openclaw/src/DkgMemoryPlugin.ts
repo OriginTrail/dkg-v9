@@ -116,6 +116,29 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.cachedStatus = this.buildStatus();
   }
 
+  /**
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Runs the
+   * full `search()` fan-out, then filters to WM layers only (agent-context
+   * WM + project WM if resolved) and caps at `maxResults`. Used by the
+   * per-turn prompt-build hook where we want cheap, focused context —
+   * SWM/VM layers are reserved for agent-initiated `memory_search` calls.
+   */
+  async searchNarrow(
+    query: string,
+    options?: { maxResults?: number; minScore?: number; sessionKey?: string },
+  ): Promise<MemorySearchResult[]> {
+    const cap = options?.maxResults ?? 5;
+    // Over-request so the WM filter has enough candidates after dedup.
+    const hits = await this.search(query, {
+      maxResults: Math.max(cap * 3, 15),
+      minScore: options?.minScore,
+      sessionKey: options?.sessionKey,
+    });
+    return hits
+      .filter((h) => h.layer === 'agent-context-wm' || h.layer === 'project-wm')
+      .slice(0, cap);
+  }
+
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
     // B37: The clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause below, so it must be an integer. A fractional

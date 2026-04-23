@@ -53,7 +53,7 @@ import type { OpenClawPluginApi } from './types.js';
 
 export type HookKind = 'typed' | 'internal' | 'legacy';
 export type HookStrategy = 'auto' | 'api-on' | 'off';
-export type HookHandler = (...args: any[]) => void | Promise<void>;
+export type HookHandler = (...args: any[]) => unknown | Promise<unknown>;
 export type Unsubscribe = () => void;
 
 /** Symbol the gateway uses to expose the internal hook registry. */

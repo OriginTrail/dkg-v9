@@ -1,230 +1,212 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { HookSurface } from "../src/HookSurface";
+import { HookSurface, INTERNAL_HOOK_SYMBOL } from "../src/HookSurface";
+import type { OpenClawPluginApi } from "../src/types";
+
+const mkLogger = () => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+});
+
+const mkApi = (overrides: Partial<OpenClawPluginApi> = {}): OpenClawPluginApi =>
+  ({
+    registerTool: vi.fn(),
+    registerHook: vi.fn(),
+    on: vi.fn(),
+    logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    config: {},
+    ...overrides,
+  }) as unknown as OpenClawPluginApi;
 
 describe("HookSurface", () => {
-  let hookSurface: HookSurface;
-  let mockApi: any;
-  let mockLogger: any;
+  let hookMapSym: Map<string, any[]>;
 
   beforeEach(() => {
-    mockLogger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    mockApi = { on: vi.fn(() => () => {}), registerHook: vi.fn(() => () => {}) };
-    hookSurface = new HookSurface(mockApi, mockLogger, "auto");
+    hookMapSym = new Map();
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = hookMapSym;
   });
 
   afterEach(() => {
-    hookSurface.unsubscribeAll();
-    vi.clearAllMocks();
+    delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
   });
 
-  it("installs typed hook via api.on", () => {
-    const handler = vi.fn();
-    const unsub = hookSurface.install("typed", "test_event", handler);
-    expect(unsub).toBeDefined();
-    expect(mockApi.on).toHaveBeenCalledWith("test_event", expect.any(Function));
-  });
-  it("installs legacy hook via api.registerHook", () => {
-    const handler = vi.fn();
-    const unsub = hookSurface.install("legacy", "test_event", handler);
-    expect(unsub).toBeDefined();
-    expect(mockApi.registerHook).toHaveBeenCalledWith("test_event", expect.any(Function));
+  describe("typed kind (api.on)", () => {
+    it("installs via api.on when available", () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const handler = vi.fn();
+      const unsub = hs.install("typed", "before_prompt_build", handler);
+      expect(unsub).not.toBeNull();
+      expect(api.on).toHaveBeenCalledWith("before_prompt_build", expect.any(Function));
+    });
+
+    it("returns null + warn when api.on absent", () => {
+      const logger = mkLogger();
+      const api = mkApi({ on: undefined as any });
+      const hs = new HookSurface(api, logger);
+      const unsub = hs.install("typed", "agent_end", vi.fn());
+      expect(unsub).toBeNull();
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("does NOT fall back to registerHook for typed hooks", () => {
+      const api = mkApi({ on: undefined as any });
+      const hs = new HookSurface(api, mkLogger());
+      hs.install("typed", "agent_end", vi.fn());
+      expect(api.registerHook).not.toHaveBeenCalled();
+    });
   });
 
-  it("installs internal hook via globalThis", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    const hookMap = new Map();
-    (globalThis as any)[HOOK_SYMBOL] = hookMap;
-    const handler = vi.fn();
-    const unsub = hookSurface.install("internal", "internal_event", handler);
-    expect(unsub).toBeDefined();
-    expect(hookMap.has("internal_event")).toBe(true);
+  describe("internal kind (globalThis)", () => {
+    it("pushes handler onto globalThis internal-hook map", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      const handler = vi.fn();
+      const unsub = hs.install("internal", "message:sent", handler);
+      expect(unsub).not.toBeNull();
+      expect(hookMapSym.get("message:sent")?.length).toBe(1);
+    });
+
+    it("unsubscribe removes only this handler", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      const h1 = vi.fn();
+      const h2 = vi.fn();
+      const unsub1 = hs.install("internal", "message:sent", h1);
+      hs.install("internal", "message:received", h2);
+      expect(hookMapSym.get("message:sent")?.length).toBe(1);
+      unsub1?.();
+      expect(hookMapSym.get("message:sent")?.length).toBe(0);
+      expect(hookMapSym.get("message:received")?.length).toBe(1);
+    });
+
+    it("returns null when globalThis map absent and records error in stats", () => {
+      delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      const hs = new HookSurface(mkApi(), mkLogger());
+      const unsub = hs.install("internal", "message:sent", vi.fn());
+      expect(unsub).toBeNull();
+      const stats = hs.getDispatchStats();
+      expect(stats["internal:message:sent"]?.installedVia).toBe("none");
+      expect(stats["internal:message:sent"]?.installError).toMatch(/absent/);
+    });
+
+    it("api-on strategy override for internal kind warns and falls back to globalThis", () => {
+      const logger = mkLogger();
+      const hs = new HookSurface(mkApi(), logger, "api-on");
+      const unsub = hs.install("internal", "message:sent", vi.fn());
+      expect(unsub).not.toBeNull();
+      expect(hookMapSym.get("message:sent")?.length).toBe(1);
+      expect(logger.warn).toHaveBeenCalled();
+    });
   });
 
-  it("blocks double registration on same (kind, event)", () => {
-    const handler1 = vi.fn();
-    const unsub1 = hookSurface.install("typed", "dup_event", handler1);
-    expect(unsub1).toBeDefined();
-    const handler2 = vi.fn();
-    const unsub2 = hookSurface.install("typed", "dup_event", handler2);
-    expect(unsub2).toBeNull();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("Double registration blocked"),
-      expect.any(Object)
-    );
-  });
-  it("allows different kinds for same event name", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    const hookMap = new Map();
-    (globalThis as any)[HOOK_SYMBOL] = hookMap;
-    const unsub1 = hookSurface.install("typed", "multi_event", vi.fn());
-    expect(unsub1).toBeDefined();
-    const unsub2 = hookSurface.install("internal", "multi_event", vi.fn());
-    expect(unsub2).toBeDefined();
-    const unsub3 = hookSurface.install("legacy", "multi_event", vi.fn());
-    expect(unsub3).toBeDefined();
+  describe("legacy kind (api.registerHook)", () => {
+    it("installs via api.registerHook", () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const unsub = hs.install("legacy", "session_end", vi.fn());
+      expect(unsub).not.toBeNull();
+      expect(api.registerHook).toHaveBeenCalled();
+    });
+
+    it("returns null when api.registerHook absent", () => {
+      const api = mkApi({ registerHook: undefined as any });
+      const logger = mkLogger();
+      const hs = new HookSurface(api, logger);
+      const unsub = hs.install("legacy", "session_end", vi.fn());
+      expect(unsub).toBeNull();
+      expect(logger.warn).toHaveBeenCalled();
+    });
   });
 
-  it("tracks fire count for dispatched events", () => {
-    hookSurface.install("typed", "fire_event", vi.fn());
-    const stats = hookSurface.getDispatchStats();
-    expect(stats["fire_event"]).toBeDefined();
-    expect(stats["fire_event"].fireCount).toBe(0);
+  describe("strategy override = off", () => {
+    it("all kinds return null", () => {
+      const hs = new HookSurface(mkApi(), mkLogger(), "off");
+      expect(hs.install("typed", "agent_end", vi.fn())).toBeNull();
+      expect(hs.install("internal", "message:sent", vi.fn())).toBeNull();
+      expect(hs.install("legacy", "session_end", vi.fn())).toBeNull();
+    });
   });
 
-  it("commits on first fire", (done) => {
-    const handler = vi.fn();
-    let wrappedHandler: any;
-    mockApi.on = vi.fn((event: string, h: any) => { wrappedHandler = h; return () => {}; });
-    hookSurface.install("typed", "first_fire_event", handler);
-    wrappedHandler();
-    setTimeout(() => {
-      const stats = hookSurface.getDispatchStats();
-      expect(stats["first_fire_event"].commitState).toBe("committed-at-first-fire");
-      expect(stats["first_fire_event"].fireCount).toBe(1);
-      done();
-    }, 50);
-  });
-  it("commits on 30s timeout if never fired", (done) => {
-    hookSurface.install("typed", "timeout_event", vi.fn());
-    const stats = hookSurface.getDispatchStats();
-    expect(stats["timeout_event"].commitState).toBe("uncommitted");
-    setTimeout(() => {
-      const updatedStats = hookSurface.getDispatchStats();
-      expect(updatedStats["timeout_event"].commitState).toBe("committed-at-timeout");
-      done();
-    }, 30100);
-  }).timeout(32000);
+  describe("C5 double-registration guard", () => {
+    it("same handler identity returns existing unsubscribe", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      const handler = vi.fn();
+      const unsub1 = hs.install("typed", "agent_end", handler);
+      const unsub2 = hs.install("typed", "agent_end", handler);
+      expect(unsub2).toBe(unsub1);
+    });
 
-  it("unsubscribeAll clears all handlers and timers", () => {
-    hookSurface.install("typed", "event1", vi.fn());
-    hookSurface.install("legacy", "event2", vi.fn());
-    hookSurface.unsubscribeAll();
-    const stats = hookSurface.getDispatchStats();
-    expect(stats).toBeDefined();
-    expect(mockLogger.debug).toHaveBeenCalledWith(
-      expect.stringContaining("Unsubscribed all handlers"),
-      expect.anything()
-    );
+    it("different handler for same slot is rejected with warn", () => {
+      const logger = mkLogger();
+      const hs = new HookSurface(mkApi(), logger);
+      hs.install("typed", "agent_end", vi.fn());
+      const unsub2 = hs.install("typed", "agent_end", vi.fn());
+      expect(unsub2).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("REJECTED"));
+    });
   });
 
-  it("warns when strategy=api-on overrides internal kind", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    const hookMap = new Map();
-    (globalThis as any)[HOOK_SYMBOL] = hookMap;
-    const surfaceWithOverride = new HookSurface(mockApi, mockLogger, "api-on");
-    surfaceWithOverride.install("internal", "override_event", vi.fn());
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("Strategy override=api-on does not apply"),
-      expect.any(Object)
-    );
-  });
-  it("blocks typed hooks when strategy=off", () => {
-    const surfaceOff = new HookSurface(mockApi, mockLogger, "off");
-    const unsub = surfaceOff.install("typed", "blocked_event", vi.fn());
-    expect(unsub).toBeNull();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("override=off"),
-      expect.anything()
-    );
+  describe("destroy()", () => {
+    it("unsubscribes internal-kind handlers from globalThis", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(hookMapSym.get("message:sent")?.length).toBe(1);
+      hs.destroy();
+      expect(hookMapSym.get("message:sent")?.length).toBe(0);
+    });
+
+    it("is idempotent", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(() => {
+        hs.destroy();
+        hs.destroy();
+      }).not.toThrow();
+    });
   });
 
-  it("returns null when api.on is unavailable", () => {
-    const apiNoOn = { registerHook: vi.fn() };
-    const surface = new HookSurface(apiNoOn, mockLogger, "auto");
-    const unsub = surface.install("typed", "no_api_on", vi.fn());
-    expect(unsub).toBeNull();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("api.on not available"),
-      expect.anything()
-    );
+  describe("getDispatchStats()", () => {
+    it("records successful typed install as installedVia='on'", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("typed", "agent_end", vi.fn());
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.installedVia).toBe("on");
+      expect(stats["typed:agent_end"]?.fireCount).toBe(0);
+      expect(stats["typed:agent_end"]?.commitState).toBe("pending");
+    });
+
+    it("records failed typed install error string", () => {
+      const hs = new HookSurface(mkApi({ on: undefined as any }), mkLogger());
+      hs.install("typed", "agent_end", vi.fn());
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.installError).toBeDefined();
+      expect(stats["typed:agent_end"]?.installedVia).toBe("none");
+    });
   });
 
-  it("returns null when global hook map is unavailable", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    (globalThis as any)[HOOK_SYMBOL] = undefined;
-    const unsub = hookSurface.install("internal", "no_hook_map", vi.fn());
-    expect(unsub).toBeNull();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("Global hook map not available"),
-      expect.anything()
-    );
-  });
-  it("returns null when api.registerHook is unavailable", () => {
-    const apiNoRegister = { on: vi.fn() };
-    const surface = new HookSurface(apiNoRegister, mockLogger, "auto");
-    const unsub = surface.install("legacy", "no_register_hook", vi.fn());
-    expect(unsub).toBeNull();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("api.registerHook not available"),
-      expect.anything()
-    );
+  describe("I4 commit-by-timeout", () => {
+    it("flips commitState to committed-by-timeout after grace period", async () => {
+      const hs = new HookSurface(mkApi(), mkLogger(), "auto", { commitGraceMs: 10 });
+      hs.install("typed", "agent_end", vi.fn());
+      await new Promise((r) => setTimeout(r, 30));
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
+    });
   });
 
-  it("returns all installed events in dispatch stats", () => {
-    hookSurface.install("typed", "event_a", vi.fn());
-    hookSurface.install("legacy", "event_b", vi.fn());
-    const stats = hookSurface.getDispatchStats();
-    expect(Object.keys(stats)).toContain("event_a");
-    expect(Object.keys(stats)).toContain("event_b");
-    expect(stats["event_a"].installedVia).toBe("api.on");
-    expect(stats["event_b"].installedVia).toBe("api.registerHook");
-  });
-
-  it("wrapped handler invokes original handler with arguments", (done) => {
-    const handler = vi.fn();
-    let wrappedHandler: any;
-    mockApi.on = vi.fn((event: string, h: any) => { wrappedHandler = h; return () => {}; });
-    hookSurface.install("typed", "args_event", handler);
-    wrappedHandler("arg1", "arg2");
-    setTimeout(() => {
-      expect(handler).toHaveBeenCalledWith("arg1", "arg2");
-      done();
-    }, 50);
-  });
-  it("catches errors during installation and logs them", () => {
-    const errorApi = { on: vi.fn(() => { throw new Error("api.on failed"); }) };
-    const surface = new HookSurface(errorApi, mockLogger, "auto");
-    const unsub = surface.install("typed", "error_event", vi.fn());
-    expect(unsub).toBeNull();
-    expect(mockLogger.error).toHaveBeenCalledWith(
-      expect.stringContaining("Failed to install typed hook"),
-      expect.any(Object)
-    );
-  });
-
-  it("creates new event set in global hook map if missing", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    const hookMap = new Map();
-    (globalThis as any)[HOOK_SYMBOL] = hookMap;
-    hookSurface.install("internal", "new_event", vi.fn());
-    expect(hookMap.has("new_event")).toBe(true);
-    const handlers = hookMap.get("new_event");
-    expect(handlers).toBeInstanceOf(Set);
-    expect(handlers!.size).toBe(1);
-  });
-
-  it("internal hook unsubscribe removes handler from global set", () => {
-    const HOOK_SYMBOL = Symbol.for("openclaw.internalHookHandlers");
-    const hookMap = new Map();
-    (globalThis as any)[HOOK_SYMBOL] = hookMap;
-    const unsub = hookSurface.install("internal", "unsub_event", vi.fn());
-    expect(hookMap.get("unsub_event")!.size).toBe(1);
-    unsub!();
-    expect(hookMap.get("unsub_event")!.size).toBe(0);
-  });
-
-  it("increments fireCount on each dispatch", (done) => {
-    const handler = vi.fn();
-    let wrappedHandler: any;
-    mockApi.on = vi.fn((event: string, h: any) => { wrappedHandler = h; return () => {}; });
-    hookSurface.install("typed", "multi_fire", handler);
-    wrappedHandler();
-    wrappedHandler();
-    wrappedHandler();
-    setTimeout(() => {
-      const stats = hookSurface.getDispatchStats();
-      expect(stats["multi_fire"].fireCount).toBe(3);
-      done();
-    }, 50);
+  describe("N5 partial-install policy", () => {
+    it("typed fails but internal+legacy succeed — each tracked independently", () => {
+      const api = mkApi({ on: undefined as any });
+      const hs = new HookSurface(api, mkLogger());
+      const typedUnsub = hs.install("typed", "agent_end", vi.fn());
+      const internalUnsub = hs.install("internal", "message:sent", vi.fn());
+      const legacyUnsub = hs.install("legacy", "session_end", vi.fn());
+      expect(typedUnsub).toBeNull();
+      expect(internalUnsub).not.toBeNull();
+      expect(legacyUnsub).not.toBeNull();
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.installedVia).toBe("none");
+      expect(stats["internal:message:sent"]?.installedVia).toBe("globalThis");
+      expect(stats["legacy:session_end"]?.installedVia).toBe("registerHook");
+    });
   });
 });

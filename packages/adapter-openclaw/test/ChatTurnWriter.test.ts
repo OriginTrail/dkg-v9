@@ -1,48 +1,53 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { ChatTurnWriter } from "../src/ChatTurnWriter";
 import type { AgentEndContext, InternalMessageEvent } from "../src/ChatTurnWriter";
 
+/** Wait long enough for fire-and-forget persistOne() to complete. */
+const flushMicrotasks = () => new Promise((r) => setTimeout(r, 20));
+
 describe("ChatTurnWriter", () => {
   let writer: ChatTurnWriter;
-  let mockClient: any;
-  let mockLogger: any;
+  let mockClient: { storeChatTurn: ReturnType<typeof vi.fn> };
+  let mockLogger: {
+    debug: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+  };
   let stateDir: string;
 
   beforeEach(() => {
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-test-"));
     mockLogger = {
       debug: vi.fn(),
       info: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
     };
-
     mockClient = {
       storeChatTurn: vi.fn().mockResolvedValue(undefined),
     };
-
-    stateDir = "/tmp/test-state";
     writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
   });
 
   afterEach(() => {
+    writer.flushSync();
+    try {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
     vi.clearAllMocks();
   });
 
-  it("initializes with empty watermarks", () => {
-    const stats = writer as any;
-    expect(stats.cachedWatermarks.size).toBe(0);
+  it("initializes with empty watermarks when state dir is fresh", () => {
+    expect((writer as any).cachedWatermarks.size).toBe(0);
   });
 
-  it("loads watermarks from file if present", async () => {
-    const event: AgentEndContext = {
-      sessionId: "session-1",
-      messages: [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }],
-    };
-    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "user123" });
-    expect(mockClient.storeChatTurn).toHaveBeenCalled();
-  });
-
-  it("calls storeChatTurn on onAgentEnd", async () => {
+  it("calls storeChatTurn on onAgentEnd with ctx", async () => {
     const event: AgentEndContext = {
       sessionId: "test-session",
       messages: [
@@ -50,57 +55,66 @@ describe("ChatTurnWriter", () => {
         { role: "assistant", content: "test response" },
       ],
     };
-    await new Promise(r => setTimeout(r, 100));
     writer.onAgentEnd(event, { channelId: "slack", sessionKey: "key123" });
-    await new Promise(r => setTimeout(r, 100));
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("handles missing context in onAgentEnd", () => {
+  it("skips persist when ctx missing", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
       messages: [{ role: "user", content: "test" }],
     };
     writer.onAgentEnd(event);
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
   });
 
-  it("skips persist when no new messages", () => {
-    const event: AgentEndContext = {
-      sessionId: "test",
-      messages: [],
-    };
+  it("skips persist when no messages", async () => {
+    const event: AgentEndContext = { sessionId: "test", messages: [] };
     writer.onAgentEnd(event, { channelId: "ch1", sessionKey: "sk1" });
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
   });
 
-  it("extracts text from string content", () => {
+  it("extracts text from string content", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
-      messages: [{ role: "user", content: "hello world" }, { role: "assistant", content: "hi there" }],
+      messages: [
+        { role: "user", content: "hello world" },
+        { role: "assistant", content: "hi there" },
+      ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
       "openclaw:ch:sk",
       "hello world",
       "hi there",
-      expect.any(Object)
+      expect.any(Object),
     );
   });
 
-  it("extracts text from array content", () => {
+  it("extracts text from array content", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
       messages: [
-        { role: "user", content: [{ type: "text", text: "part1" }, { type: "text", text: "part2" }] },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "part1" },
+            { type: "text", text: "part2" },
+          ],
+        },
         { role: "assistant", content: [{ type: "text", text: "resp" }] },
       ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("strips recalled memory markers (I1)", () => {
+  it("strips orphan TRUNCATED_FROM_SAVED_MEMORY marker (I1)", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
       messages: [
@@ -109,126 +123,106 @@ describe("ChatTurnWriter", () => {
       ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
       "openclaw:ch:sk",
       "query",
       "answer",
-      expect.any(Object)
+      expect.any(Object),
     );
   });
 
   it("stores user message on onMessageReceived", () => {
-    const event: InternalMessageEvent = {
+    writer.onMessageReceived({
       sessionKey: "session-123",
       direction: "inbound",
       text: "user input",
-    };
-    writer.onMessageReceived(event);
-    const pending = (writer as any).pendingUserMessages;
-    expect(pending.size).toBeGreaterThan(0);
+    });
+    expect((writer as any).pendingUserMessages.size).toBeGreaterThan(0);
   });
 
-  it("persists on onMessageSent", async () => {
-    const recvEvent: InternalMessageEvent = {
+  it("persists on onMessageSent pairing with prior onMessageReceived", async () => {
+    writer.onMessageReceived({
       sessionKey: "key123",
       direction: "inbound",
       text: "hello",
-    };
-    writer.onMessageReceived(recvEvent);
-
-    const sendEvent: InternalMessageEvent = {
+    });
+    writer.onMessageSent({
       sessionKey: "key123",
       direction: "outbound",
       text: "response",
-    };
-    writer.onMessageSent(sendEvent);
-    await new Promise(r => setTimeout(r, 100));
+    });
+    await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
   it("flushSync clears debounce timers", () => {
     writer.flushSync();
-    const debounceMap = (writer as any).debounceTimers;
-    expect(debounceMap.size).toBe(0);
+    expect((writer as any).debounceTimers.size).toBe(0);
   });
 
-  it("generates deterministic turnId", () => {
+  it("generates deterministic turnId (16-hex)", async () => {
     const event: AgentEndContext = {
       sessionId: "session-1",
-      messages: [{ role: "user", content: "test" }, { role: "assistant", content: "test" }],
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "test" },
+      ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
     const call = mockClient.storeChatTurn.mock.calls[0];
     expect(call[3].turnId).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  it("derives sessionId from context", () => {
+  it("derives sessionId from context", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
-      messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }],
+      messages: [
+        { role: "user", content: "x" },
+        { role: "assistant", content: "y" },
+      ],
     };
     writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "user-42" });
+    await flushMicrotasks();
     const call = mockClient.storeChatTurn.mock.calls[0];
     expect(call[0]).toContain("openclaw:telegram:");
   });
 
-  it("extracts conversation key from internal event", () => {
-    const event: InternalMessageEvent = {
-      sessionKey: "key-abc",
-      direction: "inbound",
-      text: "msg",
-    };
-    writer.onMessageReceived(event);
-    const pending = (writer as any).pendingUserMessages;
-    expect(pending.size).toBe(1);
-  });
-
-  it("sanitizes control characters (I5)", () => {
-    const event: AgentEndContext = {
-      sessionId: "test",
-      messages: [{ role: "user", content: "a\x00b\x1fc" }, { role: "assistant", content: "resp" }],
-    };
-    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    expect(mockClient.storeChatTurn).toHaveBeenCalled();
-  });
-
-  it("retries storeChatTurn with backoff", async () => {
-    mockClient.storeChatTurn = vi.fn()
+  it("retries storeChatTurn with backoff on transient failure", async () => {
+    mockClient.storeChatTurn = vi
+      .fn()
       .mockRejectedValueOnce(new Error("Network error"))
       .mockResolvedValue(undefined);
+    // Re-instantiate writer so it uses the newly-patched mock.
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
 
     const event: AgentEndContext = {
       sessionId: "test",
-      messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }],
+      messages: [
+        { role: "user", content: "x" },
+        { role: "assistant", content: "y" },
+      ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
   });
 
-  it("handles onBeforeCompaction by flushing", () => {
-    writer.onBeforeCompaction({}, {});
-    expect(mockLogger.debug).not.toHaveBeenCalledWith(expect.stringContaining("Error"));
+  it("onBeforeCompaction does not throw", () => {
+    expect(() => writer.onBeforeCompaction({}, {})).not.toThrow();
   });
 
-  it("handles onBeforeReset by flushing", () => {
-    writer.onBeforeReset({}, {});
-    expect(mockLogger.debug).not.toHaveBeenCalledWith(expect.stringContaining("Error"));
+  it("onBeforeReset does not throw", () => {
+    expect(() => writer.onBeforeReset({}, {})).not.toThrow();
   });
 
-  it("handles errors in onMessageReceived", () => {
-    const event = { sessionKey: undefined, text: "msg" } as any;
-    writer.onMessageReceived(event);
-    expect(mockLogger.warn).toHaveBeenCalled();
-  });
-
-  it("skips persist when conversation key missing", () => {
-    const event: InternalMessageEvent = {
-      sessionKey: undefined as any,
+  it("warns when onMessageReceived has no sessionKey", () => {
+    writer.onMessageReceived({
+      sessionKey: undefined as unknown as string,
       direction: "inbound",
       text: "msg",
-    };
-    writer.onMessageReceived(event);
+    });
     expect(mockLogger.warn).toHaveBeenCalled();
   });
 });

@@ -17,7 +17,7 @@ describe("ChatTurnWriter", () => {
     };
 
     mockClient = {
-      persistChatTurn: vi.fn().mockResolvedValue(undefined),
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
     };
 
     stateDir = "/tmp/test-state";
@@ -39,10 +39,10 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }],
     };
     writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "user123" });
-    expect(mockClient.persistChatTurn).toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("calls persistChatTurn on onAgentEnd", async () => {
+  it("calls storeChatTurn on onAgentEnd", async () => {
     const event: AgentEndContext = {
       sessionId: "test-session",
       messages: [
@@ -53,7 +53,7 @@ describe("ChatTurnWriter", () => {
     await new Promise(r => setTimeout(r, 100));
     writer.onAgentEnd(event, { channelId: "slack", sessionKey: "key123" });
     await new Promise(r => setTimeout(r, 100));
-    expect(mockClient.persistChatTurn).toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
   it("handles missing context in onAgentEnd", () => {
@@ -62,7 +62,7 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "test" }],
     };
     writer.onAgentEnd(event);
-    expect(mockClient.persistChatTurn).not.toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
   });
 
   it("skips persist when no new messages", () => {
@@ -71,7 +71,7 @@ describe("ChatTurnWriter", () => {
       messages: [],
     };
     writer.onAgentEnd(event, { channelId: "ch1", sessionKey: "sk1" });
-    expect(mockClient.persistChatTurn).not.toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
   });
 
   it("extracts text from string content", () => {
@@ -80,8 +80,11 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "hello world" }, { role: "assistant", content: "hi there" }],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    expect(mockClient.persistChatTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ user: "hello world", assistant: "hi there" })
+    expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
+      "openclaw:ch:sk",
+      "hello world",
+      "hi there",
+      expect.any(Object)
     );
   });
 
@@ -94,7 +97,7 @@ describe("ChatTurnWriter", () => {
       ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    expect(mockClient.persistChatTurn).toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
   it("strips recalled memory markers (I1)", () => {
@@ -106,8 +109,11 @@ describe("ChatTurnWriter", () => {
       ],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    expect(mockClient.persistChatTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ assistant: "answer" })
+    expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
+      "openclaw:ch:sk",
+      "query",
+      "answer",
+      expect.any(Object)
     );
   });
 
@@ -137,7 +143,7 @@ describe("ChatTurnWriter", () => {
     };
     writer.onMessageSent(sendEvent);
     await new Promise(r => setTimeout(r, 100));
-    expect(mockClient.persistChatTurn).toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
   it("flushSync clears debounce timers", () => {
@@ -152,8 +158,8 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "test" }, { role: "assistant", content: "test" }],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    const call = mockClient.persistChatTurn.mock.calls[0];
-    expect(call[0].turnId).toMatch(/^[0-9a-f]{16}$/);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[3].turnId).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it("derives sessionId from context", () => {
@@ -162,8 +168,8 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }],
     };
     writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "user-42" });
-    const call = mockClient.persistChatTurn.mock.calls[0];
-    expect(call[0].sessionId).toContain("openclaw:telegram:");
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[0]).toContain("openclaw:telegram:");
   });
 
   it("extracts conversation key from internal event", () => {
@@ -183,11 +189,11 @@ describe("ChatTurnWriter", () => {
       messages: [{ role: "user", content: "a\x00b\x1fc" }, { role: "assistant", content: "resp" }],
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    expect(mockClient.persistChatTurn).toHaveBeenCalled();
+    expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("retries persistChatTurn with backoff", async () => {
-    mockClient.persistChatTurn = vi.fn()
+  it("retries storeChatTurn with backoff", async () => {
+    mockClient.storeChatTurn = vi.fn()
       .mockRejectedValueOnce(new Error("Network error"))
       .mockResolvedValue(undefined);
 
@@ -197,7 +203,7 @@ describe("ChatTurnWriter", () => {
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await new Promise(r => setTimeout(r, 500));
-    expect(mockClient.persistChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
   });
 
   it("handles onBeforeCompaction by flushing", () => {

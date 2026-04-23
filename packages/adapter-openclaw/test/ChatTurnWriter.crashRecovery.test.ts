@@ -12,7 +12,7 @@ describe("ChatTurnWriter crash recovery (Task #12)", () => {
     stateDir = path.join("/tmp", `dkg-test-${Date.now()}`);
     fs.mkdirSync(path.dirname(stateDir), { recursive: true });
     mockLogger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    mockClient = { persistChatTurn: vi.fn().mockResolvedValue(undefined) };
+    mockClient = { storeChatTurn: vi.fn().mockResolvedValue(undefined) };
   });
 
   it("survives missing watermark file on init", () => {

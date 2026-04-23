@@ -215,7 +215,7 @@ export class ChatTurnWriter {
     let attempt = 0;
     while (attempt < 2) {
       try {
-        await this.client.persistChatTurn({ sessionId, turnId, user, assistant });
+        await this.client.storeChatTurn(sessionId, user, assistant, { turnId });
         const currentIndex = this.loadWatermark(sessionId);
         this.saveWatermark(sessionId, currentIndex + 1);
         this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });

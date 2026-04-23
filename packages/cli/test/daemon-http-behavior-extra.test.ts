@@ -857,6 +857,53 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
   );
 
   it(
+    'A-1 (Codex PR #242 iter-8 re-review): an authenticated agent reading its ' +
+      'OWN WM with agentAddress=self must return 200 — the auth-disabled ' +
+      'fallback 403 must NOT fire for recognised agent identities, even when ' +
+      "the agent address is not one of the node's self-aliases",
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-wm-self-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      // Register agent B with a scoped token. B's address is NOT the
+      // node default / peerId, so the self-alias fallback cannot
+      // rescue this case — only a properly-gated "authenticated agent
+      // identity bypasses the fallback" check makes the read succeed.
+      const agentB = await registerAgent(d, 'a1-self-b');
+
+      // B reads its OWN WM with its OWN token and agentAddress=B. We
+      // don't care whether the result has bindings (B hasn't written
+      // anything yet) — we only care that the daemon does NOT 403.
+      //
+      // Pre-iter-8-re-review the daemon's fallback treated
+      // `!isAdminToken` as "untrusted" and 403'd here because B's
+      // address is not a node self-alias. Post-fix, an authenticated
+      // agent identity (callerAgentAddress resolved from a valid
+      // agent-scoped bearer) skips the fallback entirely and
+      // DKGAgent.query takes over — caller===target so the isolation
+      // guard permits the read.
+      const selfRes = await queryAsAgent(d, agentB, {
+        sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: agentB.agentAddress,
+      });
+      expect(
+        selfRes.status,
+        `authenticated agent reading its own WM must return 200 — got ` +
+          `${selfRes.status} (body=${JSON.stringify(selfRes.body)})`,
+      ).toBe(200);
+    },
+    60_000,
+  );
+
+  it(
     'A-1 follow-up: access-denied synthetic response preserves SPARQL query form ' +
       '(ASK → {result:"false"}, CONSTRUCT → quads:[])',
     async () => {

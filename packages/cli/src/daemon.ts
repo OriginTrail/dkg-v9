@@ -6660,17 +6660,28 @@ async function handleRequest(
       // local agent's WM via `agentAddress`. Restrict the admin
       // bypass to tokens that are NOT bound to a specific agent
       // (`resolveAgentByToken(token) === undefined`), which is the
-      // current signal for "node-level / admin-scoped". Agent-bound
-      // tokens still flow through the isolation check below —
-      // `DKGAgent.query` will reject any mismatch between
-      // `callerAgentAddress` and `agentAddress` on a working-memory
-      // read.
+      // current signal for "node-level / admin-scoped".
+      //
+      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
+      // also NOT fire for authenticated agent callers. An agent
+      // querying its OWN WM (`callerAgentAddress === agentAddress`)
+      // was previously being rejected here unless the target happened
+      // to be the node default / peerId alias, and genuine cross-agent
+      // reads were surfacing as a 403 (leaking existence) instead of
+      // the intended silent empty-per-kind result from
+      // `DKGAgent.query`. Only gate the self-alias fallback when the
+      // caller has no recognised identity at all — neither a
+      // node-level admin token nor an agent-scoped bearer. Authenticated
+      // agent callers flow straight into `agent.query()` below, which
+      // enforces the isolation invariant by returning an empty-per-kind
+      // result for any target that is not `callerAgentAddress`.
       const isAdminToken =
         !!requestToken
         && validTokens.has(requestToken)
         && callerAgentAddress === undefined;
+      const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
-        !isAdminToken &&
+        !hasRecognisedIdentity &&
         view === 'working-memory' &&
         typeof agentAddress === 'string'
       ) {

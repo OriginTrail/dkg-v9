@@ -330,6 +330,66 @@ describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
     );
     expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
   });
+
+  // PR #229 bot review round 23 (r23-2, dkg-query-engine.ts). The
+  // canonical SPARQL shape for batched exact-subject lookups is a
+  // leading `VALUES ?s { … }` clause followed by a BGP that binds
+  // `?s`. Before r23-2 `injectMinTrustFilter` treated ANY occurrence
+  // of `VALUES` as "unsupported shape" and fail-closed to `[]` — even
+  // when every bound subject met the threshold. Callers saw a silent
+  // empty result with no `minTrust`-related error, which is exactly
+  // the false negative the bot flagged. These tests pin the fix:
+  // a single-variable leading VALUES clause is peeled off, the trust
+  // filter is attached to the BGP, and the VALUES binding is
+  // re-emitted verbatim so the engine still restricts subjects.
+  it('honors _minTrust on a leading VALUES ?s { … } clause — bot review r23-2', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:a', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:b', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:a', 'http://example.org/label', '"A"', consensus),
+      quad('urn:b', 'http://example.org/label', '"B"', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?s ?l WHERE {',
+      '  VALUES ?s { <urn:a> <urn:b> }',
+      '  ?s <http://example.org/label> ?l .',
+      '}',
+      'ORDER BY ?s',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['l'])).toEqual(['"A"', '"B"']);
+  });
+
+  it('filters VALUES-bound subjects that fall below _minTrust — bot review r23-2', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:hi', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:hi', 'http://example.org/label', '"H"', consensus),
+      quad('urn:lo', 'http://example.org/label', '"L"', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?l WHERE {',
+      '  VALUES ?s { <urn:hi> <urn:lo> }',
+      '  ?s <http://example.org/label> ?l .',
+      '}',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    // `urn:lo` is Unverified — it must be filtered out, not silently
+    // returned because the rewriter bailed on VALUES.
+    expect(result.bindings.map((b) => b['l'])).toEqual(['"H"']);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

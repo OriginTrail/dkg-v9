@@ -872,7 +872,7 @@ export class DKGAgent {
         // accumulated forever (the original P-1 finding).
         onUnmatchedBatchCreated: async ({ merkleRoot, publisherAddress, startKAId, endKAId }) => {
           const merkleRootHex = ethers.hexlify(merkleRoot);
-          const recovered = this.publisher.recoverFromWalByMerkleRoot(
+          const recovered = await this.publisher.recoverFromWalByMerkleRoot(
             merkleRootHex,
             { publisherAddress, startKAId, endKAId },
             ctx,
@@ -3691,7 +3691,13 @@ export class DKGAgent {
       const ing = dispatchIngress('publish', data);
       if (!ing) return;
       const gph = this.getOrCreateGossipPublishHandler();
-      await gph.handlePublishMessage(ing.payload, contextGraphId, undefined, from);
+      // r23-4: pass the envelope's recovered signer so
+      // GossipPublishHandler can enforce the cryptographic link
+      // between the envelope signature and the inner PublishRequest's
+      // claimed publisher address.
+      await gph.handlePublishMessage(
+        ing.payload, contextGraphId, undefined, from, ing.recoveredSigner,
+      );
     });
 
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {

@@ -21,6 +21,8 @@ import {
   generateAssertionPromotedMetadata,
   generateAssertionPublishedMetadata,
   generateAssertionDiscardedMetadata,
+  getTentativeStatusQuad,
+  getConfirmedStatusQuad,
   toHex,
   updateMetaMerkleRoot,
   type KAMetadata,
@@ -652,26 +654,33 @@ export class DKGPublisher implements Publisher {
    *      stream end-to-end (matches the existing
    *      `WAL recovery: loaded …` log on the constructor side).
    *
-   * Promotion of the actual KA tentative→confirmed status quads
-   * isn't done here — the WAL entry deliberately doesn't persist
-   * the per-KA UALs (only the batch-level `kaCount` + KA range from
-   * the on-chain event), and the runtime store may have evicted
-   * the tentative quads during the crash window. A complete
-   * re-issue path is tracked separately; this fix delivers what the
-   * bot actually flagged: "WAL reload has no runtime caller →
-   * crash-window publishes accumulate forever". That's now
-   * resolved.
+   * PR #229 bot review round 23 (r23-3, dkg-publisher.ts): in
+   * addition to dropping the WAL entry we now ALSO promote the
+   * tentative KC status quad to `confirmed` in the context graph's
+   * meta graph, matching what `PublishHandler.confirmPublish` does
+   * on the happy path. Without this, a restart-across-crash left the
+   * KC permanently stuck in `status "tentative"` even though the
+   * on-chain event confirmed the publish — callers querying
+   * `view: 'verified-memory'` or filtering by `status confirmed`
+   * would continue to treat the KC as unfinalised. We locate the
+   * KC UAL by querying the `_meta` graph for a subject whose
+   * `dkg:merkleRoot` matches the WAL entry's merkleRoot AND whose
+   * `dkg:status` is still `"tentative"`. When the store has already
+   * dropped the tentative quad (e.g. timed out, or this node crashed
+   * before writing it) the promotion is skipped with a log line and
+   * the WAL entry is still dropped — the bot's "accumulate forever"
+   * condition is driven by the WAL, not the store.
    *
    * Returns the recovered entry on success (so callers can record
    * structured telemetry / surface it through their own
    * observability pipeline) or `undefined` when no WAL entry
    * matches the merkle root.
    */
-  recoverFromWalByMerkleRoot(
+  async recoverFromWalByMerkleRoot(
     merkleRootHex: string,
     onChainData: { publisherAddress: string; startKAId: bigint; endKAId: bigint },
     ctx?: OperationContext,
-  ): PreBroadcastJournalEntry | undefined {
+  ): Promise<PreBroadcastJournalEntry | undefined> {
     const opCtx = ctx ?? createOperationContext('publish');
     const entry = this.findWalEntryByMerkleRoot(merkleRootHex);
     if (!entry) return undefined;
@@ -693,6 +702,30 @@ export class DKGPublisher implements Publisher {
       );
       return undefined;
     }
+
+    // r23-3: before dropping the WAL entry, promote any surviving
+    // `status "tentative"` KC quad in the context graph's _meta to
+    // `status "confirmed"` (mirrors `PublishHandler.confirmPublish`).
+    // A missing tentative quad is not fatal — it just means the KC
+    // never made it to the store on this node, or the tentative
+    // timeout already cleared it. We log the outcome either way so
+    // operators can reconcile against the chain.
+    let promotedUal: string | null = null;
+    try {
+      promotedUal = await this.promoteTentativeKcByMerkleRoot(
+        entry.contextGraphId,
+        merkleRootHex,
+        opCtx,
+      );
+    } catch (promoteErr) {
+      this.log.warn(
+        opCtx,
+        `WAL_RECOVERY_PROMOTE_FAILED merkleRoot=${merkleRootHex} ` +
+          `op=${entry.publishOperationId}: ` +
+          `${promoteErr instanceof Error ? promoteErr.message : String(promoteErr)}`,
+      );
+    }
+
     const idx = this.preBroadcastJournal.findIndex(
       (e) => e.publishOperationId === entry.publishOperationId,
     );
@@ -718,6 +751,7 @@ export class DKGPublisher implements Publisher {
       opCtx,
       `WAL_RECOVERY_MATCH op=${entry.publishOperationId} merkleRoot=${merkleRootHex} ` +
         `cg=${entry.contextGraphId.slice(0, 16)}… kas=${onChainData.startKAId}..${onChainData.endKAId} ` +
+        `promoted=${promotedUal ?? 'none'} ` +
         `(${this.preBroadcastJournal.length} entries surviving)`,
     );
     try {
@@ -728,6 +762,7 @@ export class DKGPublisher implements Publisher {
         publisherAddress: entry.publisherAddress,
         startKAId: onChainData.startKAId.toString(),
         endKAId: onChainData.endKAId.toString(),
+        promotedUal,
       });
     } catch {
       // EventBus emit failures are observability-only; never let
@@ -735,6 +770,58 @@ export class DKGPublisher implements Publisher {
       // event handler.
     }
     return entry;
+  }
+
+  /**
+   * r23-3: locate the KC UAL whose `dkg:merkleRoot` matches `merkleRootHex`
+   * in `<did:dkg:context-graph:{contextGraphId}/_meta>` and still carries
+   * `dkg:status "tentative"`, then flip that quad to `"confirmed"`. The
+   * merkleRoot hex written to the store uses a lowercase `0x` prefix
+   * (see `toHex` in metadata.ts); we case-insensitively match the
+   * incoming hex so a caller passing an uppercase variant still hits.
+   *
+   * Returns the promoted UAL, or `null` when no matching tentative KC
+   * exists in the store.
+   */
+  private async promoteTentativeKcByMerkleRoot(
+    contextGraphId: string,
+    merkleRootHex: string,
+    opCtx: OperationContext,
+  ): Promise<string | null> {
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const needle = merkleRootHex.toLowerCase();
+    // Escape any double-quotes in the needle defensively. `toHex`
+    // only emits `0x[0-9a-f]+` so in practice there are none, but
+    // refusing to inject unescaped content keeps the SPARQL safe
+    // against any future call-site change.
+    if (/["\\\n\r]/.test(needle)) {
+      throw new Error(`Refusing to promote KC: unsafe merkleRoot hex "${merkleRootHex}"`);
+    }
+    const select = `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ` +
+      `?ual <http://dkg.io/ontology/merkleRoot> ?root . ` +
+      `?ual <http://dkg.io/ontology/status> "tentative" . ` +
+      `FILTER(LCASE(STR(?root)) = "${needle}") } }`;
+    const res = await this.store.query(select);
+    const rows = res.type === 'bindings' ? res.bindings : [];
+    if (rows.length === 0) return null;
+    const rawUal = rows[0]['ual'];
+    if (!rawUal) return null;
+    // Oxigraph returns bound IRIs as `<...>`; strip the angle brackets.
+    const ual = rawUal.startsWith('<') && rawUal.endsWith('>')
+      ? rawUal.slice(1, -1)
+      : rawUal;
+    try {
+      await this.store.delete([getTentativeStatusQuad(ual, contextGraphId)]);
+      await this.store.insert([getConfirmedStatusQuad(ual, contextGraphId)]);
+    } catch (writeErr) {
+      this.log.error(
+        opCtx,
+        `WAL_RECOVERY_PROMOTE_WRITE_FAILED ual=${ual} merkleRoot=${merkleRootHex}: ` +
+          `${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
+      );
+      throw writeErr;
+    }
+    return ual;
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {

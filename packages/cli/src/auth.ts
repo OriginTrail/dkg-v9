@@ -877,6 +877,33 @@ export function httpAuthGuard(
           return false;
         }
         pending.verified = true;
+      } else {
+        // PR #229 bot review round 23 (r23-1): body-carrying signed
+        // requests (chunked OR explicit `Content-Length > 0`) are
+        // accepted here on the bearer-token proof alone and the HMAC
+        // check is deferred to `enforceSignedRequestPostBody`, which
+        // only runs when a route handler calls `readBody*()`. If a
+        // handler happens to ignore the body (for example
+        // `POST /api/local-agent-integrations/:id/refresh`, which
+        // only cares that the path was hit), the signed-request HMAC
+        // is *never* verified and an attacker with a valid bearer
+        // token can forge any `x-dkg-signature` + arbitrary body —
+        // the bearer token alone unlocks the route. The original
+        // r19-1 fix only caught the empty-`Content-Length` case;
+        // `Transfer-Encoding: chunked` with an empty body (and
+        // non-chunked bodies on handlers that don't read) were still
+        // exploitable.
+        //
+        // Fix: install a response-level fail-closed guard. We record
+        // the fact that a post-body HMAC verification is still
+        // outstanding and override `res.writeHead` / `res.end` so
+        // that if the handler attempts to emit ANY response while
+        // `__dkgSignedAuth.verified` is still false, we replace the
+        // status with 401 and refuse to serve data. Routes that do
+        // read the body hit `readBody` → `enforceSignedRequestPostBody`
+        // → `pending.verified = true` and the guard collapses into a
+        // no-op on the first response call.
+        installSignedRequestResponseGuard(req, res, corsOrigin ?? undefined);
       }
 
       return true;
@@ -1029,4 +1056,89 @@ export function enforceSignedRequestPostBody(
  */
 export function _clearReplayCacheForTesting(): void {
   seenNonces.clear();
+}
+
+/**
+ * PR #229 bot review round 23 (r23-1, cli/auth.ts): response-level
+ * fail-closed enforcement for body-carrying signed requests.
+ *
+ * When `httpAuthGuard` stashes `__dkgSignedAuth` for a signed request
+ * whose body has not yet been read, the HMAC is verified lazily via
+ * `readBody*()` → `enforceSignedRequestPostBody`. Routes that ignore
+ * the body (refresh / revoke / fire-and-forget endpoints) never
+ * trigger the lazy check, so the request is accepted on the bearer
+ * token alone — any `x-dkg-signature` (fresh, stale, or forged)
+ * slips through. The original r19-1 fix only closed the explicit
+ * `Content-Length: 0` path; chunked empty bodies and non-chunked
+ * bodies on non-reading routes remained exploitable.
+ *
+ * We install a one-shot guard on `res.writeHead` / `res.end` that
+ * checks `__dkgSignedAuth.verified` at response time. If the flag
+ * is still false we rewrite the response to `401 Unauthorized` —
+ * the route handler never sees its intended response emitted to
+ * the client. Routes that correctly read the body hit
+ * `enforceSignedRequestPostBody` first and flip `verified = true`,
+ * making the guard a pass-through on the first response call.
+ *
+ * Implementation note: we also hook `res.end(null)` / `res.end()` to
+ * catch streaming responses, and mark the guard as "spent" so the
+ * wrappers don't recurse when we ourselves call writeHead/end to
+ * emit the 401 response.
+ */
+function installSignedRequestResponseGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  corsOrigin?: string,
+): void {
+  type GuardedRes = ServerResponse & { __dkgSignedAuthGuardInstalled?: boolean };
+  const guarded = res as GuardedRes;
+  if (guarded.__dkgSignedAuthGuardInstalled) return;
+  guarded.__dkgSignedAuthGuardInstalled = true;
+
+  const origWriteHead = res.writeHead.bind(res) as typeof res.writeHead;
+  const origEnd = res.end.bind(res) as typeof res.end;
+  // `spent === true` means we already rewrote the response to 401;
+  // every subsequent writeHead/end call from the original handler
+  // collapses to a silent no-op so we never get an ERR_STREAM_WRITE_
+  // AFTER_END from Node when the handler drains its intended success
+  // payload into a socket we've already closed.
+  let spent = false;
+
+  const failClosed = (): void => {
+    spent = true;
+    try {
+      origWriteHead.call(res, 401, {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer realm="dkg-node"',
+        'Access-Control-Allow-Origin': corsOrigin ?? '*',
+      });
+      (origEnd as (chunk?: string) => ServerResponse)(
+        JSON.stringify({
+          error: 'Signed request rejected: HMAC verification never completed (handler did not read request body)',
+        }),
+      );
+    } catch {
+      // res already destroyed — nothing else we can do.
+    }
+  };
+
+  const shouldIntercept = (): boolean => {
+    if (spent) return true;
+    const pending = (req as unknown as {
+      __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
+    }).__dkgSignedAuth;
+    if (!pending || pending.verified) return false;
+    failClosed();
+    return true;
+  };
+
+  (res as ServerResponse).writeHead = ((...args: Parameters<ServerResponse['writeHead']>) => {
+    if (shouldIntercept()) return res;
+    return origWriteHead(...args);
+  }) as ServerResponse['writeHead'];
+
+  (res as ServerResponse).end = ((...args: Parameters<ServerResponse['end']>) => {
+    if (shouldIntercept()) return res;
+    return origEnd(...args);
+  }) as ServerResponse['end'];
 }

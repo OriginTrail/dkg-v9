@@ -626,11 +626,41 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
 
   const inner = sparql.slice(braceStart + 1, braceEnd);
 
+  // PR #229 bot review round 23 (r23-2, dkg-query-engine.ts). A
+  // leading top-level `VALUES` clause is the canonical SPARQL shape
+  // for batched exact-subject lookups:
+  //
+  //     SELECT ?o WHERE {
+  //       VALUES ?s { <a> <b> <c> }
+  //       ?s <p> ?o .
+  //     }
+  //
+  // Pre-r23 the forbidden-tokens regex treated any VALUES as
+  // "unsupported" and `_minTrust` fell through to
+  // `emptyResultForForm(...)`, which turns into a silent `[]` / `false`
+  // even when the bound subjects satisfy the threshold. The contract
+  // we need is:
+  //   (a) bail loudly on complex VALUES we can't reason about
+  //       (multi-var tuples, multi-line, no closing `}`);
+  //   (b) for the common single-var VALUES case, peel it off, run
+  //       the existing subject analysis on the body, and re-emit
+  //       the VALUES binding at the top of the rewritten WHERE so
+  //       the trust filter still applies to each bound IRI.
+  //
+  // Any other location (non-leading, multi-var, parenthesised row
+  // syntax `VALUES (?x ?y) { (<a> "b") }`) still bails because the
+  // flat scanner cannot safely rewrite them.
+  const { valuesClause, bodyAfterValues } = peelLeadingValues(inner);
+  const scanTarget = bodyAfterValues ?? inner;
+
   // Refuse to rewrite shapes we cannot reason about without a real
   // SPARQL parser. Any of these tokens means there's a nested scope
   // whose subjects the flat scan below cannot see.
-  if (/\{|\}/.test(inner)) return null;
-  if (/\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(inner)) {
+  //
+  // `VALUES` is still in the list so we catch any non-leading /
+  // multi-line / tuple VALUES clause the peeler declined to handle.
+  if (/\{|\}/.test(scanTarget)) return null;
+  if (/\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(scanTarget)) {
     return null;
   }
 
@@ -642,7 +672,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   // `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>` whenever
   // `_minTrust` was set, which fail-closes the entire query to `[]`
   // (PR #229 bot review round 7 — dkg-query-engine.ts:513).
-  const innerCodeOnly = stripSparqlLineComments(inner);
+  const innerCodeOnly = stripSparqlLineComments(scanTarget);
   const trimmedInner = innerCodeOnly.trim();
   if (trimmedInner.length === 0) return null;
 
@@ -739,11 +769,73 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   // caller terminated their final triple pattern.
   const endsWithDot = /\.\s*$/.test(trimmedInner);
   const separator = endsWithDot ? ' ' : ' . ';
-  const rewrittenInner = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
+  const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
+
+  // r23-2: if the WHERE started with a `VALUES ?s { … }` clause the
+  // peeler set aside, re-emit it at the top of the rewritten body so
+  // the bindings it introduces still drive the trust-filtered BGP.
+  const rewrittenInner = valuesClause
+    ? `${valuesClause} ${rewrittenBody}`
+    : rewrittenBody;
 
   const before = sparql.slice(0, braceStart + 1);
   const after = sparql.slice(braceEnd);
   return `${before} ${rewrittenInner} ${after}`;
+}
+
+/**
+ * r23-2: peel a single leading top-level `VALUES ?var { … }` clause
+ * off the WHERE body. Returns the clause text (verbatim, including the
+ * trailing `}`) and the remainder so the caller can reason about
+ * triples alone. If the WHERE does NOT start with a VALUES clause, or
+ * the VALUES clause is multi-var (`VALUES (?x ?y) { (<a> "b") }`), has
+ * unbalanced braces, or uses nested parentheses for row syntax, returns
+ * `{ valuesClause: null, bodyAfterValues: null }` so the caller falls
+ * back to refusing the query (the forbidden-tokens regex still trips
+ * on `VALUES`).
+ */
+function peelLeadingValues(inner: string): {
+  valuesClause: string | null;
+  bodyAfterValues: string | null;
+} {
+  const withoutComments = stripSparqlLineComments(inner);
+  const m = withoutComments.match(/^\s*VALUES\s+([?$][A-Za-z_]\w*)\s*\{/i);
+  if (!m) return { valuesClause: null, bodyAfterValues: null };
+
+  const openBraceRel = m[0].length - 1;
+  let depth = 1;
+  let i = openBraceRel + 1;
+  let inString = false;
+  let inIri = false;
+  for (; i < withoutComments.length; i++) {
+    const ch = withoutComments[i];
+    if (inString) {
+      if (ch === '\\') { i++; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (inIri) {
+      if (ch === '>') inIri = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '<') { inIri = true; continue; }
+    if (ch === '(' || ch === ')') {
+      // Row-tuple syntax — we can't reason about multi-var rows safely.
+      return { valuesClause: null, bodyAfterValues: null };
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (depth !== 0) return { valuesClause: null, bodyAfterValues: null };
+
+  const closeAbs = i;
+  const valuesClause = withoutComments.slice(0, closeAbs + 1).trim();
+  const bodyAfterValues = withoutComments.slice(closeAbs + 1);
+  return { valuesClause, bodyAfterValues };
 }
 
 function mergeSharedMemoryAndDataResults(

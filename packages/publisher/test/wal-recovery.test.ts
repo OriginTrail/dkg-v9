@@ -268,7 +268,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
       'op-recover',
     ]);
 
-    const recovered = publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+    const recovered = await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
       publisherAddress: target.publisherAddress,
       startKAId: 100n,
       endKAId: 100n,
@@ -295,7 +295,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     await writeFile(walPath, JSON.stringify(target) + '\n', 'utf-8');
 
     const publisher = makePublisher(walPath);
-    const recovered = publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+    const recovered = await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
       publisherAddress: '0x2222222222222222222222222222222222222222',
       startKAId: 1n,
       endKAId: 1n,
@@ -314,7 +314,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     await writeFile(walPath, JSON.stringify(target) + '\n', 'utf-8');
 
     const publisher = makePublisher(walPath);
-    const recovered = publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+    const recovered = await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
       publisherAddress: '0xABCDEF0123456789ABCDEF0123456789ABCDEF01',
       startKAId: 5n,
       endKAId: 7n,
@@ -329,7 +329,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     const before = await readFile(walPath, 'utf-8');
 
     const publisher = makePublisher(walPath);
-    const recovered = publisher.recoverFromWalByMerkleRoot(
+    const recovered = await publisher.recoverFromWalByMerkleRoot(
       '0x' + 'ff'.repeat(32),
       { publisherAddress: survivor.publisherAddress, startKAId: 0n, endKAId: 0n },
     );
@@ -363,7 +363,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
       keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
       publishWalFilePath: walPath,
     });
-    publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+    await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
       publisherAddress: target.publisherAddress,
       startKAId: 99n,
       endKAId: 99n,
@@ -395,7 +395,7 @@ describe('ChainEventPoller → DKGPublisher.recoverFromWalByMerkleRoot wiring (r
       onUnmatchedBatchCreated: async ({ merkleRoot, publisherAddress, startKAId, endKAId }) => {
         called += 1;
         const merkleRootHex = '0x' + Buffer.from(merkleRoot).toString('hex');
-        const recovered = publisher.recoverFromWalByMerkleRoot(
+        const recovered = await publisher.recoverFromWalByMerkleRoot(
           merkleRootHex,
           { publisherAddress, startKAId, endKAId },
         );
@@ -481,5 +481,179 @@ describe('ChainEventPoller → DKGPublisher.recoverFromWalByMerkleRoot wiring (r
         handleBatchCreated: (e: typeof event, ctx: unknown) => Promise<void>;
       }).handleBatchCreated(event, { operationId: 'test', subsystem: 'system' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// r23-3 (PR #229 bot review round 23): the previous WAL-recovery fix dropped
+// the WAL entry but never promoted the tentative KC status quad in the store
+// to `confirmed`. Query paths that gate on `dkg:status "confirmed"` (or
+// `view: 'verified-memory'`) saw the KC as permanently unfinalised even
+// though the chain event confirmed the publish. These tests pin the fix:
+// the same-transaction rewrite MUST promote the surviving tentative quad
+// AND drop the WAL entry, mirroring what `PublishHandler.confirmPublish`
+// does on the happy path.
+// ---------------------------------------------------------------------------
+describe('DKGPublisher.recoverFromWalByMerkleRoot — tentative→confirmed promotion (r23-3)', () => {
+  function makePublisherWithStore(store: OxigraphStore, publishWalFilePath: string) {
+    const eventBus = new EventEmitter() as unknown as EventBus;
+    const chain = { chainId: 'none' } as unknown as ChainAdapter;
+    const keypair = { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) };
+    return new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publishWalFilePath,
+    });
+  }
+
+  it('flips the tentative status quad to confirmed when a matching KC exists in the context-graph _meta', async () => {
+    const contextGraphId = 'cg-r23-3-happy';
+    const merkleRootHex = '0x' + '7c'.repeat(32);
+    const ual = 'did:dkg:otp:hardhat/0x1234567890abcdef1234567890abcdef12345678/99';
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    const store = new OxigraphStore();
+    // Seed the store with the tentative KC metadata the way
+    // DKGPublisher.publishContent would have before a crash: a
+    // `<ual> dkg:merkleRoot "0xhex"` triple plus a
+    // `<ual> dkg:status "tentative"` triple in the same _meta graph.
+    await store.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ual, predicate: 'http://dkg.io/ontology/status', object: '"tentative"', graph: metaGraph },
+    ]);
+
+    const entry = makeEntry({
+      publishOperationId: 'op-r23-3',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+      publisherAddress: '0x1234567890abcdef1234567890abcdef12345678',
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const publisher = makePublisherWithStore(store, walPath);
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 1n,
+      endKAId: 1n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-r23-3');
+
+    // WAL dropped.
+    expect(publisher.preBroadcastJournal).toEqual([]);
+    // Tentative quad is gone, confirmed quad is present.
+    const tentativeRes = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "tentative" } }`,
+    );
+    const confirmedRes = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(tentativeRes.type === 'boolean' ? tentativeRes.value : null).toBe(false);
+    expect(confirmedRes.type === 'boolean' ? confirmedRes.value : null).toBe(true);
+  });
+
+  it('still drops the WAL entry when no tentative KC survives in the store (promotion is best-effort, WAL drop is authoritative)', async () => {
+    const contextGraphId = 'cg-r23-3-missing';
+    const merkleRootHex = '0x' + 'de'.repeat(32);
+
+    const store = new OxigraphStore();
+    // Deliberately empty store — crash happened BEFORE the tentative
+    // quads were persisted. We still want the WAL entry dropped so
+    // the bot's "accumulate forever" condition doesn't recur.
+
+    const entry = makeEntry({
+      publishOperationId: 'op-r23-3-nostore',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const publisher = makePublisherWithStore(store, walPath);
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 2n,
+      endKAId: 2n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-r23-3-nostore');
+    expect(publisher.preBroadcastJournal).toEqual([]);
+  });
+
+  it('does NOT promote a KC that is already confirmed (idempotence across double-delivery of the chain event)', async () => {
+    const contextGraphId = 'cg-r23-3-idempotent';
+    const merkleRootHex = '0x' + 'ab'.repeat(32);
+    const ual = 'did:dkg:otp:hardhat/0xabcdef0123456789abcdef0123456789abcdef01/42';
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    const store = new OxigraphStore();
+    // KC was already promoted (e.g. the FinalizationHandler got
+    // there first, or this is the second chain event delivery).
+    await store.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ual, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: metaGraph },
+    ]);
+
+    const entry = makeEntry({
+      publishOperationId: 'op-r23-3-idem',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+      publisherAddress: '0xabcdef0123456789abcdef0123456789abcdef01',
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const publisher = makePublisherWithStore(store, walPath);
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 1n,
+      endKAId: 1n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-r23-3-idem');
+    // The confirmed quad remains; no tentative quad was ever present,
+    // and the promoter's SELECT should match nothing so no redundant
+    // delete/insert runs.
+    const confirmedRes = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(confirmedRes.type === 'boolean' ? confirmedRes.value : null).toBe(true);
+    expect(publisher.preBroadcastJournal).toEqual([]);
+  });
+
+  it('emits walRecoveryMatch with the promoted UAL so downstream observers can pin the tentative→confirmed moment', async () => {
+    const contextGraphId = 'cg-r23-3-event';
+    const merkleRootHex = '0x' + '5e'.repeat(32);
+    const ual = 'did:dkg:otp:hardhat/0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/7';
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    const store = new OxigraphStore();
+    await store.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ual, predicate: 'http://dkg.io/ontology/status', object: '"tentative"', graph: metaGraph },
+    ]);
+
+    const entry = makeEntry({
+      publishOperationId: 'op-r23-3-event',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+      publisherAddress: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const observed: Array<Record<string, unknown>> = [];
+    const ee = new EventEmitter();
+    ee.on('publisher.walRecoveryMatch', (data: Record<string, unknown>) => observed.push(data));
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus: ee as unknown as EventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: walPath,
+    });
+    await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 7n,
+      endKAId: 7n,
+    });
+    expect(observed).toHaveLength(1);
+    expect(observed[0].promotedUal).toBe(ual);
   });
 });

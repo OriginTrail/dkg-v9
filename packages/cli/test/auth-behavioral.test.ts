@@ -949,23 +949,25 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(handlerCallCount).toBe(0);
   });
 
-  it('r19-1: a chunked POST still defers to readBody (no short-circuit on Transfer-Encoding: chunked)', async () => {
-    // Negative control for the r19-1 guard: a framed-for-body
-    // request (chunked) must NOT be treated as body-less here.
-    // Pre-r19 and post-r19 behaviour is identical for this case —
-    // the deferred verify runs when the handler reads the body.
-    // We lock the pre-body gate with a tampered HMAC and expect the
-    // deferred path (which never runs in the empty handler) to be
-    // the one that rejects; since this handler writes 200, a
-    // well-formed chunked body would make it through. Here we
-    // send a bad body to trigger deferred rejection via the
-    // read-body handler pattern — but the white-box handler in
-    // this describe block does NOT call readBody, so the chunked
-    // attack would currently pass the guard. That's fine: the
-    // round-7 DELETE-with-body rationale documents that chunked
-    // POSTs are the caller's responsibility to read. We only pin
-    // that the chunked header keeps the guard from short-circuiting
-    // (otherwise r19-1 would over-block).
+  it('r23-1: a chunked POST whose handler IGNORES the body is fail-closed to 401 (response-guard catches missing HMAC verify)', async () => {
+    // PR #229 bot review round 23 (r23-1, cli/auth.ts). Pre-r23 the
+    // chunked branch was described as "caller's responsibility to
+    // read the body — the deferred verify runs when the handler
+    // reads the body". That let a signed request with
+    // `Transfer-Encoding: chunked` + empty body bypass HMAC
+    // verification on any handler that DOESN'T read the body
+    // (for example `POST /api/local-agent-integrations/:id/refresh`).
+    // The bearer token alone was enough, any `x-dkg-signature`
+    // value was accepted.
+    //
+    // Post-r23 the guard installs a response-level fail-closed
+    // wrapper on `res.writeHead`/`res.end`: if the handler tries
+    // to emit ANY response while `__dkgSignedAuth.verified` is
+    // still false, the wrapper rewrites the status to 401 and
+    // the original body is never sent. The handler for this test
+    // (in the parent describe block) writes `200 OK` unconditionally
+    // and does NOT call readBody, so pre-r23 it would leak the
+    // 200 to the wire — here we pin that the wrapper catches it.
     const ts = String(Date.now());
     const nonce = `n-${randomBytes(8).toString('hex')}`;
     const goodSig = sigFor(VALID, 'POST', '/api/agents', ts, nonce, '');
@@ -982,13 +984,36 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
       `\r\n` +
       `0\r\n\r\n`;
     const res = await sendRawHttp(Number(port), rawReq);
-    // Chunked framing means "has a body". The pre-body guard does
-    // NOT short-circuit, so the handler runs (since the guard
-    // returns true for unverified-signed-with-body and the deferred
-    // check is the handler's responsibility). 200 here confirms the
-    // r19-1 fix didn't over-reject chunked requests — the guard
-    // still correctly identified this as "framed for body".
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(401);
+  });
+
+  it('r23-1: a signed POST with Content-Length > 0 whose handler IGNORES the body is fail-closed to 401', async () => {
+    // Covers the explicit-framing sibling of the chunked case —
+    // any body-carrying signed request whose handler doesn't call
+    // readBody*() must NOT be served successfully, because the
+    // HMAC was never verified against the received bytes.
+    const body = 'ignored-by-handler';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // Even a GENUINELY-correct signature for this body must still
+    // 401 here — the point is that the handler never read the body,
+    // so the verification never fired. The response guard is the
+    // backstop.
+    const goodSig = sigFor(VALID, 'POST', '/api/agents', ts, nonce, body);
+    const { hostname, port } = new URL(baseUrl);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${goodSig}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      body;
+    const res = await sendRawHttp(Number(port), rawReq);
+    expect(res.status).toBe(401);
   });
 
   it('rejects a signed GET with a forged body binding (signed for non-empty body, request has none)', async () => {

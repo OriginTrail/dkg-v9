@@ -271,4 +271,85 @@ describe('GossipPublishHandler', () => {
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // r23-4 (PR #229 bot review round 23): the envelope's recovered signer was
+  // previously discarded, which meant a peer with a legitimate wallet could
+  // wrap a PublishRequest claiming ANY `publisherAddress` and the envelope
+  // would still verify. These tests pin the fix: when an envelopeSigner is
+  // passed through ingress, the handler MUST reject gossip whose inner
+  // PublishRequest.publisherAddress disagrees with the envelope signer.
+  // ---------------------------------------------------------------------------
+  describe('r23-4 — envelope signer MUST match PublishRequest.publisherAddress', () => {
+    const TRUE_PUBLISHER = '0x1111111111111111111111111111111111111111';
+    const ATTACKER = '0x2222222222222222222222222222222222222222';
+
+    it('accepts a publish whose inner publisherAddress matches the recovered envelope signer', async () => {
+      const { store, handler } = createHandler();
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-1', TRUE_PUBLISHER);
+      const res = await store.query(
+        `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      );
+      const bindings = res.type === 'bindings' ? res.bindings : [];
+      expect(bindings.length).toBeGreaterThan(0);
+    });
+
+    it('rejects a publish whose envelope signer does not match the claimed publisherAddress (forged attribution)', async () => {
+      const { store, handler } = createHandler();
+      const before = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      // Attacker wraps a forged PublishRequest (publisherAddress =
+      // TRUE_PUBLISHER) in an envelope signed by the ATTACKER's own
+      // wallet. Envelope signature alone verifies, but the handler
+      // must now catch the attribution mismatch.
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-attacker', ATTACKER);
+      const after = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      expect(after).toBe(before);
+    });
+
+    it('rejects an envelope-signed publish with an empty PublishRequest.publisherAddress (attribution hole)', async () => {
+      const { store, handler } = createHandler();
+      const before = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      const data = encodePublishRequest({
+        ual: '',
+        nquads: new TextEncoder().encode('<http://example.org/s> <http://example.org/p> <http://example.org/o> .'),
+        paranetId: PARANET,
+        kas: [],
+        publisherIdentity: new Uint8Array(32),
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: 'mock:31337',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-attacker', ATTACKER);
+      const after = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      expect(after).toBe(before);
+    });
+
+    it('does NOT enforce the check when envelopeSigner is undefined (legacy rolling-upgrade path stays open)', async () => {
+      // Without a signer (envelope absent / strictGossipEnvelope off),
+      // the handler falls back to the pre-r23-4 behaviour. We pin this
+      // so that enabling the check in the signed path doesn't break
+      // deployments still carrying raw gossip during rolling upgrade.
+      const { store, handler } = createHandler();
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-1');
+      const res = await store.query(
+        `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      );
+      expect((res.type === 'bindings' ? res.bindings : []).length).toBeGreaterThan(0);
+    });
+  });
 });

@@ -237,8 +237,15 @@ export interface V10PublishDirectParams {
    *
    * See P-1 / P-1.2 in BUGS_FOUND.md and the `chain:writeahead` phase
    * in `packages/publisher/src/dkg-publisher.ts`.
+   *
+   * Return type is `Promise<void> | void` so async WAL writes
+   * (disk flush, remote gossip) can run to completion before the
+   * adapter proceeds to `eth_sendRawTransaction`. Adapters MUST
+   * `await` the hook — `() => void` alone does not force synchronous
+   * callers in TypeScript, so an `async () => ...` hook passed in
+   * here would otherwise race the broadcast.
    */
-  onBroadcast?: (info: { txHash: string }) => void;
+  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
 export interface V10UpdateKCParams {
@@ -259,9 +266,9 @@ export interface V10UpdateKCParams {
    * Write-ahead hook fired just before the concrete update tx is
    * broadcast, carrying the signed tx hash. See
    * {@link V10PublishDirectParams.onBroadcast} for full semantics
-   * (fail-closed contract, exactly-once, etc.).
+   * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: { txHash: string }) => void;
+  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----

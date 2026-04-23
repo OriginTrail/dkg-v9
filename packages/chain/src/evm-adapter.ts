@@ -1322,8 +1322,14 @@ export class EVMChainAdapter implements ChainAdapter {
     // consumers can log the exact identity of the tx about to hit the
     // wire. After broadcast completes, the receipt hash matches this.
     const preBroadcastTxHash = ethers.Transaction.from(signedTx).hash ?? '0x';
+    // Codex PR #241 iter-7: `await` the hook. `onBroadcast` is typed
+    // as `Promise<void> | void`, so an async WAL writer (disk flush,
+    // remote gossip) must run to completion BEFORE we proceed to
+    // `broadcastTransaction`. Without `await`, a synchronous
+    // `try/catch` here would silently let the broadcast race the
+    // still-unresolved WAL promise and break the fail-closed contract.
     try {
-      params.onBroadcast?.({ txHash: preBroadcastTxHash });
+      await params.onBroadcast?.({ txHash: preBroadcastTxHash });
     } catch (hookErr) {
       // Fail closed: the signed tx is still in this function's local
       // scope — it has not been sent. Surface the hook error to the
@@ -1652,8 +1658,10 @@ export class EVMChainAdapter implements ChainAdapter {
     const filled = await signer.populateTransaction(populated);
     const signedTx = await signer.signTransaction(filled);
     const preBroadcastTxHash = ethers.Transaction.from(signedTx).hash ?? '0x';
+    // Codex PR #241 iter-7: `await` so async WAL writes complete
+    // before broadcast (see publishDirect above for the full rationale).
     try {
-      params.onBroadcast?.({ txHash: preBroadcastTxHash });
+      await params.onBroadcast?.({ txHash: preBroadcastTxHash });
     } catch (hookErr) {
       throw new Error(
         `chain:writeahead hook failed before updateDirect broadcast: ` +

@@ -322,7 +322,8 @@ export class MockChainAdapter implements ChainAdapter {
     // `kcId` because `txIndexInBlock` advances per-tx.
     const mockUpdateTxHash = this.peekTxHash();
     try {
-      params.onBroadcast?.({ txHash: mockUpdateTxHash });
+      // Codex PR #241 iter-7: `await` an async WAL hook.
+      await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
       throw new Error(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
@@ -833,7 +834,9 @@ export class MockChainAdapter implements ChainAdapter {
     // a unique breadcrumb (previously keyed only on `nextBatchId`).
     const mockPublishTxHash = this.peekTxHash();
     try {
-      params.onBroadcast?.({ txHash: mockPublishTxHash });
+      // Codex PR #241 iter-7: `await` so async WAL writes run to
+      // completion before the mock "broadcasts".
+      await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
       throw new Error(
         `chain:writeahead hook failed before createKnowledgeAssetsV10 broadcast (mock): ` +

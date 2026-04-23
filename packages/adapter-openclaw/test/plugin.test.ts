@@ -306,7 +306,7 @@ describe('DkgNodePlugin', () => {
       expect((form.get('file') as File).name).toBe('doc.md');
     });
 
-    it('dkg_assertion_import_file infers content-type for .pdf, .docx, .html, .txt, .csv', async () => {
+    it('dkg_assertion_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
@@ -322,6 +322,7 @@ describe('DkgNodePlugin', () => {
         ['book.epub', 'application/epub+zip'],
         ['notes.txt', 'text/plain'],
         ['data.csv', 'text/csv'],
+        ['config.json', 'application/json'],
       ];
 
       for (const [fileName, expectedMime] of cases) {
@@ -598,6 +599,24 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       expect(result.content[0].text).toContain('paranet_id');
       expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_query also rejects paranet_id when context_graph_id is empty/whitespace (not just undefined)', async () => {
+      const { fetchMock, byName } = build();
+      // Blank or whitespace-only `context_graph_id` used to pass the
+      // `!== undefined` check and fall through to `contextGraphId: undefined`,
+      // widening the query. The normalized check now catches both the empty
+      // string and a whitespace-padded value.
+      for (const blank of ['', '   ', '\t\n']) {
+        fetchMock.mockClear();
+        const result = await byName.get('dkg_query')!.execute('tc', {
+          sparql: 'ASK {}',
+          context_graph_id: blank,
+          paranet_id: 'legacy',
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(result.content[0].text).toContain('paranet_id');
+      }
     });
   });
 

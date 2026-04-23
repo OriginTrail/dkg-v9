@@ -1465,14 +1465,19 @@ export class DkgNodePlugin {
       // `context_graph_id` is optional on this tool (omit → unscoped query across
       // all subscribed CGs). That makes a leftover v9 `paranet_id` dangerous: a
       // caller that used to scope via `paranet_id` would now silently widen to
-      // every subscribed CG. Reject the legacy key explicitly so the mistake is
-      // visible instead of leaking unrelated data.
-      if (args.paranet_id !== undefined && args.context_graph_id === undefined) {
+      // every subscribed CG. Reject the legacy key explicitly whenever the
+      // normalized `context_graph_id` is missing or empty — not just when it's
+      // strictly `undefined` — so `{ context_graph_id: "", paranet_id: "x" }`
+      // also fails fast instead of falling through to unscoped.
+      const rawContextGraphId = typeof args.context_graph_id === 'string'
+        ? args.context_graph_id.trim()
+        : '';
+      const contextGraphId = rawContextGraphId ? rawContextGraphId : undefined;
+      if (args.paranet_id !== undefined && !contextGraphId) {
         return this.error(
           '"paranet_id" is a removed v9 alias. Use "context_graph_id" (or omit it for an unscoped query).',
         );
       }
-      const contextGraphId = args.context_graph_id ? String(args.context_graph_id) : undefined;
       // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
       const raw = args.include_shared_memory;
       const includeSharedMemory = raw === true || raw === 'true';
@@ -1840,17 +1845,35 @@ function escapeRdfLiteral(value: string): string {
  * Mirrors the extension → MIME lookup in `packages/node-ui/src/ui/api.ts`
  * (`detectContentType`), which the UI uses for the same reason.
  */
+/**
+ * Extension → MIME lookup used by `handleAssertionImportFile`. Kept in sync
+ * with `UPLOAD_CONTENT_TYPES` in `packages/cli/src/api-client.ts` so agents
+ * uploading via the tool surface and users uploading via the CLI see the same
+ * detected content type for a given filename. `adapter-openclaw` can't import
+ * from `@origintrail-official/dkg` directly (circular workspace dep), so we
+ * mirror the table here until a shared upload module lives in `dkg-core`.
+ * Update both tables together when adding a new format.
+ */
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.md': 'text/markdown',
+  '.markdown': 'text/markdown',
+  '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xml': 'application/xml',
+  '.epub': 'application/epub+zip',
+};
+
 function inferContentTypeFromExtension(filePath: string): string | undefined {
   const lower = filePath.toLowerCase();
-  if (/\.(md|markdown)$/.test(lower)) return 'text/markdown';
-  if (/\.pdf$/.test(lower)) return 'application/pdf';
-  if (/\.docx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  if (/\.pptx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-  if (/\.xlsx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  if (/\.html?$/.test(lower)) return 'text/html';
-  if (/\.xml$/.test(lower)) return 'application/xml';
-  if (/\.epub$/.test(lower)) return 'application/epub+zip';
-  if (/\.txt$/.test(lower)) return 'text/plain';
-  if (/\.csv$/.test(lower)) return 'text/csv';
+  for (const [ext, ct] of Object.entries(UPLOAD_CONTENT_TYPES)) {
+    if (lower.endsWith(ext)) return ct;
+  }
   return undefined;
 }

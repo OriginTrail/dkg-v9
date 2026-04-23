@@ -43,7 +43,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -6594,6 +6594,31 @@ async function handleRequest(
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
+    // P-13: accept `minTrust` as a string ("SelfAttested"|"Endorsed"|
+    // "PartiallyVerified"|"ConsensusVerified") or the matching integer
+    // (0..3). Unrecognised values fail closed with a 400 rather than
+    // silently dropping the filter, because a dropped filter leaks
+    // low-trust data into a query that asked for high-trust only.
+    const TRUST_LEVELS: Record<string, number> = {
+      selfattested: 0,
+      endorsed: 1,
+      partiallyverified: 2,
+      consensusverified: 3,
+    };
+    let minTrust: number | undefined;
+    if (parsed.minTrust !== undefined && parsed.minTrust !== null) {
+      if (typeof parsed.minTrust === 'number' && Number.isInteger(parsed.minTrust) && parsed.minTrust >= 0 && parsed.minTrust <= 3) {
+        minTrust = parsed.minTrust;
+      } else if (typeof parsed.minTrust === 'string') {
+        const canon = parsed.minTrust.toLowerCase().replace(/[_-]/g, '');
+        if (canon in TRUST_LEVELS) minTrust = TRUST_LEVELS[canon];
+      }
+      if (minTrust === undefined) {
+        return jsonResponse(res, 400, {
+          error: `Invalid minTrust "${parsed.minTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
+        });
+      }
+    }
     if (!sparql || !String(sparql).trim())
       return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
@@ -6620,6 +6645,7 @@ async function handleRequest(
         verifiedGraph,
         assertionName,
         subGraphName,
+        minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
       const execDur = Date.now() - execT0;

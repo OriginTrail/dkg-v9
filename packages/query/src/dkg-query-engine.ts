@@ -77,7 +77,24 @@ export function resolveViewGraphs(
         graphPrefixes: [],
       };
     case 'verified-memory': {
+      const requireHighTrust =
+        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       if (opts?.verifiedGraph) {
+        // P-13 review: callers MUST NOT be able to combine a specific
+        // `verifiedGraph` URI with a `minTrust` above SelfAttested unless
+        // the engine can prove the named sub-graph already satisfies the
+        // threshold. Today we have no such per-graph trust metadata, so
+        // silently ignoring `minTrust` would let a caller request
+        // ConsensusVerified and receive whatever trust level happens to
+        // live under that `_verified_memory/<id>` graph. Reject instead.
+        if (requireHighTrust) {
+          throw new Error(
+            `verified-memory: cannot combine a specific verifiedGraph with minTrust above SelfAttested ` +
+            `(got minTrust=${opts!.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
+            `the trust threshold; drop verifiedGraph to union across all quorum-verified sub-graphs, or ` +
+            `drop minTrust to read the specific sub-graph verbatim.`,
+          );
+        }
         return {
           graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
           graphPrefixes: [],
@@ -90,8 +107,6 @@ export function resolveViewGraphs(
       //
       // P-13: when the caller demands more than SelfAttested, the root data
       // graph is dropped — only quorum-verified sub-graphs survive.
-      const requireHighTrust =
-        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       return {
         graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],

@@ -81,14 +81,43 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
     ]);
   });
 
-  it('minTrust is ignored when a specific verifiedGraph is given (exact-URI takes precedence)', () => {
-    const res = resolveViewGraphs('verified-memory', CG, {
-      verifiedGraph: VM_QUORUM_A,
-      minTrust: TrustLevel.ConsensusVerified,
-    });
-    expect(res.graphs).toEqual([
-      `did:dkg:context-graph:${CG}/_verified_memory/${VM_QUORUM_A}`,
-    ]);
-    expect(res.graphPrefixes).toEqual([]);
-  });
+  it(
+    'verifiedGraph + minTrust=SelfAttested is allowed — minTrust is a no-op at SelfAttested',
+    () => {
+      const res = resolveViewGraphs('verified-memory', CG, {
+        verifiedGraph: VM_QUORUM_A,
+        minTrust: TrustLevel.SelfAttested,
+      });
+      expect(res.graphs).toEqual([
+        `did:dkg:context-graph:${CG}/_verified_memory/${VM_QUORUM_A}`,
+      ]);
+      expect(res.graphPrefixes).toEqual([]);
+    },
+  );
+
+  it(
+    'verifiedGraph + minTrust > SelfAttested REJECTS — the engine cannot yet prove a ' +
+      'named sub-graph satisfies a trust threshold, so silently reading it would violate spec §14',
+    () => {
+      // Codex review on PR #239 flagged the original behaviour (silently
+      // ignore minTrust when verifiedGraph is set) as a trust-bypass hole:
+      // a caller could ask for ConsensusVerified and receive whatever
+      // trust level happens to live under that exact _verified_memory URI.
+      // The resolver now throws instead; callers must either drop
+      // verifiedGraph (to union across the quorum-verified prefix) or
+      // drop minTrust (to read the specific sub-graph verbatim).
+      expect(() =>
+        resolveViewGraphs('verified-memory', CG, {
+          verifiedGraph: VM_QUORUM_A,
+          minTrust: TrustLevel.ConsensusVerified,
+        }),
+      ).toThrow(/cannot combine a specific verifiedGraph with minTrust above SelfAttested/);
+      expect(() =>
+        resolveViewGraphs('verified-memory', CG, {
+          verifiedGraph: VM_QUORUM_A,
+          minTrust: TrustLevel.Endorsed,
+        }),
+      ).toThrow(/cannot combine a specific verifiedGraph with minTrust above SelfAttested/);
+    },
+  );
 });

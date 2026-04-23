@@ -1211,6 +1211,14 @@ export async function runDaemonInner(
   };
 
   // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)
+  //
+  // The last fallback walks the filesystem from THIS module's compiled
+  // location. PR #258 nests this module under `dist/daemon/lifecycle.js`,
+  // one level deeper than the pre-split `dist/lifecycle.js` layout, so
+  // the relative walk needs one extra `..` to land at the monorepo's
+  // `packages/` directory. Without it, dashboard assets resolve to
+  // `packages/cli/node-ui/dist-ui` and 404 on the rare paths that hit
+  // this branch (when both `import.meta.resolve` and `repoDir()` fail).
   let nodeUiStaticDir: string;
   try {
     const nodeUiPkg = import.meta.resolve("@origintrail-official/dkg-node-ui");
@@ -1222,6 +1230,7 @@ export async function runDaemonInner(
       ? join(root, "packages", "node-ui", "dist-ui")
       : resolve(
           dirname(fileURLToPath(import.meta.url)),
+          "..",
           "..",
           "..",
           "node-ui",

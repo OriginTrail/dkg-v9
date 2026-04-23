@@ -71,8 +71,8 @@ const REPO_ROOT_MARKERS = ['.cursor', 'AGENTS.md', 'packages'] as const;
 
 /**
  * Resolve the dkg-v9 repo root from the daemon's compiled location.
- * The daemon ships at packages/cli/dist/daemon.js, so the repo root
- * is three levels up.
+ * The daemon ships at packages/cli/dist/daemon/manifest.js, so the
+ * repo root is four levels up.
  *
  * Bakes a monorepo-checkout assumption into every generated
  * `.dkg/config.yaml`, hooks file, and `mcp.json` the daemon's
@@ -90,7 +90,7 @@ const REPO_ROOT_MARKERS = ['.cursor', 'AGENTS.md', 'packages'] as const;
  */
 export function manifestRepoRoot(): string {
   const daemonDir = dirname(fileURLToPath(import.meta.url));
-  const root = resolve(daemonDir, '..', '..', '..');
+  const root = resolve(daemonDir, '..', '..', '..', '..');
   const missing = REPO_ROOT_MARKERS.filter((m) => !existsSync(resolve(root, m)));
   if (missing.length) {
     throw new Error(
@@ -151,8 +151,13 @@ export function resolveMcpDkgAssets(): McpDkgAssets {
     // plain `tsx` on source without any `node_modules`. Fall back to
     // the monorepo layout below.
   }
+  // Repo-fallback: from packages/cli/dist/daemon/manifest.js, four
+  // `..` segments land at the monorepo root. PR #258 nested this
+  // module under dist/daemon/, so the original three-level walk was
+  // off by one and landed inside packages/, pointing at the bogus
+  // <root>/packages/packages/mcp-dkg path.
   const daemonDir = dirname(fileURLToPath(import.meta.url));
-  const repoRoot = resolve(daemonDir, '..', '..', '..');
+  const repoRoot = resolve(daemonDir, '..', '..', '..', '..');
   const packageDir = resolve(repoRoot, 'packages', 'mcp-dkg');
   const distEntry = resolve(packageDir, 'dist', 'index.js');
   const captureScript = resolve(packageDir, 'hooks', 'capture-chat.mjs');

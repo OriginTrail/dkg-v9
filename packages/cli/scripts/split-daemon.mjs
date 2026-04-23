@@ -531,6 +531,44 @@ for (const mod of PLAN) {
     'new URL("../../$1"',
   );
 
+  // Same depth fix for the two hard-coded `dist/`-relative repo-root
+  // walks in the manifest helpers and the lifecycle node-ui fallback.
+  // Pre-split they walked from `packages/cli/dist/daemon.js`; post-split
+  // they walk from `packages/cli/dist/daemon/<module>.js` — one level
+  // deeper, so each walk needs one extra `..` to land at the repo root
+  // (or the `packages/` directory in lifecycle's case).
+  if (mod.file === 'manifest.ts') {
+    body = body.replace(
+      /resolve\(daemonDir, '\.\.', '\.\.', '\.\.'\)/g,
+      `resolve(daemonDir, '..', '..', '..', '..')`,
+    );
+    // Update the manifestRepoRoot doc comment that still names the old
+    // `dist/daemon.js` path / three-level walk.
+    body = body.replace(
+      ` * The daemon ships at packages/cli/dist/daemon.js, so the repo root\n * is three levels up.`,
+      ` * The daemon ships at packages/cli/dist/daemon/manifest.js, so the\n * repo root is four levels up.`,
+    );
+    // Inject a short context comment ahead of the resolveMcpDkgAssets
+    // repo-fallback walk so future maintainers see why the depth is 4
+    // and not 3.
+    body = body.replace(
+      /(\n)(  const daemonDir = dirname\(fileURLToPath\(import\.meta\.url\)\);\n  const repoRoot = resolve\(daemonDir, '\.\.', '\.\.', '\.\.', '\.\.'\);)/,
+      `$1  // Repo-fallback: from packages/cli/dist/daemon/manifest.js, four\n  // \`..\` segments land at the monorepo root. PR #258 nested this\n  // module under dist/daemon/, so the original three-level walk was\n  // off by one and landed inside packages/, pointing at the bogus\n  // <root>/packages/packages/mcp-dkg path.\n$2`,
+    );
+  }
+  if (mod.file === 'lifecycle.ts') {
+    body = body.replace(
+      /(\bresolve\(\s*\n\s*dirname\(fileURLToPath\(import\.meta\.url\)\),\s*\n\s*)"\.\.",\s*\n(\s*)"\.\.",\s*\n(\s*)"node-ui",/,
+      `$1"..",\n$2"..",\n$3"..",\n$3"node-ui",`,
+    );
+    // Annotate the node-ui fallback walk so the extra `..` doesn't
+    // look accidental on later passes through this code.
+    body = body.replace(
+      `  // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)\n  let nodeUiStaticDir: string;`,
+      `  // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)\n  //\n  // The last fallback walks the filesystem from THIS module's compiled\n  // location. PR #258 nests this module under \`dist/daemon/lifecycle.js\`,\n  // one level deeper than the pre-split \`dist/lifecycle.js\` layout, so\n  // the relative walk needs one extra \`..\` to land at the monorepo's\n  // \`packages/\` directory. Without it, dashboard assets resolve to\n  // \`packages/cli/node-ui/dist-ui\` and 404 on the rare paths that hit\n  // this branch (when both \`import.meta.resolve\` and \`repoDir()\` fail).\n  let nodeUiStaticDir: string;`,
+    );
+  }
+
   body = rewriteSharedState(body);
 
   let exported = exportifyDeclarations(body);

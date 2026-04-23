@@ -521,14 +521,17 @@ describe('DkgNodePlugin', () => {
         view: 'long-term-memory', // a v9 view name, removed in v10
       });
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('view');
-      expect(result.content[0].text).toContain('shared-working-memory');
-      expect(result.content[0].text).toContain('verified-memory');
-      // Error must NOT advertise bare `working-memory` as an accepted value —
-      // it's explicitly excluded from this tool's enum. Assert the exact
-      // valid-views list the handler emits, so substring matches inside
-      // `shared-working-memory` can't spoof this check.
-      expect(result.content[0].text).toContain('must be one of: shared-working-memory, verified-memory');
+      const text = result.content[0].text;
+      expect(text).toContain('view');
+      expect(text).toContain('shared-working-memory');
+      expect(text).toContain('verified-memory');
+      // Error must NOT advertise bare `working-memory` as an accepted value
+      // from this tool. Use a word-boundary regex (negative lookaround) so
+      // substrings inside `shared-working-memory` don't spoof the check,
+      // and so wording-only refactors of the error prefix don't break this
+      // test. The contract is "bare working-memory does not appear anywhere
+      // in the error" — regardless of how the list is framed.
+      expect(text).not.toMatch(/(?<![-a-z])working-memory(?![-a-z])/);
     });
 
     it('dkg_query rejects a `view` without `context_graph_id` locally (no daemon round-trip)', async () => {

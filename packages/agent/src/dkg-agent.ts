@@ -36,7 +36,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
@@ -4468,8 +4468,26 @@ export class DKGAgent {
     agentAddress?: string;
   }): Promise<PublishResult> {
     const { buildEndorsementQuads } = await import('./endorse.js');
+    // A-12: spec §03 / §22 require the endorser DID to be the
+    // Ethereum-address form. Passing a libp2p peer id here produced
+    // a `did:dkg:agent:${peerId}` URI (12D3KooW-prefixed in practice),
+    // which is non-spec. Prefer the per-call agentAddress, then the
+    // node's default agent address, then fall back to the peer id
+    // only if no EVM identity is known (kept for backward
+    // compatibility with test harnesses; runtime always has a
+    // defaultAgentAddress after auto-registration).
+    //
+    // A-12 review: normalise the address casing through
+    // `canonicalAgentDidSubject` so the endorsement DID converges
+    // with the profile DID for the same wallet (checksum vs
+    // lowercase inputs previously produced two distinct RDF
+    // subjects). Callers must also verify the address is owned by
+    // this node before calling — /api/endorse does that via the
+    // bearer token; see packages/cli/src/daemon.ts.
+    const raw = opts.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const endorser = canonicalAgentDidSubject(raw);
     const quads = buildEndorsementQuads(
-      this.peerId,
+      endorser,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );

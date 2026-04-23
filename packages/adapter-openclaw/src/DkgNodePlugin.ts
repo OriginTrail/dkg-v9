@@ -94,6 +94,7 @@ export class DkgNodePlugin {
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
+  private hookSurfaceApi: OpenClawPluginApi | null = null;
   private chatTurnWriter: ChatTurnWriter | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -330,10 +331,13 @@ export class DkgNodePlugin {
 
   /**
    * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase
-   * init. If a prior HookSurface instance has any `installedVia: 'none'`
-   * typed-hook entries (api.on was undefined at first-call), destroy it
-   * and re-create against the new api so the upgraded full-mode api can
-   * receive the handlers.
+   * init. Rebuild the surface when:
+   *   (a) a prior install recorded a typed-hook failure (api.on was
+   *       undefined at first-call); OR
+   *   (b) the gateway passed a new `api` instance on re-entry
+   *       (`openclaw-entry.mjs` reuses the singleton across new
+   *       registries, so typed hooks bound to the previous api object
+   *       would otherwise never fire against the new one).
    */
   private installHooksIfNeeded(api: OpenClawPluginApi): void {
     if (!this.chatTurnWriter) return;
@@ -343,13 +347,15 @@ export class DkgNodePlugin {
       const anyTypedFailed = Object.entries(stats).some(
         ([key, stat]) => key.startsWith('typed:') && stat.installedVia === 'none',
       );
-      if (!anyTypedFailed) return;
-      // Prior install recorded typed-hook failure; retry against new api.
+      const apiChanged = this.hookSurfaceApi !== api;
+      if (!anyTypedFailed && !apiChanged) return;
       this.hookSurface.destroy();
       this.hookSurface = null;
+      this.hookSurfaceApi = null;
     }
 
     this.hookSurface = new HookSurface(api, api.logger);
+    this.hookSurfaceApi = api;
 
     // W3 — auto-recall every turn via before_prompt_build typed hook
     this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
@@ -1844,11 +1850,15 @@ export class DkgNodePlugin {
       };
     };
 
-    // Events to probe: both typed hooks and internal hook names
-    const events = ['before_prompt_build', 'agent_end', 'before_compaction', 'before_reset', 'message_received', 'message_sent'];
+    // Typed hooks (api.on / api.registerHook) use underscore-separated names.
+    const typedEvents = ['before_prompt_build', 'agent_end', 'before_compaction', 'before_reset', 'message_received', 'message_sent'];
+    // Internal-hook map (globalThis symbol) uses colon-separated names per
+    // openclaw/src/infra/outbound/deliver.ts — probing the underscore form
+    // here would never observe the real internal dispatch path and would
+    // falsely drive the Branch A / No-Go decision.
+    const internalEvents = ['message:received', 'message:sent'];
 
-    for (const eventName of events) {
-      // Attempt via api.on (typed hooks)
+    for (const eventName of typedEvents) {
       if (hasOn) {
         try {
           (api as any).on(eventName, makeProbeHandler(eventName, 'api.on'));
@@ -1858,8 +1868,6 @@ export class DkgNodePlugin {
           );
         }
       }
-
-      // Attempt via api.registerHook (internal hooks)
       if (hasRegisterHook) {
         try {
           (api as any).registerHook(eventName, makeProbeHandler(eventName, 'api.registerHook'), { name: 'dkg-probe-' + eventName });
@@ -1869,12 +1877,13 @@ export class DkgNodePlugin {
           );
         }
       }
+    }
 
-      // Attempt via globalThis internal-hook map
-      if (hasGlobalHookMap) {
+    if (hasGlobalHookMap) {
+      const hookKey = Symbol.for('openclaw.internalHookHandlers');
+      const hookMap = (globalThis as any)[hookKey] as Map<string, Array<() => void>> | undefined;
+      for (const eventName of internalEvents) {
         try {
-          const hookKey = Symbol.for('openclaw.internalHookHandlers');
-          const hookMap = (globalThis as any)[hookKey] as Map<string, Array<() => void>> | undefined;
           if (hookMap) {
             if (!hookMap.has(eventName)) {
               hookMap.set(eventName, []);
@@ -2135,15 +2144,22 @@ function extractUserTextFromContent(content: unknown): string {
  * W3 auto-recall handler to return via `appendSystemContext`. The tag
  * shape is load-bearing for `ChatTurnWriter.stripRecalledMemory` —
  * keep in sync.
+ *
+ * Snippet and layer text is user/agent-authored, so both are HTML-entity
+ * escaped before interpolation. A snippet containing `</recalled-memory>`
+ * would otherwise terminate the wrapper early (escaping arbitrary content
+ * into the prompt and bypassing the strip regex).
  */
 function formatRecalledMemoryBlock(
   hits: ReadonlyArray<{ snippet: string; layer: string; score: number }>,
 ): string {
+  const escape = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const lines = [
     '<recalled-memory>',
     'The following snippets from your memory are relevant to the current turn:',
     ...hits.map(
-      (h, i) => `  [${i + 1}] (${h.layer}, score=${h.score.toFixed(2)}) ${h.snippet}`,
+      (h, i) => `  [${i + 1}] (${escape(h.layer)}, score=${h.score.toFixed(2)}) ${escape(h.snippet)}`,
     ),
     '</recalled-memory>',
   ];

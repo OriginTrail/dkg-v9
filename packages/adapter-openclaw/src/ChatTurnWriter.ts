@@ -118,9 +118,18 @@ export class ChatTurnWriter {
       if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
+      // Drop failed outbound sends: chat history should not show replies the
+      // user never received. Still clear the pending user message so the next
+      // successful turn does not pair the assistant reply with a stale
+      // inbound from a different exchange.
+      const success = (ev as any)?.context?.success ?? (ev as any)?.success;
+      if (success === false) {
+        this.pendingUserMessages.delete(conversationKey);
+        return;
+      }
       const userText = this.pendingUserMessages.get(conversationKey) || "";
       const assistantText = ev.text;
-      const sessionId = this.deriveSessionIdFromKey(conversationKey);
+      const sessionId = this.deriveSessionIdFromEvent(ev);
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
@@ -195,20 +204,36 @@ export class ChatTurnWriter {
     return `openclaw:${this.sanitize(ctx.channelId)}:${this.sanitize(ctx.sessionKey)}`;
   }
 
-  private deriveSessionIdFromKey(conversationKey: string): string {
-    const parts = conversationKey.split(":");
-    if (parts.length >= 3) {
-      return parts.slice(0, 3).join(":");
-    }
-    return conversationKey;
+  /**
+   * DKG-side session id for an internal message event. Mirrors the typed-hook
+   * `deriveSessionId(ctx)` shape (`openclaw:<channelId>:<sessionKey>`) so the
+   * same conversation persists under one session across W4a and W4b paths.
+   */
+  private deriveSessionIdFromEvent(ev: InternalMessageEvent): string {
+    const channelId = (ev as any)?.context?.channelId ?? (ev as any)?.channelId ?? "unknown";
+    const sessionKey = ev.sessionKey ?? "";
+    return `openclaw:${this.sanitize(channelId)}:${this.sanitize(sessionKey)}`;
   }
 
+  /**
+   * Pending-message lookup key. Must distinguish every in-flight conversation
+   * the gateway is juggling, so it includes channel + account + conversation +
+   * sessionKey. Two Telegram threads sharing a sessionKey still get separate
+   * slots, preventing reply mis-pairing.
+   */
   private conversationKeyFromInternalEvent(ev: InternalMessageEvent): string {
     if (!ev.sessionKey) {
       this.logger.warn?.("[ChatTurnWriter] No sessionKey in internal event");
       return "";
     }
-    return `openclaw:unknown:${this.sanitize(ev.sessionKey)}`;
+    const ctx = (ev as any)?.context ?? {};
+    const channelId = ctx.channelId ?? (ev as any)?.channelId ?? "unknown";
+    const accountId = ctx.accountId ?? "";
+    const conversationId = ctx.conversationId ?? "";
+    const parts = [channelId, accountId, conversationId, ev.sessionKey].map((p) =>
+      this.sanitize(String(p ?? "")),
+    );
+    return `openclaw:${parts.join(":")}`;
   }
 
   private extractText(content: string | Array<{ type: string; text?: string }>): string {
@@ -247,7 +272,13 @@ export class ChatTurnWriter {
     while (attempt < 2) {
       try {
         await this.client.storeChatTurn(sessionId, user, assistant, { turnId });
-        const currentIndex = this.loadWatermark(sessionId);
+        // Prefer the pending debounced index (in-flight increments not yet
+        // committed to cachedWatermarks) so two persists inside the 50ms
+        // debounce window each advance the watermark instead of both
+        // computing the same cached+1. Without this, a restart after a
+        // burst would re-persist every turn past the first as a "delta".
+        const pending = this.debounceTimers.get(sessionId);
+        const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
         this.saveWatermark(sessionId, currentIndex + 1);
         this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
         return;

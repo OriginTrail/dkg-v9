@@ -1122,15 +1122,21 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs.',
+          '`GRAPH ?g { ... }` for named graphs. Pass `view` to pick which memory layer to read: ' +
+          '`working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-replicated), ' +
+          'or `verified-memory` (VM — on-chain anchored). Omit `view` for the default (WM semantics).',
         parameters: {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
             context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
-            include_shared_memory: {
-              type: 'boolean',
-              description: 'Also search Shared Working Memory. Default: false.',
+            view: {
+              type: 'string',
+              enum: ['working-memory', 'shared-working-memory', 'verified-memory'],
+              description:
+                'Memory layer to read. `working-memory` is the default when omitted; ' +
+                '`shared-working-memory` reads provisional gossip-replicated data; ' +
+                '`verified-memory` reads on-chain anchored data.',
             },
           },
           required: ['sparql'],
@@ -1466,23 +1472,40 @@ export class DkgNodePlugin {
       if (args.paranet_id !== undefined) {
         return this.error('"paranet_id" is not a supported parameter. Use "context_graph_id".');
       }
+      // `include_shared_memory` was removed in favor of `view` — the latter
+      // mirrors the HTTP `/api/query` surface (WM / SWM / VM as three
+      // explicit layers) and gives callers access to VM reads, which the old
+      // boolean could never express. Reject the legacy field loudly rather
+      // than silently ignoring it, so stale code surfaces the rename instead
+      // of quietly dropping its intent.
+      if (args.include_shared_memory !== undefined) {
+        return this.error(
+          '"include_shared_memory" is no longer supported. Use `view: "shared-working-memory"` instead.',
+        );
+      }
       // `context_graph_id` is optional on this tool (omit → unscoped query
       // across all subscribed CGs). Trim whitespace so that
       // `{ context_graph_id: "   " }` behaves like an omission rather than
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
-      // Schema declares include_shared_memory as boolean. If a caller supplies
-      // a string ("true") or any other non-boolean, reject it — silently
-      // coercing to `false` would make callers quietly miss SWM data they
-      // thought they were requesting.
-      if (args.include_shared_memory !== undefined && typeof args.include_shared_memory !== 'boolean') {
-        return this.error('"include_shared_memory" must be a boolean.');
+      // Schema declares `view` as an enum. Accept only the three valid layer
+      // strings — anything else is a typo/misuse and rejected with the list
+      // of valid options, matching the daemon's 400 response shape.
+      const VALID_VIEWS = ['working-memory', 'shared-working-memory', 'verified-memory'] as const;
+      type View = (typeof VALID_VIEWS)[number];
+      let view: View | undefined;
+      if (args.view !== undefined) {
+        if (typeof args.view !== 'string' || !(VALID_VIEWS as readonly string[]).includes(args.view)) {
+          return this.error(
+            `"view" must be one of: ${VALID_VIEWS.join(', ')}.`,
+          );
+        }
+        view = args.view as View;
       }
-      const includeSharedMemory = args.include_shared_memory === true;
       const result = await this.client.query(sparql, {
         contextGraphId,
-        includeSharedMemory: includeSharedMemory || undefined,
+        view,
       });
       return this.json(result);
     } catch (err: any) {

@@ -297,19 +297,19 @@ describe('dkg_query tool', () => {
     expect(body.contextGraphId).toBeUndefined();
   });
 
-  it('passes includeSharedMemory when include_shared_memory is true', async () => {
+  it('passes view=shared-working-memory through to the daemon body', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
-    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: true });
+    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', view: 'shared-working-memory' });
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(body.includeSharedMemory).toBe(true);
+    expect(body.view).toBe('shared-working-memory');
   });
 
-  it('omits includeSharedMemory when include_shared_memory is not set', async () => {
+  it('omits view when not set (daemon applies the default WM semantics)', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
@@ -318,7 +318,7 @@ describe('dkg_query tool', () => {
     await tool.execute('call-4', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(body.includeSharedMemory).toBeUndefined();
+    expect(body.view).toBeUndefined();
   });
 });
 

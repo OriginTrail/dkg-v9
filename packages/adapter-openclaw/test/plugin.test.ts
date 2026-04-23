@@ -113,13 +113,22 @@ describe('DkgNodePlugin', () => {
     expect(writeTool.parameters.properties.quads.type).toBe('array');
     expect(writeTool.parameters.properties.quads.items).toBeDefined();
 
-    // dkg_subscribe / dkg_query `include_shared_memory` is boolean-only.
-    // V10-rc is the first product release — no v9 back-compat in the public
-    // tool surface, so the schema and handler only accept the boolean form.
+    // dkg_subscribe: `include_shared_memory` is boolean-only (subscribe is a
+    // catch-up/sync flag, not a memory-layer selector).
     const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
-    const querySchema = byName.get('dkg_query')!.parameters.properties.include_shared_memory.type;
     expect(subSchema).toBe('boolean');
-    expect(querySchema).toBe('boolean');
+
+    // dkg_query: `view` is an enum mirroring the daemon's GET_VIEWS. The
+    // legacy `include_shared_memory` boolean has been removed — agents pick
+    // the memory layer explicitly (WM / SWM / VM), matching the HTTP surface.
+    const queryProps = byName.get('dkg_query')!.parameters.properties;
+    expect(queryProps).not.toHaveProperty('include_shared_memory');
+    expect(queryProps.view.type).toBe('string');
+    expect(queryProps.view.enum).toEqual([
+      'working-memory',
+      'shared-working-memory',
+      'verified-memory',
+    ]);
   });
 
   // ---------------------------------------------------------------------------
@@ -445,19 +454,50 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
-    it('dkg_query rejects a stringified include_shared_memory instead of silently coercing to false', async () => {
-      // Schema declares include_shared_memory as boolean. A permissive host
-      // might still pass `"true"` through. If we silently coerced it to
-      // `false`, the caller would miss SWM data they thought they were
-      // requesting — a worse failure mode than a loud error.
+    it('dkg_query rejects the legacy include_shared_memory field and points callers at `view`', async () => {
+      // The boolean was removed in favor of `view` (mirrors the HTTP surface
+      // and exposes VM reads, which the boolean could never express). Stale
+      // callers get a hard error naming the replacement instead of a silent
+      // drop that would quietly alter query results.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
-        include_shared_memory: 'true',
+        include_shared_memory: true,
       });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(result.content[0].text).toContain('include_shared_memory');
-      expect(result.content[0].text).toContain('boolean');
+      expect(result.content[0].text).toContain('view');
+      expect(result.content[0].text).toContain('shared-working-memory');
+    });
+
+    it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'long-term-memory', // a v9 view name, removed in v10
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('view');
+      expect(result.content[0].text).toContain('working-memory');
+      expect(result.content[0].text).toContain('shared-working-memory');
+      expect(result.content[0].text).toContain('verified-memory');
+    });
+
+    it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {
+      // Handler-level drift guard: the daemon's /api/query route destructures
+      // `view` from the body. If we renamed the field in the handler, this
+      // test catches the drift.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'verified-memory',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('verified-memory');
+      expect(body.contextGraphId).toBe('my-cg');
+      expect(body).not.toHaveProperty('includeSharedMemory');
     });
 
     it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {

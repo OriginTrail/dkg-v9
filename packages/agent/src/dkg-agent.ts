@@ -4561,6 +4561,33 @@ export class DKGAgent {
 
     const exists = await this.contextGraphExists(opts.id);
     if (exists) {
+      // Backfill curator/creator triples on already-present CGs whose
+      // previous `ensureContextGraphLocal` bootstrap skipped ownership.
+      // Without this, devnets that were clean-started on an older build
+      // and then restarted on the fixed build would still refuse
+      // `registerContextGraph` with "has no known creator". The backfill
+      // is a no-op whenever any owner triple is already present, so it's
+      // safe to run on every boot.
+      try {
+        const existingOwner = await this.getContextGraphOwner(opts.id);
+        if (!existingOwner) {
+          const cgMetaGraphBackfill = paranetMetaGraphUri(opts.id);
+          const ontologyGraphBackfill = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+          const paranetUriBackfill = `did:dkg:context-graph:${opts.id}`;
+          const defGraphBackfill = opts.curated ? cgMetaGraphBackfill : ontologyGraphBackfill;
+          const creatorDidBackfill = `did:dkg:agent:${this.peerId}`;
+          const curatorDidBackfill = `did:dkg:agent:${this.defaultAgentAddress ?? this.peerId}`;
+          await this.store.insert([
+            { subject: paranetUriBackfill, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorDidBackfill, graph: defGraphBackfill },
+            { subject: paranetUriBackfill, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDidBackfill, graph: cgMetaGraphBackfill },
+            { subject: paranetUriBackfill, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraphBackfill },
+          ]);
+          this.log.info(ctx, `Backfilled creator/curator triples on existing context graph "${opts.id}"`);
+        }
+      } catch (err) {
+        this.log.warn(ctx, `Creator backfill for "${opts.id}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       this.subscribeToContextGraph(opts.id);
       this.subscribedContextGraphs.set(opts.id, {
         name: opts.name,
@@ -4583,22 +4610,40 @@ export class DKGAgent {
     // network-wide discovery.
     const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
 
+    // Stamp the hosting node as both the peer-ID creator (propagated via
+    // ONTOLOGY sync for gossip validation) and the wallet-ID curator
+    // (stored in _meta, authoritative for `getContextGraphOwner`). Without
+    // these triples, downstream `registerContextGraph` calls fail with
+    // "has no known creator" because `ensure*` was previously only writing
+    // definition triples, not ownership. Mirrors the creator/curator writes
+    // in `createContextGraph` so a config-bootstrapped CG is indistinguishable
+    // from one created via `/api/context-graph/create` for later on-chain
+    // registration.
+    //
+    // In multi-node devnets each node stamps itself on boot, which is safe:
+    // only whichever node actually triggers `registerContextGraph` first
+    // will mint the on-chain record; the rest short-circuit on the
+    // `getContextGraphOnChainId` check at registration time.
+    const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
+    const curatorDid = `did:dkg:agent:${this.defaultAgentAddress ?? this.peerId}`;
+
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.curated ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
-    if (opts.curated) {
-      quads.push({
-        subject: paranetUri,
-        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-        object: `"private"`,
-        graph: defGraph,
-      });
-    }
+    // _meta triples: registration status (so registerContextGraph can detect
+    // "unregistered" → proceed with on-chain mint) and curator DID (what
+    // `getContextGraphOwner` reads first).
+    quads.push(
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
+    );
 
     if (opts.description) {
       quads.push({

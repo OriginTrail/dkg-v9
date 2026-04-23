@@ -6620,6 +6620,12 @@ async function handleRequest(
         verifiedGraph,
         assertionName,
         subGraphName,
+        // A-1: forward the authenticated caller (resolved from the
+        // Bearer token) so DKGAgent.query can enforce Working-Memory
+        // isolation across agents. Without this the /api/query route
+        // would accept any `agentAddress` in the request body, letting
+        // one agent read another agent's WM.
+        callerAgentAddress: requestAgentAddress,
         operationCtx: ctx,
       });
       const execDur = Date.now() - execT0;

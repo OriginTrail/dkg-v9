@@ -14,10 +14,11 @@
  *     (b) Positive — A writes, B reads using B's own `agentAddress` →
  *         data is INVISIBLE. (graph-URI scoping holds.)
  *     (c) Isolation stress — B deliberately impersonates A by passing
- *         `agentAddress: A.address, view: 'working-memory'` in `query()`.
- *         Per spec §04 and RFC-29 this MUST be rejected — the agent layer
- *         has no per-request agent authentication, so this test documents
- *         the current behaviour: the data is returned. PROD-BUG surface.
+ *         `agentAddress: A.address, view: 'working-memory'` in `query()`,
+ *         while authenticated as B (the HTTP route plumbs the caller
+ *         identity as `callerAgentAddress`). Per spec §04 and RFC-29
+ *         this MUST be rejected — DKGAgent.query enforces the per-
+ *         request agent authentication and returns 0 bindings.
  *
  *     (d) Hygiene — an attacker who gets a chat-name guess cannot read
  *         another agent's WM via `agent.assertion.query` because the bound
@@ -145,7 +146,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(aWmUri).not.toBe(bWmUri);
   });
 
-  it('PROD-BUG: query(view:"working-memory", agentAddress: OTHER) returns the other agent\'s WM with no authn check', async () => {
+  it('A-1: authenticated cross-agent WM read is denied (caller=B cannot read agentAddress=A)', async () => {
     const cgId = freshCgId('wm-iso-c');
     await node!.createContextGraph({ id: cgId, name: 'WM Iso C', description: '' });
 
@@ -159,27 +160,54 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
       },
     ]);
 
-    // B supplies A's address in the query options — the agent layer has
-    // no per-request authentication, so this impersonation currently
-    // succeeds. Per spec §04 and RFC-29 this should return 0 bindings
-    // (cross-agent WM read denied). See BUGS_FOUND.md A-1.
+    // B supplies A's address in the query options while authenticated
+    // as B. The HTTP route plumbs the caller identity through
+    // `callerAgentAddress` — see packages/cli/src/daemon.ts /api/query.
+    // Per spec §04 and RFC-29 this impersonation attempt MUST be
+    // denied at the DKGAgent.query boundary (0 bindings, no data
+    // leakage). Tracks BUGS_FOUND.md A-1.
     const defaultA = node!.getDefaultAgentAddress()!;
     const leak = await node!.query(
       `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
       {
         contextGraphId: cgId,
         view: 'working-memory',
-        agentAddress: defaultA, // impersonation
+        agentAddress: defaultA, // impersonation: target A's WM graph
+        callerAgentAddress: agentB.agentAddress, // authenticated as B
       },
     );
 
-    // PROD-BUG: this expectation pins the spec. With no authn gate in
-    // `DKGAgent#query`, the current implementation returns A's secret to
-    // any caller that guesses/knows A's address. Expected to go RED.
     expect(
       leak.bindings.length,
-      'cross-agent WM access (spec §04/RFC-29 violation) — BUGS_FOUND.md A-1',
+      'cross-agent WM access must be denied when callerAgentAddress mismatches agentAddress (A-1)',
     ).toBe(0);
+  });
+
+  it('A-1: same-agent authenticated WM read still works (caller=A reads agentAddress=A)', async () => {
+    const cgId = freshCgId('wm-iso-c2');
+    await node!.createContextGraph({ id: cgId, name: 'WM Iso C2', description: '' });
+
+    await node!.assertion.create(cgId, 'journal');
+    await node!.assertion.write(cgId, 'journal', [
+      {
+        subject: 'urn:wm:alice:own-note',
+        predicate: 'http://schema.org/description',
+        object: '"A reads A"',
+        graph: '',
+      },
+    ]);
+
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const own = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        callerAgentAddress: defaultA, // authenticated as A, targeting A's WM
+      },
+    );
+    expect(own.bindings.length).toBe(1);
   });
 
   it('assertion graph URI encodes the agentAddress (structural isolation invariant)', () => {

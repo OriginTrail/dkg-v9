@@ -2732,6 +2732,20 @@ export class DKGAgent {
       verifiedGraph?: string;
       assertionName?: string;
       subGraphName?: string;
+      /**
+       * EVM address of the authenticated caller, as resolved by an
+       * outer layer (typically the daemon's per-request auth token).
+       * When set, the agent layer enforces that `view: 'working-memory'`
+       * queries can only read this caller's own WM — cross-agent reads
+       * via a foreign `agentAddress` are silently denied.
+       *
+       * Undefined = no caller authentication context (in-process call
+       * from trusted code). Backwards-compatible with callers that
+       * predate A-1 — they bypass the isolation check.
+       *
+       * See BUGS_FOUND.md A-1 and spec §04 / RFC-29.
+       */
+      callerAgentAddress?: string;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -2747,6 +2761,33 @@ export class DKGAgent {
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
+      return { bindings: [] };
+    }
+
+    // A-1: Working-Memory isolation. When the caller is authenticated
+    // (an outer layer like the daemon's `/api/query` route has resolved
+    // the request to a specific agent and passed `callerAgentAddress`),
+    // a WM query must not be allowed to read a different agent's
+    // private memory. Cross-agent WM reads are silently denied (empty
+    // bindings) rather than thrown — that matches the spec-safe
+    // "deny without leaking existence" semantics used elsewhere in
+    // this file for private context graphs.
+    //
+    // When `callerAgentAddress` is undefined we assume a trusted
+    // in-process caller (e.g. ChatMemoryManager running inside the
+    // daemon process) and leave the legacy behaviour intact. Those
+    // call sites are tracked as follow-up A-1.2 for migration to an
+    // authenticated scoped handle.
+    if (
+      opts.view === 'working-memory' &&
+      opts.callerAgentAddress &&
+      opts.agentAddress &&
+      opts.callerAgentAddress.toLowerCase() !== opts.agentAddress.toLowerCase()
+    ) {
+      this.log.info(
+        ctx,
+        `WM query denied: caller=${opts.callerAgentAddress} cannot read agentAddress=${opts.agentAddress} — A-1 isolation`,
+      );
       return { bindings: [] };
     }
 

@@ -6,8 +6,9 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
-import type { QueryResult } from './query-engine.js';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
+import type { QueryResult } from './query-engine.js';
 
 const MUTATING_KEYWORDS = [
   'INSERT',
@@ -62,42 +63,40 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
   return { safe: true };
 }
 
-export type SparqlQueryKind = 'SELECT' | 'ASK' | 'CONSTRUCT' | 'DESCRIBE';
+export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
 
 /**
- * Detect the top-level SPARQL query form (SELECT / ASK / CONSTRUCT / DESCRIBE),
- * stripping any leading PREFIX / BASE preamble, comments, and string literals.
- * Defaults to SELECT if nothing matches — callers that need strictness should
- * pair this with {@link validateReadOnlySparql}.
- *
- * Used by access-denied synthetic responses so that denying an ASK query
- * returns `{ bindings: [{ result: 'false' }] }` instead of a SELECT-shaped
- * empty-bindings object, preserving the HTTP contract for every query form.
+ * Classify the query form of a SPARQL string. Used by engines that need to
+ * short-circuit a query (e.g. "no graphs resolved") while still returning a
+ * result shape that matches the requested form — `QueryResult.bindings: []`
+ * is not a valid ASK response (ASK must return a boolean binding) and is not
+ * a valid CONSTRUCT/DESCRIBE response either (those must carry `quads: []`).
  */
-export function detectSparqlQueryKind(sparql: string): SparqlQueryKind {
+export function classifySparqlForm(sparql: string): SparqlForm {
   const stripped = stripLiteralsAndComments(sparql);
   const match = READ_ONLY_FORMS.exec(stripped);
-  if (!match) return 'SELECT';
-  return match[1].toUpperCase() as SparqlQueryKind;
+  const form = (match?.[1] ?? 'SELECT').toUpperCase();
+  if (form === 'ASK' || form === 'CONSTRUCT' || form === 'DESCRIBE') {
+    return form;
+  }
+  return 'SELECT';
 }
 
 /**
- * Return an empty query result shaped to match the SPARQL query form.
- *
- *  - SELECT    → `{ bindings: [] }`
- *  - ASK       → `{ bindings: [{ result: 'false' }] }`
- *  - CONSTRUCT → `{ bindings: [], quads: [] }`
- *  - DESCRIBE  → `{ bindings: [], quads: [] }`
- *
- * This mirrors the shape {@link DKGQueryEngine.execAndNormalize} produces
- * for a successfully-executed query that happened to match no data — so
- * an access-denied synthetic response is indistinguishable from a real
- * empty result at the wire level.
+ * Produce an empty `QueryResult` that matches the requested query form.
+ * Centralising this keeps every "nothing to query" short-circuit
+ * (access-denied synthetic response, zero-graph resolution, etc.) aligned
+ * on a single well-typed contract instead of returning `{ bindings: [] }`
+ * for every form.
  */
 export function emptyQueryResultForKind(sparql: string): QueryResult {
-  const kind = detectSparqlQueryKind(sparql);
-  if (kind === 'ASK') return { bindings: [{ result: 'false' }] };
-  if (kind === 'CONSTRUCT' || kind === 'DESCRIBE') return { bindings: [], quads: [] };
+  const form = classifySparqlForm(sparql);
+  if (form === 'ASK') {
+    return { bindings: [{ result: 'false' }] };
+  }
+  if (form === 'CONSTRUCT' || form === 'DESCRIBE') {
+    return { bindings: [], quads: [] as Quad[] };
+  }
   return { bindings: [] };
 }
 

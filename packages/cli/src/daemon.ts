@@ -43,7 +43,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -6594,12 +6594,53 @@ async function handleRequest(
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
+    // P-13: accept `minTrust` as a string ("SelfAttested"|"Endorsed"|
+    // "PartiallyVerified"|"ConsensusVerified") or the matching integer
+    // (0..3). Unrecognised values fail closed with a 400 rather than
+    // silently dropping the filter, because a dropped filter leaks
+    // low-trust data into a query that asked for high-trust only.
+    const TRUST_LEVELS: Record<string, number> = {
+      selfattested: 0,
+      endorsed: 1,
+      partiallyverified: 2,
+      consensusverified: 3,
+    };
+    // PR #239 Codex iter-5: also accept the legacy `_minTrust` underscore
+    // form as a deprecation-window alias, so SDK consumers that adopted
+    // the underscore shape before the rename get the same trust gate the
+    // canonical `minTrust` does. `minTrust` wins if both are present.
+    const rawMinTrust = parsed.minTrust ?? parsed._minTrust;
+    const minTrustSrcField = parsed.minTrust !== undefined && parsed.minTrust !== null
+      ? 'minTrust'
+      : '_minTrust';
     if (!sparql || !String(sparql).trim())
       return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
       return jsonResponse(res, 400, {
         error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
       });
+    }
+    // PR #239 Codex iter-7: gate minTrust normalization/validation behind
+    // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
+    // ignores `minTrust` outside VM, so the HTTP layer must match that —
+    // otherwise a reused options object like
+    //   { view: "working-memory", minTrust: 99 }
+    // would 400 on a request where the field is semantically irrelevant.
+    // Keep view === undefined NOT rejecting either: resolveViewGraphs
+    // treats "no view" as implicit working-memory semantics.
+    let minTrust: number | undefined;
+    if (view === 'verified-memory' && rawMinTrust !== undefined && rawMinTrust !== null) {
+      if (typeof rawMinTrust === 'number' && Number.isInteger(rawMinTrust) && rawMinTrust >= 0 && rawMinTrust <= 3) {
+        minTrust = rawMinTrust;
+      } else if (typeof rawMinTrust === 'string') {
+        const canon = rawMinTrust.toLowerCase().replace(/[_-]/g, '');
+        if (canon in TRUST_LEVELS) minTrust = TRUST_LEVELS[canon];
+      }
+      if (minTrust === undefined) {
+        return jsonResponse(res, 400, {
+          error: `Invalid ${minTrustSrcField} "${rawMinTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
+        });
+      }
     }
     const ctx = createOperationContext("query");
     tracker.start(ctx, {
@@ -6717,6 +6758,7 @@ async function handleRequest(
         assertionName,
         subGraphName,
         callerAgentAddress,
+        minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
       const execDur = Date.now() - execT0;
@@ -6742,7 +6784,11 @@ async function handleRequest(
         // body. Classify as 400 so malformed input is a clean client
         // error instead of a 500.
         msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string")
+        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
+        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
+        // so direct callers that forward a string / out-of-range
+        // value get a 400 instead of a 500.
+        msg.startsWith("Invalid minTrust")
       ) {
         return jsonResponse(res, 400, { error: msg });
       }
@@ -7982,20 +8028,51 @@ async function handleRequest(
   // POST /api/endorse
   if (req.method === "POST" && path === "/api/endorse") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
-    if (!contextGraphId || !ual || !agentAddress) {
+    const parsed = JSON.parse(body);
+    const { contextGraphId, ual } = parsed;
+    if (!contextGraphId || !ual) {
       return jsonResponse(res, 400, {
-        error: "Missing contextGraphId, ual, or agentAddress",
+        error: "Missing contextGraphId or ual",
+      });
+    }
+    // A-12 review: the endorser MUST come from the authenticated bearer
+    // token, not from the request body. Trusting body.agentAddress let
+    // any caller with node access publish endorsements as an arbitrary
+    // `did:dkg:agent:0x...`, forging provenance. `requestAgentAddress`
+    // is the token-resolved identity. If the body also includes
+    // `agentAddress`, it must match or we reject with 403. The
+    // registered-local-agent check is implicit: resolveAgentAddress
+    // returns either the token's agent (if it's an agent-scoped
+    // token) or `defaultAgentAddress` (the node's own auto-registered
+    // agent). Both are owned by this node by construction.
+    // Defence in depth: an unauthenticated caller has no agent identity
+    // to attribute an endorsement to. Early return 401 rather than
+    // attempting `.toLowerCase()` on a null/undefined address.
+    if (!requestAgentAddress) {
+      return jsonResponse(res, 401, {
+        error:
+          "Endorsement requires an authenticated agent. Provide a bearer token tied to a registered agent.",
+      });
+    }
+    const bodyAgentAddress = typeof parsed.agentAddress === 'string' ? parsed.agentAddress : undefined;
+    if (
+      bodyAgentAddress &&
+      bodyAgentAddress.toLowerCase() !== requestAgentAddress.toLowerCase()
+    ) {
+      return jsonResponse(res, 403, {
+        error:
+          `Endorser mismatch: authenticated as ${requestAgentAddress} but request body claims ${bodyAgentAddress}. ` +
+          `The endorser is resolved from the bearer token; omit body.agentAddress or use the matching agent's token.`,
       });
     }
     const result = await agent.endorse({
       contextGraphId,
       knowledgeAssetUal: ual,
-      agentAddress,
+      agentAddress: requestAgentAddress,
     });
     return jsonResponse(res, 200, {
       endorsed: true,
-      endorserAddress: agentAddress,
+      endorserAddress: requestAgentAddress,
       ...result,
     });
   }

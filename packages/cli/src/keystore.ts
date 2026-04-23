@@ -158,14 +158,26 @@ export async function decryptKeystore(
   // validation error into an uncaught runtime crash that surfaced as
   // "scrypt failed" three call frames higher. Now the validator
   // reports the intended weak-keystore error in both cases.
+  //
+  // PR #229 bugbot follow-up: explicitly reject odd-length hex strings
+  // before decoding. `Buffer.from('aa…', 'hex')` silently drops the
+  // dangling nibble, so a 33-character salt would advertise 16.5 bytes
+  // (>= MIN_SALT_BYTES under integer division) and slip through the
+  // length floor while actually deriving from a 16-byte salt with the
+  // last nibble silently lost. We catch that here so the caller sees
+  // the same "weak keystore" error class as other malformed values.
   const saltHex = typeof kdfparams.salt === 'string' ? kdfparams.salt : '';
+  const saltHexLooksWellFormed =
+    typeof kdfparams.salt === 'string'
+    && /^[0-9a-f]*$/i.test(saltHex)
+    && saltHex.length % 2 === 0;
   if (
-    typeof kdfparams.salt !== 'string' ||
-    !/^[0-9a-f]*$/i.test(saltHex) ||
-    saltHex.length / 2 < MIN_SALT_BYTES
+    !saltHexLooksWellFormed
+    || saltHex.length / 2 < MIN_SALT_BYTES
   ) {
+    const advertisedBytes = Math.floor(saltHex.length / 2);
     throw new Error(
-      `Refusing to load weak keystore: salt too short (${saltHex.length / 2} bytes < ${MIN_SALT_BYTES}). weak keystore.`,
+      `Refusing to load weak keystore: salt too short or malformed (${advertisedBytes} bytes < ${MIN_SALT_BYTES}). weak keystore.`,
     );
   }
 

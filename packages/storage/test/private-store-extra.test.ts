@@ -151,6 +151,47 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     ]);
   });
 
+  it('PR #229 bugbot: concurrent storePrivateTriples for the same (s,p,o) cannot bypass dedup (read-then-insert race)', async () => {
+    // Pre-fix: `storePrivateTriples` snapshotted existing plaintext keys
+    // BEFORE inserting, with no mutual exclusion. Two concurrent writers
+    // for the same (s,p,o) plaintext would both observe an empty key
+    // set, then each insert their own random-IV ciphertext — and the
+    // store kept both because the underlying triple store dedups by
+    // byte-identical terms only. Post-fix: the per-graph mutex makes
+    // the read-and-insert pair atomic so only the FIRST writer's
+    // ciphertext lands; the SECOND sees the freshly inserted key and
+    // skips.
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const sharedQuad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/ssn',
+      object: `"${SECRET}"`,
+      graph: '',
+    };
+
+    // Fire 8 concurrent writers for the same plaintext.
+    await Promise.all(
+      Array.from({ length: 8 }, () =>
+        ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]),
+      ),
+    );
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    expect(raw.bindings.length).toBe(1);
+
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.length).toBe(1);
+    expect(decrypted[0].object).toBe(`"${SECRET}"`);
+  });
+
   it('storePrivateTriples still adds NEW plaintext alongside existing (no false-positive dedup)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);

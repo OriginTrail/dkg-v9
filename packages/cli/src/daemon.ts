@@ -9097,11 +9097,12 @@ function sanitizeRevertMessage(raw: string): string {
  * patterns map to 4xx; everything else stays 5xx so a real internal
  * problem still surfaces via the top-level catch.
  */
-function classifyClientError(
+export function classifyClientError(
   msg: string,
 ):
   | { status: 404; sanitized: string }
   | { status: 400; sanitized: string }
+  | { status: 504; sanitized: string }
   | null {
   const sanitized = sanitizeRevertMessage(msg);
   if (
@@ -9111,8 +9112,26 @@ function classifyClientError(
   ) {
     return { status: 404, sanitized };
   }
+  // PR #229 bot review (daemon.ts:1952): pre-fix, the same regex that
+  // catches malformed peer-ids ALSO matched `timed out` / `unable to
+  // dial`, which downgraded transient transport failures from a
+  // retryable 504 to a client-side 400. The CLI / SDK then never
+  // retried — even though the next dial attempt would have succeeded.
+  // Split the classification so transport-layer transients map to
+  // 504 (Gateway Timeout) and only true input-validation problems
+  // stay on 400. Order matters: check the transient set first because
+  // libp2p sometimes embeds the word "invalid" inside a dial-timeout
+  // error string (`invalid response: timed out`) and we want such
+  // hybrids classified as transient.
   if (
-    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|aborted|timed? ?out|timeout|unable to dial|could not (dial|parse)|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
+    /\b(timed? ?out|timeout|deadline (exceeded|expired)|unable to dial|could not dial|connection (refused|reset|closed)|aborted|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 504, sanitized };
+  }
+  if (
+    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|could not parse|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
       msg,
     )
   ) {

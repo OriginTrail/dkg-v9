@@ -91,6 +91,27 @@ describe('decryptKeystore error handling', () => {
       /Decryption failed/,
     );
   });
+
+  it('rejects keystore whose hex salt has odd length (silent-truncation guard)', async () => {
+    // PR #229 bugbot regression: a 33-character hex salt advertises
+    // floor(33/2)=16 bytes (>= MIN_SALT_BYTES under integer division) so
+    // the previous length check let it through, but `Buffer.from(s, 'hex')`
+    // silently drops the dangling nibble and derives from a 16-byte salt
+    // instead of the 17 the operator believed they had configured.
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.salt = 'a'.repeat(33);
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /weak keystore/,
+    );
+  });
+
+  it('rejects keystore whose hex salt has non-hex characters', async () => {
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.salt = 'zz'.repeat(20);
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /weak keystore/,
+    );
+  });
 });
 
 describe('isEncryptedKeystore', () => {

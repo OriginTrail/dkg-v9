@@ -380,6 +380,20 @@ export class PrivateContentStore {
   /** AES-256-GCM key — used to seal literal objects of private quads
    *  before they reach the underlying TripleStore (BUGS_FOUND.md ST-2). */
   private readonly encryptionKey: Buffer;
+  /**
+   * PR #229 bot review (private-store.ts:560 — dedup race). The
+   * read-then-insert sequence in {@link storePrivateTriples} would,
+   * under concurrent invocation for the same private graph, let two
+   * writers both observe an empty `existingPlainKeys`, then each
+   * insert their own ciphertext for the SAME `(s,p,o)` plaintext.
+   * Because {@link encryptLiteral} now uses a fresh random IV per
+   * call (bot review N1), the two ciphertexts are byte-distinct, so
+   * the underlying triple store happily keeps both — duplicating the
+   * private quad. This map serialises `storePrivateTriples` calls per
+   * `graphUri` so the read-and-insert pair is atomic from the caller's
+   * perspective. Different graphs still write in parallel.
+   */
+  private readonly perGraphWriteLocks = new Map<string, Promise<void>>();
 
   constructor(
     store: TripleStore,
@@ -391,6 +405,31 @@ export class PrivateContentStore {
     this.encryptionKey = resolveEncryptionKey(options.encryptionKey, {
       strictKey: options.strictKey,
     });
+  }
+
+  /**
+   * Run `fn` while holding an exclusive lock on `graphUri`. The lock
+   * is released when `fn` resolves OR rejects; queued waiters then
+   * fire in order.
+   */
+  private async withGraphWriteLock<T>(
+    graphUri: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prev = this.perGraphWriteLocks.get(graphUri) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => { release = resolve; });
+    const chained = prev.then(() => next);
+    this.perGraphWriteLocks.set(graphUri, chained);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.perGraphWriteLocks.get(graphUri) === chained) {
+        this.perGraphWriteLocks.delete(graphUri);
+      }
+    }
   }
 
   /**
@@ -591,23 +630,31 @@ export class PrivateContentStore {
     // **plaintext** triple identity, which is the semantic we want; it
     // preserves random-IV confidentiality while making the write
     // idempotent.
-    const existingPlainKeys = await this.collectExistingPlaintextKeys(graphUri, quads);
-    const toInsert: Quad[] = [];
-    const seenInBatch = new Set<string>();
-    for (const q of quads) {
-      const key = `${q.subject}\u0001${q.predicate}\u0001${q.object}`;
-      if (existingPlainKeys.has(key)) continue;
-      if (seenInBatch.has(key)) continue;
-      seenInBatch.add(key);
-      toInsert.push({
-        ...q,
-        object: this.encryptLiteral(q.object),
-        graph: graphUri,
-      });
-    }
-    if (toInsert.length > 0) {
-      await this.store.insert(toInsert);
-    }
+    // PR #229 bot review (private-store.ts:560 — dedup race). Hold a
+    // per-graph mutex for the whole "scan existing plaintext + insert
+    // missing quads" sequence so a second concurrent caller cannot
+    // observe an empty key set in parallel and wind up inserting a
+    // byte-distinct (random-IV) ciphertext for the same `(s,p,o)`
+    // plaintext.
+    await this.withGraphWriteLock(graphUri, async () => {
+      const existingPlainKeys = await this.collectExistingPlaintextKeys(graphUri, quads);
+      const toInsert: Quad[] = [];
+      const seenInBatch = new Set<string>();
+      for (const q of quads) {
+        const key = `${q.subject}\u0001${q.predicate}\u0001${q.object}`;
+        if (existingPlainKeys.has(key)) continue;
+        if (seenInBatch.has(key)) continue;
+        seenInBatch.add(key);
+        toInsert.push({
+          ...q,
+          object: this.encryptLiteral(q.object),
+          graph: graphUri,
+        });
+      }
+      if (toInsert.length > 0) {
+        await this.store.insert(toInsert);
+      }
+    });
 
     const key = this.privateKey(contextGraphId, subGraphName);
     let entities = this.privateEntities.get(key);

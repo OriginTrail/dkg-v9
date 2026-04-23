@@ -66,11 +66,6 @@ export interface QueryOptions {
    * until Q-1 lands.
    */
   minTrust?: TrustLevel;
-  /**
-   * @deprecated Use `minTrust`. Legacy alias kept for backward compat.
-   * Will be removed in a future release.
-   */
-  _minTrust?: TrustLevel;
 }
 
 export interface QueryEngine {

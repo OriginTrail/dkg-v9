@@ -227,9 +227,7 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
-      // Accept both the new public `minTrust` field and the legacy
-      // `_minTrust` alias for backward compatibility.
-      minTrust: options.minTrust ?? options._minTrust,
+      minTrust: options.minTrust,
     });
 
     const allGraphs = [...resolution.graphs];

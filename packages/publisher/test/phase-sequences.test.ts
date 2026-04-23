@@ -35,6 +35,21 @@ function recorder(): { calls: [string, 'start' | 'end'][]; fn: PhaseCallback } {
   return { calls, fn };
 }
 
+/**
+ * PR #241 Codex iter-5: the WAL hook now emits a single-shot
+ * `chain:txsigned:tx-0x...:start` / `:end` pair carrying the exact
+ * pre-broadcast tx hash, which is by definition dynamic. Golden
+ * phase-sequence tests care about shape, not about that specific hash,
+ * so we filter those phases before comparing to the expected sequence.
+ *
+ * The `'chain:txsigned breadcrumb is present'` test below still asserts
+ * that this phase fires at all on the publish/update paths — we only
+ * strip it from the exact-equality snapshots here.
+ */
+function stripTxSigned(calls: [string, 'start' | 'end'][]): [string, 'start' | 'end'][] {
+  return calls.filter(([p]) => !p.startsWith('chain:txsigned:'));
+}
+
 describe('Phase-sequence contracts', () => {
 
   let _fileSnapshot: string;
@@ -81,7 +96,7 @@ describe('Phase-sequence contracts', () => {
       onPhase: fn,
     });
 
-    const phases = calls.map(([p, s]) => `${p}:${s}`);
+    const phases = stripTxSigned(calls).map(([p, s]) => `${p}:${s}`);
 
     expect(phases).toEqual([
       'prepare:start',
@@ -183,7 +198,7 @@ describe('Phase-sequence contracts', () => {
       onPhase: fn,
     });
 
-    const phases = calls.map(([p, s]) => `${p}:${s}`);
+    const phases = stripTxSigned(calls).map(([p, s]) => `${p}:${s}`);
 
     expect(phases).toEqual([
       'prepare:start',
@@ -395,6 +410,45 @@ describe('Phase-sequence contracts', () => {
       expect(endIdx, 'update chain:writeahead:end must fire when the adapter throws after onBroadcast').toBeGreaterThan(startIdx);
       expect(calls.filter(([p, s]) => p === 'chain:writeahead' && s === 'start').length).toBe(1);
       expect(calls.filter(([p, s]) => p === 'chain:writeahead' && s === 'end').length).toBe(1);
+    },
+  );
+
+  it(
+    'publish: chain:txsigned:tx-<hash> breadcrumb fires exactly once BEFORE chain:writeahead:start ' +
+      '(PR #241 Codex iter-5: the WAL checkpoint must carry the pre-broadcast tx hash per spec §06)',
+    async () => {
+      const store = new OxigraphStore();
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const keypair = await generateEd25519Keypair();
+      const publisher = new DKGPublisher({
+        store, chain, eventBus: new TypedEventBus(), keypair,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      });
+
+      const quads = [q(ENTITY, 'http://schema.org/name', '"Hashed"')];
+      const { calls, fn } = recorder();
+      await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+
+      // Exactly one txsigned:start event, with a hex hash embedded.
+      const txsignedStarts = calls.filter(
+        ([p, s]) => p.startsWith('chain:txsigned:tx-') && s === 'start',
+      );
+      expect(txsignedStarts.length).toBe(1);
+      const [txPhase] = txsignedStarts[0];
+      expect(txPhase).toMatch(/^chain:txsigned:tx-0x[0-9a-fA-F]{64}$/);
+
+      // txsigned must fire BEFORE chain:writeahead:start — the WAL
+      // checkpoint value (the hash) has to be observable at the moment
+      // the listener learns a broadcast is imminent.
+      const txIdx = calls.findIndex(
+        ([p, s]) => p === txPhase && s === 'start',
+      );
+      const waIdx = calls.findIndex(
+        ([p, s]) => p === 'chain:writeahead' && s === 'start',
+      );
+      expect(txIdx).toBeGreaterThanOrEqual(0);
+      expect(waIdx).toBeGreaterThan(txIdx);
     },
   );
 

@@ -1322,9 +1322,29 @@ export class DKGPublisher implements Publisher {
         // phase; adapters upgrading to the new hook regain the
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
         let wroteAhead = false;
-        const emitWriteAheadStart = () => {
+        const emitWriteAheadStart = (info?: { txHash?: string }) => {
           if (wroteAhead) return;
           wroteAhead = true;
+          // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
+          // generic `chain:writeahead:start` so WAL listeners can
+          // persist the signed-but-not-yet-broadcast tx identity
+          // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
+          // in BUGS_FOUND.md). The phase name encodes the hash because
+          // `PhaseCallback` is a 2-arg function; adding a detail
+          // parameter would be a source-level break for existing
+          // onPhase consumers. Listeners can regex the phase string
+          // to recover the hash, or legacy consumers can ignore it.
+          //
+          // Emit balanced `start` + `end` back-to-back: the phase is a
+          // single-shot breadcrumb (the actual broadcast window is
+          // already bracketed by `chain:writeahead`), and keeping
+          // starts balanced by ends preserves the "every start has a
+          // matching end" golden-sequence invariant.
+          if (info?.txHash) {
+            const phase = `chain:txsigned:tx-${info.txHash}`;
+            onPhase?.(phase, 'start');
+            onPhase?.(phase, 'end');
+          }
           onPhase?.('chain:writeahead', 'start');
         };
         try {
@@ -1577,9 +1597,18 @@ export class DKGPublisher implements Publisher {
     let txResult: { success: boolean; hash: string; blockNumber?: number };
     let earlyReturn: PublishResult | undefined;
     let wroteAhead = false;
-    const emitWriteAheadStart = () => {
+    const emitWriteAheadStart = (info?: { txHash?: string }) => {
       if (wroteAhead) return;
       wroteAhead = true;
+      // Mirror the publish path (above): emit a balanced, hash-bearing
+      // phase first so WAL listeners record the signed-but-not-yet-
+      // broadcast update tx identity, then the generic
+      // `chain:writeahead:start` for legacy consumers.
+      if (info?.txHash) {
+        const phase = `chain:txsigned:tx-${info.txHash}`;
+        onPhase?.(phase, 'start');
+        onPhase?.(phase, 'end');
+      }
       onPhase?.('chain:writeahead', 'start');
     };
     try {

@@ -309,9 +309,21 @@ export class MockChainAdapter implements ChainAdapter {
       return this.txResult(false);
     }
 
-    // P-1 review (follow-up): see `createKnowledgeAssetsV10` — fire the
-    // write-ahead hook right before the mock's synthetic tx is assigned.
-    try { params.onBroadcast?.(); } catch { /* swallow */ }
+    // P-1 review (Codex iter-5): match the real EVM adapter's
+    // "fail closed on hook error" contract — listeners are the durable
+    // WAL and must be able to abort broadcast by throwing.
+    // Mock adapter emits a synthetic but deterministic pseudo-hash so
+    // WAL consumers have SOMETHING stable to log. Real hashes come from
+    // the EVM adapter; this is only for mock-backed tests.
+    const mockUpdateTxHash = `0xmock-update-${this.nextBatchId}-${params.kcId}`;
+    try {
+      params.onBroadcast?.({ txHash: mockUpdateTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
 
     existing.merkleRoot = params.newMerkleRoot;
     const txIndex = this.txIndexInBlock;
@@ -803,7 +815,21 @@ export class MockChainAdapter implements ChainAdapter {
     // hook so mock-backed publisher tests observe the same phase
     // boundary contract (`chain:writeahead:start` fires only when a
     // concrete broadcast is imminent).
-    try { params.onBroadcast?.(); } catch { /* swallow */ }
+    //
+    // Codex iter-5: fail closed on hook error — matching the real
+    // EVM adapter's refactored send path. WAL persistence failures
+    // MUST abort the broadcast. Provide a synthetic but deterministic
+    // pseudo-hash so WAL consumers can log a stable identity for the
+    // about-to-broadcast mock tx (real hashes come from the EVM adapter).
+    const mockPublishTxHash = `0xmock-publish-${this.nextBatchId}`;
+    try {
+      params.onBroadcast?.({ txHash: mockPublishTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before createKnowledgeAssetsV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
 
     const kcId = this.nextBatchId++;
     this.collections.set(kcId, {

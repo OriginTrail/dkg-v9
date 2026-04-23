@@ -1294,15 +1294,46 @@ export class EVMChainAdapter implements ChainAdapter {
       vs: params.ackSignatures.map((s) => ethers.hexlify(s.vs)),
     };
 
-    // P-1 review (follow-up): fire the write-ahead hook AFTER allowance
-    // checks + optional `approve()` and IMMEDIATELY before the
-    // `publishDirect` broadcast, so listeners see `chain:writeahead:start`
-    // only when a concrete publish tx is about to hit the wire. Errors
-    // above this line (approve revert, gas estimate rejection, etc.) never
-    // create an unmatched WAL boundary. The hook is best-effort: any throw
-    // inside it must not abort the broadcast.
-    try { params.onBroadcast?.(); } catch { /* swallow — listener contract */ }
-    const tx = await ka.publishDirect(publishParamsStruct, params.paymaster);
+    // P-1 review (follow-up, Codex iter-5): the `onBroadcast` hook is
+    // the durable WAL checkpoint, so it MUST fire in the true send
+    // path — after populate / gas-estimate / sign succeed, and
+    // immediately before `eth_sendRawTransaction`. If the hook throws
+    // (WAL persistence failed, disk full, etc.) we MUST abort: the tx
+    // was signed but never broadcast, so the caller is free to retry
+    // without any on-chain effect. `contract.method(...)` does
+    // populate + sign + broadcast as one step, so we break it apart:
+    //
+    //   1. populateTransaction — builds the `{ to, data, value }` request
+    //   2. signer.populateTransaction — fills chainId / gas / nonce
+    //   3. signer.signTransaction — returns the signed hex string
+    //   4. onBroadcast — WAL checkpoint; throw aborts the broadcast
+    //   5. provider.broadcastTransaction — the real eth_sendRawTransaction
+    //
+    // This also gives the WAL the pre-broadcast tx hash (ethers v6
+    // exposes it on the returned TransactionResponse), so recovery can
+    // reconcile an in-flight tx after a daemon crash.
+    const populated = await (ka as any).publishDirect.populateTransaction(
+      publishParamsStruct,
+      params.paymaster,
+    );
+    const filled = await txSigner.populateTransaction(populated);
+    const signedTx = await txSigner.signTransaction(filled);
+    // Derive the pre-broadcast tx hash from the signed raw hex so WAL
+    // consumers can log the exact identity of the tx about to hit the
+    // wire. After broadcast completes, the receipt hash matches this.
+    const preBroadcastTxHash = ethers.Transaction.from(signedTx).hash ?? '0x';
+    try {
+      params.onBroadcast?.({ txHash: preBroadcastTxHash });
+    } catch (hookErr) {
+      // Fail closed: the signed tx is still in this function's local
+      // scope — it has not been sent. Surface the hook error to the
+      // caller so they know WAL persistence failed BEFORE broadcast.
+      throw new Error(
+        `chain:writeahead hook failed before publishDirect broadcast: ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
+    const tx = await this.provider.broadcastTransaction(signedTx);
 
     const receipt = await tx.wait();
     if (!receipt) throw new Error('Transaction receipt is null');
@@ -1608,14 +1639,36 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    // P-1 review (follow-up): fire the write-ahead hook immediately
-    // before the real `updateDirect` broadcast — after allowance +
-    // approve — so listeners never checkpoint a WAL record for an
-    // update tx that never hit the wire. Best-effort; swallow throws.
-    try { params.onBroadcast?.(); } catch { /* swallow */ }
-    const tx = await ka.updateDirect(updateParams, ethers.ZeroAddress);
+    // P-1 review (Codex iter-5): same pattern as publishDirect above —
+    // break the single contract call into populate / sign / hook /
+    // broadcast so the `onBroadcast` checkpoint fires at the actual
+    // eth_sendRawTransaction boundary, and so a hook failure (e.g.
+    // WAL persistence error) aborts broadcast instead of leaving an
+    // unmatched WAL record.
+    const populated = await (ka as any).updateDirect.populateTransaction(
+      updateParams,
+      ethers.ZeroAddress,
+    );
+    const filled = await signer.populateTransaction(populated);
+    const signedTx = await signer.signTransaction(filled);
+    const preBroadcastTxHash = ethers.Transaction.from(signedTx).hash ?? '0x';
+    try {
+      params.onBroadcast?.({ txHash: preBroadcastTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before updateDirect broadcast: ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
+    const tx = await this.provider.broadcastTransaction(signedTx);
 
     const receipt = await tx.wait();
+    if (!receipt) {
+      throw new Error(
+        `updateDirect broadcast succeeded (txHash=${preBroadcastTxHash}) but receipt was null ` +
+        `— the tx was likely replaced or dropped before confirmation`,
+      );
+    }
 
     return {
       hash: receipt.hash,

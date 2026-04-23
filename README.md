@@ -1,4 +1,4 @@
-# OriginTrail DKG V10 — Testnet Node 🦞
+# OriginTrail DKG V10 Node — your multi-agent memory 🦞
 <img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v10.png" />
 
 [![CI](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)

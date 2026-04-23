@@ -185,17 +185,35 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
-    it('reverts on invalid lock tier (0 — rest state, not a valid create target)', async () => {
+    it('happy path: tier 0 (rest state, 1x, no lock) mints an NFT — every V10 position is an NFT', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
-      // lock=0 is the post-expiry rest state in ConvictionStakingStorage;
-      // new positions must never enter at the rest tier. The wrapper's
-      // `_convictionMultiplier` accepts 0 (for reward-math callers) but
-      // StakingV10.stake rejects it via `InvalidLockTier`.
-      await expect(
-        NFT.connect(accounts[0]).createConviction(identityId, amount, 0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'InvalidLockTier');
+
+      // V10 policy: no-lock staking is a first-class product and produces
+      // an NFT just like the locked tiers. Tier 0 is seeded active at
+      // `CSS.initialize()` with 1.0x multiplier and zero duration.
+      const tx = await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+      // Wrapper event mirrors the mint.
+      await expect(tx)
+        .to.emit(NFT, 'PositionCreated')
+        .withArgs(accounts[0].address, 0n, identityId, amount, 0);
+
+      // ERC721 ownership — tier-0 stakers get an NFT like anyone else.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
+
+      // Position semantics: 1x multiplier, permanent (expiryTimestamp == 0).
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(identityId);
+      expect(pos.raw).to.equal(amount);
+      expect(pos.lockTier).to.equal(0);
+      expect(pos.multiplier18).to.equal(ONE_X);
+      expect(pos.expiryTimestamp).to.equal(0); // rest-state sentinel: no boost to decay.
+
+      // Stake aggregates updated the same as any other tier.
+      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(amount);
     });
 
     it('reverts on non-existent profile', async () => {
@@ -521,16 +539,22 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
       await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
-      const beforeEpoch = await ChronosContract.getCurrentEpoch();
       // D21: `relock` is a burn+mint. The old NFT (`tokenId 0`) is burned
       // and a fresh token is minted. Return value is the new tokenId.
       const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 12);
       const tx = await NFT.connect(accounts[0]).relock(0, 12);
+      // Capture the block timestamp to compute the D26 expected expiry.
+      const txReceipt = await tx.wait();
+      const txBlock = await hre.ethers.provider.getBlock(txReceipt!.blockHash);
+      const relockTs = BigInt(txBlock!.timestamp);
+      // Tier 12 wall-clock duration = 366 days.
+      const DAY = 24n * 60n * 60n;
+      const expectedExpiryTs = relockTs + 366n * DAY;
 
       await expect(tx).to.emit(NFT, 'PositionRelocked').withArgs(0n, newTokenId, 12);
       await expect(tx)
         .to.emit(StakingV10Contract, 'Relocked')
-        .withArgs(newTokenId, 12, beforeEpoch + 12n);
+        .withArgs(newTokenId, 12, expectedExpiryTs);
 
       // Old token is burned; new token carries the relocked position state.
       await expect(NFT.ownerOf(0)).to.be.reverted;
@@ -541,7 +565,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(pos.raw).to.equal(amount); // principal migrated to new tokenId
       expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
-      expect(pos.expiryEpoch).to.equal(beforeEpoch + 12n);
+      expect(pos.expiryTimestamp).to.equal(expectedExpiryTs);
     });
 
     it('happy path: relock to tier 0 (permanent rest state, 1x multiplier)', async () => {
@@ -568,10 +592,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
       // D20: `_computeExpiryEpoch(0)` returns 0 (rest-state sentinel).
-      expect(pos.expiryEpoch).to.equal(0);
+      expect(pos.expiryTimestamp).to.equal(0);
     });
 
-    it('happy path: relock updates expiryEpoch to currentEpoch + newLockTier', async () => {
+    it('happy path: relock updates expiryTimestamp to block.timestamp + tierDuration', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -579,12 +603,17 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
       await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
-      const beforeEpoch = await ChronosContract.getCurrentEpoch();
       // D21: relock burns + remints; read state from the new tokenId.
       const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 6);
-      await NFT.connect(accounts[0]).relock(0, 6);
+      const tx = await NFT.connect(accounts[0]).relock(0, 6);
+      const receipt = await tx.wait();
+      const txBlock = await hre.ethers.provider.getBlock(receipt!.blockHash);
+      const relockTs = BigInt(txBlock!.timestamp);
+      // D26: tier 6 commits 180 days of boost exactly.
+      const DAY = 24n * 60n * 60n;
+      const expectedExpiryTs = relockTs + 180n * DAY;
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
-      expect(pos.expiryEpoch).to.equal(beforeEpoch + 6n);
+      expect(pos.expiryTimestamp).to.equal(expectedExpiryTs);
       expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
     });
 
@@ -602,13 +631,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
 
-    it('boundary: relock succeeds at exactly currentEpoch == pos.expiryEpoch', async () => {
+    it('boundary: relock succeeds at exactly currentEpoch == pos.expiryTimestamp', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      // 1-epoch lock at creation epoch C → expiryEpoch = C + 1. Advance
-      // exactly 1 epoch so currentEpoch == expiryEpoch — under the old
+      // 1-epoch lock at creation epoch C → expiryTimestamp = C + 1. Advance
+      // exactly 1 epoch so currentEpoch == expiryTimestamp — under the old
       // `<=` check this would still revert as LockStillActive.
       await advanceEpochs(1);
       await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
@@ -725,35 +754,19 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
 
       // The gate pins the caller to the Hub-registered NFT contract.
-      // D21: `StakingV10.redelegate(address staker, uint256 oldTokenId, uint256 newTokenId, uint72 newIdentityId)`.
+      // D25: `StakingV10.redelegate(address staker, uint256 tokenId, uint72 newIdentityId)`
+      // — in-place, no newTokenId.
       await expect(
-        StakingV10Contract.connect(accounts[0]).redelegate(accounts[0].address, 0, 1, toId),
+        StakingV10Contract.connect(accounts[0]).redelegate(accounts[0].address, 0, toId),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
 
-    it('reverts if a pending withdrawal exists (Phase 5 cancel-first UX)', async () => {
-      const { identityId: fromId } = await createProfile();
-      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
-      await advanceEpochs(2); // post-expiry so createWithdrawal is allowed
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, hre.ethers.parseEther('100'));
-
-      // Pending exists → redelegate must reject. Otherwise the cancel/
-      // finalize path would land on the OLD node after the position has
-      // moved, stranding the pending TRAC on the wrong identity.
-      await expect(
-        NFT.connect(accounts[0]).redelegate(0, toId),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalAlreadyRequested');
-    });
-
     // -----------------------------------------------------------------
-    // Happy paths
+    // Happy paths — D25 in-place redelegate: tokenId STABLE, lock clock
+    // preserved, only `pos.identityId` mutates.
     // -----------------------------------------------------------------
 
-    it('happy path mid-lock: nodeStake moves, totalStake invariant, delegator base moves, position identityId updated, event emitted', async () => {
+    it('happy path mid-lock: nodeStake moves, totalStake invariant, position identityId updated in place, tokenId STABLE, expiryTimestamp preserved, event emitted', async () => {
       const { identityId: fromId } = await createProfile();
       const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
       const amount = hre.ethers.parseEther('1000');
@@ -764,18 +777,24 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(amount);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(toId)).to.equal(0n);
 
-      // Still mid-lock — the 12-epoch lock is nowhere near done.
-      // D21: redelegate is a burn+mint. Capture the new tokenId.
-      const newTokenId = await NFT.connect(accounts[0]).redelegate.staticCall(0, toId);
+      // Capture the pre-call expiryTimestamp so we can verify preservation.
+      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+      const expiryBefore = posBefore.expiryTimestamp;
+
+      // Still mid-lock — the 12-tier lock is nowhere near done.
       const tx = await NFT.connect(accounts[0]).redelegate(0, toId);
 
-      // Wrapper-layer event mirrors, authoritative event from StakingV10.
+      // Wrapper-layer event (`(tokenId, oldIdentityId, newIdentityId)`)
+      // mirrors the authoritative events from StakingV10 and CSS.
       await expect(tx)
         .to.emit(NFT, 'PositionRedelegated')
-        .withArgs(0n, newTokenId, toId, fromId);
+        .withArgs(0n, fromId, toId);
       await expect(tx)
         .to.emit(StakingV10Contract, 'Redelegated')
-        .withArgs(newTokenId, fromId, toId);
+        .withArgs(0n, fromId, toId);
+      await expect(tx)
+        .to.emit(ConvictionStakingStorageContract, 'PositionRedelegated')
+        .withArgs(0n, fromId, toId);
 
       // Per-node stake moved.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(0n);
@@ -784,20 +803,22 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Global totalStake is INVARIANT — redelegate is a per-node move only.
       expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(totalStakeBefore);
 
-      // Old token is burned; new token carries the redelegated state.
-      await expect(NFT.ownerOf(0)).to.be.reverted;
-      expect(await NFT.ownerOf(newTokenId)).to.equal(accounts[0].address);
+      // D25: tokenId 0 is STABLE — still owned by the original staker,
+      // no mint, no burn.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
 
       // ConvictionStakingStorage position now points at the new node.
-      // Raw, lockTier, multiplier18, expiryEpoch all untouched.
-      const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
+      // Raw, lockTier, multiplier18, expiryTimestamp all preserved — the
+      // lock clock did NOT reset.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.identityId).to.equal(toId);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
+      expect(pos.expiryTimestamp).to.equal(expiryBefore);
     });
 
-    it('happy path post-expiry: redelegate after lock expired moves nodeStake correctly', async () => {
+    it('happy path post-expiry: redelegate after lock expired moves nodeStake correctly, tokenId STABLE', async () => {
       const { identityId: fromId } = await createProfile();
       const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
       const amount = hre.ethers.parseEther('1000');
@@ -810,13 +831,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
       await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
-      // D21: redelegate burns + remints.
-      const newTokenId = await NFT.connect(accounts[0]).redelegate.staticCall(0, toId);
       await NFT.connect(accounts[0]).redelegate(0, toId);
 
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(0n);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(toId)).to.equal(amount);
-      const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
+      // tokenId STABLE — no mint, no burn.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.identityId).to.equal(toId);
       expect(pos.raw).to.equal(amount);
       // Raw lock state on the position stays as it was pre-redelegate
@@ -839,15 +860,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const totalBefore = await ConvictionStakingStorageContract.totalStakeV10();
 
-      // Redelegate ONLY NFT 0 from nodeA → nodeB. D21: burn+mint.
-      const newTokenId = await NFT.connect(accounts[0]).redelegate.staticCall(0, nodeB);
+      // Redelegate ONLY NFT 0 from nodeA → nodeB. D25 in-place: tokenId stable.
       await NFT.connect(accounts[0]).redelegate(0, nodeB);
 
-      // NFT 0 moved correctly: burned, new token carries the position.
+      // NFT 0 moved correctly: tokenId preserved, position updated.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(nodeA)).to.equal(0n);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(nodeB)).to.equal(amount);
-      await expect(NFT.ownerOf(0)).to.be.reverted;
-      const movedPos = await ConvictionStakingStorageContract.getPosition(newTokenId);
+      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      const movedPos = await ConvictionStakingStorageContract.getPosition(0);
       expect(movedPos.raw).to.equal(amount);
       expect(movedPos.identityId).to.equal(nodeB);
 
@@ -879,575 +899,203 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   // =====================================================================
-  // createWithdrawal / cancelWithdrawal / finalizeWithdrawal
+  // withdraw (→ StakingV10.withdraw) — D14 atomic exit
   // =====================================================================
   //
-  // D19 + D14 withdrawal semantics:
-  //   pre-expiry  : LockStillActive (raw is locked; rewards compounded into raw
-  //                 inside the lock so no partial drain is possible during the
-  //                 lock window).
-  //   post-expiry : amount ≤ pos.raw (single bucket; the "rewards" sidecar
-  //                 was removed by D19 — rewards compound into raw at claim).
+  // Post-V10 withdrawal is a single transaction:
+  //   1. `NFT.withdraw(tokenId)` — caller must own the NFT.
+  //   2. StakingV10 checks the lock gate (`LockStillActive` pre-expiry;
+  //      tier-0 always passes since `expiryTimestamp == 0`).
+  //   3. Auto-claims any outstanding rewards (compounds into `raw`).
+  //   4. Reads the post-claim `raw`, transfers that much TRAC from the
+  //      StakingStorage vault to the owner, and calls
+  //      `CSS.deletePosition(tokenId)` (which tears down effective-stake
+  //      diff entries, cancels pending expiry drops, decrements node +
+  //      total aggregates, pops the per-node enumeration slot).
+  //   5. The wrapper burns `tokenId`.
   //
-  // D14 drops WITHDRAWAL_DELAY to 0 — the conviction lock itself is the
-  // gating mechanism. `finalizeWithdrawal` can be called in the same block
-  // as `createWithdrawal` once post-expiry.
+  // Full-only by design (Q1): partial withdrawals are NOT a first-class
+  // feature. A user wanting partial liquidity should withdraw the whole
+  // position and re-stake the remainder at tier 0 (effectively liquid).
   //
-  // Pending-withdrawal slot lives on ConvictionStakingStorage
-  // (`pendingWithdrawals[tokenId]`). Shape is `{amount, releaseAt}` only —
-  // no rewardsPortion field (D19 collapsed the two buckets into one).
+  // No `PendingWithdrawal` storage, no delay, no cancel. The lock IS the
+  // delay, and tier 0 has no lock.
 
-  // D14: WITHDRAWAL_DELAY = 0. Kept as a named constant so downstream
-  //      tests stay explicit about the delay semantics.
-  const WITHDRAWAL_DELAY_SECONDS = 0;
-
-  // Pre-finalize helper — after a long `time.increase` crosses many Chronos
-  // epochs, the next ConvictionStakingStorage mutator has to walk every
-  // dirty-prefix epoch to catch `totalEffectiveStakeAtEpoch[e]` up to the
-  // current cursor, and that linear loop blows past hardhat's per-tx
-  // `gas: 15_000_000` cap for anything longer than ~40 epochs in the
-  // dirty window. We break the walk into smaller chunks by calling the
-  // external `finalizeEffectiveStakeUpTo` / `finalizeNodeEffectiveStakeUpTo`
-  // entries as the hub owner (both `onlyContracts` permit the hub owner
-  // via `HubDependent._checkHubContract`), so each call fits easily under
-  // the cap. This is test-only scaffolding; the corresponding production
-  // path during a real 15-day withdrawal would either amortize the work
-  // across many mutator calls over the delay window or be kept cheap by
-  // the unchanged `firstDirty`/`lastFinalizedEpoch` fast-paths in
-  // `_finalizeEffectiveStakeUpTo`.
-  const preFinalizeDormantEpochs = async (identityId: number) => {
-    const currentEpoch = Number(await ChronosContract.getCurrentEpoch());
-    const lastGlobal = Number(await ConvictionStakingStorageContract.getLastFinalizedEpoch());
-    const lastNode = Number(
-      await ConvictionStakingStorageContract.getNodeLastFinalizedEpoch(identityId),
-    );
-    const target = currentEpoch - 1;
-    // Chunked walk — 50 epochs per call is well under the 15M cap.
-    const chunkSize = 50;
-    for (let e = lastGlobal + chunkSize; e <= target; e += chunkSize) {
-      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeEffectiveStakeUpTo(e);
-    }
-    if (lastGlobal < target) {
-      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeEffectiveStakeUpTo(
-        target,
-      );
-    }
-    for (let e = lastNode + chunkSize; e <= target; e += chunkSize) {
-      await ConvictionStakingStorageContract.connect(accounts[0]).finalizeNodeEffectiveStakeUpTo(
-        identityId,
-        e,
-      );
-    }
-    if (lastNode < target) {
-      await ConvictionStakingStorageContract.connect(
-        accounts[0],
-      ).finalizeNodeEffectiveStakeUpTo(identityId, target);
-    }
+  // D26 — effective-stake accounting is timestamp-accurate and event-density-
+  // bounded. Long dormancy windows no longer need a per-epoch walk: `settleNodeTo`
+  // drains the sorted expiry queue in a single pass, sized by the number of
+  // expiry events between settlement points (typically 0-3, never unbounded).
+  // The old dirty-prefix backfill is gone, so this helper is a no-op kept in
+  // place to avoid churning every call-site.
+  const preFinalizeDormantEpochs = async (identityId: number): Promise<void> => {
+    void identityId;
   };
 
-  describe('createWithdrawal (→ StakingV10.createWithdrawal)', () => {
-    // Phase 5 review fix — decrement-at-request model. `createWithdrawal`
-    // immediately decrements pos.raw / pos.rewards and the StakingStorage
-    // delegator/node/total stake. The pending-withdrawal slot lives on
-    // `ConvictionStakingStorage.pendingWithdrawals[tokenId]` (V10-native),
-    // NOT on `StakingStorage.withdrawals` (V8 legacy slot).
+  describe('withdraw (→ StakingV10.withdraw)', () => {
+    // D14 atomic exit — one tx does it all: lock gate → auto-claim →
+    // full-drain → transfer TRAC → delete position → burn NFT.
+    // No pending slot, no delay, no cancel. Full-only (Q1).
 
     it('reverts if not owner (non-owner caller)', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry so raw would otherwise be withdrawable
+      await advanceEpochs(2); // post-expiry so the position is unlocked
       // accounts[4] does not own tokenId 0 — wrapper-layer guard.
       await expect(
-        NFT.connect(accounts[4]).createWithdrawal(0, 100n),
+        NFT.connect(accounts[4]).withdraw(0),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
-    it('reverts on amount == 0 at the NFT wrapper layer', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, 0),
-      ).to.be.revertedWithCustomError(NFT, 'ZeroAmount');
-    });
-
-    it('reverts pre-expiry with LockStillActive (D19: no partial drain during lock)', async () => {
+    it('reverts pre-expiry with LockStillActive', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
-      // Pre-expiry (12-epoch lock still active). D19 collapsed the rewards
-      // bucket into raw; the entire position is locked until expiry. Any
-      // positive amount trips LockStillActive — `InsufficientWithdrawable`
-      // is reachable only post-expiry when `amount > pos.raw`.
+      // Pre-expiry: the 12-tier lock is still active. `withdraw` is
+      // lock-gated at StakingV10 — no partial or rewards-only drain is
+      // available during the lock window.
       await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, 1n),
+        NFT.connect(accounts[0]).withdraw(0),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'LockStillActive');
     });
 
-    it('reverts post-expiry when amount > raw + rewards', async () => {
+    it('tier 0 (rest state): withdraw succeeds immediately — no lock', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      // raw=1000 TRAC, rewards=0 → withdrawable=1000. 1001 is one wei too many.
-      await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, amount + 1n),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'InsufficientWithdrawable');
+      // Tier 0: `expiryTimestamp == 0`. `withdraw` is immediately callable —
+      // the tier-0 branch of the unlock check passes unconditionally.
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+      const balBefore = await Token.balanceOf(accounts[0].address);
+      await NFT.connect(accounts[0]).withdraw(0);
+
+      expect(await Token.balanceOf(accounts[0].address)).to.equal(
+        balBefore + amount,
+      );
+      // CSS position deleted, NFT burned.
+      expect(
+        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+      ).to.equal(0n);
+      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+        NFT,
+        'ERC721NonexistentToken',
+      );
     });
 
-    it('reverts if withdrawal already requested', async () => {
+    it('boundary: withdraw succeeds at exactly currentEpoch == pos.expiryTimestamp', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      // Second request on the same tokenId fails — one pending at a time.
-      await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, 50n),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalAlreadyRequested');
-    });
-
-    it('boundary: post-expiry raw withdrawal succeeds at exactly currentEpoch == pos.expiryEpoch', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      // 1-epoch lock at creation epoch C → expiryEpoch = C + 1. Advance
-      // exactly 1 epoch so currentEpoch == expiryEpoch (the boundary the
-      // off-by-one fix targets — under the old `>` check this would still
-      // revert as InsufficientWithdrawable because withdrawable would be
-      // computed as `rewards`-only).
+      // 1-tier lock at creation epoch C → expiryTimestamp ~ C + 1. Advance
+      // exactly 1 epoch so currentEpoch == expiryTimestamp (the unlock
+      // boundary). Under `currentEpoch >= expiryTimestamp` this must pass.
       await advanceEpochs(1);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      // Withdraw the full raw — must succeed at the boundary.
-      await NFT.connect(accounts[0]).createWithdrawal(0, amount);
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(amount);
+
+      // `withdraw` auto-claims internally — no separate claim() required.
+      await NFT.connect(accounts[0]).withdraw(0);
+
+      expect(
+        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+      ).to.equal(0n);
     });
 
-    it('happy path post-expiry partial: raw decrements at request, pending tracks the draw', async () => {
+    it('happy path post-expiry: TRAC refunded, node/total drop, position deleted, NFT burned (D14 atomic)', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry → raw is withdrawable
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+
+      await advanceEpochs(2); // post-expiry
 
       const totalStakeBefore = await ConvictionStakingStorageContract.totalStakeV10();
       const nodeStakeBefore = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
-
-      const withdrawAmount = hre.ethers.parseEther('400');
-      const tx = await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
-      const blockNumber = (await tx.wait())!.blockNumber;
-      const block = await hre.ethers.provider.getBlock(blockNumber);
-      const expectedReleaseAt = BigInt(block!.timestamp) + BigInt(WITHDRAWAL_DELAY_SECONDS);
-
-      await expect(tx)
-        .to.emit(StakingV10Contract, 'WithdrawalCreated')
-        .withArgs(0n, withdrawAmount, expectedReleaseAt);
-
-      // D19: pending has only `{amount, releaseAt}` — no rewardsPortion.
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(withdrawAmount);
-      expect(pending.releaseAt).to.equal(expectedReleaseAt);
-
-      // Raw decremented immediately.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount - withdrawAmount);
-
-      // Node + total stake dropped by withdrawAmount.
-      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(
-        nodeStakeBefore - withdrawAmount,
-      );
-      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
-        totalStakeBefore - withdrawAmount,
-      );
-    });
-
-    it('happy path post-expiry full drain: raw drops to 0', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      const tx = await NFT.connect(accounts[0]).createWithdrawal(0, amount);
-      await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
-
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(amount);
-
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(0n);
-    });
-
-    it('direct StakingV10.createWithdrawal call from non-NFT caller reverts via gate', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await expect(
-        StakingV10Contract.connect(accounts[0]).createWithdrawal(
-          accounts[0].address,
-          0,
-          100n,
-        ),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
-    });
-
-    it('reverts UnclaimedEpochs if position has unclaimed epochs', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      // Advance 3 epochs past expiry without claiming.
-      await advanceEpochs(3);
-      await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, 100n),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
-    });
-  });
-
-  describe('cancelWithdrawal (→ StakingV10.cancelWithdrawal)', () => {
-    // Phase 5 review fix — symmetric inverse of the new `createWithdrawal`.
-    // Restores pos.raw / pos.rewards, the StakingStorage delegator base,
-    // and the node/total stake to their pre-create state, then deletes the
-    // V10-native pending slot.
-
-    it('reverts if not owner (non-owner caller)', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      await expect(
-        NFT.connect(accounts[4]).cancelWithdrawal(0),
-      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
-    });
-
-    it('reverts if no withdrawal was requested', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await expect(
-        NFT.connect(accounts[0]).cancelWithdrawal(0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
-    });
-
-    it('happy path: symmetric restore — pos.raw, node/total stake all back to pre-request', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      // Snapshot pre-request state.
-      const totalStakeBefore = await ConvictionStakingStorageContract.totalStakeV10();
-      const nodeStakeBefore = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
-      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
-
-      const withdrawAmount = hre.ethers.parseEther('400');
-      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
-
-      // Mid-state: everything dropped by withdrawAmount.
-      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
-        totalStakeBefore - withdrawAmount,
-      );
-
-      // Cancel.
-      const tx = await NFT.connect(accounts[0]).cancelWithdrawal(0);
-      await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCancelled').withArgs(0n);
-      await expect(tx).to.emit(NFT, 'WithdrawalCancelled').withArgs(0n);
-
-      // Pending slot cleared.
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(0n);
-
-      // Position raw restored byte-identical.
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
-      expect(posAfter.raw).to.equal(posBefore.raw);
-
-      // Node + total stake restored.
-      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(nodeStakeBefore);
-      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(totalStakeBefore);
-    });
-
-    it('happy path: cancel allows a new withdrawal to be requested', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      await NFT.connect(accounts[0]).cancelWithdrawal(0);
-      // A fresh request with a different amount succeeds now that the
-      // WithdrawalAlreadyRequested guard is cleared.
-      await NFT.connect(accounts[0]).createWithdrawal(0, 200n);
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(200n);
-    });
-
-    it('happy path: cancel after partial drain restores pos.raw exactly', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-
-      await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      // Partial post-expiry draw — under D19 the single-bucket semantic
-      // makes this a pure `decreaseRaw(withdrawAmount)`.
-      const withdrawAmount = hre.ethers.parseEther('500');
-      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
-
-      // Mid-state: raw dropped by withdrawAmount.
-      let pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount - withdrawAmount); // 500
-
-      // Cancel — raw restored to amount.
-      await NFT.connect(accounts[0]).cancelWithdrawal(0);
-      pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount); // 1000 restored
-    });
-
-    it('direct StakingV10.cancelWithdrawal call from non-NFT caller reverts via gate', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      await expect(
-        StakingV10Contract.connect(accounts[0]).cancelWithdrawal(accounts[0].address, 0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
-    });
-
-    it('reverts UnclaimedEpochs if position has unclaimed epochs at cancel time', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      // Advance to post-expiry; claim to satisfy the guard for createWithdrawal.
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0);
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      // Advance further without claiming — cancelWithdrawal now sees stale
-      // lastClaimedEpoch and must revert.
-      await advanceEpochs(2);
-      await expect(
-        NFT.connect(accounts[0]).cancelWithdrawal(0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
-    });
-  });
-
-  describe('finalizeWithdrawal (→ StakingV10.finalizeWithdrawal)', () => {
-    // Phase 5 review fix — under the decrement-at-request model,
-    // `finalizeWithdrawal` ONLY transfers TRAC from the vault to the user
-    // and deletes the pending slot. The position buckets, delegator base,
-    // and node/total stake were all decremented at `createWithdrawal` time.
-    // Sharding-table maintenance also ran at create time.
-
-    it('reverts if not owner (non-owner caller)', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-      await expect(
-        NFT.connect(accounts[4]).finalizeWithdrawal(0),
-      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
-    });
-
-    it('reverts if no withdrawal was requested', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await expect(
-        NFT.connect(accounts[0]).finalizeWithdrawal(0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
-    });
-
-    it('D14: WITHDRAWAL_DELAY=0 — finalize succeeds in the same block as createWithdrawal', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      // With delay=0, no time.increase is needed; finalize must succeed.
-      await expect(NFT.connect(accounts[0]).finalizeWithdrawal(0))
-        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, 100n);
-    });
-
-    it('happy path partial raw withdrawal post-expiry: TRAC refunded, position state unchanged at finalize, NFT alive', async () => {
-      const { identityId } = await createProfile();
-      const minStake = await ParametersStorage.minimumStake();
-      // Use 2x minStake so the node enters the sharding table at stake
-      // time, then partially withdraw — stake stays above minStake so
-      // sharding state should not change (decremented at create time).
-      const amount = minStake * 2n;
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      const withdrawAmount = minStake / 2n;
-      // createWithdrawal does the heavy lifting: decrements pos.raw + node/
-      // total stake. After this call, position raw = amount - withdrawAmount,
-      // and the StakingStorage delegator/node/total all reflect the drop.
-      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
-
-      // Snapshot the post-create-decrement state so finalize can be tested
-      // as a "transfer + cleanup only" operation.
-      const totalStakeAfterCreate = await ConvictionStakingStorageContract.totalStakeV10();
-      const nodeStakeAfterCreate = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
-      const posAfterCreate = await ConvictionStakingStorageContract.getPosition(0);
-
-      // D14: WITHDRAWAL_DELAY=0 — no time.increase required.
-
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
 
-      const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
-      await expect(tx)
-        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, withdrawAmount);
+      const tx = await NFT.connect(accounts[0]).withdraw(0);
 
-      // TRAC returned to staker.
+      // Authoritative StakingV10 event; amount ≥ original principal
+      // because auto-claim may have compounded rewards into raw. On a
+      // fresh position with no injected node score, reward == 0 and the
+      // emitted amount is the original principal.
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'Withdrawn')
+        .withArgs(0n, accounts[0].address, amount);
+      await expect(tx)
+        .to.emit(NFT, 'PositionWithdrawn')
+        .withArgs(0n, amount);
+
+      // TRAC refunded to staker.
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
-        stakerBalBefore + withdrawAmount,
+        stakerBalBefore + amount,
       );
 
-      // Totals UNCHANGED at finalize — they were decremented at create time.
-      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(totalStakeAfterCreate);
-      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(nodeStakeAfterCreate);
+      // Node + total stake drained by `amount`.
+      expect(
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+      ).to.equal(nodeStakeBefore - amount);
+      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
+        totalStakeBefore - amount,
+      );
 
-      // Position state is unchanged at finalize.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(posAfterCreate.raw);
-      expect(pos.identityId).to.equal(identityId);
+      // CSS position deleted — identityId reset to 0 is the sentinel.
+      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfter.identityId).to.equal(0n);
+      expect(posAfter.raw).to.equal(0n);
 
-      // NFT still alive (partial drain — pos.raw > 0).
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
-      expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
-
-      // V10 pending slot cleared.
-      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
-      expect(pending.amount).to.equal(0n);
+      // NFT burned.
+      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+        NFT,
+        'ERC721NonexistentToken',
+      );
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
     });
 
-    it('happy path full drain post-expiry: NFT is burned, sharding-table removal happens at create time', async () => {
+    it('happy path: node drops below minStake → sharding-table removal', async () => {
       const { identityId } = await createProfile();
       const minStake = await ParametersStorage.minimumStake();
-      // Fund exactly minStake so a full drain drops nodeStake to 0 < minStake.
+      // Fund exactly minStake so full drain drops nodeStake to 0 < minStake.
       await mintAndApprove(accounts[0], minStake);
       await NFT.connect(accounts[0]).createConviction(identityId, minStake, 1);
 
       const ShardingTableStorage = await hre.ethers.getContract<
         import('../../typechain').ShardingTableStorage
       >('ShardingTableStorage');
-      // Node was inserted at stake time (raw = minStake).
+      // Node was inserted at stake time (raw == minStake).
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
 
       await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
+      await NFT.connect(accounts[0]).withdraw(0);
 
-      // Sharding-table removal happens at CREATE time under the new model.
+      // Sharding-table removal happens atomically inside withdraw.
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
-      // Node stake also drops at create time.
-      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(0n);
-
-      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-
-      await NFT.connect(accounts[0]).finalizeWithdrawal(0);
-
-      // NFT burned → ownerOf reverts with ERC721NonexistentToken.
+      expect(
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+      ).to.equal(0n);
+      // CSS position + NFT gone.
+      expect(
+        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+      ).to.equal(0);
       await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
         NFT,
         'ERC721NonexistentToken',
       );
-      expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
-
-      // Node stake still drained, sharding-table state still reflects removal.
-      expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(0n);
-      expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
-
-      // Phase 5 round-2 fix: full-drain finalize calls deletePosition to
-      // clear the orphaned Position struct. After finalize, identityId must
-      // be 0 (deleted) rather than stale metadata left on-chain.
-      const posAfterFinalize = await ConvictionStakingStorageContract.getPosition(0);
-      expect(posAfterFinalize.identityId).to.equal(0);
-      expect(posAfterFinalize.raw).to.equal(0n);
     });
 
-    it('happy path multi-partial post-expiry: second partial draw after finalize works', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('1000');
-      await mintAndApprove(accounts[0], amount);
-      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
-      await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-
-      // First partial draw.
-      const first = hre.ethers.parseEther('200');
-      await NFT.connect(accounts[0]).createWithdrawal(0, first);
-
-      // D14: WITHDRAWAL_DELAY=0 — finalize immediately.
-      const balBefore = await Token.balanceOf(accounts[0].address);
-      await NFT.connect(accounts[0]).finalizeWithdrawal(0);
-      expect(await Token.balanceOf(accounts[0].address)).to.equal(balBefore + first);
-
-      // Second partial draw — pending slot was cleared at finalize.
-      const second = hre.ethers.parseEther('300');
-      await NFT.connect(accounts[0]).createWithdrawal(0, second);
-
-      // raw decremented twice: amount - first - second.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount - first - second);
-
-      // NFT still alive after the first finalize (raw still > 0).
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
-    });
-
-    it('direct StakingV10.finalizeWithdrawal call from non-NFT caller reverts via gate', async () => {
+    it('direct StakingV10.withdraw call from non-NFT caller reverts via gate', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
-      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await expect(
-        StakingV10Contract.connect(accounts[0]).finalizeWithdrawal(accounts[0].address, 0),
+        StakingV10Contract.connect(accounts[0]).withdraw(
+          accounts[0].address,
+          0,
+        ),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
   });
@@ -1844,7 +1492,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
         epochPool,
       );
 
-      // effStake = raw * 6x (still pre-expiry since expiryEpoch = creation+12)
+      // effStake = raw * 6x (still pre-expiry since expiryTimestamp = creation+12)
       const effStake = (amount * SIX_X) / SCALE18;
       const expectedReward = computeReward(
         effStake,
@@ -1881,14 +1529,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
-      // 1-epoch lock -> expiryEpoch = creationEpoch + 1. Advance 3 epochs so the
+      // 1-epoch lock -> expiryTimestamp = creationEpoch + 1. Advance 3 epochs so the
       // claim window covers creationEpoch (pre-expiry) AND creationEpoch+1,+2
       // (post-expiry). Inject distinct scores to verify per-epoch math.
       await advanceEpochs(3);
 
       // Only inject on one post-expiry epoch so the expected reward is
       // unambiguously the 1x rate.
-      const postExpiryEpoch = creationEpoch + 2n; // strictly > expiryEpoch=creation+1
+      const postExpiryEpoch = creationEpoch + 2n; // strictly > expiryTimestamp=creation+1
       const scorePerStake36 = hre.ethers.parseEther('0.01');
       const nodeScore18 = hre.ethers.parseEther('100');
       const allNodesScore18 = nodeScore18;
@@ -1926,10 +1574,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
-      // 1-epoch lock -> expiryEpoch = creationEpoch + 1. With advanceEpochs(3):
+      // 1-epoch lock -> expiryTimestamp = creationEpoch + 1. With advanceEpochs(3):
       //   - claim window = [creationEpoch .. creationEpoch + 2]
-      //   - pre-expiry: epoch == creationEpoch (strict < expiryEpoch)
-      //   - post-expiry: creationEpoch + 1, creationEpoch + 2 (>= expiryEpoch)
+      //   - pre-expiry: epoch == creationEpoch (strict < expiryTimestamp)
+      //   - post-expiry: creationEpoch + 1, creationEpoch + 2 (>= expiryTimestamp)
       await advanceEpochs(3);
       const scorePre = hre.ethers.parseEther('0.01');
       const scorePost = hre.ethers.parseEther('0.02');
@@ -2106,26 +1754,40 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const posAfterClaim = await ConvictionStakingStorageContract.getPosition(0);
       expect(posAfterClaim.raw).to.equal(amount + expectedReward);
 
-      // 2. Advance one more epoch → now post-expiry. createWithdrawal can
-      //    drain the whole raw (principal + compounded rewards).
+      // 2. Advance one more epoch → now post-expiry. `withdraw` is the
+      //    atomic exit: it auto-claims any remaining reward window,
+      //    reads the post-claim raw, refunds TRAC, deletes the position,
+      //    and burns the NFT in a single transaction.
       await advanceEpochs(1);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
-      const totalWithdraw = posAfterClaim.raw;
-      await NFT.connect(accounts[0]).createWithdrawal(0, totalWithdraw);
-
-      // 3. D14: WITHDRAWAL_DELAY=0 → finalize in the same block.
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
-      const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
-      await expect(tx)
-        .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, totalWithdraw);
+      const tx = await NFT.connect(accounts[0]).withdraw(0);
 
-      // TRAC refunded: principal + rewards, minus whatever epoch-2 reward
-      // was compounded by the second claim (that extra amount stays on raw).
+      // The emitted amount is authoritative: it includes everything that
+      // auto-claim rolled into raw before the transfer.
+      const rc = await tx.wait();
+      const evt = rc!.logs
+        .map((l) => {
+          try {
+            return StakingV10Contract.interface.parseLog(l as never);
+          } catch {
+            return null;
+          }
+        })
+        .find((e) => e?.name === 'Withdrawn');
+      const paid = evt!.args[2] as bigint;
+
+      // TRAC refunded equals the emitted amount (principal + rewards,
+      // including any reward accrued in the post-expiry epoch that the
+      // in-tx auto-claim compounds in before the transfer).
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
-        stakerBalBefore + totalWithdraw,
+        stakerBalBefore + paid,
       );
+
+      // Position + NFT gone.
+      expect(
+        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+      ).to.equal(0n);
     });
 
     // -----------------------------------------------------------------
@@ -2155,7 +1817,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       // Advance 2 epochs so Bob's 1-epoch lock is expired on the claim epoch.
-      // Bob's expiryEpoch = creationEpoch + 1, so epoch creationEpoch+1 is
+      // Bob's expiryTimestamp = creationEpoch + 1, so epoch creationEpoch+1 is
       // post-expiry for Bob but still pre-expiry for Alice (expiry at +12).
       await advanceEpochs(2);
       const claimEpoch = creationEpoch + 1n;
@@ -2237,17 +1899,17 @@ describe('@unit DKGStakingConvictionNFT', () => {
     });
 
     // -----------------------------------------------------------------
-    // Expiry boundary — multiplier transitions at expiryEpoch
+    // Expiry boundary — multiplier transitions at expiryTimestamp
     // -----------------------------------------------------------------
 
-    it('expiry boundary: pre-expiry epochs use 6x, expiryEpoch onward uses 1x', async () => {
+    it('expiry boundary: pre-expiry epochs use 6x, expiryTimestamp onward uses 1x', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
-      // expiryEpoch = creationEpoch + 12. Advance 14 epochs to cover
+      // expiryTimestamp = creationEpoch + 12. Advance 14 epochs to cover
       // [creationEpoch .. creationEpoch+13]. Epochs 0..11 are pre-expiry
       // (6x), epoch 12+ are post-expiry (1x).
       await advanceEpochs(14);
@@ -2260,8 +1922,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Inject score for exactly two epochs: one pre-expiry and one
       // post-expiry (the boundary epoch). This isolates the multiplier
       // transition.
-      const lastPreExpiryEpoch = creationEpoch + 11n; // epoch index 11, still < expiryEpoch=creation+12
-      const firstPostExpiryEpoch = creationEpoch + 12n; // expiryEpoch itself
+      const lastPreExpiryEpoch = creationEpoch + 11n; // epoch index 11, still < expiryTimestamp=creation+12
+      const firstPostExpiryEpoch = creationEpoch + 12n; // expiryTimestamp itself
 
       // Fund the full 14-epoch range in one call to avoid finalization issues.
       await fundEpochPoolRange(creationEpoch, creationEpoch + 13n, epochPool);
@@ -2601,13 +2263,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       await NFT.connect(accounts[0]).selfMigrateV8(identityId, 0);
 
-      // V10 position at rest tier: multiplier 1x, expiryEpoch == 0 per
+      // V10 position at rest tier: multiplier 1x, expiryTimestamp == 0 per
       // ConvictionStakingStorage.createPosition at :153-154.
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
-      expect(pos.expiryEpoch).to.equal(0);
+      expect(pos.expiryTimestamp).to.equal(0);
 
       // D15: V10 aggregates grow by the migrated amount.
       expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
@@ -2664,11 +2326,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
   // Phase 5 transfer semantics: when Alice transfers tokenId to Bob mid-lock,
   // the underlying `ConvictionStakingStorage.Position` is NOT mutated. No
   // rewards are settled, `lastClaimedEpoch` does not reset, the raw /
-  // rewards / identityId / lockTier / expiryEpoch / multiplier18 fields
+  // rewards / identityId / lockTier / expiryTimestamp / multiplier18 fields
   // all stay with the tokenId. Bob now owns the tokenId and can exercise
-  // every NFT entry point (claim, relock, redelegate, createWithdrawal,
-  // cancelWithdrawal, finalizeWithdrawal) that gates on
-  // `ownerOf(tokenId) == msg.sender`.
+  // every NFT entry point (claim, relock, redelegate, withdraw) that gates
+  // on `ownerOf(tokenId) == msg.sender`.
   //
   // The `_update` override in `DKGStakingConvictionNFT` is a pure
   // `super._update` pass-through — no settlement, no storage mutation.
@@ -2816,7 +2477,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const posAfter = await ConvictionStakingStorageContract.getPosition(0);
       expect(posAfter.raw).to.equal(posBefore.raw);
       expect(posAfter.lockTier).to.equal(posBefore.lockTier);
-      expect(posAfter.expiryEpoch).to.equal(posBefore.expiryEpoch);
+      expect(posAfter.expiryTimestamp).to.equal(posBefore.expiryTimestamp);
       expect(posAfter.identityId).to.equal(posBefore.identityId);
       expect(posAfter.multiplier18).to.equal(posBefore.multiplier18);
       expect(posAfter.lastClaimedEpoch).to.equal(posBefore.lastClaimedEpoch);
@@ -2920,13 +2581,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
     });
 
-    it('Alice cannot relock / redelegate / createWithdrawal / cancelWithdrawal / finalizeWithdrawal after transfer', async () => {
+    it('Alice cannot relock / redelegate / withdraw after transfer', async () => {
       const { identityId: fromId } = await createProfile();
       const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
-      await advanceEpochs(2); // post-expiry so relock + full withdraw paths are reachable
+      await advanceEpochs(2); // post-expiry so relock + withdraw are reachable
 
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
@@ -2934,9 +2595,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
         0,
       );
 
-      // Every owner-gated entry point rejects Alice post-transfer. This is
-      // the full surface check: any gate that forgot the `ownerOf` guard
-      // would leak ownership authority back to the pre-transfer holder.
+      // Every owner-gated entry point rejects Alice post-transfer. Any gate
+      // that forgot the `ownerOf` guard would leak ownership authority
+      // back to the pre-transfer holder.
       await expect(NFT.connect(accounts[0]).relock(0, 6)).to.be.revertedWithCustomError(
         NFT,
         'NotPositionOwner',
@@ -2945,13 +2606,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
         NFT.connect(accounts[0]).redelegate(0, toId),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
       await expect(
-        NFT.connect(accounts[0]).createWithdrawal(0, 100n),
-      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
-      await expect(
-        NFT.connect(accounts[0]).cancelWithdrawal(0),
-      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
-      await expect(
-        NFT.connect(accounts[0]).finalizeWithdrawal(0),
+        NFT.connect(accounts[0]).withdraw(0),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
@@ -3046,21 +2701,20 @@ describe('@unit DKGStakingConvictionNFT', () => {
         0,
       );
 
-      // Bob — the new owner — calls redelegate. D21: redelegate is a
-      // burn+mint, so we capture the new tokenId and assert state on it.
-      const newTokenId = await NFT.connect(accounts[4]).redelegate.staticCall(0, toId);
+      // Bob — the new owner — calls redelegate. Redelegate is in-place
+      // now (D25): the tokenId is preserved, only `identityId` flips.
       await NFT.connect(accounts[4]).redelegate(0, toId);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.identityId).to.equal(toId);
-      // Raw, lockTier, multiplier18 migrated to the new tokenId intact.
+      // Raw, lockTier, multiplier18, expiryTimestamp all preserved on the
+      // same tokenId.
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
 
-      // New NFT is owned by Bob; old NFT was burned.
-      expect(await NFT.ownerOf(newTokenId)).to.equal(accounts[4].address);
-      await expect(NFT.ownerOf(0)).to.be.reverted;
+      // NFT ownership unchanged (same tokenId, still owned by Bob).
+      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
     });
 
     it('safeTransferFrom to an EOA preserves accrued-interest semantics', async () => {

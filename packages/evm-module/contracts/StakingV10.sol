@@ -48,7 +48,24 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     `cs.cumulativeRewardsClaimed` tracks lifetime reward compounding for
  *     UI/indexer consumption.
  *   - There is no separate `rewards` bucket, no `increaseRewards` /
- *     `decreaseRewards`, no `rewardsPortion` on pending withdrawals.
+ *     `decreaseRewards`.
+ *
+ * Withdraw model (D14 — atomic):
+ *   - `withdraw()` is a single transaction. Pre-expiry is disallowed (lock
+ *     still active). Post-expiry (or tier-0 rest state) it auto-claims any
+ *     outstanding rewards into `raw`, pays out the full `raw` balance from
+ *     the `StakingStorage` TRAC vault to the owner, and deletes the CSS
+ *     position. The NFT wrapper burns the token on the back half. There is
+ *     no request/cancel/finalize dance and no address-timer delay — the
+ *     lock IS the delay, and partial withdrawals are not a first-class
+ *     feature (re-stake the remainder for the same economic result).
+ *
+ * Redelegate model (D25 — in-place):
+ *   - `redelegate()` is a single transaction that mutates `pos.identityId`
+ *     in place on CSS via `updateOnRedelegate`. Same tokenId, same
+ *     `expiryEpoch`, same rewards cursor — only the node assignment
+ *     changes. `relock` continues to use the D21/D23 burn-and-mint path
+ *     because relock materially changes tier / multiplier / expiry.
  */
 contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
@@ -56,7 +73,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
 
     string private constant _NAME = "StakingV10";
-    string private constant _VERSION = "2.0.0";
+    // Version history:
+    //   2.0.0 — initial V10 orchestrator (post-migration).
+    //   2.1.0 — atomic `withdraw` + in-place `redelegate`.
+    //   2.2.0 — aligned with CSS v2.2.0: `PendingWithdrawal` storage gone,
+    //           `redelegate` goes through `updateOnRedelegate` (tokenId +
+    //           expiryEpoch preserved), `withdraw` is a single-tx exit
+    //           with auto-claim.
+    string private constant _VERSION = "2.2.0";
 
     // ========================================================================
     // Constants
@@ -64,20 +88,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
     /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`.
     uint256 public constant SCALE18 = 1e18;
-
-    /// @notice Delay between `createWithdrawal` and `finalizeWithdrawal`.
-    ///         D14 — set to 0. Conviction positions are lock-gated
-    ///         (withdraw disallowed pre-expiry; the lock IS the delay), so
-    ///         a second address-timer gate on top of expiry is redundant
-    ///         and just adds operational friction. The `releaseAt` field
-    ///         on `PendingWithdrawal` is preserved so on-chain storage
-    ///         layout is identical to a non-zero-delay deployment; the
-    ///         `finalizeWithdrawal` check simply passes immediately.
-    ///
-    ///         This is a deployment knob: flipping it back to a non-zero
-    ///         value (e.g. `15 days`) is a one-line change + re-deploy and
-    ///         requires no storage migration.
-    uint256 public constant WITHDRAWAL_DELAY = 0;
 
     /// @notice EpochStorage shard ID for the reward pool.
     uint256 private constant EPOCH_POOL_INDEX = 1;
@@ -109,11 +119,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint96 amount,
         uint8 lockTier
     );
-    event Relocked(uint256 indexed tokenId, uint8 newLockTier, uint64 newExpiryEpoch);
+    event Relocked(uint256 indexed tokenId, uint8 newLockTier, uint64 newExpiryTimestamp);
     event Redelegated(uint256 indexed tokenId, uint72 indexed oldIdentityId, uint72 indexed newIdentityId);
-    event WithdrawalCreated(uint256 indexed tokenId, uint96 amount, uint64 releaseAt);
-    event WithdrawalCancelled(uint256 indexed tokenId);
-    event WithdrawalFinalized(uint256 indexed tokenId, uint96 amount);
+    /// @notice Authoritative atomic-withdraw event. `amount` is the total
+    ///         TRAC paid out to `staker` (post-auto-claim `raw`). The NFT
+    ///         wrapper burns `tokenId` on the back half.
+    event Withdrawn(uint256 indexed tokenId, address indexed staker, uint96 amount);
     event RewardsClaimed(uint256 indexed tokenId, uint96 amount);
     /// @notice Authoritative V8→V10 migration event. `rawAbsorbed` is the
     ///         combined `stakeBase + pendingWithdrawal` amount (D8). `isAdmin`
@@ -137,10 +148,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error InvalidLockTier();
     error LockStillActive();
     error NotPositionOwner();
-    error WithdrawalAlreadyRequested();
-    error WithdrawalNotRequested();
-    error WithdrawalDelayPending();
-    error InsufficientWithdrawable();
     error ZeroAmount();
     error MaxStakeExceeded();
     error SameIdentity();
@@ -246,7 +253,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (amount == 0) revert ZeroAmount();
         if (!profileStorage.profileExists(identityId)) revert ProfileDoesNotExist();
 
-        if (lockTier == 0) revert InvalidLockTier();
+        // Tier 0 (rest state, 1x multiplier, no lock) is a first-class valid
+        // mint target — every V10 staking position is an NFT, including
+        // no-lock liquid stake. Off-ladder tiers (2, 4, 7, 13, ...) are
+        // rejected by CSS's `expectedMultiplier18` below ("Invalid lock"),
+        // and also fail-fast at the NFT wrapper layer via `_convictionMultiplier`.
         uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockTier));
 
         uint256 maxStake = uint256(parametersStorage.maximumStake());
@@ -312,7 +323,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         _requireFullyClaimed(pos);
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        if (currentEpoch < pos.expiryEpoch) revert LockStillActive();
+        // D26 — timestamp-accurate lock gate. Tier-0 (expiryTimestamp == 0)
+        // is already in rest state; any non-zero expiry must have elapsed.
+        if (pos.expiryTimestamp != 0 && block.timestamp < uint256(pos.expiryTimestamp)) revert LockStillActive();
 
         _prepareForStakeChangeV10(currentEpoch, oldTokenId, pos.identityId);
 
@@ -330,48 +343,43 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         );
 
         ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(newTokenId);
-        emit Relocked(newTokenId, newLockTier, uint64(posAfter.expiryEpoch));
+        emit Relocked(newTokenId, newLockTier, uint64(posAfter.expiryTimestamp));
     }
 
     /**
      * @notice Move a position from its current node to `newIdentityId`.
-     *         Per-node raw/effective stake moves; global totals invariant.
-     *         Under D21 this is a burn-and-mint: `oldTokenId` is burned by
-     *         the NFT wrapper, `newTokenId` is a freshly-minted NFT the
-     *         wrapper has already allocated, and the position state moves
-     *         over via the D23 `createNewPositionFromExisting` primitive.
+     *         Same tokenId persists; only `pos.identityId` mutates.
+     *         Per-node raw / effective stake moves across at `currentEpoch`;
+     *         global totals invariant.
      *
-     * @dev Redelegate preserves tier and lifetime stats. CSS re-installs
-     *      the boost at `currentEpoch` on the NEW identity under the old
-     *      multiplier — effectively the lock "follows" the delegator to
-     *      the new node, expiring at the same wall-clock boundary the
-     *      caller originally committed to (the primitive re-derives
-     *      `expiryEpoch` from `newLockTier = pos.lockTier`, which
-     *      lengthens the remaining lock. This is a conscious UX choice:
-     *      redelegation resets the clock. Operators wanting a clean
-     *      pre-expiry move must cancel + re-stake explicitly).
+     * @dev D25 — in-place redelegate. The tokenId, `expiryEpoch`,
+     *      `lockTier`, `multiplier18`, `lastClaimedEpoch`, `migrationEpoch`
+     *      and `cumulativeRewardsClaimed` are ALL preserved. The lock
+     *      clock does NOT reset: a redelegation is a routing decision,
+     *      not a new commitment. CSS's `updateOnRedelegate` moves the
+     *      per-node effective-stake contribution at `currentEpoch` and
+     *      reassigns the pending expiry drop from the old node to the
+     *      new node at the same `expiryEpoch`.
+     *
+     *      Fresh stakes still gate on the destination's `maxStake` —
+     *      redelegating INTO a near-capped node can still revert. The
+     *      min-stake boundary on the OLD node may trigger a sharding-
+     *      table removal; the new node may cross back in. Ask recalc
+     *      runs once at the end.
      */
     function redelegate(
         address staker,
-        uint256 oldTokenId,
-        uint256 newTokenId,
+        uint256 tokenId,
         uint72 newIdentityId
     ) external onlyConvictionNFT {
         staker;
 
-        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(oldTokenId);
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
         if (pos.identityId == 0) revert PositionNotFound();
         _requireFullyClaimed(pos);
         uint72 oldIdentityId = pos.identityId;
 
         if (oldIdentityId == newIdentityId) revert SameIdentity();
-
-        // Reject if a pending withdrawal exists. The D23 primitive ALSO
-        // rejects this, but we check first so the revert surfaces the
-        // intent-level error (UX: cancel first, then redelegate).
-        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(oldTokenId);
-        if (pending.amount != 0) revert WithdrawalAlreadyRequested();
-
         if (!profileStorage.profileExists(newIdentityId)) revert ProfileDoesNotExist();
 
         uint96 raw = pos.raw;
@@ -386,19 +394,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // effective stake (which shifts the delegator's contribution
         // between the two nodes at `currentEpoch`).
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        _prepareForStakeChangeV10(currentEpoch, oldTokenId, oldIdentityId);
-        _prepareForStakeChangeV10(currentEpoch, oldTokenId, newIdentityId);
+        _prepareForStakeChangeV10(currentEpoch, tokenId, oldIdentityId);
+        _prepareForStakeChangeV10(currentEpoch, tokenId, newIdentityId);
 
-        // D23 — atomic replace. New identity, same tier/multiplier; CSS
-        // re-schedules the expiry drop on the new node and moves
-        // nodeStakeV10 across; totalStakeV10 invariant.
-        convictionStorage.createNewPositionFromExisting(
-            oldTokenId,
-            newTokenId,
-            newIdentityId,
-            pos.lockTier,
-            pos.multiplier18
-        );
+        // D25 — in-place node swap. tokenId + expiryEpoch + reward cursor
+        // preserved; per-node diffs + per-node raw + pending expiry
+        // subtraction all move from oldIdentityId to newIdentityId.
+        convictionStorage.updateOnRedelegate(tokenId, newIdentityId);
 
         // Sharding-table maintenance on BOTH nodes gates on V10 canonical stake.
         ShardingTableStorage sts = shardingTableStorage;
@@ -414,143 +416,71 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         ask.recalculateActiveSet();
 
-        emit Redelegated(newTokenId, oldIdentityId, newIdentityId);
+        emit Redelegated(tokenId, oldIdentityId, newIdentityId);
     }
 
     /**
-     * @notice Start the WITHDRAWAL_DELAY timer for a partial or full
-     *         withdrawal. Pre-expiry: disallowed (raw is locked). Post-
-     *         expiry: `amount <= pos.raw`.
+     * @notice Atomic full withdrawal. Post-expiry (or tier-0 rest state)
+     *         only. Auto-claims any outstanding rewards into `raw`, pays
+     *         out the full `raw` balance from the `StakingStorage` TRAC
+     *         vault to `staker`, and deletes the CSS position. The NFT
+     *         wrapper burns the token on return.
      *
-     * @dev D19 — no rewards/raw split anymore (rewards compound into raw),
-     *      so the single amount is drawn from `pos.raw` directly.
-     *      Decrement-at-request semantics: CSS `decreaseRaw` debits the
-     *      position + node stake + effective-stake diff immediately; the
-     *      pending struct holds only `amount` + `releaseAt`.
+     * @dev D14 — atomic withdraw. No request / cancel / finalize dance,
+     *      no address-timer delay: the lock IS the delay. Partial
+     *      withdrawals are NOT a first-class feature — a user wanting
+     *      partial liquidity should withdraw the whole position and
+     *      re-stake the remainder, which gives the same economic
+     *      result (tier-0 with 1x multiplier is effectively liquid
+     *      stake). Q3 — rewards are auto-claimed inside this call so
+     *      the user sees a single button in the UI.
      */
-    function createWithdrawal(
+    function withdraw(
         address staker,
-        uint256 tokenId,
-        uint96 amount
-    ) external onlyConvictionNFT {
-        staker;
-
-        if (amount == 0) revert ZeroAmount();
-
+        uint256 tokenId
+    ) external onlyConvictionNFT returns (uint96 amount) {
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
         if (pos.identityId == 0) revert PositionNotFound();
-        _requireFullyClaimed(pos);
 
-        ConvictionStakingStorage.PendingWithdrawal memory existing = convictionStorage.getPendingWithdrawal(tokenId);
-        if (existing.amount != 0) revert WithdrawalAlreadyRequested();
-
-        // Post-expiry only: pre-expiry the raw is locked (that's the whole
-        // point of the conviction lock). Without a rewards sidecar to
-        // withdraw from, partial withdrawals during lock are simply
-        // unavailable under D19.
-        uint256 currentEpoch = chronos.getCurrentEpoch();
-        bool unlocked = (pos.expiryEpoch != 0 && currentEpoch >= pos.expiryEpoch)
-            || pos.expiryEpoch == 0; // lock-0 rest state
+        // Lock gate: pre-expiry withdrawals are disallowed. Tier-0
+        // positions (`expiryTimestamp == 0`) always pass — they are the
+        // rest state with no lock. D26 — timestamp-accurate.
+        bool unlocked = pos.expiryTimestamp == 0 || block.timestamp >= uint256(pos.expiryTimestamp);
         if (!unlocked) revert LockStillActive();
-        if (uint256(amount) > uint256(pos.raw)) revert InsufficientWithdrawable();
 
-        _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
+        // Auto-claim any outstanding rewards (compounds into `raw`). Must
+        // happen BEFORE reading the final raw, because compounding grows
+        // it. No-op when `currentEpoch <= 1` or nothing is unclaimed.
+        _claim(tokenId);
 
-        // CSS decrements: position `raw`, nodeStakeV10, totalStakeV10,
-        // per-epoch effective-stake diff (+ pending-expiry restore if the
-        // position had one scheduled).
-        convictionStorage.decreaseRaw(tokenId, amount);
+        // Re-read after auto-claim — raw may have grown via compounding.
+        pos = convictionStorage.getPosition(tokenId);
+        amount = pos.raw;
+        require(amount > 0, "No raw");
+        uint72 identityId = pos.identityId;
 
-        uint64 releaseAt = uint64(block.timestamp + WITHDRAWAL_DELAY);
-        convictionStorage.createPendingWithdrawal(tokenId, amount, releaseAt);
+        // Delete the position: CSS handles effective-stake diff teardown,
+        // pending-expiry delta cancel, per-node enumeration pop, per-node
+        // raw aggregate decrement, global total decrement, finalization.
+        convictionStorage.deletePosition(tokenId);
 
-        // Sharding-table maintenance: node may have dropped below minimumStake.
-        uint256 newNodeStake = convictionStorage.getNodeStakeV10(pos.identityId);
-        if (
-            shardingTableStorage.nodeExists(pos.identityId) &&
-            newNodeStake < uint256(parametersStorage.minimumStake())
-        ) {
-            shardingTable.removeNode(pos.identityId);
-        }
-
-        ask.recalculateActiveSet();
-
-        emit WithdrawalCreated(tokenId, amount, releaseAt);
-    }
-
-    /**
-     * @notice Cancel a pending withdrawal before the delay elapses.
-     *         Symmetric inverse of `createWithdrawal` under D19.
-     */
-    function cancelWithdrawal(
-        address staker,
-        uint256 tokenId
-    ) external onlyConvictionNFT {
-        staker;
-
-        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
-        if (pos.identityId == 0) revert PositionNotFound();
-        _requireFullyClaimed(pos);
-
-        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
-        if (pending.amount == 0) revert WithdrawalNotRequested();
-
-        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId, pos.identityId);
-
-        convictionStorage.increaseRaw(tokenId, pending.amount);
-        convictionStorage.deletePendingWithdrawal(tokenId);
-
-        uint256 newNodeStake = convictionStorage.getNodeStakeV10(pos.identityId);
-        if (
-            !shardingTableStorage.nodeExists(pos.identityId) &&
-            newNodeStake >= uint256(parametersStorage.minimumStake())
-        ) {
-            shardingTable.insertNode(pos.identityId);
-        }
-
-        ask.recalculateActiveSet();
-
-        emit WithdrawalCancelled(tokenId);
-    }
-
-    /**
-     * @notice After WITHDRAWAL_DELAY elapses, transfer the previously-
-     *         decremented TRAC back to `staker`. Position buckets and node
-     *         aggregates already settled at create-time.
-     */
-    function finalizeWithdrawal(
-        address staker,
-        uint256 tokenId
-    ) external onlyConvictionNFT {
-        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
-        if (pos.identityId == 0) revert PositionNotFound();
-
-        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
-        if (pending.amount == 0) revert WithdrawalNotRequested();
-        if (block.timestamp < pending.releaseAt) revert WithdrawalDelayPending();
-
-        uint96 amount = pending.amount;
-
-        // TRAC flows from the StakingStorage vault to the NFT owner. This
-        // is the one mapping on StakingStorage the V10 path still interacts
-        // with — the vault itself is the protocol's TRAC custody.
+        // TRAC flows from the StakingStorage vault (protocol-wide TRAC
+        // custody) to the NFT owner. This is the only mapping on
+        // StakingStorage that the V10 path still writes to.
         stakingStorage.transferStake(staker, amount);
 
-        convictionStorage.deletePendingWithdrawal(tokenId);
-
-        // Clean up orphaned Position on full drain. `deletePosition` also
-        // pops the token from `nodeTokens` and adjusts `nodeStakeV10` —
-        // but nodeStake was already adjusted at create-time, so
-        // `deletePosition`'s own `_decreaseNodeStakeV10` would
-        // double-count. We only call `deletePosition` when `pos.raw == 0`,
-        // meaning `_decreaseNodeStakeV10(id, 0)` is a no-op inside CSS
-        // (guarded by `if (raw > 0)` in `deletePosition`).
-        ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(tokenId);
-        if (posAfter.raw == 0) {
-            convictionStorage.deletePosition(tokenId);
+        // Sharding-table maintenance: node may have dropped below minStake.
+        uint256 newNodeStake = convictionStorage.getNodeStakeV10(identityId);
+        if (
+            shardingTableStorage.nodeExists(identityId) &&
+            newNodeStake < uint256(parametersStorage.minimumStake())
+        ) {
+            shardingTable.removeNode(identityId);
         }
 
-        emit WithdrawalFinalized(tokenId, amount);
+        ask.recalculateActiveSet();
+
+        emit Withdrawn(tokenId, staker, amount);
     }
 
     /**
@@ -584,7 +514,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 tokenId
     ) external onlyConvictionNFT {
         staker;
+        _claim(tokenId);
+    }
 
+    /**
+     * @dev Internal claim body shared between the external `claim` entry
+     *      point and the atomic `withdraw` path. Advances the position's
+     *      reward cursor and compounds any outstanding rewards into `raw`.
+     *      No-op when the position has no unclaimed window (early epochs
+     *      or `lastClaimedEpoch == currentEpoch - 1`).
+     */
+    function _claim(uint256 tokenId) internal {
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
         if (pos.identityId == 0) revert PositionNotFound();
 
@@ -604,23 +544,26 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
 
         // Local cache.
-        uint256 raw = uint256(pos.raw);
+        uint256 rawU = uint256(pos.raw);
         uint256 mult18 = uint256(pos.multiplier18);
-        uint256 expiryEpoch = uint256(pos.expiryEpoch);
+        uint256 expiryTs = uint256(pos.expiryTimestamp);
+        // D26 — wall-clock → epoch projection of the position's expiry.
+        // 0 for tier-0 (no boost, no expiry).
+        uint256 expiryEpoch = expiryTs == 0 ? 0 : chronos.epochAtTimestamp(expiryTs);
         uint72 identityId = pos.identityId;
         bytes32 delegatorKey = bytes32(tokenId);
 
+        uint256 effBoosted = (rawU * mult18) / SCALE18;
+        uint256 effBase = rawU;
+
         uint256 rewardTotal = 0;
         for (uint256 e = claimFromEpoch; e <= claimToEpoch; e++) {
-            // Per-epoch effective stake (D19 — no rewards addend).
-            uint256 effStake;
-            if (expiryEpoch != 0 && e < expiryEpoch) {
-                effStake = (raw * mult18) / SCALE18;
-            } else {
-                effStake = raw;
-            }
-
-            uint256 scorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(e, identityId);
+            // D26 — score-per-stake via EpochIndex sentinels. For past
+            // epochs, `lastScorePerStake36[e]` is the definitive epoch-end
+            // value. `lastDelegatorSettled[e]` is the scorePerStake cursor
+            // at the last _prepareForStakeChangeV10 call during epoch e
+            // (zero if never).
+            uint256 scorePerStake36 = randomSamplingStorage.getEpochLastScorePerStake(identityId, e);
             uint256 settledDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
                 e,
                 identityId,
@@ -628,10 +571,38 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 lastSettledIndex36 = randomSamplingStorage
                 .getDelegatorLastSettledNodeEpochScorePerStake(e, identityId, delegatorKey);
+
             uint256 unsettledDelegatorScore18 = 0;
             if (scorePerStake36 > lastSettledIndex36) {
-                unsettledDelegatorScore18 =
-                    (effStake * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
+                if (expiryTs == 0 || e < expiryEpoch) {
+                    // Boost fully active in this epoch (or no lock: tier-0).
+                    uint256 eff = (expiryTs == 0) ? effBase : effBoosted;
+                    unsettledDelegatorScore18 = (eff * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
+                } else if (e > expiryEpoch) {
+                    // Boost already dropped for the whole epoch.
+                    unsettledDelegatorScore18 = (effBase * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
+                } else {
+                    // e == expiryEpoch. One binary search into the epoch's
+                    // checkpoint array gives scorePerStake at expiryTs. If
+                    // the delegator's last settle happened BEFORE expiry,
+                    // split the earning interval at expiryTs.
+                    uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
+                        identityId,
+                        e,
+                        uint40(expiryTs)
+                    );
+                    if (scoreAtExpiry > lastSettledIndex36) {
+                        unsettledDelegatorScore18 =
+                            (effBoosted * (scoreAtExpiry - lastSettledIndex36)) /
+                            SCALE18 +
+                            (effBase * (scorePerStake36 - scoreAtExpiry)) /
+                            SCALE18;
+                    } else {
+                        unsettledDelegatorScore18 =
+                            (effBase * (scorePerStake36 - lastSettledIndex36)) /
+                            SCALE18;
+                    }
+                }
             }
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
@@ -876,25 +847,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
 
     /**
-     * @dev Effective stake a position contributes at `epoch` (D19 — no rewards addend).
-     */
-    function _getEffectiveStakeAtEpoch(
-        ConvictionStakingStorage.Position memory pos,
-        uint256 epoch
-    ) internal pure returns (uint256) {
-        uint256 raw = uint256(pos.raw);
-        uint256 expiryEpoch = uint256(pos.expiryEpoch);
-        if (expiryEpoch != 0 && epoch < expiryEpoch) {
-            return (raw * uint256(pos.multiplier18)) / SCALE18;
-        }
-        return raw;
-    }
-
-    /**
-     * @dev Settles the delegator's score-per-stake index at `epoch` using
-     *      effective stake. If the position lives on `identityId`, settle
-     *      with real effective stake; otherwise baseline only (zero stake).
-     *      Every call site passes the target node explicitly.
+     * @dev D26 — settle the delegator's score accumulator for `epoch` up to
+     *      the latest on-chain proof. If the position lives on `identityId`,
+     *      integrate using its current effective stake, splitting at
+     *      `expiryTimestamp` when the boost transition lands inside `epoch`.
+     *      Otherwise (redelegate to a different node, or migration baseline)
+     *      just bump the delegator's cursor to the current last-value.
      */
     function _prepareForStakeChangeV10(
         uint256 epoch,
@@ -902,43 +860,61 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId
     ) internal returns (uint256 delegatorScore) {
         bytes32 delegatorKey = bytes32(tokenId);
-
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
 
-        uint256 effectiveStake = (pos.identityId == identityId)
-            ? _getEffectiveStakeAtEpoch(pos, epoch)
-            : 0;
-
-        uint256 nodeScorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(epoch, identityId);
+        uint256 nodeScorePerStake36 = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch);
         uint256 currentDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
             epoch,
             identityId,
             delegatorKey
         );
-        uint256 lastSettled = randomSamplingStorage
-            .getDelegatorLastSettledNodeEpochScorePerStake(epoch, identityId, delegatorKey);
+        uint256 lastSettled = randomSamplingStorage.getDelegatorLastSettledNodeEpochScorePerStake(
+            epoch,
+            identityId,
+            delegatorKey
+        );
 
         if (nodeScorePerStake36 == lastSettled) {
             return currentDelegatorScore18;
         }
 
-        if (effectiveStake == 0) {
-            randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
-                epoch,
-                identityId,
-                delegatorKey,
-                nodeScorePerStake36
-            );
-            return currentDelegatorScore18;
-        }
+        uint256 scoreEarned18 = 0;
+        if (pos.identityId == identityId) {
+            uint256 rawU = uint256(pos.raw);
+            uint256 mult18 = uint256(pos.multiplier18);
+            uint256 expiryTs = uint256(pos.expiryTimestamp);
+            uint256 expiryEpoch = expiryTs == 0 ? 0 : chronos.epochAtTimestamp(expiryTs);
+            uint256 effBoosted = (rawU * mult18) / SCALE18;
+            uint256 effBase = rawU;
 
-        uint256 scorePerStakeDiff36 = nodeScorePerStake36 - lastSettled;
-        uint256 scoreEarned18 = (effectiveStake * scorePerStakeDiff36) / SCALE18;
+            if (expiryTs == 0 || epoch < expiryEpoch) {
+                uint256 eff = (expiryTs == 0) ? effBase : effBoosted;
+                scoreEarned18 = (eff * (nodeScorePerStake36 - lastSettled)) / SCALE18;
+            } else if (epoch > expiryEpoch) {
+                scoreEarned18 = (effBase * (nodeScorePerStake36 - lastSettled)) / SCALE18;
+            } else {
+                // epoch == expiryEpoch: split at expiryTs using the
+                // checkpoint array on RSS.
+                uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
+                    identityId,
+                    epoch,
+                    uint40(expiryTs)
+                );
+                if (scoreAtExpiry > lastSettled) {
+                    scoreEarned18 =
+                        (effBoosted * (scoreAtExpiry - lastSettled)) /
+                        SCALE18 +
+                        (effBase * (nodeScorePerStake36 - scoreAtExpiry)) /
+                        SCALE18;
+                } else {
+                    scoreEarned18 = (effBase * (nodeScorePerStake36 - lastSettled)) / SCALE18;
+                }
+            }
+        }
 
         if (scoreEarned18 > 0) {
             randomSamplingStorage.addToEpochNodeDelegatorScore(epoch, identityId, delegatorKey, scoreEarned18);
         }
-
         randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
             epoch,
             identityId,

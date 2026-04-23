@@ -41,10 +41,6 @@ import {
 
 const SCALE18 = 10n ** 18n;
 const SIX_X = 6n * SCALE18;
-// D14 — WITHDRAWAL_DELAY collapsed to 0 since conviction lock expiry already
-// serves as the delay. Kept as a named constant so the finalize-flow test
-// stays self-documenting when the delay is reintroduced.
-const WITHDRAWAL_DELAY_SECONDS = 0;
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -342,15 +338,15 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   });
 
   // --------------------------------------------------------------------------
-  // Test 4 — withdrawal lifecycle: createWithdrawal → finalizeWithdrawal
+  // Test 4 — atomic withdrawal (D14)
   // --------------------------------------------------------------------------
   //
   // End-to-end withdrawal: lock on a 1-epoch tier, advance past expiry,
-  // `createWithdrawal` for the full amount, then `finalizeWithdrawal`
-  // immediately (D14 — WITHDRAWAL_DELAY is 0 post-V10; the conviction
-  // lock itself serves as the time-lock). Verifies TRAC refund to the
-  // staker and NFT burn on full drain.
-  it('withdrawal lifecycle: post-expiry create → finalize refunds TRAC and burns NFT on full drain (D14)', async () => {
+  // call `withdraw` once — StakingV10 auto-claims any outstanding rewards,
+  // drains the full post-claim `raw`, deletes the CSS position, burns the
+  // NFT, and transfers TRAC back to the owner. Verifies the refund, the
+  // node-stake drain, and the NFT burn.
+  it('atomic withdrawal: post-expiry withdraw auto-claims, refunds TRAC and burns NFT (D14)', async () => {
     const { identityId } = await createProfile();
     const ParametersStorage =
       await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
@@ -367,70 +363,31 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     const epochLength = await ChronosContract.epochLength();
     await time.increase(Number(epochLength) * 3);
 
-    // Satisfy the UnclaimedEpochs guard before withdrawal.
-    await NFT.connect(accounts[0]).claim(0);
+    // D26: finalization is now automatic via `CSS.settleNodeTo` which drains
+    // the per-node expiry queue lazily. Dormant windows no longer walk every
+    // epoch — the queue is event-density-bounded, not time-density-bounded.
+    // Identity parameter kept for readability in the rest of the test.
+    void identityId;
 
-    // Walk the effective-stake finalization cursor to `currentEpoch - 1`
-    // before requesting a withdrawal. createWithdrawal re-settles the
-    // position and each unfinalized epoch costs gas; dormant windows of
-    // ~30 days would otherwise blow the per-tx gas cap.
-    const currentEpochBeforeWd = Number(
-      await ChronosContract.getCurrentEpoch(),
-    );
-    const lastGlobal = Number(
-      await ConvictionStakingStorageContract.getLastFinalizedEpoch(),
-    );
-    const lastNode = Number(
-      await ConvictionStakingStorageContract.getNodeLastFinalizedEpoch(
-        identityId,
-      ),
-    );
-    const target = currentEpochBeforeWd - 1;
-    const chunk = 50;
-    for (let e = lastGlobal + chunk; e <= target; e += chunk) {
-      await ConvictionStakingStorageContract.connect(
-        accounts[0],
-      ).finalizeEffectiveStakeUpTo(e);
-    }
-    if (lastGlobal < target) {
-      await ConvictionStakingStorageContract.connect(
-        accounts[0],
-      ).finalizeEffectiveStakeUpTo(target);
-    }
-    for (let e = lastNode + chunk; e <= target; e += chunk) {
-      await ConvictionStakingStorageContract.connect(
-        accounts[0],
-      ).finalizeNodeEffectiveStakeUpTo(identityId, e);
-    }
-    if (lastNode < target) {
-      await ConvictionStakingStorageContract.connect(
-        accounts[0],
-      ).finalizeNodeEffectiveStakeUpTo(identityId, target);
-    }
-
-    // Full drain — claim() may have compounded rewards into raw (D19),
-    // so withdraw the updated pos.raw (not the original minStake).
-    const pos = await ConvictionStakingStorageContract.getPosition(0);
-    await NFT.connect(accounts[0]).createWithdrawal(0, pos.raw);
-
-    // D14 — WITHDRAWAL_DELAY=0: finalize can run in the same block as
-    // createWithdrawal, no time advance required. Lock expiry already
-    // serves as the de-facto delay.
-    if (WITHDRAWAL_DELAY_SECONDS > 0) {
-      await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-    }
-
+    // Snapshot raw BEFORE the atomic withdraw. The call auto-claims,
+    // which may compound rewards into raw; the on-chain payout is the
+    // post-claim value. Rather than trying to predict it here, read it
+    // back via the token-balance delta and the CSS state.
     const stakerBalBefore = await Token.balanceOf(accounts[0].address);
-    await NFT.connect(accounts[0]).finalizeWithdrawal(0);
+    await NFT.connect(accounts[0]).withdraw(0);
+    const stakerBalAfter = await Token.balanceOf(accounts[0].address);
 
-    // TRAC refunded (original principal + claimed rewards).
-    expect(await Token.balanceOf(accounts[0].address)).to.equal(
-      stakerBalBefore + pos.raw,
-    );
+    // TRAC refund is at least the original principal (rewards compound
+    // on top, so the transferred amount can be strictly greater).
+    expect(stakerBalAfter - stakerBalBefore).to.be.gte(minStake);
+
     // D15 — V10 node stake lives on ConvictionStakingStorage; drained to 0.
     expect(
       await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
     ).to.equal(0n);
+    // CSS position deleted.
+    const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+    expect(posAfter.identityId).to.equal(0n);
     // NFT burned → ownerOf reverts.
     await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
       NFT,

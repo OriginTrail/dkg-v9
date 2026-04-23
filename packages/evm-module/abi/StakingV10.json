@@ -12,11 +12,6 @@
   },
   {
     "inputs": [],
-    "name": "InsufficientWithdrawable",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "InvalidLockTier",
     "type": "error"
   },
@@ -79,21 +74,6 @@
   {
     "inputs": [],
     "name": "UnclaimedEpochs",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "WithdrawalAlreadyRequested",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "WithdrawalDelayPending",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "WithdrawalNotRequested",
     "type": "error"
   },
   {
@@ -198,7 +178,7 @@
       {
         "indexed": false,
         "internalType": "uint64",
-        "name": "newExpiryEpoch",
+        "name": "newExpiryTimestamp",
         "type": "uint64"
       }
     ],
@@ -269,44 +249,12 @@
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
-      }
-    ],
-    "name": "WithdrawalCancelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       },
       {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "releaseAt",
-        "type": "uint64"
-      }
-    ],
-    "name": "WithdrawalCreated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
         "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "staker",
+        "type": "address"
       },
       {
         "indexed": false,
@@ -315,25 +263,12 @@
         "type": "uint96"
       }
     ],
-    "name": "WithdrawalFinalized",
+    "name": "Withdrawn",
     "type": "event"
   },
   {
     "inputs": [],
     "name": "SCALE18",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "WITHDRAWAL_DELAY",
     "outputs": [
       {
         "internalType": "uint256",
@@ -386,24 +321,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "cancelWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -448,29 +365,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "createWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "epochStorage",
     "outputs": [
@@ -481,24 +375,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "finalizeWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -582,12 +458,7 @@
       },
       {
         "internalType": "uint256",
-        "name": "oldTokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "newTokenId",
+        "name": "tokenId",
         "type": "uint256"
       },
       {
@@ -792,6 +663,30 @@
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "staker",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "withdraw",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   }
 ]

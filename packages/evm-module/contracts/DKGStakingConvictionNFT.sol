@@ -41,36 +41,38 @@ import {HubLib} from "./libraries/HubLib.sol";
  *      `StakingV10` directly and `StakingV10.stake` pulls TRAC via
  *      `token.transferFrom(staker, stakingStorage, amount)`. The wrapper
  *      never calls `StakingStorage.*` or `ConvictionStakingStorage.*`
- *      directly for mutations — the only storage reads it does are:
- *        - one-shot `convictionStakingStorage.getPosition(oldTokenId)` in
- *          `redelegate` (to capture the pre-call `identityId` for the
- *          mirror event), and
- *        - `convictionStakingStorage.getPosition(tokenId)` in
- *          `finalizeWithdrawal` (to detect a fully-drained position so the
- *          NFT can be burned).
+ *      directly for mutations — the only storage read it does is
+ *      `convictionStakingStorage.getPosition(tokenId)` in `redelegate`,
+ *      to capture the pre-call `identityId` for the wrapper-layer event.
  *
  *      User-facing entry points:
  *        - `createConviction`                             — mint path, fresh V10 stake
  *        - `selfMigrateV8`                                — mint path, D7 self migration
  *        - `adminMigrateV8` / `adminMigrateV8Batch`       — mint path, D7 straggler rescue (admin)
  *        - `finalizeMigrationBatch`                       — DAO closer (D11), sets `v10LaunchEpoch`
- *        - `relock` / `redelegate`                        — D21 burn-and-mint position mutations
- *        - `createWithdrawal` / `cancelWithdrawal` / `finalizeWithdrawal`
+ *        - `relock`                                       — D21 burn-and-mint tier re-commit
+ *        - `redelegate`                                   — D25 in-place node swap (stable tokenId)
+ *        - `withdraw`                                     — D14 atomic burn-and-payout
  *        - `claim`
  *
- *      D21 — NFTs are ephemeral across state-changing transitions:
- *        - `relock` and `redelegate` each burn `oldTokenId` and mint
- *          `newTokenId`. The CSS-level position migrates via the D23
- *          `createNewPositionFromExisting` primitive, which preserves
+ *      NFT lifecycle:
+ *        - `createConviction` / `selfMigrateV8` / `adminMigrateV8*`:
+ *          fresh mints. Monotonic `nextTokenId`.
+ *        - `relock` (D21): burns `oldTokenId` and mints `newTokenId`.
+ *          CSS-level position state migrates via the D23
+ *          `createNewPositionFromExisting` primitive, preserving
  *          `cumulativeRewardsClaimed`, `lastClaimedEpoch`, and
  *          `migrationEpoch` into the new tokenId so off-chain reward
  *          accounting stays intact across the burn-mint.
- *        - `finalizeWithdrawal` burns the NFT iff the position is fully
- *          drained (`raw == 0` after the finalize-side CSS delete).
+ *        - `redelegate` (D25): tokenId is STABLE — no mint, no burn,
+ *          only `pos.identityId` mutates on CSS via `updateOnRedelegate`.
+ *          `expiryEpoch` is preserved: the lock clock keeps ticking.
+ *        - `withdraw` (D14): atomic. Burns `tokenId` after CSS deletes
+ *          the position and TRAC is released to the owner.
  */
 contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
     string private constant _NAME = "DKGStakingConvictionNFT";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
 
     // ========================================================================
     // Constants
@@ -79,15 +81,6 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`.
     ///         Tier table and reward math all use this scale.
     uint256 public constant SCALE18 = 1e18;
-
-    /// @notice Time between `createWithdrawal` and `finalizeWithdrawal`.
-    ///         D14 — set to 0 (see `StakingV10.WITHDRAWAL_DELAY` for the
-    ///         full rationale: conviction lock expiry is itself the delay
-    ///         gate, a second address-timer is redundant). This constant
-    ///         is kept on the wrapper for off-chain integrations that
-    ///         read it; the authoritative value used in the flow is
-    ///         `StakingV10.WITHDRAWAL_DELAY`.
-    uint256 public constant WITHDRAWAL_DELAY = 0;
 
     // ========================================================================
     // Hub-wired dependencies
@@ -144,35 +137,28 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint8 newLockTier
     );
 
-    /// @notice Emitted by `redelegate` after the old NFT is burned and a
-    ///         fresh one is minted on a new node. Global totals are
-    ///         invariant; only per-node effective stake moves. D21 — see
-    ///         `PositionRelocked` for NFT-continuity semantics.
+    /// @notice Emitted by `redelegate` after the position's identity is
+    ///         mutated in place. D25 — tokenId, `expiryEpoch`, lock tier,
+    ///         multiplier, and reward cursor are all preserved; only the
+    ///         node assignment changes. Global totals are invariant; only
+    ///         per-node effective stake moves. Authoritative event (same
+    ///         shape) is emitted by `ConvictionStakingStorage` via
+    ///         `updateOnRedelegate`; this wrapper-layer event is kept so
+    ///         off-chain indexers watching the NFT contract alone still
+    ///         see the transition.
     event PositionRedelegated(
-        uint256 indexed oldTokenId,
-        uint256 indexed newTokenId,
-        uint72 indexed newIdentityId,
-        uint72 oldIdentityId
+        uint256 indexed tokenId,
+        uint72 indexed oldIdentityId,
+        uint72 indexed newIdentityId
     );
 
-    /// @notice Emitted by `createWithdrawal` when the 15-day delay timer
-    ///         starts. The authoritative event (with `releaseAt`) is emitted
-    ///         by `StakingV10.createWithdrawal`; this wrapper-layer event is
-    ///         kept so off-chain indexers watching the NFT contract still see
-    ///         withdrawal intents.
-    event WithdrawalCreated(uint256 indexed tokenId, uint96 amount);
-
-    /// @notice Emitted by `cancelWithdrawal` when a pending withdrawal is
-    ///         cleared before finalization.
-    event WithdrawalCancelled(uint256 indexed tokenId);
-
-    /// @notice Emitted by `finalizeWithdrawal` after the delay elapses and
-    ///         TRAC is released back to the owner. The authoritative event
-    ///         (with `rawDraw` / `rewardsDraw`) is emitted by
-    ///         `StakingV10.finalizeWithdrawal`; this wrapper-layer event is
-    ///         kept so off-chain indexers watching the NFT contract still see
-    ///         the finalize step.
-    event WithdrawalFinalized(uint256 indexed tokenId);
+    /// @notice Emitted by `withdraw` after CSS deletes the position and TRAC
+    ///         is released from the vault to the owner. The NFT is burned
+    ///         immediately after. Authoritative event (with `staker`) is
+    ///         emitted by `StakingV10.withdraw`; this wrapper-layer event
+    ///         is kept so off-chain indexers watching the NFT contract
+    ///         alone still see the exit.
+    event PositionWithdrawn(uint256 indexed tokenId, uint96 amount);
 
     /// @notice Emitted by `selfMigrateV8` / `adminMigrateV8` when a V8
     ///         address-keyed delegation is migrated into a V10 NFT-backed
@@ -282,27 +268,28 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // Discrete, exact-match semantics — no snap-down. An unregistered
     // `lockTier` reverts `InvalidLockTier()`.
     //
-    // Why `0 → 1x` rather than a revert at the helper level:
-    //   The post-expiry rest state in `ConvictionStakingStorage` is
-    //   encoded as `lockTier == 0 → 1x`, and reward-math / relock /
-    //   migration callers legitimately invoke this helper with tier 0:
-    //     - relock(_, 0)          : post-expiry opt-out to permanent 1x.
-    //     - _convertToNFT(_, _, 0): V8 migrants landing at rest state
-    //                               (they never chose conviction staking).
+    // Tier 0 → 1x is a first-class tier, not an edge case:
+    //   V10 policy is that every staking position is an NFT, including
+    //   no-lock liquid stake. Tier 0 is valid on every entry point that
+    //   takes a lockTier:
+    //     - createConviction(_, _, 0): fresh mint at rest state.
+    //     - relock(_, 0)             : post-expiry opt-out to permanent 1x.
+    //     - _convertToNFT(_, _, 0)   : V8 migrants landing at rest state.
     //     - any caller reading a live position's current tier after its
     //       lock has expired back to the rest state.
-    //   See Phase 5 decisions doc Q5 for the full reasoning.
+    //   Semantics: 1.0x multiplier, `expiryEpoch == 0` (permanent, no
+    //   boost decay ever fires), TRAC withdrawable at any time via the
+    //   atomic `withdraw` path (D14 — no delay, the lock IS the delay
+    //   and tier 0 has no lock).
     //
-    //   The only entry point that forbids tier 0 is `createConviction`
-    //   (fresh mint): a brand-new conviction NFT must commit to a real
-    //   lock (tier ∈ {1, 3, 6, 12}). That policy is enforced by
-    //   `StakingV10.stake` — see the fail-fast note there.
-    //
-    //   Additionally, `createConviction` rejects DEACTIVATED tiers at
-    //   the CSS layer: `CSS.createPosition` requires `active == true`
-    //   whenever `migrationEpoch == 0`. Relock and V8→V10 migration
-    //   paths bypass that check (existence only) so users can renew
-    //   under a tier they originally committed to.
+    //   `createConviction` still rejects DEACTIVATED tiers at the CSS
+    //   layer: `CSS.createPosition` requires `active == true` whenever
+    //   `migrationEpoch == 0`. Tier 0 is seeded active at
+    //   `CSS.initialize()` and a HubOwner could deactivate it via
+    //   `deactivateTier(0)` if the no-lock product is ever retired;
+    //   relock and V8→V10 migration paths bypass the `active` check
+    //   (existence only) so users can renew under a tier they
+    //   originally committed to.
     //
     // @param lockTier Tier id; must exist in `CSS._tiers`. Maps to the
     //                 wall-clock duration registered there. NOT a Chronos
@@ -338,31 +325,26 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // approved `StakingV10` directly, and `StakingV10.stake` pulls TRAC via
     // `token.transferFrom(staker, stakingStorage, amount)`. The NFT layer
     // only mints/burns ERC-721 tokens.
-    //
-    // `StakingV10` is currently scaffolded — all its entry points revert
-    // `"NotImplemented"`. That is expected and the runtime behavior of
-    // every wrapper here is "forwards, then reverts" until downstream
-    // subagents fill the StakingV10 bodies.
 
     /// @notice Mint a fresh NFT-backed staking position on `identityId` with
-    ///         `amount` TRAC locked under the `lockTier` tier (tier index
-    ///         ∈ {1, 3, 6, 12} → wall-clock durations {30d, 90d, 180d, 360d};
-    ///         tier 0 is rejected — no rest-state mints).
+    ///         `amount` TRAC under the `lockTier` tier. Valid tiers are
+    ///         whatever `CSS.getTier(lockTier).active == true`; the seeded
+    ///         baseline is tier 0 (rest state, 1x, no lock) plus 1/3/6/12
+    ///         (30d/90d/180d/366d → 1.5x/2x/3.5x/6x). All tiers — including
+    ///         tier 0 — produce an NFT; every V10 staking position is an NFT.
     function createConviction(
         uint72 identityId,
         uint96 amount,
         uint8 lockTier
     ) external returns (uint256 tokenId) {
         if (amount == 0) revert ZeroAmount();
-        // Fail-fast on off-ladder tier values (e.g. 2, 4, 7):
-        // `_convictionMultiplier` reverts `InvalidLockTier()` for any value
-        // outside {0, 1, 3, 6, 12}. This does NOT reject tier 0 — the helper
-        // is intentionally tolerant of the rest state because relock and
-        // migration legitimately pass tier 0. The "no fresh mint at rest
-        // state" policy is enforced downstream by `StakingV10.stake`, which
-        // reverts `InvalidLockTier()` if `lockTier == 0`. A fresh conviction
-        // NFT must commit to a real lock (tier ∈ {1, 3, 6, 12}); a user who
-        // wants no lock has no business minting a conviction position.
+        // Fail-fast on tiers that don't exist in `CSS._tiers` (e.g. 2, 4,
+        // 7, 13): `_convictionMultiplier` reverts `InvalidLockTier()` when
+        // the tier is unregistered. Tier 0 (rest state, 1x) is a valid
+        // registered tier — V10 policy is that no-lock stake is a first-
+        // class NFT position, not a blocked state. Deactivated tiers are
+        // rejected further downstream by `CSS.createPosition` via
+        // `_requireActiveTier` (fresh stakes only — migrationEpoch == 0).
         _convictionMultiplier(lockTier);
 
         tokenId = nextTokenId++;
@@ -395,8 +377,12 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///      position state intact at the old tokenId.
     function relock(uint256 oldTokenId, uint8 newLockTier) external returns (uint256 newTokenId) {
         if (ownerOf(oldTokenId) != msg.sender) revert NotPositionOwner();
-        // Fail-fast on invalid tier. Same note as createConviction: the
-        // `lockTier == 0` policy check lives in `StakingV10.relock`.
+        // Fail-fast on unregistered tiers (e.g. 2, 4, 7). Tier 0 is valid:
+        // relock to the rest state is a legitimate post-expiry opt-out to
+        // permanent 1x with no new lock. Deactivated tiers are allowed on
+        // the relock path (existence-only check in CSS) so users can
+        // renew under a tier they originally committed to even if it has
+        // since been retired.
         _convictionMultiplier(newLockTier);
 
         newTokenId = nextTokenId++;
@@ -409,64 +395,50 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
 
     /// @notice Move a position from its current node to `newIdentityId`.
     ///         Per-node effective stake moves; global totals invariant.
+    ///         The tokenId is STABLE — the caller's NFT asset identity is
+    ///         preserved across the redelegation, only the node it points
+    ///         at changes.
     ///
-    /// @dev D21 — ephemeral NFT semantics. See `relock` for the
-    ///      mint-before-forward / burn-after-forward rationale — identical
-    ///      pattern applies.
-    function redelegate(
-        uint256 oldTokenId,
-        uint72 newIdentityId
-    ) external returns (uint256 newTokenId) {
-        if (ownerOf(oldTokenId) != msg.sender) revert NotPositionOwner();
+    /// @dev D25 — in-place node swap. Unlike `relock` (which burns and
+    ///      mints because tier / multiplier / expiry all change), a
+    ///      redelegation is a routing decision: the lock clock keeps
+    ///      ticking on the same `expiryEpoch`, the reward cursor
+    ///      (`lastClaimedEpoch`, `cumulativeRewardsClaimed`,
+    ///      `migrationEpoch`) carries through unchanged, and the tokenId
+    ///      itself persists so wallets and marketplaces see a stable
+    ///      asset. StakingV10 drives the CSS `updateOnRedelegate`
+    ///      primitive which moves per-node effective-stake contributions
+    ///      and pending expiry deltas across at `currentEpoch`.
+    function redelegate(uint256 tokenId, uint72 newIdentityId) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
         // Capture the pre-call `identityId` so the wrapper-layer event can
         // surface both endpoints.
-        uint72 oldIdentityId = convictionStakingStorage.getPosition(oldTokenId).identityId;
+        uint72 oldIdentityId = convictionStakingStorage.getPosition(tokenId).identityId;
 
-        newTokenId = nextTokenId++;
-        _mint(msg.sender, newTokenId);
-        stakingV10.redelegate(msg.sender, oldTokenId, newTokenId, newIdentityId);
-        _burn(oldTokenId);
+        stakingV10.redelegate(msg.sender, tokenId, newIdentityId);
 
-        emit PositionRedelegated(oldTokenId, newTokenId, newIdentityId, oldIdentityId);
+        emit PositionRedelegated(tokenId, oldIdentityId, newIdentityId);
     }
 
-    /// @notice Start the 15-day withdrawal timer for a partial or full
-    ///         withdrawal. Caller must own the NFT.
-    function createWithdrawal(uint256 tokenId, uint96 amount) external {
-        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
-        if (amount == 0) revert ZeroAmount();
-        stakingV10.createWithdrawal(msg.sender, tokenId, amount);
-        emit WithdrawalCreated(tokenId, amount);
-    }
-
-    /// @notice Cancel a pending withdrawal before the delay elapses. Returns
-    ///         the position to its pre-`createWithdrawal` state.
-    function cancelWithdrawal(uint256 tokenId) external {
-        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
-        stakingV10.cancelWithdrawal(msg.sender, tokenId);
-        emit WithdrawalCancelled(tokenId);
-    }
-
-    /// @notice After `WITHDRAWAL_DELAY` has elapsed, drain the withdrawable
-    ///         amount from the position and transfer TRAC back to the owner.
-    ///         Burns the NFT if the position is fully drained (`raw == 0`).
+    /// @notice Atomic full withdrawal. Pays out the position's entire `raw`
+    ///         balance (post-auto-claim) to the owner and burns the NFT in
+    ///         a single transaction. Caller must own the NFT.
     ///
-    /// @dev D19 — the separate `rewards` bucket was removed; rewards are
-    ///      compounded into `raw` at claim time, so "fully drained" is
-    ///      defined solely by `raw == 0`. `ConvictionStakingStorage`
-    ///      returns a zero-value Position struct after `deletePosition`,
-    ///      which still satisfies the raw==0 check, so the defensive
-    ///      read-back is safe even when StakingV10 has already deleted.
-    function finalizeWithdrawal(uint256 tokenId) external {
+    /// @dev D14 — no request/cancel/finalize dance, no address-timer
+    ///      delay. Pre-expiry reverts `LockStillActive` at StakingV10.
+    ///      Q3 — rewards are auto-claimed inside `StakingV10.withdraw`
+    ///      before the final drain, so the user sees a single button in
+    ///      the UI. Full-only by design (Q1) — a user wanting to keep
+    ///      some TRAC staked should withdraw and re-stake the remainder
+    ///      (tier 0 with 1x is effectively liquid).
+    function withdraw(uint256 tokenId) external returns (uint96 amount) {
         if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
-        stakingV10.finalizeWithdrawal(msg.sender, tokenId);
 
-        ConvictionStakingStorage.Position memory pos = convictionStakingStorage.getPosition(tokenId);
-        if (pos.raw == 0) {
-            _burn(tokenId);
-        }
+        amount = stakingV10.withdraw(msg.sender, tokenId);
 
-        emit WithdrawalFinalized(tokenId);
+        _burn(tokenId);
+
+        emit PositionWithdrawn(tokenId, amount);
     }
 
     /// @notice Walk unclaimed epochs for the position, accumulate reward,
@@ -504,8 +476,12 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint72 identityId,
         uint8 lockTier
     ) external returns (uint256 tokenId) {
-        // Fail-fast on invalid tier. `lockTier == 0` policy check lives
-        // in `StakingV10.selfConvertToNFT`.
+        // Fail-fast on unregistered tiers. Tier 0 is valid for V8→V10
+        // migration: migrants land at the rest-state tier (1x, no lock)
+        // when they want their full balance liquid post-migration.
+        // Deactivated tiers are allowed on this path (existence-only
+        // check in CSS) so stragglers can still be onboarded under the
+        // tier they originally committed to.
         _convictionMultiplier(lockTier);
 
         tokenId = nextTokenId++;

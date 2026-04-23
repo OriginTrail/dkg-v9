@@ -313,25 +313,19 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "oldTokenId",
+        "name": "tokenId",
         "type": "uint256"
       },
       {
         "indexed": true,
-        "internalType": "uint256",
-        "name": "newTokenId",
-        "type": "uint256"
+        "internalType": "uint72",
+        "name": "oldIdentityId",
+        "type": "uint72"
       },
       {
         "indexed": true,
         "internalType": "uint72",
         "name": "newIdentityId",
-        "type": "uint72"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint72",
-        "name": "oldIdentityId",
         "type": "uint72"
       }
     ],
@@ -368,6 +362,25 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "PositionWithdrawn",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "from",
         "type": "address"
@@ -389,66 +402,8 @@
     "type": "event"
   },
   {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "WithdrawalCancelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "WithdrawalCreated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "WithdrawalFinalized",
-    "type": "event"
-  },
-  {
     "inputs": [],
     "name": "SCALE18",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "WITHDRAWAL_DELAY",
     "outputs": [
       {
         "internalType": "uint256",
@@ -568,19 +523,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "cancelWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -652,42 +594,11 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "createWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
         "name": "v10LaunchEpoch",
         "type": "uint256"
       }
     ],
     "name": "finalizeMigrationBatch",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "finalizeWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -843,7 +754,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "oldTokenId",
+        "name": "tokenId",
         "type": "uint256"
       },
       {
@@ -853,13 +764,7 @@
       }
     ],
     "name": "redelegate",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "newTokenId",
-        "type": "uint256"
-      }
-    ],
+    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -1212,6 +1117,25 @@
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "withdraw",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   }
 ]

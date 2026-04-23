@@ -264,18 +264,25 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
             randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-            // D4+D15 — post-migration the only source of staked TRAC is the V10
-            // conviction layer: StakingStorage stops being written to by V10
-            // (D15), migration is mandatory (all V8 delegators move to V10
-            // positions), and the `nodeV10BaseStake` subtraction term is
-            // therefore redundant (there's no V8 principal to double-count
-            // against). The denominator is the V10 boosted effective stake.
-            uint256 effectiveNodeStake = convictionStakingStorage.getNodeEffectiveStakeAtEpoch(
-                identityId, epoch
-            );
+            // D4+D15+D26 — post-migration the only source of staked TRAC is
+            // the V10 conviction layer. The denominator is the V10 effective
+            // stake at *this instant*. Under D26 timestamp-accurate accounting
+            // we first settle the node forward to `block.timestamp` (draining
+            // any boost-expiry drops that fell inside the interval since the
+            // last proof) and then read the post-settle running effective
+            // stake.
+            uint40 tsNow = uint40(block.timestamp);
+            convictionStakingStorage.settleNodeTo(identityId, tsNow);
+            uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
             if (effectiveNodeStake > 0) {
-                uint256 nodeScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
-                randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
+                uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
+                uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
+                    deltaScorePerStake36;
+                // `appendCheckpoint` auto-seeds `firstScorePerStake36 = 0` on
+                // the first write of an epoch (scorePerStake is epoch-local
+                // under D26) and records the timestamped post-proof value for
+                // later claim-time binary-search splits at boost expiry.
+                randomSamplingStorage.appendCheckpoint(identityId, epoch, tsNow, newLast);
             }
         } else {
             revert MerkleRootMismatchError(computedMerkleRoot, expectedMerkleRoot);

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -107,6 +107,215 @@ describe('DkgNodePlugin', () => {
     // dkg_subscribe / dkg_query include_shared_memory is a boolean, not a string
     expect(byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type).toBe('boolean');
     expect(byName.get('dkg_query')!.parameters.properties.include_shared_memory.type).toBe('boolean');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Handler-level parameter drift guards: for each new tool, invoke
+  // `tool.execute(snakeCaseArgs)` with a mocked fetch and assert the daemon
+  // receives the exact camelCase body / query-string keys the route handlers
+  // in packages/cli/src/daemon.ts destructure. This catches
+  // snake_case → camelCase drift at the handler boundary — the same class of
+  // bug that cost PR A multiple review rounds.
+  // ---------------------------------------------------------------------------
+
+  describe('handler-level drift guards: snake_case args → camelCase daemon body', () => {
+    const setupPluginWithFetch = (response: unknown = {}) => {
+      const fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      return { fetchMock, plugin, byName };
+    };
+
+    const originalFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('dkg_assertion_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      await byName.get('dkg_assertion_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'chat-turns',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        name: 'chat-turns',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_assertion_write forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/write');
+      const body = JSON.parse(init.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.quads).toHaveLength(1);
+    });
+
+    it('dkg_assertion_promote forwards snake_case → camelCase body and rejects stray string "all"', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: ['urn:root-1', 'urn:root-2'],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/promote');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        entities: ['urn:root-1', 'urn:root-2'],
+        subGraphName: 'protocols',
+      });
+
+      // Blocker guard: the previous string-"all" shortcut is gone from the public
+      // tool surface. The handler now returns an error result instead of sending.
+      fetchMock.mockClear();
+      const bad = await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: 'all',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_assertion_promote omits entities when not supplied (daemon default kicks in)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.entities).toBeUndefined();
+    });
+
+    it('dkg_assertion_discard forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ discarded: true });
+      await byName.get('dkg_assertion_discard')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'draft',
+        sub_graph_name: 'scratch',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/draft/discard');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'scratch',
+      });
+    });
+
+    it('dkg_assertion_query forwards snake_case → camelCase body (no sparql)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ quads: [], count: 0 });
+      await byName.get('dkg_assertion_query')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/query');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'protocols' });
+      expect(body).not.toHaveProperty('sparql');
+    });
+
+    it('dkg_assertion_history forwards snake_case → camelCase query params (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ createdAt: 't' });
+      await byName.get('dkg_assertion_history')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        agent_address: '0xabc',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/assertion/notes/history');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(parsed.searchParams.get('agentAddress')).toBe('0xabc');
+      expect(parsed.searchParams.get('subGraphName')).toBe('protocols');
+      expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_assertion_import_file reads the file and forwards camelCase multipart fields', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-test-'));
+      const filePath = join(tmpDir, 'doc.md');
+      writeFileSync(filePath, '# Hello\n');
+
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+        ontology_ref: 'urn:onto',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/import-file');
+      expect(init.method).toBe('POST');
+      const form = init.body as FormData;
+      expect(form).toBeInstanceOf(FormData);
+      expect(form.get('contextGraphId')).toBe('ctx');
+      // content_type was omitted but file has .md extension — handler should infer text/markdown
+      expect(form.get('contentType')).toBe('text/markdown');
+      expect(form.get('ontologyRef')).toBe('urn:onto');
+      expect(form.get('subGraphName')).toBe('protocols');
+      expect((form.get('file') as File).name).toBe('doc.md');
+    });
+
+    it('dkg_sub_graph_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ created: 'protocols', contextGraphId: 'ctx' });
+      await byName.get('dkg_sub_graph_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/sub-graph/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_sub_graph_list forwards snake_case → camelCase query param (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', subGraphs: [] });
+      await byName.get('dkg_sub_graph_list')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/sub-graph/list');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(init.body).toBeUndefined();
+    });
   });
 
   it('all tools have name, description, parameters, and execute', () => {

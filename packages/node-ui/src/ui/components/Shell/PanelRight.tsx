@@ -1345,6 +1345,13 @@ export function PanelRight() {
     refreshLocalIntegrations();
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
+  // Mount-time hydrate from the stable openclaw session so chat history
+  // paints before the bridge probe completes (issue #255).
+  useEffect(() => {
+    void loadLocalHistory('openclaw', getDefaultLocalAgentSessionId('openclaw'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const intervalId = setInterval(() => {
       loadSessions();

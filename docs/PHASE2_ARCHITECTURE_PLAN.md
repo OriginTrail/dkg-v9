@@ -62,7 +62,23 @@ packages/cli/src/
 │   │   ├── assertion.ts             # /api/assertion/*
 │   │   ├── query.ts                 # /api/query
 │   │   ├── connect.ts               # /api/connect, /api/update, /api/subscribe
-│   │   ├── paranet.ts               # /api/paranet/create|list|rename|exists (legacy aliases over context-graph.ts)
+│   │   ├── paranet.ts               # /api/paranet/create|list|rename|exists
+│   │   │                            # NOT a pure alias — see below
+│   │   ├── shared-memory.ts         # /api/shared-memory/*   (publish/query/subscribe
+│   │   │                            #   to a CG's `_shared_memory` graph; interacts
+│   │   │                            #   with the same SWM state as context-graph.ts)
+│   │   ├── query-remote.ts          # /api/query-remote, /api/query-remote-sparql
+│   │   │                            #   (RPC-over-libp2p variants of /api/query)
+│   │   ├── sync.ts                  # /api/sync/catchup-status, /api/sync/trigger,
+│   │   │                            #   /api/sync/shared-memory
+│   │   ├── local-agent-integrations.ts # /api/local-agent-integrations*
+│   │   │                            #   (OpenClaw registrar, heartbeat, list)
+│   │   ├── verify.ts                # /api/verify (verified-memory single-KA verify)
+│   │   ├── ccl.ts                   # /api/ccl/eval, /api/ccl/policy/*
+│   │   ├── memory.ts                # /api/memory/* (L1/L2 memory ingest/query)
+│   │   ├── epcis.ts                 # /api/epcis/* (EPCIS 2.0 event ingest/query)
+│   │   ├── identity.ts              # /api/identity*, /api/wallets*
+│   │   │                            #   (ensureIdentity, keystore wallet CRUD)
 │   │   ├── files.ts                 # /api/file/*
 │   │   ├── genui.ts                 # /api/genui/render
 │   │   ├── events.ts                # /api/events  (SSE)
@@ -85,11 +101,13 @@ Recommended PR ordering (smallest → largest, each is independently mergeable):
 
 1. Extract `http/router.ts`, `http/auth.ts`, `http/responses.ts`, `http/readBody.ts` only. `daemon.ts` keeps the giant `if (req.method === ... && path === ...)` chain but each branch becomes a 5‑line dispatch.
 2. Extract `routes/status.ts`, `routes/well-known.ts`, `routes/files.ts`, `routes/events.ts` — the simple, side‑effect‑light routes.
-3. Extract `routes/agents.ts`, `routes/skills.ts`, `routes/chat.ts`.
+3. Extract `routes/agents.ts`, `routes/identity.ts`, `routes/skills.ts`, `routes/chat.ts`.
 4. Extract `routes/openclaw-channel.ts` — by itself ~600 LOC, the largest single sub‑surface.
 5. Extract `routes/publisher.ts`.
-6. Extract `routes/context-graph.ts` and `routes/sub-graph.ts` (paired — sub-graph routes share the private-CG gating helpers that live with context-graph), then `routes/assertion.ts`, `routes/query.ts`, `routes/connect.ts`, `routes/genui.ts`.
+6. Extract `routes/context-graph.ts` and `routes/sub-graph.ts` (paired — sub-graph routes share the private-CG gating helpers that live with context-graph), then `routes/paranet.ts` (V10 create/register multiplexing lives here — see note below), `routes/assertion.ts`, `routes/query.ts`, `routes/query-remote.ts`, `routes/shared-memory.ts`, `routes/sync.ts`, `routes/local-agent-integrations.ts`, `routes/verify.ts`, `routes/ccl.ts`, `routes/memory.ts`, `routes/epcis.ts`, `routes/connect.ts`, `routes/genui.ts`.
 7. Move helpers into `manifest/`, `markitdown/`, `mcp-version.ts`, `catchup.ts`.
+
+> **`/api/paranet/create` is NOT a pure alias over `/api/context-graph/create`.** The V10 paranet route additionally multiplexes the on‑chain create/register flow and accepts fields the legacy context‑graph route ignores (`register`, `allowedPeers`, `participantIdentityIds`, `requiredSignatures`, paranet curator + ACL parameters). Treat it as a separate compatibility route during the split. If consolidation ever happens, it is its own semver‑breaking PR with a dedicated migration note — not part of this "lift, don't rewrite" phase.
 
 End state: `daemon.ts` ≤ 1 kLOC; no single route module > 800 LOC.
 
@@ -110,7 +128,8 @@ packages/agent/src/
 ├── dkg-agent.ts                     ~1.0 kLOC — facade: composes the parts, owns lifecycle
 ├── agent/
 │   ├── identity.ts                  # peerId, wallet, defaultAgentAddress, registerAgent,
-│   │                                # listLocalAgents, resolveAgentByToken, resolveAgentAddress
+│   │                                # listLocalAgents, resolveAgentByToken, resolveAgentAddress,
+│   │                                # ensureIdentity (keystore bootstrap / wallet creation)
 │   ├── profile.ts                   # publishProfile (already exists; merge ProfileManager here)
 │   ├── discovery.ts                 # findAgents, findSkills, findAgentByPeerId  (already a module)
 │   ├── publish.ts                   # publish, update, share, conditionalShare,
@@ -124,8 +143,15 @@ packages/agent/src/
 │   ├── context-graph.ts             # createContextGraph, registerContextGraphOnChain,
 │   │                                # addBatchToContextGraph, isCuratorOf,
 │   │                                # inviteToContextGraph, subscribe/unsubscribe
+│   ├── context-graph-discovery.ts   # listContextGraphs, getContextGraphMetadata,
+│   │                                # catch-up helpers (pullContextGraphFromPeers),
+│   │                                # approveJoinRequest, listParticipants
 │   ├── endorse.ts                   # endorse  (delegates to existing endorse.ts builder)
 │   ├── verify.ts                    # verify, propose-verify, ConsensusVerified promotion
+│   ├── ccl.ts                       # CCL policy eval + policy CRUD flows currently
+│   │                                # inlined on DKGAgent (evalCcl, registerPolicy, etc.)
+│   ├── network.ts                   # networkId, pingPeers, peer list helpers
+│   │                                # (libp2p health/identity surface exposed on DKGAgent)
 │   ├── chat.ts                      # sendChat, onChat
 │   └── skills.ts                    # invokeSkill + skill registration
 └── dkg-agent-types.ts               # public option/result interfaces shared by the parts
@@ -164,7 +190,15 @@ End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC. The implemen
 ### 4. Risks & mitigations
 
 - **Risk:** churn in import paths breaks downstream consumers (CLI, node‑ui, MCP).
-  **Mitigation:** keep `dkg-agent.ts` and `daemon.ts` as facades that re‑export the public surface. Between every split PR, run `pnpm -r build` (builds every package that exposes a `build` script — this is the closest thing to a repo‑wide typecheck we have today) and the full agent + publisher + node‑ui + cli test suites. A repo‑wide `typecheck` script per package is itself a Phase‑2 follow‑up, not a prerequisite.
+  **Mitigation:** keep `dkg-agent.ts` and `daemon.ts` as facades that re‑export the public surface. Between every split PR, run `pnpm -r build` (builds every package that exposes a `build` script — this is the closest thing to a repo‑wide typecheck we have today) and the following test suites:
+  - `packages/agent` (DKGAgent unit + integration)
+  - `packages/publisher` (phase-sequences + publish/update regression)
+  - `packages/cli` (daemon HTTP behaviour + CLI integration)
+  - `packages/node-ui` (chat-memory, operations view)
+  - `packages/mcp-server` (MCP tool schema + integration — the MCP server is an in-repo `/api/query`, `/api/context-graph/list`, `/api/subscribe`, and `/api/publisher/*` client; a route move that breaks its calls would otherwise slip through the daemon-only tests)
+  - `packages/mcp-dkg` (the DKG-flavoured MCP bundle; same rationale)
+
+  A repo‑wide `typecheck` script per package is itself a Phase‑2 follow‑up, not a prerequisite.
 
 - **Risk:** lifting code accidentally widens trust boundaries (e.g. dropping the A‑1 `callerAgentAddress` check during a route move or during the `DKGAgent` split).
   **Mitigation:** two-layer coverage, *both* required before each route or module split merges.

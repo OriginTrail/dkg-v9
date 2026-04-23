@@ -139,10 +139,13 @@ export class DkgDaemonClient {
       /**
        * P-13: minimum trust level. Only meaningful for
        * `view: "verified-memory"`; ignored (silently) on WM/SWM views.
-       * Accepts the string form or an integer 0..3. See
-       * `packages/query/src/query-engine.ts QueryOptions.minTrust`.
+       *
+       * The daemon implements only `SelfAttested` / `Endorsed` today —
+       * higher tiers (Q-1 follow-up) are rejected with HTTP 400, so the
+       * public client surface only advertises the implementable values.
+       * See `packages/query/src/query-engine.ts QueryOptions.minTrust`.
        */
-      minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
+      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
     },
   ): Promise<any> {
     return this.post('/api/query', {

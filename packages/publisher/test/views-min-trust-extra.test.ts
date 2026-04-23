@@ -184,19 +184,36 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
 
   it(
     'accepts the legacy `_minTrust` alias as a back-compat normalizer ' +
-      '(Codex PR #239 review: former `_minTrust` SDK consumers must not silently lose the filter)',
+      '(Codex PR #239 iter-7: assert the alias is materially threaded — ' +
+      'previously this test only checked for `resolves.toBeDefined` which stayed green ' +
+      'even if the alias was silently dropped on the way to the engine.)',
     async () => {
       // `_minTrust` was briefly exported on QueryOptions before V10.
       // `resolveViewGraphs` itself only consumes `minTrust`, but the
       // engine-level normalisation `options.minTrust ?? options._minTrust`
-      // MUST forward the legacy form through. This test exercises the
-      // engine path (not the resolver) to confirm the alias still works.
+      // MUST forward the legacy form through.
+      //
+      // To prove the alias is actually honoured (not silently dropped)
+      // we push a value the VALIDATOR rejects — `PartiallyVerified` —
+      // via `_minTrust` only. If the alias is threaded, the engine
+      // validator sees the above-Endorsed value and throws. If the
+      // alias gets silently lost, the engine sees `minTrust === undefined`
+      // and the query resolves normally — so resolve-vs-reject is a
+      // deterministic signal for the alias being alive.
       const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
       const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
       const store = new OxigraphStore();
       const engine = new DKGQueryEngine(store);
-      // Endorsed via the legacy key alone — should route to
-      // verified-memory minus the root graph (same as `minTrust: Endorsed`).
+      await expect(
+        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+          contextGraphId: CG,
+          view: 'verified-memory',
+          _minTrust: TrustLevel.PartiallyVerified,
+        }),
+      ).rejects.toThrow(/Invalid minTrust=2 for verified-memory/);
+      // Endorsed via the legacy key alone — must resolve. This
+      // separates "alias forwards the value" (rejection above) from
+      // "alias forwards + value is valid" (resolution here).
       await expect(
         engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
           contextGraphId: CG,
@@ -204,14 +221,17 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           _minTrust: TrustLevel.Endorsed,
         }),
       ).resolves.toBeDefined();
-      // Explicit `minTrust` wins over `_minTrust` (so a caller that sets
-      // both gets the new-form semantics).
+      // Explicit `minTrust` wins over `_minTrust` — if we set
+      // `minTrust: SelfAttested` and `_minTrust: PartiallyVerified`,
+      // the engine must see the legal SelfAttested and resolve.
+      // Dropping `_minTrust` entirely would also resolve here, so this
+      // case only rules out the "alias overrides explicit field" bug.
       await expect(
         engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
           contextGraphId: CG,
           view: 'verified-memory',
           minTrust: TrustLevel.SelfAttested,
-          _minTrust: TrustLevel.ConsensusVerified,
+          _minTrust: TrustLevel.PartiallyVerified,
         }),
       ).resolves.toBeDefined();
     },

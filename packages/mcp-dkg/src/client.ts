@@ -157,12 +157,16 @@ export class DkgClient {
     assertionName?: string;
     /**
      * P-13: minimum trust level to admit into results. Only meaningful for
-     * `view: "verified-memory"`. Accepts either the string form
-     * (`"SelfAttested" | "Endorsed" | "PartiallyVerified" | "ConsensusVerified"`)
-     * or the matching integer (0..3). Values above `Endorsed` are currently
-     * rejected by the daemon — see P-13 notes in `packages/query`.
+     * `view: "verified-memory"`; silently ignored on WM/SWM views.
+     *
+     * The daemon currently implements only `SelfAttested` (0) and
+     * `Endorsed` (1) — the higher tiers are tracked by Q-1 (per-graph
+     * trust tagging) and will be accepted once that ships. Until then
+     * the daemon returns HTTP 400 on `PartiallyVerified` / `ConsensusVerified`,
+     * so the public client type only advertises the two values the
+     * server actually honours to avoid documented-yet-failing inputs.
      */
-    minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
+    minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
   }): Promise<SparqlResult> {
     const body: Record<string, unknown> = { sparql: args.sparql };
     if (args.contextGraphId) body.contextGraphId = args.contextGraphId;

@@ -250,7 +250,12 @@ export class ApiClient {
       assertionName?: string;
       subGraphName?: string;
       verifiedGraph?: string;
-      minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
+      /**
+       * P-13: implementable tiers are `SelfAttested` (0) and `Endorsed`
+       * (1) only. `PartiallyVerified` / `ConsensusVerified` fail fast
+       * with a 400 at the daemon until Q-1 lands.
+       */
+      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
     },
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {

@@ -636,7 +636,13 @@ export function mergeOpenClawConfig(
     log(`Set plugins.entries.${pluginId}.config.installedWorkspace = "${installedWorkspace}"`);
   }
 
-  // Ensure plugin-registered tools are visible to the agent
+  // Ensure plugin-registered tools are visible to the agent. Track whether THIS
+  // merge pass actually mutates anything under `config.tools` so `mergedToolsShape`
+  // can be refreshed only when we've genuinely written to the section. If the user
+  // has already settled the tools section (or has intentionally changed it after an
+  // earlier merge), no mutation fires here and the snapshot stays whatever a prior
+  // merge captured — preserving the correct ownership semantics for unmerge.
+  let mutatedTools = false;
   if (!config.tools) config.tools = {};
   if (!Array.isArray(config.tools.alsoAllow)) {
     // Preserve existing string value if present
@@ -645,6 +651,7 @@ export function mergeOpenClawConfig(
   }
   if (!config.tools.alsoAllow.includes('group:plugins')) {
     config.tools.alsoAllow.push('group:plugins');
+    mutatedTools = true;
     log('Added "group:plugins" to tools.alsoAllow');
   }
 
@@ -663,12 +670,14 @@ export function mergeOpenClawConfig(
       adapterEntryForCapture.previousToolsProfile = null;
     }
     config.tools.profile = 'full';
+    mutatedTools = true;
     log('Set tools.profile = "full" to expose plugin tools');
   } else if (config.tools.profile === 'coding') {
     if (adapterEntryForCapture && !('previousToolsProfile' in adapterEntryForCapture)) {
       adapterEntryForCapture.previousToolsProfile = 'coding';
     }
     config.tools.profile = 'full';
+    mutatedTools = true;
     log('Upgraded tools.profile from "coding" to "full" to expose plugin tools');
   }
   // If the user explicitly set "minimal" or "messaging", respect that — they may
@@ -696,17 +705,24 @@ export function mergeOpenClawConfig(
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {};
   }
+  // `previousChannelsDkgUi` is first-wins — it captures the ORIGINAL pre-merge
+  // user state (absent / degenerate) at the very first install so unmerge can
+  // restore verbatim. `mergedChannelsDkgUi` tracks our LATEST output and MUST
+  // be refreshed on every write, since a later re-merge (e.g. after the user
+  // deletes or strips channels.dkg-ui, forcing us to re-create at a different
+  // port) would otherwise leave a stale snapshot and break the deep-equal
+  // ownership check on disconnect.
   const dkgUiChannel = config.channels['dkg-ui'];
   const lastMergedChannel = adapterEntryForCapture?.mergedChannelsDkgUi as Record<string, unknown> | undefined;
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
     // Channel absent before merge → on disconnect, delete it (only if still
-    // matches the shape we wrote). Capture both the prior absence (`null`) and
-    // the exact value we're about to write so unmerge can deep-equal-compare
-    // and leave user post-merge edits alone.
+    // matches the shape we wrote).
     const created = { enabled: true, port: adapterChannelPort };
-    if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
-      adapterEntryForCapture.previousChannelsDkgUi = null;
-      adapterEntryForCapture.mergedChannelsDkgUi = { ...created };
+    if (adapterEntryForCapture) {
+      if (!('previousChannelsDkgUi' in adapterEntryForCapture)) {
+        adapterEntryForCapture.previousChannelsDkgUi = null; // first-wins
+      }
+      adapterEntryForCapture.mergedChannelsDkgUi = { ...created }; // always refresh
     }
     config.channels['dkg-ui'] = created;
     log(`Created channels.dkg-ui with port ${adapterChannelPort} to keep plugin in full runtime mode`);
@@ -714,12 +730,13 @@ export function mergeOpenClawConfig(
     // Check whether the existing entry has any non-`enabled` key.
     const hasNonEnabledKey = Object.keys(dkgUiChannel).some((k) => k !== 'enabled');
     if (!hasNonEnabledKey) {
-      // Capture the degenerate shape + exact merge output so disconnect can
-      // restore verbatim iff the channel hasn't been edited since.
+      // Degenerate shape → upgrade.
       const upgraded = { ...dkgUiChannel, port: adapterChannelPort };
-      if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
-        adapterEntryForCapture.previousChannelsDkgUi = { ...dkgUiChannel };
-        adapterEntryForCapture.mergedChannelsDkgUi = { ...upgraded };
+      if (adapterEntryForCapture) {
+        if (!('previousChannelsDkgUi' in adapterEntryForCapture)) {
+          adapterEntryForCapture.previousChannelsDkgUi = { ...dkgUiChannel }; // first-wins
+        }
+        adapterEntryForCapture.mergedChannelsDkgUi = { ...upgraded }; // always refresh
       }
       config.channels['dkg-ui'] = upgraded;
       log(`Added port ${adapterChannelPort} to channels.dkg-ui to keep plugin in full runtime mode`);
@@ -729,9 +746,6 @@ export function mergeOpenClawConfig(
       // after the user edits `plugins.entries.adapter-openclaw.config.channel.port`
       // (or passes a different port via entryConfig) propagates to the top-level
       // channel instead of leaving the old adapter-written port in place.
-      // `previousChannelsDkgUi` is first-wins (keeps the original user state),
-      // but `mergedChannelsDkgUi` tracks the latest adapter output so the
-      // unmerge ownership check sees the refreshed value.
       const refreshed: Record<string, unknown> = { ...dkgUiChannel, port: adapterChannelPort };
       if (!isDeepStrictEqual(refreshed, lastMergedChannel)) {
         if (adapterEntryForCapture) {
@@ -743,19 +757,29 @@ export function mergeOpenClawConfig(
       // else: already up to date — no-op keeps idempotency on successive re-runs.
     }
     // Otherwise the user has modified channels.dkg-ui since install (or created
-    // it themselves with non-enabled keys). Leave alone. No capture because we
+    // it themselves with non-enabled keys). Leave alone. No refresh because we
     // didn't mutate — disconnect must not touch a user-owned channel.
   }
 
   // Capture the full `config.tools` shape AFTER all merge mutations (profile +
-  // alsoAllow). Unmerge uses this as a deep-equal ownership check: if the user
-  // has edited anything under `tools` since our merge, we leave our mutations
-  // alone rather than risk clobbering the surrounding section. Always overwrite
-  // on re-merge — unlike `previousToolsProfile` (first-wins to preserve the
-  // ORIGINAL user value), this snapshot tracks our LATEST output, so re-running
-  // stays idempotent because merge always produces the same post-merge shape
-  // from the same inputs.
-  if (adapterEntryForCapture) {
+  // alsoAllow) — but ONLY when this pass actually mutated `config.tools`.
+  // Unmerge uses this as a deep-equal ownership check: if the user has edited
+  // anything under `tools` since our last write, we leave our mutations alone.
+  //
+  // Gating on `mutatedTools` matters for the re-run case where an earlier merge
+  // set `profile: "full"` + captured the snapshot, the user later changed the
+  // profile to `"minimal"` and added other `tools.*` fields, and now setup runs
+  // again: our profile block no longer mutates (respects "minimal"), alsoAllow
+  // is already present (no push), so we don't touch `config.tools` at all. If
+  // we unconditionally overwrote `mergedToolsShape` with the user's current
+  // tools shape, unmerge would then see a perfect deep-equal match and revert
+  // `previousToolsProfile` — silently clobbering the user's "minimal" choice.
+  // Keeping the snapshot at the PRIOR adapter output means unmerge's deep-equal
+  // fails (correct ownership: user now owns the section) and the revert is
+  // skipped. On the no-op first merge (tools.profile already "full" + alsoAllow
+  // already present), no snapshot is captured at all — also correct, because we
+  // never took ownership of the section.
+  if (mutatedTools && adapterEntryForCapture) {
     adapterEntryForCapture.mergedToolsShape = structuredClone(config.tools);
   }
 

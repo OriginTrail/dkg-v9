@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -35,6 +35,7 @@ describe('DkgNodePlugin', () => {
     expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
 
     const toolNames = registeredTools.map(t => t.name);
+    // Existing 11 active tools
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
     expect(toolNames).toContain('dkg_list_context_graphs');
@@ -46,9 +47,498 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(toolNames).toContain('dkg_list_paranets');
-    expect(toolNames).toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(13);
+    // 10 new tools (assertion lifecycle + sub-graph management + SWM→VM publish)
+    expect(toolNames).toContain('dkg_assertion_create');
+    expect(toolNames).toContain('dkg_assertion_write');
+    expect(toolNames).toContain('dkg_assertion_promote');
+    expect(toolNames).toContain('dkg_assertion_discard');
+    expect(toolNames).toContain('dkg_assertion_import_file');
+    expect(toolNames).toContain('dkg_assertion_query');
+    expect(toolNames).toContain('dkg_assertion_history');
+    expect(toolNames).toContain('dkg_sub_graph_create');
+    expect(toolNames).toContain('dkg_sub_graph_list');
+    expect(toolNames).toContain('dkg_shared_memory_publish');
+    // Legacy V9 paranet aliases are removed as of v10-rc (`dkg_list_paranets`, `dkg_paranet_create`).
+    expect(toolNames).not.toContain('dkg_list_paranets');
+    expect(toolNames).not.toContain('dkg_paranet_create');
+    expect(registeredTools.length).toBe(21);
+  });
+
+  it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
+    const plugin = new DkgNodePlugin();
+    const registeredTools: OpenClawTool[] = [];
+
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registerTool: (tool) => registeredTools.push(tool),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    };
+
+    plugin.register(mockApi);
+
+    const byName = new Map(registeredTools.map(t => [t.name, t] as const));
+
+    const expectRequired = (name: string, required: string[]) => {
+      const tool = byName.get(name);
+      expect(tool, `${name} should be registered`).toBeTruthy();
+      const props = tool!.parameters.properties;
+      for (const key of required) {
+        expect(props, `${name}.${key} should be declared in parameters.properties`).toHaveProperty(key);
+      }
+      expect(tool!.parameters.required).toEqual(expect.arrayContaining(required));
+    };
+
+    expectRequired('dkg_assertion_create', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_write', ['context_graph_id', 'name', 'quads']);
+    expectRequired('dkg_assertion_promote', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_import_file', ['context_graph_id', 'name', 'file_path']);
+    expectRequired('dkg_assertion_query', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
+    expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
+    expectRequired('dkg_sub_graph_list', ['context_graph_id']);
+    expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
+
+    // dkg_shared_memory_publish must declare `sub_graph_name` so agents that
+    // create/write/promote into a sub-graph can publish the promoted data
+    // through the same sub-graph instead of hitting the root SWM graph.
+    const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
+    expect(publishProps).toHaveProperty('sub_graph_name');
+    expect(publishProps.sub_graph_name.type).toBe('string');
+
+    // dkg_assertion_write.quads is an array of {subject,predicate,object}
+    const writeTool = byName.get('dkg_assertion_write')!;
+    expect(writeTool.parameters.properties.quads.type).toBe('array');
+    expect(writeTool.parameters.properties.quads.items).toBeDefined();
+
+    // dkg_subscribe / dkg_query `include_shared_memory` is boolean-only.
+    // V10-rc is the first product release — no v9 back-compat in the public
+    // tool surface, so the schema and handler only accept the boolean form.
+    const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
+    const querySchema = byName.get('dkg_query')!.parameters.properties.include_shared_memory.type;
+    expect(subSchema).toBe('boolean');
+    expect(querySchema).toBe('boolean');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Handler-level parameter drift guards: for each new tool, invoke
+  // `tool.execute(snakeCaseArgs)` with a mocked fetch and assert the daemon
+  // receives the exact camelCase body / query-string keys the route handlers
+  // in packages/cli/src/daemon.ts destructure. This catches
+  // snake_case → camelCase drift at the handler boundary — the same class of
+  // bug that cost PR A multiple review rounds.
+  // ---------------------------------------------------------------------------
+
+  describe('handler-level drift guards: snake_case args → camelCase daemon body', () => {
+    const setupPluginWithFetch = (response: unknown = {}) => {
+      const fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      return { fetchMock, plugin, byName };
+    };
+
+    const originalFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('dkg_assertion_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      await byName.get('dkg_assertion_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'chat-turns',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        name: 'chat-turns',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_assertion_write forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/write');
+      const body = JSON.parse(init.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.quads).toHaveLength(1);
+    });
+
+    it('dkg_assertion_promote forwards snake_case → camelCase body and rejects stray string "all"', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: ['urn:root-1', 'urn:root-2'],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/promote');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        entities: ['urn:root-1', 'urn:root-2'],
+        subGraphName: 'protocols',
+      });
+
+      // Blocker guard: the previous string-"all" shortcut is gone from the public
+      // tool surface. The handler now returns an error result instead of sending.
+      fetchMock.mockClear();
+      const bad = await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: 'all',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_assertion_promote omits entities when not supplied (daemon default kicks in)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.entities).toBeUndefined();
+    });
+
+    it('dkg_assertion_discard forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ discarded: true });
+      await byName.get('dkg_assertion_discard')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'draft',
+        sub_graph_name: 'scratch',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/draft/discard');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'scratch',
+      });
+    });
+
+    it('dkg_assertion_query forwards snake_case → camelCase body (no sparql)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ quads: [], count: 0 });
+      await byName.get('dkg_assertion_query')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/query');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'protocols' });
+      expect(body).not.toHaveProperty('sparql');
+    });
+
+    it('dkg_assertion_history forwards snake_case → camelCase query params (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ createdAt: 't' });
+      await byName.get('dkg_assertion_history')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        agent_address: '0xabc',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/assertion/notes/history');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(parsed.searchParams.get('agentAddress')).toBe('0xabc');
+      expect(parsed.searchParams.get('subGraphName')).toBe('protocols');
+      expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_assertion_import_file reads the file and forwards camelCase multipart fields (.md → text/markdown)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-test-'));
+      const filePath = join(tmpDir, 'doc.md');
+      writeFileSync(filePath, '# Hello\n');
+
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+        ontology_ref: 'urn:onto',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/import-file');
+      expect(init.method).toBe('POST');
+      const form = init.body as FormData;
+      expect(form).toBeInstanceOf(FormData);
+      expect(form.get('contextGraphId')).toBe('ctx');
+      // content_type was omitted but file has .md extension — handler should infer text/markdown
+      expect(form.get('contentType')).toBe('text/markdown');
+      expect(form.get('ontologyRef')).toBe('urn:onto');
+      expect(form.get('subGraphName')).toBe('protocols');
+      expect((form.get('file') as File).name).toBe('doc.md');
+    });
+
+    it('dkg_assertion_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+
+      const cases: Array<[string, string]> = [
+        ['doc.pdf', 'application/pdf'],
+        ['doc.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+        ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+        ['page.html', 'text/html'],
+        ['page.htm', 'text/html'],
+        ['feed.xml', 'application/xml'],
+        ['book.epub', 'application/epub+zip'],
+        ['notes.txt', 'text/plain'],
+        ['data.csv', 'text/csv'],
+        ['config.json', 'application/json'],
+      ];
+
+      for (const [fileName, expectedMime] of cases) {
+        const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+        const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-mime-'));
+        const filePath = join(tmpDir, fileName);
+        writeFileSync(filePath, 'dummy');
+        await byName.get('dkg_assertion_import_file')!.execute('tc', {
+          context_graph_id: 'ctx',
+          name: 'notes',
+          file_path: filePath,
+        });
+        const form = fetchMock.mock.calls[0][1]?.body as FormData;
+        expect(form.get('contentType'), `${fileName} should infer ${expectedMime}`).toBe(expectedMime);
+      }
+    });
+
+    it('dkg_assertion_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-unknown-'));
+      const filePath = join(tmpDir, 'blob.xyz');
+      writeFileSync(filePath, 'dummy');
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+      });
+      const form = fetchMock.mock.calls[0][1]?.body as FormData;
+      // Handler left contentType undefined → client does NOT append the form field,
+      // daemon falls through to the Blob's default 'application/octet-stream' type.
+      expect(form.has('contentType')).toBe(false);
+    });
+
+    it('dkg_sub_graph_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ created: 'protocols', contextGraphId: 'ctx' });
+      await byName.get('dkg_sub_graph_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/sub-graph/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_sub_graph_list forwards snake_case → camelCase query param (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', subGraphs: [] });
+      await byName.get('dkg_sub_graph_list')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/sub-graph/list');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_shared_memory_publish forwards snake_case → camelCase body with selection="all" when omitted', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-1', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/shared-memory/publish');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: 'all', clearAfter: true });
+    });
+
+    it('dkg_shared_memory_publish forwards explicit root_entities as selection array with clearAfter=false (subset safety default)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-2', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: ['urn:a', 'urn:b'],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Subset publishes default to clearAfter=false so roots NOT in `selection`
+      // aren't clobbered as a side-effect of publishing a subset.
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
+    });
+
+    it('dkg_shared_memory_publish plumbs sub_graph_name through to subGraphName for sub-graph-scoped publishes', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-5', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Without this, an agent that created/wrote/promoted into a sub-graph
+      // would publish to the root shared-memory graph instead of the sub-graph.
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.contextGraphId).toBe('ctx');
+    });
+
+    it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: 'all', // Agents must send an array, never a bare string.
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('root_entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_query explicitly rejects the v9 paranet_id field with a clear error', async () => {
+      // V10-rc is the first product release; there is no v9 back-compat on the
+      // public tool surface. Silently ignoring `paranet_id` would let stale v9
+      // agent code run unscoped queries thinking it was scoping them — a
+      // dangerous failure mode. The handler rejects the field explicitly so
+      // the caller's wrong assumption surfaces instead of producing garbage.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        paranet_id: 'my-cg',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_query rejects a stringified include_shared_memory instead of silently coercing to false', async () => {
+      // Schema declares include_shared_memory as boolean. A permissive host
+      // might still pass `"true"` through. If we silently coerced it to
+      // `false`, the caller would miss SWM data they thought they were
+      // requesting — a worse failure mode than a loud error.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        include_shared_memory: 'true',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('include_shared_memory');
+      expect(result.content[0].text).toContain('boolean');
+    });
+
+    it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_subscribe')!.execute('tc', {
+        context_graph_id: 'ctx',
+        include_shared_memory: 'true',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('include_shared_memory');
+      expect(result.content[0].text).toContain('boolean');
+    });
+
+    it('dkg_assertion_promote description points to dkg_shared_memory_publish as the next step', () => {
+      // dkg_publish is a one-shot write-AND-publish helper. After promote the
+      // data is already in SWM, so the correct finalizer is
+      // dkg_shared_memory_publish — calling dkg_publish would append
+      // duplicates. The promote description must steer agents correctly.
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const promote = tools.find((t) => t.name === 'dkg_assertion_promote')!;
+      expect(promote.description).toContain('dkg_shared_memory_publish');
+      expect(promote.description).toMatch(/NOT dkg_publish/);
+    });
+
+    it('dkg_assertion_write escapes every N-Triples ECHAR control character in literal objects', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [
+          {
+            subject: 'https://example.org/a',
+            predicate: 'https://schema.org/text',
+            // Includes: \n, \t, \r, ", \, \f (form-feed), \b (backspace).
+            // Missing \f / \b escapes would leave raw 0x0C / 0x08 bytes in
+            // the JSON body and cause strict triple-store parsers to reject
+            // the literal.
+            object: 'line1\nline2\tcol\rend"with quote\\and backslash\fff\bbb',
+          },
+        ],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.quads[0].object).toBe(
+        '"line1\\nline2\\tcol\\rend\\"with quote\\\\and backslash\\fff\\bbb"',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // No v9 back-compat: v10-rc is the first product release. Any v9-era field
+  // (`paranet_id`, stringified `include_shared_memory`, etc.) is out of scope
+  // for the public tool surface. Handlers and schemas only accept the V10
+  // shape. Strict JSON-schema validators and permissive hosts behave the
+  // same: a stray legacy field is simply ignored (not a special-cased error),
+  // and `context_graph_id` is the single source of truth on every tool that
+  // needs it.
+  // ---------------------------------------------------------------------------
+
+  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 paranet_id alias', () => {
+    const plugin = new DkgNodePlugin();
+    const tools: OpenClawTool[] = [];
+    plugin.register({
+      config: {},
+      registerTool: (t) => tools.push(t),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    });
+    const byName = new Map(tools.map((t) => [t.name, t] as const));
+    for (const name of ['dkg_subscribe', 'dkg_publish', 'dkg_query'] as const) {
+      const props = byName.get(name)!.parameters.properties;
+      expect(props).not.toHaveProperty('paranet_id');
+    }
   });
 
   it('all tools have name, description, parameters, and execute', () => {

@@ -879,6 +879,10 @@ export class ApiClient {
   }
 }
 
+// NOTE: mirrored in `packages/adapter-openclaw/src/DkgNodePlugin.ts`
+// (`UPLOAD_CONTENT_TYPES` there). `adapter-openclaw` can't import this
+// directly (circular workspace dep), so update both tables together when
+// adding a new format until a shared upload module lives in `dkg-core`.
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.md': 'text/markdown',

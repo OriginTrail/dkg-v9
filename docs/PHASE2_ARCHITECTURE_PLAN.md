@@ -57,7 +57,8 @@ packages/cli/src/
 │   │   ├── chat.ts                  # /api/chat, /api/messages, /api/chat-openclaw
 │   │   ├── openclaw-channel.ts      # /api/openclaw-channel/*  (~600 LOC today)
 │   │   ├── publisher.ts             # /api/publisher/*  (~400 LOC today)
-│   │   ├── context-graph.ts         # /api/context-graph/*  + /api/sub-graph/*
+│   │   ├── context-graph.ts         # /api/context-graph/*
+│   │   ├── sub-graph.ts             # /api/sub-graph/*  (shares state with context-graph.ts via dep injection)
 │   │   ├── assertion.ts             # /api/assertion/*
 │   │   ├── query.ts                 # /api/query
 │   │   ├── connect.ts               # /api/connect, /api/update, /api/subscribe
@@ -87,7 +88,7 @@ Recommended PR ordering (smallest → largest, each is independently mergeable):
 3. Extract `routes/agents.ts`, `routes/skills.ts`, `routes/chat.ts`.
 4. Extract `routes/openclaw-channel.ts` — by itself ~600 LOC, the largest single sub‑surface.
 5. Extract `routes/publisher.ts`.
-6. Extract `routes/context-graph.ts`, `routes/sub-graph.ts`, `routes/assertion.ts`, `routes/query.ts`, `routes/connect.ts`, `routes/genui.ts`.
+6. Extract `routes/context-graph.ts` and `routes/sub-graph.ts` (paired — sub-graph routes share the private-CG gating helpers that live with context-graph), then `routes/assertion.ts`, `routes/query.ts`, `routes/connect.ts`, `routes/genui.ts`.
 7. Move helpers into `manifest/`, `markitdown/`, `mcp-version.ts`, `catchup.ts`.
 
 End state: `daemon.ts` ≤ 1 kLOC; no single route module > 800 LOC.
@@ -145,7 +146,7 @@ Recommended PR ordering:
 4. Lift `query.ts`, then `publish.ts`, then `sync.ts`, then `context-graph.ts`.
 5. Final pass: thin `dkg-agent.ts` to a facade.
 
-End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC; ProfileManager and DiscoveryClient are folded into their respective modules so we no longer have parallel "manager" + "client" classes.
+End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC. The implementations of `ProfileManager` and `DiscoveryClient` move into `agent/profile.ts` and `agent/discovery.ts` respectively, **but the classes themselves remain public exports from `@origintrail-official/dkg-agent`** — the old import paths keep working. Collapsing them into plain functions (which would be a semver‑breaking change and would force `packages/cli`, the keystore tests, and `packages/agent/README.md` examples to be rewritten) is deferred to a separate, explicitly‑breaking PR and is NOT part of Phase 2.
 
 ---
 
@@ -163,10 +164,13 @@ End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC; ProfileManag
 ### 4. Risks & mitigations
 
 - **Risk:** churn in import paths breaks downstream consumers (CLI, node‑ui, MCP).
-  **Mitigation:** keep `dkg-agent.ts` and `daemon.ts` as facades that re‑export the public surface. Run `pnpm -r typecheck` + the full agent + publisher + node‑ui suites between every split PR.
+  **Mitigation:** keep `dkg-agent.ts` and `daemon.ts` as facades that re‑export the public surface. Between every split PR, run `pnpm -r build` (builds every package that exposes a `build` script — this is the closest thing to a repo‑wide typecheck we have today) and the full agent + publisher + node‑ui + cli test suites. A repo‑wide `typecheck` script per package is itself a Phase‑2 follow‑up, not a prerequisite.
 
-- **Risk:** lifting code accidentally widens trust boundaries (e.g. dropping the A‑1 `callerAgentAddress` check during a route move).
-  **Mitigation:** the per‑module split happens AFTER PR #242 lands; the new `agent/query.ts` keeps the same enforcement, and a CDC test in `packages/agent/test/wm-multi-agent-isolation-extra.test.ts` (already added in PR #242) catches regressions.
+- **Risk:** lifting code accidentally widens trust boundaries (e.g. dropping the A‑1 `callerAgentAddress` check during a route move or during the `DKGAgent` split).
+  **Mitigation:** two-layer coverage, *both* required before each route or module split merges.
+  1. Agent-layer: `packages/agent/test/wm-multi-agent-isolation-extra.test.ts` locks the in‑process `DKGAgent.query()` guard and the non‑string `agentAddress` rejection — it catches regressions in the per‑module split (e.g. if `agent/query.ts` forgets to thread `callerAgentAddress`).
+  2. HTTP-layer: the `A-1 — /api/query enforces working-memory isolation across agent tokens` block in `packages/cli/test/daemon-http-behavior-extra.test.ts` drives the production path end‑to‑end — daemon child process, real bearer tokens, seeded data under the default agent's WM, cross‑agent read through `/api/query`. It catches regressions in the *route* split (e.g. if `routes/query.ts` stops forwarding `requestAgentAddress` as `callerAgentAddress`, or reverts the agent‑scoped/node‑level token distinction added in PR #242).
+  If a future route or module lift removes the agent-layer test's relevance (say by moving the guard into a scoped handle) the HTTP-layer test still locks the externally observable contract — do not delete it.
 
 - **Risk:** golden‑sequence tests (e.g. `packages/publisher/test/phase-sequences.test.ts`) break when phases get re‑ordered during a split.
   **Mitigation:** publisher split goes LAST; the phase contract is frozen by PR #241.
@@ -182,8 +186,8 @@ End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC; ProfileManag
 - **A‑15:** sign every gossip envelope (PROD‑BUG; needs `GossipPublisher` to wrap the libp2p layer).
 - **A‑13:** workspace‑config loader (SPEC‑GAP; new module).
 - **Q‑1:** per‑quad trust filtering inside surviving WM graphs (complement to PR #239's graph‑level minTrust filter).
-- **A‑1.2:** authenticated scoped handle for in‑process callers (`ChatMemoryManager`, `DkgMemoryPlugin`). Lands inside the new `agent/query.ts` module from §2.
-- **A‑12.2:** migrate the remaining `did:dkg:agent:${this.peerId}` uses inside `dkg-agent.ts` (creator DID, sync‑auth self‑reference, gossip endorsement self‑DID) to the EVM form. Lands during the §2 split.
+- **A‑1.2:** authenticated scoped handle for in‑process callers (`ChatMemoryManager`, `DkgMemoryPlugin`). Behavioural fix, scoped to its own PR. The §2 split creates the *natural home* for it (`agent/query.ts`) but A‑1.2 is NOT part of the §2 "lift, don't rewrite" split PRs — that framing is preserved by keeping behaviour identical during the split and fixing A‑1.2 in a follow‑up once the module exists.
+- **A‑12.2:** migrate the remaining `did:dkg:agent:${this.peerId}` uses inside `dkg-agent.ts` (creator DID, sync‑auth self‑reference, gossip endorsement self‑DID) to the EVM form. Same framing as A‑1.2 — lands AFTER the §2 split in a dedicated behavioural PR, not as part of the split itself, so the no‑behavioural‑change contract of Phase 2 holds.
 
 ---
 

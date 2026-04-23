@@ -21,6 +21,7 @@ import {
   type LocalAgentIntegrationTransport,
 } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
+import { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
   DkgMemoryPlugin,
   type DkgMemorySession,
@@ -88,6 +89,7 @@ export class DkgNodePlugin {
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
+  private chatTurnWriter: ChatTurnWriter | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -308,6 +310,7 @@ export class DkgNodePlugin {
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
     this.initialized = true;
+    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir: api.runtime.state.resolveStateDir() });
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
@@ -766,6 +769,7 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
+    this.chatTurnWriter?.flushSync();
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);

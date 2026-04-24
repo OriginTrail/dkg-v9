@@ -329,6 +329,29 @@ import {
 
 import { handleRequest } from './handle-request.js';
 
+/**
+ * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
+ *
+ * `agent.assertion.write` (the path chat-turn persistence rides on)
+ * internally resolves the assertion graph URI from
+ * `defaultAgentAddress ?? peerId` — see
+ * `packages/agent/src/dkg-agent.ts::get assertion()`. The memory manager
+ * must read under the SAME address writes land on, or the two sides
+ * resolve to structurally different `contextGraphAssertionUri(...)`
+ * graphs and `/api/memory/sessions` silently returns `[]` (issue #277).
+ *
+ * Extracted as a pure function so the daemon-wiring contract is
+ * unit-testable without booting a real `DKGAgent` (Hardhat / libp2p).
+ * Changes to this resolver MUST stay in lockstep with the agent-side
+ * resolution in `get assertion()`.
+ */
+export function resolveMemoryAgentAddress(agent: {
+  getDefaultAgentAddress(): string | undefined;
+  peerId: string;
+}): string {
+  return agent.getDefaultAgentAddress() ?? agent.peerId;
+}
+
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const config = await loadConfig();
@@ -1166,14 +1189,10 @@ export async function runDaemonInner(
     }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
-  // Chat-turn writes go through `agent.assertion.write`, which internally
-  // resolves the assertion graph URI from `defaultAgentAddress ?? peerId`
-  // (see `packages/agent/src/dkg-agent.ts::get assertion()`). If we
-  // configure the manager to READ under `agent.peerId` while writes land
-  // under `defaultAgentAddress`, the two sides resolve to structurally
-  // different `contextGraphAssertionUri(cg, <addr>, <name>)` graphs and
-  // reads silently return empty — issue #277.
-  const memoryAgentAddress = agent.getDefaultAgentAddress() ?? agent.peerId;
+  // See `resolveMemoryAgentAddress` for the write/read-URI invariant
+  // this encodes (issue #277). The helper is exported purely so the
+  // daemon-wiring contract stays unit-testable without a real agent.
+  const memoryAgentAddress = resolveMemoryAgentAddress(agent);
   const memoryManager = new ChatMemoryManager(
     agentToolsContext,
     config.llm ?? { apiKey: '' },

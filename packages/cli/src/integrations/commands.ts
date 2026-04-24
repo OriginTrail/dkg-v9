@@ -31,26 +31,34 @@ export function registerIntegrationCommands(program: Command): void {
     .action(async (opts: { tier: string; json?: boolean }) => {
       try {
         const cfg = resolveRegistryConfig();
-        const all = await fetchAllEntries(cfg);
+        const { entries, failures } = await fetchAllEntries(cfg);
         const min = parseTier(opts.tier);
-        const filtered = all.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
+        const filtered = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
 
         if (opts.json) {
-          console.log(JSON.stringify(filtered, null, 2));
+          console.log(JSON.stringify({ entries: filtered, failures }, null, 2));
           return;
         }
 
         if (filtered.length === 0) {
           console.log(`No integrations at tier "${min}" or above.`);
-          return;
+        } else {
+          console.log(`Showing ${filtered.length} integration(s) at tier ${min}+:\n`);
+          for (const e of filtered) {
+            console.log(`  ${e.slug.padEnd(24)}  [${e.trustTier}]  ${e.name}`);
+            console.log(`    ${e.description.slice(0, 120)}${e.description.length > 120 ? '…' : ''}`);
+            console.log(`    install: ${e.install.kind} · memory: ${e.memoryLayers.join(', ')} · ${e.repo}`);
+            console.log('');
+          }
         }
 
-        console.log(`Showing ${filtered.length} integration(s) at tier ${min}+:\n`);
-        for (const e of filtered) {
-          console.log(`  ${e.slug.padEnd(24)}  [${e.trustTier}]  ${e.name}`);
-          console.log(`    ${e.description.slice(0, 120)}${e.description.length > 120 ? '…' : ''}`);
-          console.log(`    install: ${e.install.kind} · memory: ${e.memoryLayers.join(', ')} · ${e.repo}`);
-          console.log('');
+        // Surface failures as warnings rather than aborting — one broken
+        // community entry shouldn't hide every verified one.
+        if (failures.length > 0) {
+          console.warn(`Skipped ${failures.length} unreadable registry entr${failures.length === 1 ? 'y' : 'ies'}:`);
+          for (const f of failures) {
+            console.warn(`  ${f.slug}: ${f.error}`);
+          }
         }
       } catch (err) {
         console.error(`Failed to list integrations: ${toMessage(err)}`);
@@ -83,7 +91,8 @@ export function registerIntegrationCommands(program: Command): void {
     .option('--allow-community', 'Allow installing community-tier entries (not peer-reviewed)')
     .option('--dry-run', 'Print what would happen without executing any install step')
     .option('--api-url <url>', 'DKG node HTTP API URL to wire into integrations', 'http://127.0.0.1:9200')
-    .action(async (slug: string, opts: { allowCommunity?: boolean; dryRun?: boolean; apiUrl: string }) => {
+    .option('--no-verify-provenance', 'Skip publish-time provenance + repo-match verification for cli installs')
+    .action(async (slug: string, opts: { allowCommunity?: boolean; dryRun?: boolean; apiUrl: string; verifyProvenance: boolean }) => {
       try {
         const cfg = resolveRegistryConfig();
         const entry = await fetchEntry(slug, cfg);
@@ -115,24 +124,31 @@ export function registerIntegrationCommands(program: Command): void {
 
         switch (entry.install.kind) {
           case 'cli': {
-            const result = await installCli({ entry, dryRun: opts.dryRun });
+            const result = await installCli({
+              entry,
+              dryRun: opts.dryRun,
+              skipProvenance: opts.verifyProvenance === false,
+            });
             if (opts.dryRun) {
               console.log('');
               console.log(`Dry-run: no changes made. Re-run without --dry-run to install.`);
+              console.log(`Note: provenance is only checked on a real install (skipped in dry-run).`);
               break;
             }
             console.log('');
             console.log(`Installed ${entry.install.package}@${entry.install.version}.`);
+            if (result.provenance?.ok) {
+              console.log(
+                `Provenance verified: npm tarball is attested and bound to ${result.provenance.found.repositoryUrl ?? entry.repo}.`,
+              );
+            } else if (opts.verifyProvenance === false) {
+              console.log(`Provenance: skipped (--no-verify-provenance).`);
+            }
             console.log(`Run \`${result.binary} --help\` to get started.`);
             if (result.postInstructions.length > 0) {
               console.log('');
               for (const line of result.postInstructions) console.log(line);
             }
-            console.log('');
-            console.log(
-              `Verify publish-time provenance (ties the tarball to a Git commit):\n` +
-                `  npm view ${entry.install.package}@${entry.install.version} dist`,
-            );
             break;
           }
           case 'mcp': {
@@ -191,8 +207,11 @@ function printEntryHuman(e: IntegrationEntry): void {
       break;
     case 'mcp':
       console.log(`    command:    ${e.install.command} ${e.install.args.join(' ')}`);
-      if (e.install.clientCompatibility) {
-        console.log(`    clients:    ${e.install.clientCompatibility.join(', ')}`);
+      if (e.install.supportedClients) {
+        console.log(`    clients:    ${e.install.supportedClients.join(', ')}`);
+      }
+      if (e.install.envRequired) {
+        console.log(`    env needed: ${e.install.envRequired.join(', ')}`);
       }
       break;
     case 'service':

@@ -10,10 +10,23 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { dkgDir } from '../config.js';
 import type { InstallCli, IntegrationEntry } from './schema.js';
+import { verifyNpmProvenance, type ProvenanceCheckResult } from './verify-npm-provenance.js';
+
+export type ProvenanceVerifier = (
+  pkg: string,
+  version: string,
+  expectedRepo: string,
+) => Promise<ProvenanceCheckResult>;
+
+// Injectable so tests can exercise the install flow without spawning npm.
+export type InstallRunner = (cmd: string, args: string[]) => Promise<number>;
 
 export interface InstallCliOptions {
   entry: IntegrationEntry;
   dryRun?: boolean;
+  skipProvenance?: boolean;
+  verifier?: ProvenanceVerifier;
+  runner?: InstallRunner;
   logger?: (msg: string) => void;
 }
 
@@ -23,6 +36,7 @@ export interface InstallCliResult {
   exitCode: number;
   binary: string;
   postInstructions: string[];
+  provenance?: ProvenanceCheckResult;
 }
 
 function assertCli(spec: IntegrationEntry['install']): asserts spec is InstallCli {
@@ -32,12 +46,42 @@ function assertCli(spec: IntegrationEntry['install']): asserts spec is InstallCl
 }
 
 export async function installCli(options: InstallCliOptions): Promise<InstallCliResult> {
-  const { entry, dryRun = false, logger = console.log } = options;
+  const {
+    entry,
+    dryRun = false,
+    skipProvenance = false,
+    verifier = verifyNpmProvenance,
+    runner = runCommand,
+    logger = console.log,
+  } = options;
   assertCli(entry.install);
   const { package: pkg, version, binary } = entry.install;
 
   const command = 'npm';
   const args = ['install', '--global', `${pkg}@${version}`];
+
+  // Provenance gate: verify BEFORE we touch the user's global npm. We skip
+  // this in dry-run (no side effects to guard) and when the caller passes
+  // --no-verify-provenance (e.g. installing a pre-release dev tarball with
+  // no attestation yet, or an air-gapped registry that doesn't sign).
+  let provenance: ProvenanceCheckResult | undefined;
+  if (!dryRun && !skipProvenance) {
+    logger(`Verifying publish-time provenance for ${pkg}@${version}...`);
+    provenance = await verifier(pkg, version, entry.repo);
+    if (!provenance.ok) {
+      logger('');
+      logger('  Provenance check FAILED:');
+      for (const r of provenance.reasons) logger(`    - ${r}`);
+      logger('');
+      throw new Error(
+        `Refusing to install ${pkg}@${version}: the tarball on npm is not ` +
+          `cryptographically bound to ${entry.repo}. Re-run with --no-verify-provenance ` +
+          `to install anyway.`,
+      );
+    }
+    logger(`  ok — tarball is attested and points at ${entry.repo}.`);
+    logger('');
+  }
 
   logger(`Installing ${pkg}@${version} globally via npm...`);
   logger(`  ${command} ${args.join(' ')}`);
@@ -49,10 +93,11 @@ export async function installCli(options: InstallCliOptions): Promise<InstallCli
       exitCode: 0,
       binary,
       postInstructions: buildPostInstructions(entry),
+      provenance,
     };
   }
 
-  const exitCode = await runCommand(command, args);
+  const exitCode = await runner(command, args);
   if (exitCode !== 0) {
     throw new Error(`npm install failed with exit code ${exitCode}. See output above for details.`);
   }
@@ -63,6 +108,7 @@ export async function installCli(options: InstallCliOptions): Promise<InstallCli
     exitCode,
     binary,
     postInstructions: buildPostInstructions(entry),
+    provenance,
   };
 }
 

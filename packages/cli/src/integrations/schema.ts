@@ -29,8 +29,13 @@ export interface InstallMcp {
   kind: 'mcp';
   command: string;
   args: string[];
-  env?: Record<string, string>;
-  clientCompatibility?: string[];
+  // Env var NAMES the MCP server expects. Per the registry schema,
+  // DKG_AUTH_TOKEN and DKG_API_URL are auto-filled by the installer when
+  // listed here; other names are rendered as placeholders the user must
+  // fill in. Entries that DO NOT list DKG_AUTH_TOKEN never get the
+  // local admin token injected — that's the security boundary.
+  envRequired?: string[];
+  supportedClients?: string[];
   usageHint?: string;
 }
 
@@ -127,10 +132,13 @@ export function isIntegrationEntry(value: unknown): value is IntegrationEntry {
     if (m !== 'WM' && m !== 'SWM' && m !== 'VM') return false;
   }
   if (!isStringArray(o.v10PrimitivesUsed)) return false;
+  // publicInterfacesUsed is rendered but not dispatched on, so accept any
+  // string here. Hard-rejecting unknown values would stop older CLIs from
+  // reading otherwise-valid registry entries as soon as the registry adds a
+  // new interface label — forward-compat beats strictness for display-only
+  // fields. trustTier, memoryLayers, and install.kind stay strict below
+  // because the CLI branches on them.
   if (!isStringArray(o.publicInterfacesUsed)) return false;
-  for (const p of o.publicInterfacesUsed as unknown[]) {
-    if (p !== 'http-api' && p !== 'cli' && p !== 'mcp') return false;
-  }
 
   // Trust tier: direct input to the `--allow-community` gate.
   if (o.trustTier !== 'community' && o.trustTier !== 'verified' && o.trustTier !== 'featured') {
@@ -175,8 +183,8 @@ function isValidInstallSpec(v: unknown): boolean {
       return (
         typeof v.command === 'string' &&
         isStringArray(v.args) &&
-        (v.env === undefined || isStringRecord(v.env)) &&
-        (v.clientCompatibility === undefined || isStringArray(v.clientCompatibility))
+        (v.envRequired === undefined || isStringArray(v.envRequired)) &&
+        (v.supportedClients === undefined || isStringArray(v.supportedClients))
       );
     case 'service':
       return v.runtime === 'docker' || v.runtime === 'npm-global';
@@ -193,7 +201,3 @@ function isValidInstallSpec(v: unknown): boolean {
   }
 }
 
-function isStringRecord(v: unknown): boolean {
-  if (!isPlainObject(v)) return false;
-  return Object.values(v).every((x) => typeof x === 'string');
-}

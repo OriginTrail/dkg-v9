@@ -60,16 +60,42 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
   const { entry, apiUrl = 'http://127.0.0.1:9200', logger = console.log } = options;
   assertMcp(entry.install);
 
-  const token = (await readLocalToken()) ?? '<DKG_AUTH_TOKEN>';
+  // Registry schema: entries declare the env var NAMES they need via
+  // `envRequired`. DKG_API_URL and DKG_AUTH_TOKEN are auto-filled if
+  // listed; every other name is rendered as a placeholder the user fills
+  // in. Entries that do NOT list DKG_AUTH_TOKEN never get the local admin
+  // token embedded — that is the security boundary. Auto-injecting the
+  // token into every MCP block would hand the node's write authority to
+  // any third-party server the moment the user pastes the snippet.
+  const envRequired = entry.install.envRequired ?? [];
+  const entryWantsToken = envRequired.includes('DKG_AUTH_TOKEN');
+  const entryWantsApiUrl = envRequired.includes('DKG_API_URL');
 
-  const env: Record<string, string> = { ...(entry.install.env ?? {}) };
-  for (const [k, v] of Object.entries(env)) {
-    env[k] = v
-      .replace('${DKG_API_URL}', apiUrl)
-      .replace('${DKG_AUTH_TOKEN}', token);
+  let localToken: string | undefined;
+  if (entryWantsToken) {
+    localToken = await readLocalToken();
   }
-  if (!('DKG_API_URL' in env)) env.DKG_API_URL = apiUrl;
-  if (!('DKG_AUTH_TOKEN' in env)) env.DKG_AUTH_TOKEN = token;
+  const tokenPlaceholder = '<DKG_AUTH_TOKEN>';
+  let tokenUsed = false;
+
+  const env: Record<string, string> = {};
+  if (entryWantsApiUrl) {
+    env.DKG_API_URL = apiUrl;
+  }
+  if (entryWantsToken) {
+    if (localToken) {
+      env.DKG_AUTH_TOKEN = localToken;
+      tokenUsed = true;
+    } else {
+      env.DKG_AUTH_TOKEN = tokenPlaceholder;
+    }
+  }
+  // Any other env vars the entry declares get placeholder slots the user
+  // must fill in manually — we don't invent values for unknown names.
+  for (const name of envRequired) {
+    if (name === 'DKG_API_URL' || name === 'DKG_AUTH_TOKEN') continue;
+    env[name] = `<${name}>`;
+  }
 
   const serverBlock: Record<string, unknown> = {
     command: entry.install.command,
@@ -98,9 +124,18 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
   logger('');
   logger('Common config locations:');
   for (const { client, path } of suggestedPaths) logger(`  ${client}: ${path}`);
-  if (token === '<DKG_AUTH_TOKEN>') {
+  if (entryWantsToken && !localToken) {
     logger('');
-    logger('No local DKG auth token found — replace <DKG_AUTH_TOKEN> with the value from `dkg auth show`.');
+    logger(`No local DKG auth token found — replace ${tokenPlaceholder} with the value from \`dkg auth show\`.`);
+  }
+  if (!entryWantsToken) {
+    logger('');
+    logger('This entry does not declare DKG_AUTH_TOKEN in envRequired, so no local token was embedded in the block.');
+  }
+  const userMustFill = envRequired.filter((n) => n !== 'DKG_API_URL' && n !== 'DKG_AUTH_TOKEN');
+  if (userMustFill.length > 0) {
+    logger('');
+    logger(`The following env values are not auto-filled — replace the placeholders before use: ${userMustFill.join(', ')}`);
   }
   if (entry.install.usageHint) {
     logger('');
@@ -108,5 +143,11 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
     for (const line of entry.install.usageHint.split('\n')) logger(`  ${line}`);
   }
 
-  return { serverKey, serverBlock, mcpJson, suggestedPaths, token: token === '<DKG_AUTH_TOKEN>' ? undefined : token };
+  return {
+    serverKey,
+    serverBlock,
+    mcpJson,
+    suggestedPaths,
+    token: tokenUsed ? localToken : undefined,
+  };
 }

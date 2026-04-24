@@ -32,7 +32,7 @@ describe('requestFaucetFunding', () => {
       ],
     });
     const result = await requestFaucetFunding(
-      'https://faucet.example.com/fund', 'v9_base_sepolia',
+      'https://faucet.example.com/fund', 'v10_base_sepolia',
       ['0xAAA', '0xBBB'], 'test-node', fetch,
     );
     expect(result.success).toBe(true);
@@ -40,7 +40,7 @@ describe('requestFaucetFunding', () => {
     expect(calls).toHaveLength(1);
     const reqBody = JSON.parse(calls[0].init.body as string);
     expect(reqBody.wallets).toEqual(['0xAAA', '0xBBB']);
-    expect(reqBody.mode).toBe('v9_base_sepolia');
+    expect(reqBody.mode).toBe('v10_base_sepolia');
   });
 
   it('caps wallets at 3', async () => {

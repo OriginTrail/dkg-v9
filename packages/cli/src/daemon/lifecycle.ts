@@ -69,6 +69,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  resolveAutoUpdateConfig,
   dkgDir,
   writePid,
   removePid,
@@ -328,6 +329,29 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
+
+/**
+ * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
+ *
+ * `agent.assertion.write` (the path chat-turn persistence rides on)
+ * internally resolves the assertion graph URI from
+ * `defaultAgentAddress ?? peerId` — see
+ * `packages/agent/src/dkg-agent.ts::get assertion()`. The memory manager
+ * must read under the SAME address writes land on, or the two sides
+ * resolve to structurally different `contextGraphAssertionUri(...)`
+ * graphs and `/api/memory/sessions` silently returns `[]` (issue #277).
+ *
+ * Extracted as a pure function so the daemon-wiring contract is
+ * unit-testable without booting a real `DKGAgent` (Hardhat / libp2p).
+ * Changes to this resolver MUST stay in lockstep with the agent-side
+ * resolution in `get assertion()`.
+ */
+export function resolveMemoryAgentAddress(agent: {
+  getDefaultAgentAddress(): string | undefined;
+  peerId: string;
+}): string {
+  return agent.getDefaultAgentAddress() ?? agent.peerId;
+}
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
@@ -688,23 +712,27 @@ export async function runDaemonInner(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Version check + auto-update
+  // Version check + auto-update.
+  // The resolver merges repo/branch/interval field-by-field across
+  // ~/.dkg/config.json → network/<env>.json → project.json, so defaults
+  // in the shipped configs take effect even when the local config
+  // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
-  const au = config.autoUpdate;
+  const au = resolveAutoUpdateConfig(config, network);
   const standalone = isStandaloneInstall();
-  const hasGitConfig = !!(au?.repo && au?.branch);
+  const hasGitConfig = !!au;
 
   if (standalone || hasGitConfig) {
-    const checkIntervalMs = (au?.checkIntervalMinutes || 30) * 60_000;
+    const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
     const allowPre = au?.allowPrerelease ?? true;
 
     if (standalone) {
       log(
-        `Auto-update (npm): ${au?.enabled !== false ? "enabled" : "disabled — version check only"} (every ${au?.checkIntervalMinutes ?? 30}min)`,
+        `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"} (every ${au?.checkIntervalMinutes ?? 30}min)`,
       );
-    } else if (hasGitConfig) {
+    } else if (au) {
       log(
-        `Auto-update ${au!.enabled ? "enabled" : "disabled — version check only"}: ${au!.repo}@${au!.branch} (every ${au!.checkIntervalMinutes}min)`,
+        `Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`,
       );
     }
 
@@ -724,8 +752,8 @@ export async function runDaemonInner(
           updateAvailable = true;
           targetNpmVersion = npmStatus.version;
         }
-      } else if (hasGitConfig) {
-        const commitStatus = await checkForNewCommitWithStatus(au!, log);
+      } else if (au) {
+        const commitStatus = await checkForNewCommitWithStatus(au, log);
         if (commitStatus.status !== "error") {
           daemonState.lastUpdateCheck.upToDate = commitStatus.status === "up-to-date";
           daemonState.lastUpdateCheck.checkedAt = Date.now();
@@ -735,14 +763,14 @@ export async function runDaemonInner(
         updateAvailable = commitStatus.status === "available";
       }
 
-      if (au?.enabled !== false && updateAvailable) {
+      if (au && updateAvailable) {
         daemonState.isUpdating = true;
         let updated = false;
         if (standalone && targetNpmVersion) {
           const status = await performNpmUpdate(targetNpmVersion, log);
           updated = status === "updated";
-        } else if (hasGitConfig) {
-          updated = await checkForUpdate(au!, log);
+        } else {
+          updated = await checkForUpdate(au, log);
         }
         daemonState.isUpdating = false;
         if (updated) {
@@ -1166,10 +1194,14 @@ export async function runDaemonInner(
     }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
+  // See `resolveMemoryAgentAddress` for the write/read-URI invariant
+  // this encodes (issue #277). The helper is exported purely so the
+  // daemon-wiring contract stays unit-testable without a real agent.
+  const memoryAgentAddress = resolveMemoryAgentAddress(agent);
   const memoryManager = new ChatMemoryManager(
     agentToolsContext,
     config.llm ?? { apiKey: '' },
-    { agentAddress: agent.peerId },
+    { agentAddress: memoryAgentAddress },
   );
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');

@@ -199,6 +199,22 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 
 ---
 
+## Testnet Funding
+
+A DKG testnet node needs Base Sepolia ETH (to pay gas for on-chain operations) and test TRAC (for staking and publishing). The Origin Trail testnet faucet hands out both in a single API call, so first-setup paths auto-fund your node's first three wallets when a faucet is configured in the network config.
+
+Three entry points cover the common flows:
+
+- **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the node's wallets when `network.faucet.url` is set (the default for the bundled testnet config).
+- **OpenClaw adapter (`dkg openclaw setup`)** — runs the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
+- **Direct API / custom scripts** — the full request/response shape, idempotency semantics, and error codes live in [`docs/setup/TESTNET_FAUCET.md`](docs/setup/TESTNET_FAUCET.md).
+
+Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up. Rate limits and error codes are documented in the [faucet reference](docs/setup/TESTNET_FAUCET.md#rate-limits-and-cooldowns).
+
+If the faucet is unreachable and you need ETH only, [`docs/setup/JOIN_TESTNET.md`](docs/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
+
+---
+
 ## Architecture
 
 ```text

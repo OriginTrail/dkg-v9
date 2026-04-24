@@ -117,6 +117,8 @@ describe('DkgMemoryPlugin.register', () => {
     expect(sections.join('\n')).toContain('shared-working-memory');
     expect(sections.join('\n')).toContain('verified-memory');
     expect(sections.join('\n')).toContain('retry with alternate identity forms');
+    expect(sections.join('\n')).toContain('generate an invite code first');
+    expect(sections.join('\n')).toContain('allowlisting is not the full UI join flow');
   });
 
   it('registers only the memory slot capability, no conventional memory tools (Codex B-retire)', () => {

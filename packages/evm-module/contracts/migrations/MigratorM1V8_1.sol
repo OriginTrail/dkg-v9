@@ -153,6 +153,10 @@ contract MigratorM1V8_1 is ContractStatus {
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        // EOA-safe short-circuit (see Hub.sol comment).
+        if (multiSigAddress.code.length == 0) {
+            return false;
+        }
         try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
             for (uint256 i = 0; i < multiSigOwners.length; i++) {
                 if (msg.sender == multiSigOwners[i]) {

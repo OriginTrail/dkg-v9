@@ -56,6 +56,27 @@ export interface ChainEventPollerConfig {
   onProfileEvent?: OnProfileEvent;
   /** Persistent cursor for surviving restarts. */
   cursorPersistence?: CursorPersistence;
+  /**
+   * PR #229 bot review (post-v10-rc-merge, r21-5): post-restart WAL
+   * reconciler. Called when an on-chain `KnowledgeBatchCreated`
+   * arrives whose `merkleRoot` does NOT match any in-memory pending
+   * publish (the common case after a process crash that wiped
+   * `pendingPublishes` but persisted the WAL). Implementations
+   * should look the merkle root up in the recovered
+   * `preBroadcastJournal`, drop the matching entry from both memory
+   * and the WAL file, and emit any reconciliation telemetry.
+   * Returning `true` means the recovery path matched — useful for
+   * tests / observability — and `false` means no surviving WAL
+   * record matched (which is benign: the on-chain event was simply
+   * not produced by this node).
+   */
+  onUnmatchedBatchCreated?: (info: {
+    merkleRoot: Uint8Array;
+    publisherAddress: string;
+    startKAId: bigint;
+    endKAId: bigint;
+    blockNumber: number;
+  }) => Promise<boolean | void>;
 }
 
 /**
@@ -79,14 +100,30 @@ export class ChainEventPoller {
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly cursorPersistence?: CursorPersistence;
+  private readonly onUnmatchedBatchCreated?: ChainEventPollerConfig['onUnmatchedBatchCreated'];
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
   private headKnown = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /**
+   * Consecutive transient failures since the last successful poll. Used to
+   * escalate a stuck transient (e.g. RPC URL is permanently broken) from
+   * [WARN] to [ERROR] so genuinely-broken endpoints surface in the E2E
+   * "no fatal ERROR lines" contract instead of being suppressed forever.
+   */
+  private consecutiveTransientFailures = 0;
 
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
+  /**
+   * After this many consecutive transient failures we assume the
+   * "transient" classifier is masking a permanent fault and log at
+   * [ERROR] instead. With the default 12s interval that is ~60s of
+   * uninterrupted upstream errors, well past any reasonable transient
+   * blip on a healthy RPC endpoint.
+   */
+  private static readonly TRANSIENT_ESCALATION_AFTER = 5;
 
   constructor(config: ChainEventPollerConfig) {
     this.chain = config.chain;
@@ -97,6 +134,7 @@ export class ChainEventPoller {
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.cursorPersistence = config.cursorPersistence;
+    this.onUnmatchedBatchCreated = config.onUnmatchedBatchCreated;
   }
 
   async start(): Promise<void> {
@@ -121,14 +159,89 @@ export class ChainEventPoller {
     this.log.info(ctx, `Starting chain event poller (interval=${this.intervalMs}ms)`);
 
     this.timer = setInterval(() => {
-      this.poll().catch((err) => {
-        const pollCtx = createOperationContext('system');
-        this.log.error(pollCtx, `Poll failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      this.poll()
+        .then(() => {
+          // Successful poll — reset the transient-failure escalation
+          // counter so a fresh series of upstream blips starts from
+          // zero rather than carrying over decade-old retries.
+          this.consecutiveTransientFailures = 0;
+        })
+        .catch((err) => {
+          this.handlePollFailure(err);
+        });
     }, this.intervalMs);
 
     // Run first poll immediately
     this.poll().catch(() => {});
+  }
+
+  /**
+   * Classify a poll-loop error as a recoverable transient or a real
+   * failure. Exposed (and tested) so the rule-set is auditable in
+   * isolation rather than buried inside the `setInterval` callback.
+   *
+   * Two transient categories are treated as recoverable:
+   *
+   *   - `chain head race` — Hardhat / ethers fast-iterating tests
+   *     occasionally call `eth_getLogs` with `toBlock` momentarily
+   *     past the current head between our `getBlockNumber()` and the
+   *     `eth_getLogs` round-trip. The cursor does not advance on
+   *     failure and the next tick retries. (PR #229 r12 fix.)
+   *   - `upstream RPC` — public RPC endpoints (e.g. sepolia.base.org)
+   *     periodically return 5xx gateway errors or close the socket
+   *     mid-request. ethers wraps these as `code=SERVER_ERROR`. Same
+   *     contract: cursor does not advance, next tick retries.
+   *     (Post-v10-rc merge fix; surfaced by the
+   *     `three-player-game.test.ts` E2E "no fatal ERROR lines"
+   *     assertion red-lighting on a single 502.)
+   *
+   * Anything else is a real failure. Logging at [ERROR] is the right
+   * shape so genuine bugs surface in the same E2E assertion.
+   */
+  static classifyPollFailure(err: unknown): {
+    kind: 'chain-head-race' | 'upstream-rpc' | 'fatal';
+    message: string;
+  } {
+    const message = err instanceof Error ? err.message : String(err);
+    const isTransientHeadRace =
+      /block range extends beyond current head block/i.test(message)
+      || /code=UNKNOWN_ERROR.*32602/i.test(message);
+    if (isTransientHeadRace) return { kind: 'chain-head-race', message };
+    const isTransientUpstreamRpc =
+      /code=SERVER_ERROR/i.test(message)
+      || /\b50\d\b\s*(?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)/i.test(message)
+      || /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed/i.test(message);
+    if (isTransientUpstreamRpc) return { kind: 'upstream-rpc', message };
+    return { kind: 'fatal', message };
+  }
+
+  /**
+   * Apply the classifier and emit the matching log line. Tracks
+   * consecutive transient failures so a permanently broken endpoint
+   * (wrong URL, dead provider) eventually escalates from [WARN] to
+   * [ERROR] — without this, the warn-only classifier would itself be
+   * a false-negative-producing test smell.
+   */
+  private handlePollFailure(err: unknown): void {
+    const pollCtx = createOperationContext('system');
+    const { kind, message } = ChainEventPoller.classifyPollFailure(err);
+    if (kind === 'fatal') {
+      this.log.error(pollCtx, `Poll failed: ${message}`);
+      return;
+    }
+    this.consecutiveTransientFailures += 1;
+    if (this.consecutiveTransientFailures >= ChainEventPoller.TRANSIENT_ESCALATION_AFTER) {
+      this.log.error(
+        pollCtx,
+        `Poll failed: transient persisted ${this.consecutiveTransientFailures} ticks (last error: ${message})`,
+      );
+      return;
+    }
+    const reason = kind === 'chain-head-race' ? 'chain head race' : 'upstream RPC';
+    this.log.warn(
+      pollCtx,
+      `Poll transient (${reason} — retrying next tick, ${this.consecutiveTransientFailures}/${ChainEventPoller.TRANSIENT_ESCALATION_AFTER}): ${message}`,
+    );
   }
 
   stop(): void {
@@ -148,7 +261,25 @@ export class ChainEventPoller {
     const watchUpdates = !!this.onCollectionUpdated;
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
-    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles) return;
+    // PR #229 bot review round 24 (r24-4). The unmatched-batch
+    // reconciler (`onUnmatchedBatchCreated`) is the durable path that
+    // drains the WAL after a restart — the in-memory pending map is
+    // empty by construction at that point, so relying solely on
+    // `hasPending` here would leave recovered WAL entries un-scanned
+    // forever. A poller wired ONLY for WAL recovery (no publishes
+    // queued locally, no CG/update/allowlist/profile watchers) still
+    // needs every tick to scan `KnowledgeBatchCreated` / `KCCreated`
+    // so the recovered entry can be matched. Treat the callback as
+    // an active watcher in the early-return gate too.
+    const watchUnmatchedBatches = !!this.onUnmatchedBatchCreated;
+    if (
+      !hasPending
+      && !watchContextGraphs
+      && !watchUpdates
+      && !watchAllowList
+      && !watchProfiles
+      && !watchUnmatchedBatches
+    ) return;
 
     const ctx = createOperationContext('publish');
 
@@ -162,11 +293,36 @@ export class ChainEventPoller {
     // On first successful head fetch, seed cursor near the tip — but only
     // when there are no pending publishes whose confirmations we might skip.
     // Full-history context graph discovery is handled by discoverContextGraphsFromChain().
+    //
+    // PR #229 bot review round 25 (r25-1). WAL recovery is ALSO a reason
+    // not to seed near the tip: on restart the in-memory pending map is
+    // empty by construction, but the unmatched-batch reconciler
+    // (`onUnmatchedBatchCreated`, installed by the agent for WAL drain)
+    // is what actually resurrects pre-crash publishes from the
+    // write-ahead log. If the surviving WAL entry is older than 500
+    // blocks the near-tip seed would silently skip its on-chain
+    // confirmation event forever, and the WAL would never drain.
+    //
+    // When the callback is present we therefore refuse to seed —
+    // `lastBlock = 0` means "scan from genesis" (bounded per-poll by
+    // `MAX_RANGE = 9000`, so even a long-running testnet drains in
+    // finite ticks). An operator whose cursor persistence layer
+    // already has a valid checkpoint still benefits: `this.lastBlock`
+    // is populated from persistence BEFORE the first `poll()` call in
+    // `start()`, so the `this.lastBlock === 0` gate below does NOT
+    // fire and no scanning is wasted.
     if (head != null && !this.headKnown) {
       this.headKnown = true;
-      if (this.lastBlock === 0 && !hasPending) {
+      if (this.lastBlock === 0 && !hasPending && !watchUnmatchedBatches) {
         this.lastBlock = Math.max(0, head - 500);
         this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
+      } else if (this.lastBlock === 0 && watchUnmatchedBatches) {
+        this.log.info(
+          ctx,
+          `WAL recovery active — NOT seeding poller cursor near head; ` +
+            `scanning from genesis to drain any pre-crash WAL entries ` +
+            `(head=${head}, r25-1)`,
+        );
       }
     }
 
@@ -257,6 +413,35 @@ export class ChainEventPoller {
 
     if (confirmed) {
       this.log.info(ctx, `Confirmed tentative publish via chain event (block ${event.blockNumber})`);
+      return;
+    }
+
+    // r21-5: in-memory pending map didn't match. After a process
+    // restart the map is empty by construction, so the only durable
+    // record of "we signed and were about to broadcast this batch"
+    // is the WAL. Hand the event off to the unmatched-batch reconciler
+    // (DKGAgent wires this to `DKGPublisher.recoverFromWalByMerkleRoot`),
+    // which drops the surviving WAL entry once the on-chain confirmation
+    // proves the broadcast actually landed. We swallow handler errors so
+    // a buggy reconciler can't take down the whole poller — every
+    // chain event after the throw would be skipped, which would mask
+    // genuine `KCCreated` confirmations and resurrect the original
+    // "WAL accumulates forever" bug from a different angle.
+    if (this.onUnmatchedBatchCreated) {
+      try {
+        await this.onUnmatchedBatchCreated({
+          merkleRoot,
+          publisherAddress,
+          startKAId,
+          endKAId,
+          blockNumber: event.blockNumber,
+        });
+      } catch (recoverErr) {
+        this.log.warn(
+          ctx,
+          `onUnmatchedBatchCreated callback failed for merkleRoot=${ethers.hexlify(merkleRoot)}: ${recoverErr instanceof Error ? recoverErr.message : String(recoverErr)}`,
+        );
+      }
     }
   }
 

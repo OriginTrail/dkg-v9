@@ -42,45 +42,21 @@ interface WorkspaceConfig {
   extractionPolicy: string;
 }
 
-// Reference loader implementing the spec §22 schema. This mirrors what
-// the agent layer SHOULD ship — see SPEC-GAP test below.
-function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
-  if (raw == null || typeof raw !== 'object') {
-    throw new Error('workspace config: root must be an object');
-  }
-  const obj = raw as Record<string, unknown>;
-  const contextGraph = obj.contextGraph;
-  const node = obj.node;
-  if (typeof contextGraph !== 'string' || contextGraph.length === 0) {
-    throw new Error('workspace config: `contextGraph` is required (string)');
-  }
-  if (typeof node !== 'string' || node.length === 0) {
-    throw new Error('workspace config: `node` is required (string)');
-  }
-  const autoShare = obj.autoShare ?? true;
-  if (typeof autoShare !== 'boolean') {
-    throw new Error('workspace config: `autoShare` must be boolean');
-  }
-  const extractionPolicy = (obj.extractionPolicy as string | undefined) ?? 'structural-plus-semantic';
-  if (!EXTRACTION_POLICIES.has(extractionPolicy)) {
-    throw new Error(
-      `workspace config: \`extractionPolicy\` must be one of ${[...EXTRACTION_POLICIES].join(', ')}`,
-    );
-  }
-  return { contextGraph, node, autoShare, extractionPolicy };
-}
-
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/;
-
-function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
-  const m = FRONTMATTER_RE.exec(src);
-  if (!m) throw new Error('AGENTS.md: missing YAML frontmatter');
-  const fm = yaml.load(m[1]) as Record<string, unknown> | null;
-  if (!fm || typeof fm !== 'object' || !('dkg' in fm)) {
-    throw new Error('AGENTS.md frontmatter: missing `dkg` key');
-  }
-  return parseWorkspaceConfig(fm.dkg);
-}
+// PR #229 follow-up: the suite originally shipped a LOCAL reference
+// loader to keep the schema test green even before the production
+// module landed (see SPEC-GAP test below). The production
+// `workspace-config.ts` now exports the same surface AND has been
+// extended (r21-4 / r22-5) to accept plain-Markdown AGENTS.md via a
+// `dkg-config` fence. Re-bind the test names to the production
+// exports so this suite actually exercises the shipping behaviour;
+// otherwise our regression tests would pass against the local stub
+// while the real code regresses unobserved.
+import {
+  parseWorkspaceConfig as parseWorkspaceConfigImpl,
+  parseAgentsMdFrontmatter as parseAgentsMdFrontmatterImpl,
+} from '../src/workspace-config.js';
+const parseWorkspaceConfig = parseWorkspaceConfigImpl as unknown as (raw: unknown) => WorkspaceConfig;
+const parseAgentsMdFrontmatter = parseAgentsMdFrontmatterImpl as unknown as (src: string) => WorkspaceConfig;
 
 describe('A-13: workspace config schema (.dkg/config.yaml)', () => {
   it('parses a spec-compliant YAML with all fields', () => {
@@ -183,14 +159,85 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.autoShare).toBe(true);
   });
 
-  it('rejects AGENTS.md with no frontmatter', () => {
+  it('rejects AGENTS.md with no frontmatter AND no dkg-config fence', () => {
     const md = '# just a heading\n';
-    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/frontmatter/);
+    // PR #229 bot review (r21-4): the diagnostic now mentions BOTH
+    // carriers because we tried both before failing.
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(
+      /frontmatter|dkg-config/,
+    );
   });
 
-  it('rejects AGENTS.md frontmatter missing `dkg:` key', () => {
+  it('rejects AGENTS.md frontmatter missing `dkg:` key when no fence is present either', () => {
     const md = ['---', 'title: foo', '---', '# body'].join('\n');
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg/);
+  });
+
+  // PR #229 bot review (r21-4 / r22-5): the AGENTS.md convention used
+  // by Cursor / Continue / Codex CLI is plain Markdown WITHOUT
+  // frontmatter. The pre-r21-4 code threw "missing YAML frontmatter"
+  // and the documented third lookup tier was therefore unusable for
+  // the projects that actually rely on it as a workspace-config
+  // carrier. The fenced ```dkg-config``` block is the supported
+  // alternate carrier.
+  it('PR #229 bugbot: parses plain-Markdown AGENTS.md via a ```dkg-config``` fence', () => {
+    const md = [
+      '# Project Agents',
+      '',
+      'This project uses DKG shared memory.',
+      '',
+      '```dkg-config',
+      'contextGraph: "fence-only"',
+      'node: "http://127.0.0.1:9201"',
+      'autoShare: false',
+      '```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('fence-only');
+    expect(cfg.node).toBe('http://127.0.0.1:9201');
+    expect(cfg.autoShare).toBe(false);
+  });
+
+  it('PR #229 bugbot: also accepts ```yaml dkg-config``` and ```json dkg-config``` info-string variants', () => {
+    const yml = [
+      '# header',
+      '```yaml dkg-config',
+      'contextGraph: "yaml-fence"',
+      'node: "http://n"',
+      '```',
+    ].join('\n');
+    expect(parseAgentsMdFrontmatter(yml).contextGraph).toBe('yaml-fence');
+
+    const json = [
+      '# header',
+      '```json dkg-config',
+      '{ "contextGraph": "json-fence", "node": "http://n" }',
+      '```',
+    ].join('\n');
+    expect(parseAgentsMdFrontmatter(json).contextGraph).toBe('json-fence');
+  });
+
+  // PR #229 bot review (r22-5): when AGENTS.md has unrelated
+  // frontmatter (extremely common for tags/owner/prompt metadata in
+  // the AI-agent ecosystem) but the dkg config lives in a fenced
+  // block below, the loader MUST fall through to the fence parser
+  // instead of throwing on the missing top-level `dkg:` key.
+  it('PR #229 bugbot: falls through to fence when frontmatter exists but lacks `dkg:` key', () => {
+    const md = [
+      '---',
+      'title: project notes',
+      'owner: alice',
+      '---',
+      '',
+      '# Notes',
+      '',
+      '```dkg-config',
+      'contextGraph: "fallthrough-cg"',
+      'node: "http://n"',
+      '```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('fallthrough-cg');
   });
 });
 
@@ -229,6 +276,33 @@ describe('A-13: file-system priority resolution', () => {
     const r = resolve(dir);
     expect(r.source.endsWith('.dkg/config.yaml')).toBe(true);
     expect(r.cfg.contextGraph).toBe('from-yaml');
+  });
+
+  // PR #229 bot review (r21-4 / bugbot 1291): the agent's own
+  // `loadWorkspaceConfig` MUST resolve plain-Markdown AGENTS.md (no
+  // YAML frontmatter, fenced ```dkg-config``` block) so the
+  // documented third lookup tier is actually usable on this very
+  // monorepo (whose AGENTS.md is plain Markdown).
+  it('PR #229 bugbot: loadWorkspaceConfig accepts plain-Markdown AGENTS.md with a dkg-config fence', async () => {
+    const { loadWorkspaceConfig } = await import('../src/workspace-config.js');
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ws-fence-'));
+    writeFileSync(
+      join(dir, 'AGENTS.md'),
+      [
+        '# Project Agents',
+        '',
+        'No frontmatter here, just a fenced block.',
+        '',
+        '```dkg-config',
+        'contextGraph: "fence-only-via-load"',
+        'node: "http://127.0.0.1:9201"',
+        '```',
+      ].join('\n'),
+    );
+    const r = loadWorkspaceConfig(dir);
+    expect(r.source.endsWith('AGENTS.md')).toBe(true);
+    expect(r.cfg.contextGraph).toBe('fence-only-via-load');
+    expect(r.cfg.node).toBe('http://127.0.0.1:9201');
   });
 });
 

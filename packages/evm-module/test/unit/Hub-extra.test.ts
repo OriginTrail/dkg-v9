@@ -148,15 +148,17 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
 
         it('non-owner (EOA) call reverts (auth gate closes)', async () => {
           // `setAndReinitializeContracts` carries `onlyOwnerOrMultiSigOwner`.
-          // The underlying `_checkOwnerOrMultiSigOwner` reverts via
-          // `HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner")`.
-          // Pinning the custom error (and its single string arg) catches
-          // regressions where the gate is replaced with a different error
-          // selector or accidentally loosened to `Ownable` only.
+          // After alignment with OZ Ownable v5 (BUGS_FOUND.md
+          // "OwnableUnauthorizedAccount vs UnauthorizedAccess") the gate
+          // raises the standard `OwnableUnauthorizedAccount(msg.sender)` so
+          // indexers + clients can route on the same selector that
+          // `_checkOwner` produces. Pinning both the selector and the
+          // single address arg catches regressions where the gate is
+          // replaced with a different error or the modifier is dropped.
           const asStranger = HubContract.connect(accounts[5]);
           await expect(asStranger.setAndReinitializeContracts([], [], [], []))
-            .to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess')
-            .withArgs('Only Hub Owner or Multisig Owner');
+            .to.be.revertedWithCustomError(HubContract, 'OwnableUnauthorizedAccount')
+            .withArgs(accounts[5].address);
         });
 
     it('bubbles a revert from _reinitializeContracts (no try/catch on initialize)', async () => {
@@ -234,10 +236,11 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
         .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
         .withArgs('ForwardRollbackContract');
 
-      // Token.mint is Ownable — when called via forwardCall from Hub, which
-      // isn't Token's owner, Token reverts with OwnableUnauthorizedAccount.
-      // We match the custom error name (args come from Token, not Hub, so
-      // skip .withArgs here to avoid ABI mismatch false-negatives).
+      // Token.mint uses `onlyRole(MINTER_ROLE)` (OZ AccessControl) — when
+      // called via forwardCall from Hub (which lacks MINTER_ROLE), Token
+      // reverts with `AccessControlUnauthorizedAccount(account, role)`.
+      // We match the custom error name (args come from Token, not Hub,
+      // so skip .withArgs here to avoid ABI mismatch false-negatives).
       await expect(
         HubContract.setAndReinitializeContracts(
           [{ name: 'ForwardRollbackContract', addr: accounts[7].address }],
@@ -245,7 +248,7 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
           [],
           [{ contractName: 'Token', encodedData: [mintData] }],
         ),
-      ).to.be.revertedWithCustomError(TokenContract, 'OwnableUnauthorizedAccount');
+      ).to.be.revertedWithCustomError(TokenContract, 'AccessControlUnauthorizedAccount');
 
       await expect(HubContract.getContractAddress('ForwardRollbackContract'))
         .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')

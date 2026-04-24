@@ -4,8 +4,12 @@ export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-qu
 export { QueryHandler } from './query-handler.js';
 export {
   validateReadOnlySparql,
+  detectSparqlQueryForm,
+  emptyResultForForm,
   classifySparqlForm,
   emptyQueryResultForKind,
   type SparqlGuardResult,
+  type SparqlQueryForm,
   type SparqlForm,
+  type EmptyQueryResultShape,
 } from './sparql-guard.js';

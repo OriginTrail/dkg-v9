@@ -92,14 +92,36 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
  */
 export function enrichEvmError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
-  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
-  if (!match) return null;
-  const decoded = decodeEvmError(match[1]);
-  if (!decoded) return null;
-  const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
-  const decodedStr = `${decoded.name}${argsStr}`;
-  err.message = err.message.replace('unknown custom error', decodedStr);
-  return decoded.name;
+  // CH-10: match multiple RPC revert-data shapes so we don't leak raw
+  // selectors to operators (issue #159 class). Providers serialize revert
+  // data under many keys — `data`, `errorData`, JSON-encoded `"data"` — and
+  // with or without quotes / with a space after the colon. We try each
+  // shape in order and use the first hex blob that decodes into a known
+  // custom error selector.
+  const candidates: string[] = [];
+  const patterns = [
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*"(0x[0-9a-fA-F]+)"/g,
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*(0x[0-9a-fA-F]+)/g,
+    /"data"\s*:\s*"(0x[0-9a-fA-F]+)"/g,
+  ];
+  for (const re of patterns) {
+    for (const m of err.message.matchAll(re)) {
+      if (m[1]) candidates.push(m[1]);
+    }
+  }
+  for (const hex of candidates) {
+    const decoded = decodeEvmError(hex);
+    if (!decoded) continue;
+    const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
+    const decodedStr = `${decoded.name}${argsStr}`;
+    if (err.message.includes('unknown custom error')) {
+      err.message = err.message.replace('unknown custom error', decodedStr);
+    } else {
+      err.message = `${err.message} [${decodedStr}]`;
+    }
+    return decoded.name;
+  }
+  return null;
 }
 
 export interface EVMAdapterConfig {
@@ -815,6 +837,79 @@ export class EVMChainAdapter implements ChainAdapter {
                 txHash: log.transactionHash,
               },
             };
+          }
+        }
+
+        // Bot review H1 follow-up: the previous revision ALSO subscribed to
+        // KAV10's OWN KnowledgeBatchCreated(batchId, contextGraphId, amount,
+        // byteSize, startEpoch, endEpoch, tokenAmount, isImmutable) and
+        // yielded a normalized event with `merkleRoot: undefined` and
+        // `publisherAddress: undefined`. That breaks downstream:
+        // `ChainEventPoller.handleBatchCreated()` calls
+        // `ethers.hexlify(merkleRoot)` (publish-handler.ts:103) which throws
+        // on undefined, and matches confirmation by exact merkleRoot equality
+        // — so the synthetic event would either crash the poller loop or
+        // never confirm any tentative publish. V10-only deployments are
+        // already covered by the `KCCreated` path below
+        // (KnowledgeCollectionStorage.KnowledgeCollectionCreated emits
+        // `merkleRoot` and `KnowledgeAssetsMinted` carries publisher +
+        // startId/endId), so re-emitting from KAV10 was both redundant and
+        // broken.
+        //
+        // Bot review PR #229 (post-round-5): V10 publishes now surface a
+        // batch-shaped audit record via `V10KnowledgeBatchEmitted`
+        // (distinct topic from legacy `KnowledgeBatchCreated`) so this
+        // subscription path does NOT pick them up. Legacy V8/V9 indexers
+        // that subscribe here continue to see only real V8/V9 batches
+        // (where the backing state is actually populated). V10-aware
+        // indexers subscribe to KCCreated above and/or to the
+        // `V10KnowledgeBatchEmitted` topic directly if they want the
+        // batch-shaped projection.
+      }
+
+      // PR #229 bot review round 10 (evm-adapter.ts:815). The PR
+      // introduced `V10KnowledgeBatchEmitted` on KASStorage (distinct
+      // from legacy `KnowledgeBatchCreated`) and explicitly tells
+      // V10-aware consumers to subscribe to this topic directly. The
+      // adapter had no branch for it, so any caller following that
+      // guidance got an empty stream. Add the branch so the event is
+      // consumable through the same `listenForEvents()` API as every
+      // other chain event.
+      if (eventType === 'V10KnowledgeBatchEmitted') {
+        const kasStorage = this.contracts.knowledgeAssetsStorage;
+        if (kasStorage) {
+          const eventFilter = kasStorage.filters.V10KnowledgeBatchEmitted();
+          const logs = await kasStorage.queryFilter(
+            eventFilter,
+            filter.fromBlock ?? 0,
+            filter.toBlock,
+          );
+          for (const log of logs) {
+            const parsed = kasStorage.interface.parseLog({
+              topics: [...log.topics],
+              data: log.data,
+            });
+            if (parsed) {
+              yield {
+                type: 'V10KnowledgeBatchEmitted',
+                blockNumber: log.blockNumber,
+                data: {
+                  batchId: parsed.args.batchId.toString(),
+                  publisherAddress: parsed.args.publisher?.toString(),
+                  merkleRoot: parsed.args.merkleRoot,
+                  publicByteSize: parsed.args.publicByteSize?.toString(),
+                  knowledgeAssetsCount: parsed.args.knowledgeAssetsCount?.toString(),
+                  startKAId: parsed.args.startKAId.toString(),
+                  endKAId: parsed.args.endKAId.toString(),
+                  startEpoch: parsed.args.startEpoch?.toString(),
+                  endEpoch: parsed.args.endEpoch?.toString(),
+                  tokenAmount: parsed.args.tokenAmount?.toString(),
+                  // Event field is `isPermanent` (see KASStorage.sol:75).
+                  isPermanent: Boolean(parsed.args.isPermanent),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
           }
         }
       }
@@ -1884,6 +1979,23 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     if (!this.contracts.parametersStorage) return 3;
     return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+  }
+
+  /**
+   * Read the per-CG `requiredSignatures` value from `ContextGraphStorage`.
+   * Returns 0 when the CG is not registered or the contract is unavailable.
+   * Throws on contract-level errors so callers can decide whether to fall
+   * back to the global minimum or fail loud.
+   *
+   * Spec §06_PUBLISH / BUGS_FOUND.md A-5.
+   */
+  async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
+    await this.init();
+    const storage = this.contracts.contextGraphStorage;
+    if (!storage) return 0;
+    if (contextGraphId <= 0n) return 0;
+    const raw: bigint = await storage.getContextGraphRequiredSignatures(contextGraphId);
+    return Number(raw);
   }
 
   async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

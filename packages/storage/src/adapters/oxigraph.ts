@@ -21,6 +21,34 @@ export class OxigraphStore implements TripleStore {
   private persistPath: string | undefined;
 
   /**
+   * Side-table preserving the ORIGINAL `^^<datatype>` of typed numeric
+   * literals through round-trips. Oxigraph canonicalizes numeric
+   * subtypes (e.g. `xsd:long` → `xsd:integer`), which loses the
+   * publisher's intent and breaks BUGS_FOUND.md#ST-12.
+   *
+   * Bot review M1: previously keyed by the lexical value alone, which
+   * corrupted results whenever two quads in the store used the same
+   * lexeme with different declared types (e.g. `"1"^^xsd:int` and
+   * `"1"^^xsd:positiveInteger`). The later insert clobbered the
+   * earlier entry, so BOTH quads read back with the newer datatype.
+   *
+   * Key is now the full quad identity (subject | predicate | value |
+   * graph) so each typed-literal position owns its own declared type.
+   * Collisions only happen when the same position is written twice
+   * with different declared types, which is a genuine overwrite.
+   */
+  private originalNumericDatatype = new Map<string, string>();
+
+  private static numericDatatypeKey(
+    subject: string,
+    predicate: string,
+    value: string,
+    graph: string | undefined,
+  ): string {
+    return `${subject}\u0000${predicate}\u0000${value}\u0000${graph ?? ''}`;
+  }
+
+  /**
    * @param persistPath  If provided, the store will dump/load N-Quads
    *   to this file path for persistence across restarts. The underlying
    *   store is still in-memory, but data is hydrated on construction
@@ -34,6 +62,80 @@ export class OxigraphStore implements TripleStore {
     }
   }
 
+  /**
+   * Capture publisher-declared numeric subtype before it goes through
+   * Oxigraph (which collapses `xsd:long`, `xsd:int`, `xsd:short`,
+   * `xsd:byte` and friends into `xsd:integer`). The declared type is
+   * keyed per-quad (see {@link originalNumericDatatype}) so two quads
+   * sharing a lexeme but declaring different subtypes each retain
+   * their own declared type on read-back. BUGS_FOUND.md#ST-12.
+   */
+  private rememberNumericDatatype(q: DKGQuad): void {
+    const term = q.object;
+    if (!term.startsWith('"')) return;
+    const m = term.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return;
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    this.originalNumericDatatype.set(key, dtype);
+  }
+
+  /**
+   * Drop the numeric-subtype side-table entry for a quad that was just
+   * removed from the store. PR #229 bot review round 7 (oxigraph.ts:164)
+   * — before this, `delete()` / `deleteByPattern()` / `dropGraph()` /
+   * `deleteBySubjectPrefix()` silently left stale entries behind, so
+   * `restoreOriginalDatatypeForSelectBinding()` could see phantom
+   * subtype conflicts from data that no longer existed (and the
+   * conflicts were persisted across restarts via the sidecar).
+   */
+  private forgetNumericDatatype(q: DKGQuad): void {
+    const term = q.object;
+    if (!term.startsWith('"')) return;
+    const m = term.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return;
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    this.originalNumericDatatype.delete(key);
+  }
+
+  /**
+   * Evict side-table entries whose graph suffix matches. Called from
+   * `dropGraph()` / `deleteBySubjectPrefix()` / `deleteByPattern()`
+   * when we don't have the pre-delete quad set to key by directly.
+   * Keys are `s\0p\0value\0g` so we filter on the final `\0g` suffix
+   * (plus optional subject-prefix predicate).
+   */
+  private evictNumericDatatypeForGraph(
+    graphUri: string,
+    subjectPrefix?: string,
+  ): void {
+    const suffix = `\u0000${graphUri}`;
+    for (const k of this.originalNumericDatatype.keys()) {
+      if (!k.endsWith(suffix)) continue;
+      if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
+      this.originalNumericDatatype.delete(k);
+    }
+  }
+
+  /**
+   * Companion sidecar path that persists the numeric-subtype metadata
+   * across restarts. The main N-Quads dump cannot carry it because
+   * Oxigraph canonicalises `xsd:long`/`xsd:int`/`xsd:short`/`xsd:byte`
+   * to `xsd:integer` BEFORE the dump is emitted — so by the time we
+   * read the file back the original declared type is gone. Writing it
+   * alongside the dump (and reading it on {@link hydrateSync}) is the
+   * only way to keep the side-table useful in `oxigraph-persistent`
+   * across restarts (bot review PR #229 M-follow-up).
+   */
+  private static numericDatatypeSidecarPath(persistPath: string): string {
+    return `${persistPath}.numeric-datatypes.json`;
+  }
+
   private hydrateSync(filePath: string): void {
     try {
       if (!existsSync(filePath)) return;
@@ -43,6 +145,33 @@ export class OxigraphStore implements TripleStore {
       }
     } catch {
       // File missing or corrupt — start empty.
+    }
+    // Bot review (PR #229 M-follow-up): `originalNumericDatatype` used
+    // to only be populated by live `insert()` calls, so after a process
+    // restart every `oxigraph-persistent` store lost all numeric-subtype
+    // metadata and `restoreOriginalDatatype*()` collapsed the literals
+    // back to Oxigraph's canonical `xsd:integer`. Hydrate the side-table
+    // from the companion sidecar written by {@link flushNow} so restart
+    // round-trips preserve the publisher-declared subtype.
+    try {
+      const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(filePath);
+      if (!existsSync(sidecarPath)) return;
+      const raw = readFileSync(sidecarPath, 'utf-8');
+      if (!raw.trim()) return;
+      const parsed = JSON.parse(raw) as { entries?: Array<[string, string]> };
+      const entries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
+      for (const entry of entries) {
+        if (
+          Array.isArray(entry) &&
+          entry.length === 2 &&
+          typeof entry[0] === 'string' &&
+          typeof entry[1] === 'string'
+        ) {
+          this.originalNumericDatatype.set(entry[0], entry[1]);
+        }
+      }
+    } catch {
+      // Sidecar missing or corrupt — fall back to lexical-only restore.
     }
   }
 
@@ -64,6 +193,17 @@ export class OxigraphStore implements TripleStore {
       await mkdir(dirname(this.persistPath), { recursive: true });
       const nquads = this.store.dump({ format: 'application/n-quads' });
       await writeFile(this.persistPath, nquads, 'utf-8');
+      // Bot review (PR #229 M-follow-up): persist the numeric-subtype
+      // side-table alongside the dump so hydrateSync() can restore it on
+      // the next boot. Without this sidecar every restart re-canonicalises
+      // `xsd:long`/`xsd:int`/... back to `xsd:integer` on read-back because
+      // Oxigraph has already collapsed the subtype by the time it dumps.
+      const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(this.persistPath);
+      const sidecar = JSON.stringify({
+        version: 1,
+        entries: Array.from(this.originalNumericDatatype.entries()),
+      });
+      await writeFile(sidecarPath, sidecar, 'utf-8');
     } catch {
       // Best-effort persistence.
     } finally {
@@ -73,6 +213,7 @@ export class OxigraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[]): Promise<void> {
     if (quads.length === 0) return;
+    for (const q of quads) this.rememberNumericDatatype(q);
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
@@ -82,6 +223,7 @@ export class OxigraphStore implements TripleStore {
     for (const q of quads) {
       const oxQuad = toOxQuad(q);
       if (oxQuad) this.store.delete(oxQuad);
+      this.forgetNumericDatatype(q);
     }
     this.scheduleFlush();
   }
@@ -95,6 +237,9 @@ export class OxigraphStore implements TripleStore {
     );
     for (const q of matches) {
       this.store.delete(q);
+      // We have the concrete deleted quads in hand, so do an exact
+      // eviction rather than the graph-wide scan (bot review round 7).
+      this.forgetNumericDatatype(fromOxQuad(q));
     }
     if (matches.length > 0) this.scheduleFlush();
     return matches.length;
@@ -119,8 +264,17 @@ export class OxigraphStore implements TripleStore {
     if (first instanceof Map) {
       const bindings = (result as Map<string, OxTerm>[]).map((row) => {
         const obj: Record<string, string> = {};
+        // Bot review M1: SELECT results are keyed only by the
+        // binding value (we don't know which quad each binding came
+        // from), so we can only safely restore the declared subtype
+        // when every remembered quad with this lexeme agreed on it.
+        // If two quads in the store declared different xsd subtypes
+        // for the same lexeme (e.g. `"1"^^xsd:int` vs
+        // `"1"^^xsd:positiveInteger`), SELECT cannot pick a side
+        // without the position — so we fall through to Oxigraph's
+        // canonical form instead of silently reporting the wrong type.
         for (const [key, term] of row.entries()) {
-          obj[key] = termToString(term);
+          obj[key] = this.restoreOriginalDatatypeForSelectBinding(termToString(term));
         }
         return obj;
       });
@@ -128,8 +282,76 @@ export class OxigraphStore implements TripleStore {
     }
 
 
-    const quads = (result as OxQuad[]).map(fromOxQuad);
+    const quads = (result as OxQuad[]).map((oxq) => {
+      const dq = fromOxQuad(oxq);
+      dq.object = this.restoreOriginalDatatype(dq);
+      return dq;
+    });
     return { type: 'quads', quads } satisfies ConstructResult;
+  }
+
+  /**
+   * Reverse of `rememberNumericDatatype` — if a CONSTRUCT row contains
+   * a typed literal whose datatype Oxigraph collapsed (e.g. `xsd:long`
+   * → `xsd:integer`), restore the publisher's original declared type
+   * from the side-table keyed by the full quad identity (bot review
+   * M1). Falls through unchanged when no entry exists or the key is
+   * not a known numeric subtype. BUGS_FOUND.md#ST-12.
+   */
+  private restoreOriginalDatatype(q: DKGQuad): string {
+    const serialized = q.object;
+    if (!serialized.startsWith('"')) return serialized;
+    const m = serialized.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return serialized;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return serialized;
+    // Prefer the exact quad-identity match (per bot review M1 — this
+    // is the unambiguous path when one position declared a specific
+    // subtype).
+    const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    const original = this.originalNumericDatatype.get(key);
+    if (original && original !== dtype) {
+      return `"${value}"^^<${original}>`;
+    }
+    // CONSTRUCT results often project quads into the default graph
+    // (`CONSTRUCT { ?s ?p ?o }`), so the per-quad key doesn't line up
+    // with the graph-scoped write-time key. Fall back to the
+    // lexical-only best-effort lookup WITH CONFLICT DETECTION: if
+    // every remembered quad with this lexeme declared the same
+    // subtype, restore it; if two different subtypes were declared
+    // anywhere, refuse to guess and return Oxigraph's canonical form.
+    return this.restoreOriginalDatatypeForSelectBinding(serialized);
+  }
+
+  /**
+   * Bot review M1: lexical-only restore for SELECT bindings. Only
+   * returns the declared subtype when EVERY remembered quad that
+   * carried this lexeme declared the SAME subtype — otherwise falls
+   * back to Oxigraph's canonical form. This preserves the common
+   * case (single publisher wrote `"42"^^xsd:long`) while refusing
+   * to guess when the store contains conflicting declarations.
+   */
+  private restoreOriginalDatatypeForSelectBinding(serialized: string): string {
+    if (!serialized.startsWith('"')) return serialized;
+    const m = serialized.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return serialized;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return serialized;
+    let only: string | undefined;
+    // Keys are `s\0p\0value\0g` — scan for entries matching this value.
+    const needle = `\u0000${value}\u0000`;
+    for (const [k, v] of this.originalNumericDatatype) {
+      if (!k.includes(needle)) continue;
+      if (only === undefined) {
+        only = v;
+      } else if (only !== v) {
+        return serialized; // conflict — fall back to Oxigraph canonical
+      }
+    }
+    if (!only || only === dtype) return serialized;
+    return `"${value}"^^<${only}>`;
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
@@ -148,6 +370,12 @@ export class OxigraphStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+    // PR #229 bot review round 7 (oxigraph.ts:164): every numeric-
+    // subtype key that lived in this graph must be dropped too, so
+    // `restoreOriginalDatatypeForSelectBinding` can't see phantom
+    // conflicts from data that no longer exists (and the conflicts
+    // don't get persisted across restarts via the sidecar).
+    this.evictNumericDatatypeForGraph(graphUri);
     this.scheduleFlush();
   }
 
@@ -175,7 +403,14 @@ export class OxigraphStore implements TripleStore {
       `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
     );
     const removed = before - this.store.size;
-    if (removed > 0) this.scheduleFlush();
+    if (removed > 0) {
+      // PR #229 bot review round 7 (oxigraph.ts:164): evict sidecar
+      // entries for quads that just vanished. We filter by
+      // `startsWith(subjectPrefix)` (keys are `s\0p\0v\0g`) which
+      // mirrors the SPARQL `STRSTARTS(STR(?s), prefix)` filter above.
+      this.evictNumericDatatypeForGraph(graphUri, prefix);
+      this.scheduleFlush();
+    }
     return removed;
   }
 
@@ -257,6 +492,29 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
     graph:
       oxq.graph.termType === 'DefaultGraph' ? '' : oxq.graph.value,
   };
+}
+
+/** XSD numeric subtypes that Oxigraph silently canonicalises to
+ *  `xsd:integer` — keep this list in sync with the W3C XSD spec
+ *  derived-integer hierarchy. */
+const NUMERIC_SUBTYPES = new Set<string>([
+  'http://www.w3.org/2001/XMLSchema#long',
+  'http://www.w3.org/2001/XMLSchema#int',
+  'http://www.w3.org/2001/XMLSchema#short',
+  'http://www.w3.org/2001/XMLSchema#byte',
+  'http://www.w3.org/2001/XMLSchema#unsignedLong',
+  'http://www.w3.org/2001/XMLSchema#unsignedInt',
+  'http://www.w3.org/2001/XMLSchema#unsignedShort',
+  'http://www.w3.org/2001/XMLSchema#unsignedByte',
+  'http://www.w3.org/2001/XMLSchema#integer',
+  'http://www.w3.org/2001/XMLSchema#nonNegativeInteger',
+  'http://www.w3.org/2001/XMLSchema#positiveInteger',
+  'http://www.w3.org/2001/XMLSchema#negativeInteger',
+  'http://www.w3.org/2001/XMLSchema#nonPositiveInteger',
+]);
+
+function isNumericSubtype(dtype: string): boolean {
+  return NUMERIC_SUBTYPES.has(dtype);
 }
 
 function escapeNQuadsLiteral(s: string): string {

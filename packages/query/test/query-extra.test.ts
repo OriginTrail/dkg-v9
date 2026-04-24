@@ -118,6 +118,292 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     // alone returns both LowTrust and HighTrust from the mixed sub-graph.
     expect(names).toEqual(['"HighTrust"']);
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Bot review (PR #229 follow-up, dkg-query-engine.ts:534): concrete-
+  // subject queries like `SELECT ?o WHERE { <entity> <p> ?o }` are the
+  // most common SPARQL shape for exact lookups and MUST honor `_minTrust`
+  // (not fail closed with an empty result). The fix attaches
+  // `<entity> <trustLevel> ?t . FILTER(?t >= N)` to the rewritten WHERE.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('honors _minTrust on CONCRETE-SUBJECT queries (exact-entity lookup)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Exact-entity lookup MUST succeed when the entity meets the threshold.
+    const ok = await engine.query(
+      'SELECT ?n WHERE { <urn:e1> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(ok.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('fails CLOSED on a concrete-subject lookup whose entity is BELOW the trust threshold', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const selfAttestedGraph = contextGraphVerifiedMemoryUri(CG, 'self-attested');
+    await store.insert([
+      quad('urn:low', 'http://schema.org/name', '"Bob"', selfAttestedGraph),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, selfAttestedGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:low> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    // Below threshold → empty (the trust filter eliminates the row).
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('fails CLOSED on a concrete-subject lookup whose entity has NO trust metadata at all', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const verifiedGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:bare', 'http://schema.org/name', '"Ghost"', verifiedGraph),
+      // deliberately NO trustLevel quad for <urn:bare>
+    ]);
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:bare> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
+
+  // PR #229 bot review round 7 (dkg-query-engine.ts:513) — `rdf:type` style
+  // IRIs contain a `#` fragment. The prior naive `replace(/#[^\n]*/g,'')`
+  // would mangle the IRI into `<http://www.w3.org/1999/02/22-rdf-syntax-ns`
+  // and fail-close every such query to `[]`. Lock the happy path so the
+  // fragment is preserved and the trust filter is injected correctly.
+  it('honors _minTrust when the BGP contains a fragment IRI (rdf:type, xsd, rdfs)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:frag', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://schema.org/Person', consensusGraph),
+      quad('urn:frag', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:frag> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['t'])).toEqual(['http://schema.org/Person']);
+  });
+
+  it('still strips real line comments containing a fake terminator (`# … .`)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:cmt', 'http://schema.org/name', '"ok"', consensus),
+      quad('urn:cmt', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+    ]);
+    const sparql = [
+      'SELECT ?n WHERE {',
+      '  <urn:cmt> <http://schema.org/name> ?n . # trailing comment with a fake dot .',
+      '}',
+    ].join('\n');
+    const result = await engine.query(sparql, {
+      contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"ok"']);
+  });
+
+  // PR #229 bot review round 8 (dkg-query-engine.ts:576): the naive
+  // `/\.(?=\s|$)/` split fragmented any query whose literal contained
+  // a sentence-terminating dot ("hello. world", an email address
+  // ending a chat message, a float "3.14 " — anything where `.` was
+  // followed by whitespace inside the string). The rewrite would
+  // then bail out and `_minTrust` would fail-closed to `[]` for
+  // every text/chat query. These two cases pin the fix.
+  it('honors _minTrust when a triple-object literal contains a dot followed by whitespace ("hello. world")', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:msg', 'http://schema.org/text', '"hello. world"', consensus),
+      quad('urn:msg', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:msg> <http://schema.org/text> ?t }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['t'])).toEqual(['"hello. world"']);
+  });
+
+  it('honors _minTrust on a multi-triple BGP where the FIRST literal contains a sentence-terminator dot', async () => {
+    // If the fragmenter splits on the inner-literal dot it will treat
+    // "world" . ?s <p> ... as the start of the next statement — the
+    // subject scanner then refuses the shape and the query returns
+    // [] instead of the join result.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:m', 'http://schema.org/text', '"ack. ok"', consensus),
+      quad('urn:m', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:m', 'http://schema.org/author', '"alice"', consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?a WHERE { <urn:m> <http://schema.org/text> "ack. ok" . <urn:m> <http://schema.org/author> ?a }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['a'])).toEqual(['"alice"']);
+  });
+
+  it('honors _minTrust on MIXED concrete + variable subjects in a single BGP', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:p', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:q', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:p', 'http://schema.org/relatedTo', 'urn:q', consensus),
+      quad('urn:q', 'http://schema.org/name', '"q-name"', consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?name WHERE { <urn:p> <http://schema.org/relatedTo> ?t . ?t <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
+  });
+
+  // PR #229 bot review round 11 (dkg-query-engine.ts:654) — before this
+  // round the `_minTrust` subject matcher only accepted variables,
+  // `<iri>`, blank nodes, and literals. Standard SPARQL with a
+  // `PREFIX ex: <urn:> ...` header and a prefixed-name subject
+  // (`ex:item`) was classified as "unsupported shape" and fail-closed
+  // to `[]` — even though the exact-entity trust filter is perfectly
+  // enforceable. These tests pin the fix: the rewritten WHERE accepts
+  // prefixed-name subjects and attaches the trust-level clause inline.
+  it('honors _minTrust when the subject is a prefixed name (PNAME_LN) — bot review r11-3', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:item', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:item', 'http://example.org/name', '"Alice"', consensus),
+    ]);
+    const sparql = [
+      'PREFIX ex: <urn:>',
+      'PREFIX s: <http://example.org/>',
+      'SELECT ?n WHERE { ex:item s:name ?n }',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('filters out below-threshold results for prefixed-name subjects — bot review r11-3', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:low', 'http://example.org/name', '"Bob"', consensus),
+    ]);
+    // ex:low has Unverified < ConsensusVerified, so the rewrite MUST
+    // filter it out — not silently drop `_minTrust` and return "Bob".
+    const sparql = [
+      'PREFIX ex: <urn:>',
+      'PREFIX s: <http://example.org/>',
+      'SELECT ?n WHERE { ex:low s:name ?n }',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('honors _minTrust on mixed prefixed + variable subjects (multi-triple BGP) — bot review r11-3', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:p', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:q', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:p', 'http://schema.org/relatedTo', 'urn:q', consensus),
+      quad('urn:q', 'http://schema.org/name', '"q-name"', consensus),
+    ]);
+    const sparql = [
+      'PREFIX ex: <urn:>',
+      'SELECT ?name WHERE { ex:p <http://schema.org/relatedTo> ?t . ?t <http://schema.org/name> ?name }',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
+  });
+
+  // PR #229 bot review round 23 (r23-2, dkg-query-engine.ts). The
+  // canonical SPARQL shape for batched exact-subject lookups is a
+  // leading `VALUES ?s { … }` clause followed by a BGP that binds
+  // `?s`. Before r23-2 `injectMinTrustFilter` treated ANY occurrence
+  // of `VALUES` as "unsupported shape" and fail-closed to `[]` — even
+  // when every bound subject met the threshold. Callers saw a silent
+  // empty result with no `minTrust`-related error, which is exactly
+  // the false negative the bot flagged. These tests pin the fix:
+  // a single-variable leading VALUES clause is peeled off, the trust
+  // filter is attached to the BGP, and the VALUES binding is
+  // re-emitted verbatim so the engine still restricts subjects.
+  it('honors _minTrust on a leading VALUES ?s { … } clause — bot review r23-2', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:a', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:b', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:a', 'http://example.org/label', '"A"', consensus),
+      quad('urn:b', 'http://example.org/label', '"B"', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?s ?l WHERE {',
+      '  VALUES ?s { <urn:a> <urn:b> }',
+      '  ?s <http://example.org/label> ?l .',
+      '}',
+      'ORDER BY ?s',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['l'])).toEqual(['"A"', '"B"']);
+  });
+
+  it('filters VALUES-bound subjects that fall below _minTrust — bot review r23-2', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:hi', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:hi', 'http://example.org/label', '"H"', consensus),
+      quad('urn:lo', 'http://example.org/label', '"L"', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?l WHERE {',
+      '  VALUES ?s { <urn:hi> <urn:lo> }',
+      '  ?s <http://example.org/label> ?l .',
+      '}',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    // `urn:lo` is Unverified — it must be filtered out, not silently
+    // returned because the rewriter bailed on VALUES.
+    expect(result.bindings.map((b) => b['l'])).toEqual(['"H"']);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

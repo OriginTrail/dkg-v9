@@ -57,10 +57,10 @@ interface DKGAgent {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
   ): Promise<DKGPublishReturn | undefined>;
-  createContextGraph(params: {
+  registerContextGraphOnChain(params: {
     participantIdentityIds: bigint[];
     requiredSignatures: number;
-  }): Promise<{ contextGraphId: bigint; success: boolean }>;
+  }): Promise<{ contextGraphId: bigint; txHash?: string; blockNumber?: number; success?: boolean }>;
   signContextGraphDigest(
     contextGraphId: bigint,
     merkleRoot: Uint8Array,
@@ -763,14 +763,23 @@ export class OriginTrailGameCoordinator {
         const participantIdentityIds = allIds.map(id => BigInt(id!))
           .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const M = signatureThreshold(participantIdentityIds.length);
-        const result = await this.agent.createContextGraph({
+        const result = await this.agent.registerContextGraphOnChain({
           participantIdentityIds,
           requiredSignatures: M,
         });
-        if (result.success) {
+        // EVM adapter returns { success: false, contextGraphId: 0n } when the
+        // ContextGraphCreated event cannot be parsed out of the receipt logs,
+        // so we MUST NOT treat a `!= null` result as success — doing so binds
+        // the swarm to a non-existent context graph ("0"), which later
+        // publishes/signatures silently target and drop. Gate on the explicit
+        // TxResult.success flag AND reject the 0n sentinel so future adapter
+        // regressions can't sneak a fake id back into the happy path.
+        if (result && result.success && result.contextGraphId !== 0n && result.contextGraphId != null) {
           swarm.contextGraphId = String(result.contextGraphId);
           swarm.requiredSignatures = M;
           this.log(`Context graph ${swarm.contextGraphId} created for swarm ${swarmId} (M=${M}, ${participantIdentityIds.length} participants)`);
+        } else {
+          this.log(`Context graph creation for swarm ${swarmId} did not succeed (success=${result?.success}, contextGraphId=${result?.contextGraphId}); game proceeds without on-chain anchoring`);
         }
       }
     } catch (err) {
@@ -784,24 +793,14 @@ export class OriginTrailGameCoordinator {
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
 
-    const msg: proto.ExpeditionLaunchedMsg = {
-      app: proto.APP_ID,
-      type: 'expedition:launched',
-      swarmId,
-      peerId: this.myPeerId,
-      timestamp: now,
-      gameStateJson,
-      partyOrder: swarm.players.map(p => p.peerId),
-      contextGraphId: swarm.contextGraphId,
-      requiredSignatures: swarm.requiredSignatures,
-    };
-    await this.broadcast(msg);
-    this.log(`Expedition launched for ${swarmId}`);
-
-    // Install CCL turn-validation policy. If the agent supports CCL evaluation
-    // and installation fails, the expedition is aborted — we cannot silently
-    // skip governance since followers will expect CCL enforcement and reject
-    // proposals when they fail to resolve the policy.
+    // Install CCL turn-validation policy BEFORE broadcasting expedition:launched.
+    // Followers must learn the leader's authoritative cclPolicyInstalled state
+    // from the launch message; otherwise they would optimistically assume the
+    // policy exists, fail to resolve it locally, and reject every proposal —
+    // deadlocking turn advancement (G-2). If installation fails on a real chain
+    // we still abort, but the noChainOwner fallback keeps no-chain dev/E2E
+    // working with cclPolicyInstalled=false on every node.
+    swarm.cclPolicyInstalled = false;
     if (this.agent.publishCclPolicy && this.agent.approveCclPolicy) {
       try {
         const published = await this.agent.publishCclPolicy({
@@ -818,21 +817,34 @@ export class OriginTrailGameCoordinator {
         swarm.cclPolicyInstalled = true;
         this.log(`CCL turn-validation policy installed for ${swarmId}`);
       } catch (err: any) {
-        // If the agent supports CCL evaluation, installation failure is fatal —
-        // evaluateCclPolicy will be called later and followers will independently
-        // attempt to resolve the policy. If it's absent, they reject all turns.
-        if (this.agent.evaluateCclPolicy) {
+        const installErrMsg = String(err?.message ?? err);
+        const noChainOwner = /no registered owner|cannot manage policies|identity not yet provisioned|Identity not set/i.test(installErrMsg);
+        if (this.agent.evaluateCclPolicy && !noChainOwner) {
           this.swarms.delete(swarmId);
           throw new Error(
             `Expedition startup aborted: CCL policy installation failed (${err.message}). ` +
             `Cannot proceed without governance — followers would reject all proposals.`,
           );
         }
-        // Agent doesn't support CCL evaluation — safe to proceed without it
         swarm.cclPolicyInstalled = false;
         this.log(`CCL policy installation failed: ${err.message} — CCL governance not available, proceeding without`);
       }
     }
+
+    const msg: proto.ExpeditionLaunchedMsg = {
+      app: proto.APP_ID,
+      type: 'expedition:launched',
+      swarmId,
+      peerId: this.myPeerId,
+      timestamp: now,
+      gameStateJson,
+      partyOrder: swarm.players.map(p => p.peerId),
+      contextGraphId: swarm.contextGraphId,
+      requiredSignatures: swarm.requiredSignatures,
+      cclPolicyInstalled: swarm.cclPolicyInstalled,
+    };
+    await this.broadcast(msg);
+    this.log(`Expedition launched for ${swarmId}`);
 
     return swarm;
   }
@@ -1133,7 +1145,12 @@ export class OriginTrailGameCoordinator {
         { rootEntities },
         { contextGraphId: swarm.contextGraphId, contextGraphSignatures },
       );
-      this.log(`${label} published from shared memory to context graph ${swarm.contextGraphId}`);
+      // Log phrasing is observed by the e2e suite (`leader log shows
+      // complete context graph lifecycle` / `turn 1: votes resolve and
+      // data is published to context graph`) — keep the substring
+      // "published to context graph" intact so the assertions don't
+      // false-fail when the message is reworded.
+      this.log(`${label} published to context graph ${swarm.contextGraphId} (from shared memory)`);
       return result;
     }
 
@@ -1235,6 +1252,9 @@ export class OriginTrailGameCoordinator {
           if (publishResult) {
             const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
             await this.publishProvenanceChain(turnEntity, publishResult);
+            await this.writeLineageFromSnapshot(opsSnapshot, publishResult).catch(() => {});
+          } else {
+            await this.writeLineageFromSnapshot(opsSnapshot, undefined).catch(() => {});
           }
         }
       } catch (err: any) {
@@ -1267,7 +1287,10 @@ export class OriginTrailGameCoordinator {
     }
   }
 
-  async forceResolveTurn(swarmId: string): Promise<SwarmState> {
+  async forceResolveTurn(
+    swarmId: string,
+    opts?: { expectedTurn?: number },
+  ): Promise<SwarmState> {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
@@ -1277,6 +1300,58 @@ export class OriginTrailGameCoordinator {
       if (!swarm.turnDeadline || Date.now() < swarm.turnDeadline) {
         throw new Error('Only leader can force resolve before deadline');
       }
+    }
+
+    // Bot review PR #229 (post-round-5): force-resolve idempotence is
+    // now keyed to the EXACT turn being retried, not a wall-clock
+    // heuristic. The previous revision suppressed any force-resolve
+    // within 3 s of an auto-resolve when there were no open votes —
+    // which ALSO suppressed a legitimate force-resolve of the NEXT
+    // turn in fast/solo flows (e.g. turn N auto-resolves, user
+    // immediately tries to force-resolve turn N+1 because it is stuck
+    // on leader output → the 3-s guard silently no-ops the attempt).
+    //
+    // Idempotence is now semantic:
+    //   - If the caller passes `expectedTurn` and that turn is already
+    //     in `turnHistory`, the request is treated as an idempotent
+    //     retry (silent no-op). This is the clean case for any UI or
+    //     test that knows which turn it meant to resolve.
+    //   - If the caller omits `expectedTurn` AND we just auto-resolved
+    //     the previous turn AND there are no open votes or pending
+    //     proposals, we fall back to the legacy "treat as duplicate"
+    //     behaviour to preserve existing e2e flows that call
+    //     `castVote(); sleep(1000); forceResolveTurn(id)` for a solo /
+    //     fast M-of-1 flow. Callers that want deterministic behaviour
+    //     SHOULD pass `expectedTurn`.
+    const lastEntry = swarm.turnHistory[swarm.turnHistory.length - 1];
+    if (typeof opts?.expectedTurn === 'number') {
+      const exp = opts.expectedTurn;
+      if (swarm.turnHistory.some(t => t.turn === exp)) {
+        this.log(
+          `force-resolve idempotent no-op for ${swarmId} turn ${exp}: already in turnHistory`,
+        );
+        return swarm;
+      }
+      if (exp !== swarm.currentTurn) {
+        throw new Error(
+          `force-resolve requested for turn ${exp} but swarm is on turn ${swarm.currentTurn}`,
+        );
+      }
+      // Falls through: expectedTurn === currentTurn and not yet resolved.
+    } else if (
+      swarm.votes.length === 0
+      && !swarm.pendingProposal
+      && lastEntry
+      && lastEntry.turn === swarm.currentTurn - 1
+      && Date.now() - lastEntry.timestamp < 3000
+    ) {
+      // Legacy time-window fallback for callers that did not pass
+      // expectedTurn. Documented as best-effort only — pass
+      // `expectedTurn` if you want deterministic behaviour.
+      this.log(
+        `force-resolve legacy no-op for ${swarmId} turn ${swarm.currentTurn}: previous turn just resolved and caller did not pass expectedTurn`,
+      );
+      return swarm;
     }
 
     if (swarm.votes.length === 0) {
@@ -1366,6 +1441,7 @@ export class OriginTrailGameCoordinator {
 
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
       await this.publishProvenanceChain(turnEntity, publishResult);
+      await this.writeLineageFromSnapshot(opsSnapshot, publishResult).catch(() => {});
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -1537,6 +1613,17 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
     if (swarm.players.some(p => p.peerId === msg.peerId)) return;
+    // Ignore stale `swarm:joined` gossip that races behind a later
+    // `swarm:left` for the same peer (G-4): without this check a delayed
+    // join broadcast can resurrect a player who has already left the
+    // swarm because gossipsub does not guarantee ordering across topics.
+    // The tombstone records `swarm:left.timestamp`; only re-admit when
+    // the new join is strictly newer than that tombstone.
+    const tombstones = this.swarmMemberTombstones.get(msg.swarmId);
+    const tombstonedAt = tombstones?.get(msg.peerId);
+    if (tombstonedAt != null && msg.timestamp <= tombstonedAt) {
+      return;
+    }
     swarm.players.push({
       peerId: msg.peerId,
       displayName: msg.playerName,
@@ -1613,10 +1700,16 @@ export class OriginTrailGameCoordinator {
     swarm.turnDeadline = Date.now() + 30_000;
     if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
     if (msg.requiredSignatures != null) swarm.requiredSignatures = msg.requiredSignatures;
-    // Followers assume CCL is installed if the agent supports it and a context graph exists.
-    // The leader publishes the policy via gossip; followers will resolve it at evaluation time.
-    // If the policy isn't found, the evaluation catch block will handle it gracefully.
-    swarm.cclPolicyInstalled = !!this.agent.evaluateCclPolicy && !!swarm.contextGraphId;
+    // Honor the leader's authoritative cclPolicyInstalled flag (G-2).
+    // Followers MUST NOT optimistically infer "installed" from the local
+    // capabilities; if the leader couldn't install the policy we'd reject
+    // every subsequent proposal in evaluateCclPolicy and deadlock the game.
+    // Legacy launch payloads omit the flag — treat that as "not installed"
+    // since we have no on-chain policy to resolve against.
+    swarm.cclPolicyInstalled =
+      !!this.agent.evaluateCclPolicy &&
+      !!swarm.contextGraphId &&
+      msg.cclPolicyInstalled === true;
 
     this.pushNotification({
       type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,

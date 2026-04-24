@@ -163,7 +163,10 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
-    // A-12 migration: profile DIDs are the EVM-address form, not peer-id.
+    // A-12: agent DIDs MUST be the 0x-address form per spec §03/§22.
+    // Pass the EVM address explicitly via `agentAddress`; `peerId` is
+    // kept as a legacy libp2p handle to prove the builder uses the
+    // canonical address form even when both are provided.
     const addr = '0x' + '1'.repeat(40);
     const { quads, rootEntity } = buildAgentProfile({
       peerId: 'QmTest123',

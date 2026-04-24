@@ -83,10 +83,13 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     }
   });
 
-  it('a second, unrelated SPARQL client can read the secret verbatim', async () => {
-    // The "confidentiality" model is purely a query-routing convention:
-    // whoever queries `GRAPH <…/_private> { ?s ?p ?o }` gets everything.
-    // No capability check, no encryption key. Demonstrates the gap.
+  it('a second, unrelated SPARQL client must NOT see the plaintext literal', async () => {
+    // FIXED (ST-2): PrivateContentStore now seals the literal `object`
+    // with AES-256-GCM before handing the quad to the TripleStore. A
+    // raw SPARQL caller (no PrivateContentStore decrypt) sees only the
+    // `enc:gcm:v1:<base64>` envelope. PrivateContentStore.getPrivateTriples
+    // reverses the seal and returns the original literal — exercised
+    // by the "round-trip" assertion below.
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -95,17 +98,118 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
       { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
     ]);
 
-    // Simulate an unrelated caller that just knows the graph URI.
     const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
-    const result = await store.query(
+    const raw = await store.query(
       `SELECT ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
     );
-    expect(result.type).toBe('bindings');
-    if (result.type !== 'bindings') return;
-    const objects = result.bindings.map((b) => b['o']);
-    // PROD-BUG: plaintext readable by anyone with SPARQL access.
-    // See BUGS_FOUND.md ST-2.
-    expect(objects).toContain(`"${SECRET}"`);
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    const rawObjects = raw.bindings.map((b) => b['o']);
+    // Raw SPARQL view: only the AES-GCM envelope is observable.
+    expect(rawObjects.join(' ')).not.toContain(SECRET);
+    expect(rawObjects.some((o) => o.startsWith('"enc:gcm:v1:'))).toBe(true);
+
+    // Authorised path round-trips: getPrivateTriples decrypts.
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.map((q) => q.object)).toContain(`"${SECRET}"`);
+  });
+
+  // PR #229 bot review round 7 (private-store.ts:226). Random IV is
+  // required (bot review N1 forbids deterministic IVs for AES-GCM), but
+  // the write path MUST stay idempotent on plaintext identity — otherwise
+  // every replay / retry of the same private KA stacks another
+  // ciphertext row and `getPrivateTriples` starts returning duplicates.
+  it('storePrivateTriples is idempotent on plaintext (no dup rows on replay)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const quads = [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+      { subject: ROOT, predicate: 'http://schema.org/creditCard', object: `"4111-1111-1111-1111"`, graph: '' },
+    ];
+
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads);
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads);
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads);
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    // Exactly two ciphertext rows survive, one per distinct (s,p,plaintext).
+    expect(raw.bindings.length).toBe(2);
+
+    const roundTripped = (await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT))
+      .map((q) => `${q.subject}|${q.predicate}|${q.object}`)
+      .sort();
+    expect(roundTripped).toEqual([
+      `${ROOT}|http://schema.org/creditCard|"4111-1111-1111-1111"`,
+      `${ROOT}|http://schema.org/ssn|"${SECRET}"`,
+    ]);
+  });
+
+  it('PR #229 bugbot: concurrent storePrivateTriples for the same (s,p,o) cannot bypass dedup (read-then-insert race)', async () => {
+    // Pre-fix: `storePrivateTriples` snapshotted existing plaintext keys
+    // BEFORE inserting, with no mutual exclusion. Two concurrent writers
+    // for the same (s,p,o) plaintext would both observe an empty key
+    // set, then each insert their own random-IV ciphertext — and the
+    // store kept both because the underlying triple store dedups by
+    // byte-identical terms only. Post-fix: the per-graph mutex makes
+    // the read-and-insert pair atomic so only the FIRST writer's
+    // ciphertext lands; the SECOND sees the freshly inserted key and
+    // skips.
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const sharedQuad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/ssn',
+      object: `"${SECRET}"`,
+      graph: '',
+    };
+
+    // Fire 8 concurrent writers for the same plaintext.
+    await Promise.all(
+      Array.from({ length: 8 }, () =>
+        ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]),
+      ),
+    );
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    expect(raw.bindings.length).toBe(1);
+
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.length).toBe(1);
+    expect(decrypted[0].object).toBe(`"${SECRET}"`);
+  });
+
+  it('storePrivateTriples still adds NEW plaintext alongside existing (no false-positive dedup)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+    ]);
+    // Same (s,p) but a DIFFERENT plaintext — this is a new, distinct triple
+    // and must not be swallowed by the dedup.
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"OTHER_SECRET"`, graph: '' },
+    ]);
+
+    const roundTripped = (await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT))
+      .map((q) => q.object)
+      .sort();
+    expect(roundTripped).toEqual([`"${SECRET}"`, `"OTHER_SECRET"`].sort());
   });
 });
 

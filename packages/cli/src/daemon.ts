@@ -91,7 +91,7 @@ import {
 } from './config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from './catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, enforceSignedRequestPostBody, SignedRequestRejectedError } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
 import {
@@ -2058,6 +2058,7 @@ async function runDaemonInner(
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;
+          if (err instanceof SignedRequestRejectedError) throw err;
           return jsonResponse(res, 500, {
             error: err.message ?? "Failed to update shared memory TTL",
           });
@@ -2126,7 +2127,25 @@ async function runDaemonInner(
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
-      if (err instanceof PayloadTooLargeError) {
+      if (err instanceof SignedRequestRejectedError) {
+        // PR #229 F2 follow-up: the body-reading helpers throw this when
+        // the post-body HMAC verification fails for a request that opted
+        // into signed mode. Map to 401 with the same wire shape as the
+        // pre-body signed-mode rejections in httpAuthGuard so clients see
+        // a single consistent error surface.
+        const status = err.reason === 'missing-fields' ? 400 : 401;
+        const extraHeaders: Record<string, string> =
+          status === 401
+            ? {
+                'WWW-Authenticate': 'Bearer realm="dkg-node"',
+              }
+            : {};
+        res.writeHead(status, {
+          'Content-Type': 'application/json',
+          ...extraHeaders,
+        });
+        res.end(JSON.stringify({ error: `Signed request rejected: ${err.reason}` }));
+      } else if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
       } else if (err instanceof SyntaxError) {
         jsonResponse(res, 400, { error: err.message });
@@ -2142,7 +2161,14 @@ async function runDaemonInner(
         jsonResponse(res, 400, { error: err.message });
       } else {
         enrichEvmError(err);
-        jsonResponse(res, 500, { error: err.message });
+        const rawMsg = typeof err?.message === "string" ? err.message : String(err);
+        // CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert
+        // hex / `unknown custom error` markers from the 500 body so
+        // ANY endpoint that bubbles a chain error gets the same
+        // privacy-safe treatment, not just /api/verify. Endpoints
+        // that already mapped the error to a 4xx never reach here.
+        const sanitized = sanitizeRevertMessage(rawMsg);
+        jsonResponse(res, 500, { error: sanitized });
       }
     }
   });
@@ -5561,6 +5587,7 @@ async function handleRequest(
       body = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
     } catch (err: any) {
       if (err instanceof PayloadTooLargeError) throw err;
+      if (err instanceof SignedRequestRejectedError) throw err;
       return jsonResponse(res, 400, {
         error: `Failed to read request body: ${err.message}`,
       });
@@ -6591,6 +6618,18 @@ async function handleRequest(
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
+    // PR #229 bot review round 22 (r22-1, dkg-agent.ts:3226): the
+    // RFC-29 multi-agent WM isolation gate is fail-closed by default.
+    // For cross-agent `view: 'working-memory'` reads on nodes with
+    // more than one local agent, the caller MUST supply
+    // `agentAuthSignature` (a signature over a canonical challenge
+    // proving ownership of the agent's private key). Before this the
+    // daemon's `/api/query` endpoint only forwarded `agentAddress`,
+    // so any multi-agent caller got `[]` back from a strict-default
+    // node — effectively downgrading every /api/query hit to
+    // "denied". Plumb the signature through so clients that DO sign
+    // (mcp_auth / OpenClaw adapters after r22-1) can pass the gate.
+    const agentAuthSignature = parsed.agentAuthSignature;
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
@@ -6754,10 +6793,18 @@ async function handleRequest(
         includeSharedMemory,
         view,
         agentAddress,
+        agentAuthSignature,
         verifiedGraph,
         assertionName,
         subGraphName,
         callerAgentAddress,
+        // PR #229 follow-up (round 12 hardening): the daemon admin
+        // token is the authorisation anchor for cross-agent WM reads
+        // (adapter-openclaw and the CLI rely on this). Pass it through
+        // so DKGAgent.query knows to skip the multi-agent signed-proof
+        // gate. Per-agent tokens still go through the regular caller-
+        // matches-target invariant inside DKGAgent.query.
+        adminAuthenticated: isAdminToken,
         minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
@@ -7033,6 +7080,22 @@ async function handleRequest(
       return jsonResponse(res, 200, response);
     } catch (err) {
       tracker.fail(ctx, err);
+      // CLI-7 (BUGS_FOUND.md dup #72 #85): the previous behaviour was
+      // to re-throw and let the global catch emit a 500 with the raw
+      // libp2p / agent message. That conflates "I couldn't reach the
+      // peer" with "the daemon crashed", which the audit flagged as a
+      // false-positive 5xx. We now translate well-known
+      // peer-resolution / unreachable / dial-timeout errors to 404/400
+      // so callers can distinguish operator error from server bugs.
+      // Anything that doesn't match the conservative client-error
+      // vocabulary still falls through to the top-level 500 handler.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
       throw err;
     }
   }
@@ -8015,14 +8078,53 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: parsedSigs.error });
     }
     const validatedRequiredSigs = parsedSigs.value || undefined;
-    const result = await agent.verify({
-      contextGraphId,
-      verifiedMemoryId,
-      batchId: BigInt(batchId),
-      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
-      requiredSignatures: validatedRequiredSigs,
-    });
-    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+
+    // CLI-9 (BUGS_FOUND.md dup #158): batchId is user-controlled; an
+    // unparseable value used to throw `SyntaxError: Cannot convert ...
+    // to a BigInt` deep inside `BigInt()` and bubble up as a 500 with
+    // a stack trace. Pre-validate so the operator gets a crisp 400.
+    let parsedBatchId: bigint;
+    try {
+      parsedBatchId = BigInt(batchId);
+    } catch {
+      return jsonResponse(res, 400, {
+        error: `Invalid batchId — must be an integer string, got ${JSON.stringify(batchId)}`,
+      });
+    }
+
+    try {
+      const result = await agent.verify({
+        contextGraphId,
+        verifiedMemoryId,
+        batchId: parsedBatchId,
+        timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+        requiredSignatures: validatedRequiredSigs,
+      });
+      return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+    } catch (err) {
+      // CLI-9 dup #158 #159: a non-existent (cgId, vmId, batchId)
+      // tuple used to bubble up a chain custom-error revert as a
+      // generic 500 with the raw `data="0x…"` payload in the body.
+      // Map "not found / does not exist" to 404 and other client-shape
+      // errors to 400. Sanitize the message either way so we never
+      // leak the raw revert hex (#159 specifically). Unknown errors
+      // still fall through to the global 500 handler (with the same
+      // sanitization applied below) so genuine internal failures
+      // remain visible.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
+      // Re-throw as a sanitized error so the global catch's 500 body
+      // does not include the raw chain payload either.
+      const sanitized = sanitizeRevertMessage(msg);
+      throw err instanceof Error
+        ? Object.assign(new Error(sanitized), { cause: err })
+        : new Error(sanitized);
+    }
   }
 
   // POST /api/endorse
@@ -8970,6 +9072,90 @@ function parsePublishRequestBody(
   };
 }
 
+/**
+ * CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert payloads from
+ * error messages before they reach the HTTP body. Ethers wraps custom
+ * errors into long, ABI-encoded `data="0x…"` blobs and an `unknown
+ * custom error` prefix; both are operator fingerprints that have leaked
+ * privacy-sensitive context in past audits. We normalise to a clean,
+ * human-readable string before responding. Callers still get the
+ * underlying agent message for debugging — just without the chain
+ * payload.
+ */
+function sanitizeRevertMessage(raw: string): string {
+  return raw
+    .replace(/data="0x[0-9a-fA-F]+"/g, 'data="<redacted>"')
+    .replace(/unknown custom error[^.\n]*\.?/gi, "request rejected by chain")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * CLI-7/9 helper: classify a thrown error as a "client mistake" (4xx)
+ * vs an "infrastructure failure" (5xx). The vocabulary is conservative
+ * — only well-known not-found / invalid-input / unreachable-peer
+ * patterns map to 4xx; everything else stays 5xx so a real internal
+ * problem still surfaces via the top-level catch.
+ */
+export function classifyClientError(
+  msg: string,
+):
+  | { status: 404; sanitized: string }
+  | { status: 400; sanitized: string }
+  | { status: 504; sanitized: string }
+  | null {
+  const sanitized = sanitizeRevertMessage(msg);
+  if (
+    /\b(not found|does not exist|no such|unknown (policy|paranet|context.?graph|peer|verified.?memory)|peer is not connected|cannot resolve|no addresses)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 404, sanitized };
+  }
+  // PR #229 bot review (daemon.ts:1952): pre-fix, the same regex that
+  // catches malformed peer-ids ALSO matched `timed out` / `unable to
+  // dial`, which downgraded transient transport failures from a
+  // retryable 504 to a client-side 400. The CLI / SDK then never
+  // retried — even though the next dial attempt would have succeeded.
+  // Split the classification so transport-layer transients map to
+  // 504 (Gateway Timeout) and only true input-validation problems
+  // stay on 400. Order matters: check the transient set first because
+  // libp2p sometimes embeds the word "invalid" inside a dial-timeout
+  // error string (`invalid response: timed out`) and we want such
+  // hybrids classified as transient.
+  if (
+    /\b(timed? ?out|timeout|deadline (exceeded|expired)|unable to dial|could not dial|connection (refused|reset|closed)|aborted|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 504, sanitized };
+  }
+  if (
+    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|could not parse|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 400, sanitized };
+  }
+  // multiformats / @multiformats/multibase throws "Non-base58btc
+  // character" / "Non-base32 character" / "Unknown base" when handed
+  // a malformed peer-id / multihash / CID. These are unambiguous
+  // client-side input errors — surfacing them as 500 misleads
+  // operators into thinking the daemon itself is broken.
+  if (/Non-base[0-9]+(btc|hex|z)? character|Unknown base|expected (base|prefix|multibase)/i.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  // Last-resort heuristic: libp2p / multiformats throws errors with
+  // codes like ERR_INVALID_PEER_ID / ERR_INVALID_MULTIHASH that don't
+  // include human-readable English. Match the canonical ERR_INVALID_*
+  // shape so a fresh dependency-version upgrade doesn't silently
+  // start returning 500 on what's plainly a malformed-input 400.
+  if (/ERR_INVALID_(PEER|MULTIHASH|MULTIADDR|CID|BASE)/.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  return null;
+}
+
 function jsonResponse(
   res: ServerResponse,
   status: number,
@@ -9213,7 +9399,23 @@ function readBody(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString());
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // PR #229 F2 follow-up (bot review): enforce the post-body
+      // signed-request HMAC check here, centrally, so every route that
+      // reads a body automatically validates the signature against the
+      // actual bytes. Previously httpAuthGuard only pre-validated the
+      // headers and stashed `__dkgSignedAuth`, but no caller invoked
+      // verifyHttpSignedRequestAfterBody — which meant a valid bearer
+      // token plus an arbitrary x-dkg-signature still reached the
+      // handler with the body-binding guarantee silently disabled.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf.toString());
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);
@@ -9248,7 +9450,18 @@ function readBodyBuffer(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks));
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // See readBody() for the rationale — the signed-request post-body
+      // check must run here too so multipart / binary routes cannot be
+      // used to bypass the HMAC / body-binding check.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf);
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);
@@ -9363,6 +9576,20 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 function isValidContextGraphId(id: string): boolean {
   if (!id || typeof id !== "string") return false;
   if (id.length > 256) return false;
+  // CLI-16 (BUGS_FOUND.md dup #87): reject path-traversal patterns
+  // explicitly. The character whitelist below allows `.` and `/`
+  // (because URNs / DIDs / URLs legitimately use them), so a naive
+  // identifier like `../etc/passwd` or `legit-cg/../../other-cg`
+  // slips past the regex and gets handed to file-system / on-chain
+  // code that has no business seeing parent-directory segments.
+  // Tokenise on `/` and refuse anything that resolves to a
+  // parent-directory or hidden-traversal segment, then refuse any
+  // raw `..` substring (catches `..foo` style obfuscations even
+  // though the segment check would already block them).
+  if (id.includes("..")) return false;
+  for (const seg of id.split("/")) {
+    if (seg === "." || seg === "..") return false;
+  }
   // Allow URNs, DIDs, simple slug-like identifiers, and URIs
   return /^[\w:/.@\-]+$/.test(id);
 }

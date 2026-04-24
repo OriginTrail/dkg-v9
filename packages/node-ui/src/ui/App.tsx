@@ -148,7 +148,6 @@ export function App() {
       } />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />
-      <Route path="/apps/*" element={<Navigate to="/" replace />} />
       <Route path="/settings" element={<Navigate to="/" replace />} />
       <Route path="/messages" element={<Navigate to="/" replace />} />
       <Route path="*" element={<AppShell />} />

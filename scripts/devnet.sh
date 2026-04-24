@@ -352,7 +352,7 @@ create_node_config() {
   "nodeRole": "${node_role}",
   ${relay_value}
   ${store_block}
-  "contextGraphs": ["devnet-test", "origin-trail-game"],
+  "contextGraphs": ["devnet-test"],
   ${devnet_auth_block}
   "chain": {
     "type": "evm",
@@ -731,7 +731,7 @@ cmd_start() {
   local register_endpoint="http://127.0.0.1:$API_PORT_BASE/api/context-graph/register"
   local register_auth_header="Authorization: Bearer $shared_token"
   local register_failures=0
-  for cg in devnet-test origin-trail-game; do
+  for cg in devnet-test; do
     local on_chain_id=""
     local attempt
     for attempt in 1 2 3; do

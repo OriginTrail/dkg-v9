@@ -116,7 +116,31 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.cachedStatus = this.buildStatus();
   }
 
+  /**
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Queries only
+   * WM layers (agent-context WM + project WM if resolved); SWM/VM are
+   * reserved for agent-initiated `memory_search` calls. Querying WM
+   * directly — rather than fanning out all 6 layers and post-filtering —
+   * avoids the case where VM/SWM trust boosts fill the top-N ranking and
+   * starve legitimate WM hits from the result window.
+   */
+  async searchNarrow(
+    query: string,
+    options?: { maxResults?: number; minScore?: number; sessionKey?: string },
+  ): Promise<MemorySearchResult[]> {
+    const cap = options?.maxResults ?? 5;
+    return this.runSearch(query, { ...options, maxResults: cap }, ['agent-context-wm', 'project-wm']);
+  }
+
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
+    return this.runSearch(query, options);
+  }
+
+  private async runSearch(
+    query: string,
+    options?: MemorySearchOptions,
+    layerFilter?: ReadonlyArray<MemoryLayer>,
+  ): Promise<MemorySearchResult[]> {
     // B37: The clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause below, so it must be an integer. A fractional
     // input like `2.5` would produce `LIMIT 2.5`, which is invalid
@@ -285,8 +309,16 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       );
     }
 
+    // `searchNarrow` restricts to WM-only layers so the ranked top-N
+    // window cannot be starved by higher-trust SWM/VM hits. Apply the
+    // filter before fan-out so we also skip the unnecessary SWM/VM
+    // queries entirely.
+    const activePlans = layerFilter
+      ? plans.filter((p) => layerFilter.includes(p.layer))
+      : plans;
+
     const settled = await Promise.all(
-      plans.map(plan =>
+      activePlans.map(plan =>
         this.deps.client
           .query(plan.sparql, {
             contextGraphId: plan.contextGraphId,
@@ -322,7 +354,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.deps.logger?.info?.(
       `[dkg-memory] search fired: ` +
       `project=${projectContextGraphId ?? '∅'}, ` +
-      `layers=${plans.length}, ` +
+      `layers=${activePlans.length}, ` +
       `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
     );
     this.deps.logger?.debug?.(

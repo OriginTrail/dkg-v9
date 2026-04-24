@@ -22,8 +22,11 @@ import {
   type LocalAgentIntegrationTransport,
 } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
+import { HookSurface } from './HookSurface.js';
+import { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
   DkgMemoryPlugin,
+  DkgMemorySearchManager,
   toAgentPeerId,
   type DkgMemorySession,
   type DkgMemorySessionResolver,
@@ -34,6 +37,7 @@ import type {
   OpenClawTool,
   OpenClawToolResult,
 } from './types.js';
+import { homedir } from 'node:os';
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
@@ -90,6 +94,9 @@ export class DkgNodePlugin {
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
+  private hookSurface: HookSurface | null = null;
+  private hookSurfaceApi: OpenClawPluginApi | null = null;
+  private chatTurnWriter: ChatTurnWriter | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -235,8 +242,16 @@ export class DkgNodePlugin {
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
-  private crossChannelHookRegistered = false;
-  private crossChannelHookCleanup: (() => void) | null = null;
+  /**
+   * Counter for registration-mode probe diagnostics. Incremented on each
+   * register() call when DKG_PROBE_REGISTRATION_MODE=1 for sequencing logs.
+   */
+  private probeRegisterCallCount = 0;
+  /**
+   * Track hook fires per (event, mechanism) for the registration-mode probe.
+   * Maps "event:via" to fire count.
+   */
+  private probeHookFireCounts = new Map<string, number>();
 
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
@@ -244,6 +259,12 @@ export class DkgNodePlugin {
    * On subsequent calls (gateway multi-phase init): re-registers tools into the new registry.
    */
   register(api: OpenClawPluginApi): void {
+
+    // --- Env-gated registration-mode probe ---
+    if (process.env.DKG_PROBE_REGISTRATION_MODE === '1') {
+      this.runRegistrationModeProbe(api);
+    }
+
     this.warnOnLegacyGameConfig(api);
 
     const registrationMode = api.registrationMode ?? 'full';
@@ -281,12 +302,11 @@ export class DkgNodePlugin {
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
-      // api.on (typed plugin hooks) is only wired in `full` mode.
-      // The first call is usually `setup-runtime` (noop); a later
-      // multi-phase call may arrive with `full` — register then.
-      if (!this.crossChannelHookRegistered && runtimeEnabled) {
-        this.registerCrossChannelPersistence(api);
-      }
+      // Retry typed-hook installs if the first register() call used a
+      // setup-runtime api where api.on was undefined. HookSurface records
+      // those as installedVia='none' with installError set; we detect that
+      // and re-install against the current (possibly full-mode) api.
+      this.installHooksIfNeeded(api);
       return;
     }
 
@@ -294,19 +314,104 @@ export class DkgNodePlugin {
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
     this.initialized = true;
+    const stateDir = (api as any)?.runtime?.state?.resolveStateDir?.()
+      ?? process.env.OPENCLAW_STATE_DIR
+      ?? `${homedir()}/.openclaw`;
+    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+    this.installHooksIfNeeded(api);
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
-
-    // --- Cross-channel turn persistence ---
-    if (runtimeEnabled) {
-      this.registerCrossChannelPersistence(api);
-    }
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
 
     if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
+    }
+  }
+
+  /**
+   * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase
+   * init. Rebuild the surface when:
+   *   (a) ANY prior install recorded a failure (`installedVia === 'none'`),
+   *       whether typed (api.on was undefined at first-call) or internal
+   *       (globalThis hook map not created yet); OR
+   *   (b) the gateway passed a new `api` instance on re-entry
+   *       (`openclaw-entry.mjs` reuses the singleton across new
+   *       registries, so typed hooks bound to the previous api object
+   *       would otherwise never fire against the new one).
+   * Retrying on internal-hook failures too is load-bearing: if the first
+   * register() call runs before the gateway sets up the internal-hook map,
+   * cross-channel persistence (W4b) would otherwise stay dead forever
+   * even after the map appears on a later re-entry.
+   */
+  private installHooksIfNeeded(api: OpenClawPluginApi): void {
+    if (!this.chatTurnWriter) return;
+
+    if (this.hookSurface) {
+      const stats = this.hookSurface.getDispatchStats();
+      const apiChanged = this.hookSurfaceApi !== api;
+      if (apiChanged) {
+        // New api instance — typed hooks bound to the old api won't fire
+        // against it. Destroy and rebuild everything.
+        this.hookSurface.destroy();
+        this.hookSurface = null;
+        this.hookSurfaceApi = null;
+      } else {
+        // Same api. Only retry INTERNAL hook installs that previously
+        // failed (e.g. gateway hadn't created the internal-hook map yet
+        // at first register()). Do NOT re-run typed installs on the same
+        // api — `api.on(...)` has no unsubscribe, so a rebuild would
+        // leave the old typed handlers bound and `before_prompt_build` /
+        // `agent_end` would fire twice per turn.
+        const internalNeedsRetry = (event: string) =>
+          stats[`internal:${event}`]?.installedVia === 'none';
+        if (internalNeedsRetry('message:received')) {
+          this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
+        }
+        if (internalNeedsRetry('message:sent')) {
+          this.hookSurface.install('internal', 'message:sent', (ev) => this.chatTurnWriter!.onMessageSent(ev));
+        }
+        return;
+      }
+    }
+
+    this.hookSurface = new HookSurface(api, api.logger);
+    this.hookSurfaceApi = api;
+
+    // W3 — auto-recall every turn via before_prompt_build typed hook
+    this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+
+    // W4a — LLM-driven turn capture via typed hooks. `before_compaction`
+    // and `before_reset` are rare on healthy gateways; tag them so the
+    // HookSurface commit-by-timeout warn downgrades to debug (otherwise
+    // they false-positive within 30s of startup every time).
+    this.hookSurface.install('typed', 'agent_end',        (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
+    this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
+    this.hookSurface.install('typed', 'before_reset',      (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+
+    // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism)
+    this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
+    this.hookSurface.install('internal', 'message:sent',     (ev) => this.chatTurnWriter!.onMessageSent(ev));
+
+    // I8 — tool-selection guidance injected into the system prompt every turn.
+    // Reaches the agent model directly (unlike SKILL.md which only reaches
+    // doc-readers). Feature-detected: no-op on gateways that haven't wired it.
+    const registerPromptSection = (api as any).registerMemoryPromptSection as
+      | ((section: { title: string; body: string }) => void)
+      | undefined;
+    if (typeof registerPromptSection === 'function') {
+      try {
+        registerPromptSection({
+          title: 'DKG Memory',
+          body:
+            'Prefer `memory_search` for free-text recall across your DKG memory ' +
+            '(fan-outs WM/SWM/VM, trust-weighted, deduped). Use `dkg_query` only ' +
+            'when you need precise SPARQL control over a known graph pattern.',
+        });
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg] registerMemoryPromptSection failed: ${err?.message ?? err}`);
+      }
     }
   }
 
@@ -341,7 +446,6 @@ export class DkgNodePlugin {
         // Clear any stale re-assert callback from a previous registration
         // so the channel plugin doesn't steal the slot back from the
         // newly elected provider on subsequent turns.
-        this.channelPlugin?.setMemoryReAssert(null);
         api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
         return;
       }
@@ -351,10 +455,6 @@ export class DkgNodePlugin {
       // before each inbound turn dispatch. This guarantees our runtime
       // handles recall even when memory-core's dreaming sidecar overwrites
       // the single-slot capability store during plugin loading.
-      if (this.channelPlugin && this.memoryPlugin) {
-        this.channelPlugin.setMemoryReAssert(() => this.memoryPlugin?.reAssertCapability());
-      }
-
       // Cache the API handle so `ensureNodePeerId` can log from the lazy
       // re-probe call tree, which fires outside of any register() scope
       // when a later resolver call asks for the default agent address.
@@ -370,99 +470,6 @@ export class DkgNodePlugin {
       // surprise `/api/status` probe.
       void this.refreshMemoryResolverState(api);
     }
-  }
-
-  /**
-   * Register cross-channel turn persistence via the gateway's internal
-   * hook system (`message:received` + `message:sent`). Fires for ALL
-   * OpenClaw channels (Telegram, WhatsApp, API, etc.). The DKG UI
-   * channel bridge already persists with richer data (correlation IDs,
-   * attachment refs) via DkgChannelPlugin.queueTurnPersistence, so
-   * `dkg-ui` is skipped here.
-   *
-   * Registers directly into the gateway's global hook map because
-   * external plugins only receive `setup-runtime` mode where both
-   * `api.on` and `api.registerHook` are noops.
-   */
-  private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
-    if (this.crossChannelHookRegistered) return;
-
-    // The gateway only exposes api.on (typed plugin hooks) in
-    // registrationMode === 'full'. External plugins get 'setup-runtime'
-    // where both api.on and api.registerHook are noops.
-    //
-    // Workaround: register directly into the gateway's internal hook
-    // map (a global singleton on `globalThis`) for the 'message:sent'
-    // event. This fires after every outbound message across ALL channels
-    // and carries channelId + message content on the event context.
-    const hookKey = Symbol.for('openclaw.internalHookHandlers');
-    const hookMap = (globalThis as any)[hookKey] as Map<string, Array<(event: any) => void>> | undefined;
-    if (!hookMap) {
-      api.logger.debug?.('[dkg] Cross-channel persistence: internal hook map not found (not in gateway)');
-      return;
-    }
-
-    const DKG_UI_CHANNEL = 'dkg-ui';
-    const client = this.client;
-    const pendingUserMessages = new Map<string, string>();
-
-    const conversationKey = (ctx: any): string => {
-      const parts = [ctx?.channelId ?? 'unknown'];
-      if (ctx?.accountId) parts.push(ctx.accountId);
-      parts.push(ctx?.conversationId ?? 'default');
-      return parts.join(':');
-    };
-
-    const onReceived = (event: any) => {
-      const ctx = event?.context;
-      const channelId = ctx?.channelId;
-      if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      const content = typeof ctx?.content === 'string' ? ctx.content : '';
-      if (!content) return;
-      pendingUserMessages.set(conversationKey(ctx), content);
-    };
-
-    const onSent = async (event: any) => {
-      const ctx = event?.context;
-      const channelId = ctx?.channelId;
-      if (!channelId || channelId === DKG_UI_CHANNEL) return;
-      const key = conversationKey(ctx);
-      if (ctx?.success === false) {
-        pendingUserMessages.delete(key);
-        return;
-      }
-
-      const content = typeof ctx?.content === 'string' ? ctx.content : '';
-      const userMessage = pendingUserMessages.get(key) ?? '';
-      pendingUserMessages.delete(key);
-
-      if (!userMessage && !content) return;
-
-      const sessionId = `openclaw:${key}`;
-
-      try {
-        await client.storeChatTurn(sessionId, userMessage, content);
-        api.logger.info?.(`[dkg] Cross-channel turn persisted (${channelId})`);
-      } catch (err: any) {
-        api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
-      }
-    };
-
-    if (!hookMap.has('message:received')) hookMap.set('message:received', []);
-    hookMap.get('message:received')!.push(onReceived);
-
-    if (!hookMap.has('message:sent')) hookMap.set('message:sent', []);
-    hookMap.get('message:sent')!.push(onSent);
-
-    this.crossChannelHookCleanup = () => {
-      const recv = hookMap.get('message:received');
-      if (recv) hookMap.set('message:received', recv.filter(h => h !== onReceived));
-      const sent = hookMap.get('message:sent');
-      if (sent) hookMap.set('message:sent', sent.filter(h => h !== onSent));
-    };
-
-    this.crossChannelHookRegistered = true;
-    api.logger.info?.('[dkg] Cross-channel persistence registered (internal hooks: message:received + message:sent)');
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {
@@ -752,15 +759,12 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
+    try { this.chatTurnWriter?.flushSync(); } catch { /* best effort */ }
+    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
-    }
-    if (this.crossChannelHookCleanup) {
-      this.crossChannelHookCleanup();
-      this.crossChannelHookCleanup = null;
-      this.crossChannelHookRegistered = false;
     }
     await this.channelPlugin?.stop();
   }
@@ -1422,6 +1426,31 @@ export class DkgNodePlugin {
         },
         execute: async (_toolCallId, args) => this.handleSharedMemoryPublish(args),
       },
+      {
+        name: 'memory_search',
+        description:
+          'Search your DKG-backed memory across all trust tiers (Working Memory drafts, ' +
+          'Shared Working Memory, and on-chain Verified Memory) in both your agent-context ' +
+          'graph and the currently-selected project context graph. Returns the top-N most ' +
+          'relevant memory snippets with trust-weighted ranking (VM > SWM > WM). Prefer this ' +
+          'over dkg_query for free-text recall; use dkg_query only when you need precise ' +
+          'SPARQL control over a known graph pattern.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Free-text search query. Case-insensitive keyword match (≥2 chars).',
+            },
+            limit: {
+              type: ['number', 'string'],
+              description: 'Max hits to return. Integer in [1, 100]. Default 10.',
+            },
+          },
+          required: ['query'],
+        },
+        execute: async (_toolCallId, args) => this.handleMemorySearch(args),
+      },
     ];
   }
 
@@ -1436,6 +1465,122 @@ export class DkgNodePlugin {
         this.client.getWallets().catch(() => ({ wallets: [] })),
       ]);
       return this.json({ ...status, walletAddresses: wallets.wallets });
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  /**
+   * W3 — auto-recall handler for the `before_prompt_build` typed hook.
+   *
+   * Fires every turn. Takes the last user message from the run, calls
+   * `DkgMemorySearchManager.searchNarrow` (WM-only, top 5, 250ms budget
+   * via `Promise.race`), and returns an `appendSystemContext` block that
+   * OpenClaw merges into the system prompt.
+   *
+   * Returns `undefined` (not `{}` or empty string) on any of:
+   *   - no memoryPlugin registered
+   *   - no user message in event.messages
+   *   - query shorter than 2 chars
+   *   - timeout exceeded
+   *   - zero hits returned
+   *
+   * Per plan v2.1 A2: empty-string returns break prompt caching. Every
+   * early-return path must return `undefined`.
+   */
+  private async handleBeforePromptBuild(
+    event: any,
+    ctx: any,
+  ): Promise<{ appendSystemContext: string } | undefined> {
+    if (!this.memoryPlugin) return undefined;
+
+    // Per-turn re-assertion of the memory-slot capability. Cheap (one
+    // property assignment per DkgMemoryPlugin.reAssertCapability docstring)
+    // and runs before every prompt build, so if another plugin reclaims
+    // `memoryPluginState.capability` after startup, DKG memory re-asserts
+    // ownership before slot-backed recall runs. Replaces the retired
+    // PR #211 per-turn re-assert wiring with a lighter, channel-agnostic
+    // variant keyed to where it actually matters (recall-time).
+    try {
+      this.memoryPlugin.reAssertCapability();
+    } catch {
+      /* non-fatal; retained by DkgMemoryPlugin itself */
+    }
+
+    const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
+    const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
+    if (!lastUser) return undefined;
+
+    const query = extractUserTextFromContent(lastUser.content);
+    if (!query || query.length < 2) return undefined;
+
+    try {
+      const manager = new DkgMemorySearchManager({
+        client: this.client,
+        resolver: this.memorySessionResolver,
+        sessionKey: ctx?.sessionKey,
+        logger: this.memoryResolverApi?.logger,
+      });
+
+      // 250ms budget. Racing with setTimeout means the underlying SPARQL
+      // queries may complete in the background after we've returned —
+      // acceptable v1 trade-off; tighter AbortSignal threading is a
+      // follow-up (plan N4 would thread through client.query).
+      const hits = await Promise.race([
+        manager.searchNarrow(query, { maxResults: 5 }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+      ]);
+      if (!hits || hits.length === 0) return undefined;
+
+      const block = formatRecalledMemoryBlock(
+        hits.map((h) => ({ snippet: h.snippet, layer: String(h.layer ?? 'unknown'), score: h.score })),
+      );
+      return { appendSystemContext: block };
+    } catch {
+      // Never throw out of a prompt-build handler — return undefined so
+      // OpenClaw's prompt-merge step sees no-op and the turn proceeds.
+      return undefined;
+    }
+  }
+
+  /**
+   * Agent-callable recall button. Runs the full 6-layer SPARQL fan-out
+   * (agent-context WM/SWM/VM + project CG WM/SWM/VM when resolved) via
+   * `DkgMemorySearchManager`, returns trust-weighted ranked hits.
+   */
+  private async handleMemorySearch(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    if (!this.memoryPlugin) {
+      return this.error('memory_search unavailable: memory module is disabled in adapter config');
+    }
+    const query = typeof args.query === 'string' ? args.query.trim() : '';
+    if (!query) {
+      return this.error('"query" is required (non-empty string, ≥2 chars)');
+    }
+    const rawLimit = typeof args.limit === 'string' ? Number(args.limit) : args.limit;
+    const limit = Number.isFinite(rawLimit)
+      ? Math.floor(Math.max(1, Math.min(100, rawLimit as number)))
+      : 10;
+
+    try {
+      const manager = new DkgMemorySearchManager({
+        client: this.client,
+        resolver: this.memorySessionResolver,
+        logger: this.memoryResolverApi?.logger,
+      });
+      const hits = await manager.search(query, { maxResults: limit });
+      const session = this.memorySessionResolver.getSession(undefined);
+      return this.json({
+        query,
+        count: hits.length,
+        scope: session?.projectContextGraphId ?? null,
+        hits: hits.map((h) => ({
+          snippet: h.snippet,
+          layer: h.layer,
+          source: h.source,
+          score: h.score,
+          path: h.path,
+        })),
+      });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -1712,6 +1857,88 @@ export class DkgNodePlugin {
     }
   }
 
+  /**
+   * Env-gated diagnostic probe for registration-mode behavior.
+   * Fires only when DKG_PROBE_REGISTRATION_MODE=1. Logs:
+   *   - Each register() call with mode, call count, and API surface availability
+   *   - Each hook dispatch with event name, registration mechanism, and mode
+   */
+  private runRegistrationModeProbe(api: OpenClawPluginApi): void {
+    this.probeRegisterCallCount++;
+    const mode = api.registrationMode ?? 'full';
+    const hasOn = typeof api.on === 'function';
+    const hasRegisterHook = typeof api.registerHook === 'function';
+    const hasGlobalHookMap = !!(globalThis as any)[Symbol.for('openclaw.internalHookHandlers')];
+
+    api.logger.info?.(
+      '[dkg-probe] register() called: mode=' + mode + ', call#=' + this.probeRegisterCallCount + ', ' +
+      'api.on=' + (hasOn ? 'function' : 'undefined') + ', api.registerHook=' + (hasRegisterHook ? 'function' : 'undefined') + ', ' +
+      'globalThis-hook-map=' + (hasGlobalHookMap ? 'present' : 'absent'),
+    );
+
+    // Helper to make a probe handler factory
+    const makeProbeHandler = (eventName: string, via: string) => {
+      return () => {
+        const key = eventName + ':' + via;
+        const count = (this.probeHookFireCounts.get(key) ?? 0) + 1;
+        this.probeHookFireCounts.set(key, count);
+        api.logger.info?.(
+          '[dkg-probe] HOOK FIRED: event=' + eventName + ' via=' + via + ' mode=' + mode + ' fire#=' + count,
+        );
+      };
+    };
+
+    // Typed hooks (api.on / api.registerHook) use underscore-separated names.
+    const typedEvents = ['before_prompt_build', 'agent_end', 'before_compaction', 'before_reset', 'message_received', 'message_sent'];
+    // Internal-hook map (globalThis symbol) uses colon-separated names per
+    // openclaw/src/infra/outbound/deliver.ts — probing the underscore form
+    // here would never observe the real internal dispatch path and would
+    // falsely drive the Branch A / No-Go decision.
+    const internalEvents = ['message:received', 'message:sent'];
+
+    for (const eventName of typedEvents) {
+      if (hasOn) {
+        try {
+          (api as any).on(eventName, makeProbeHandler(eventName, 'api.on'));
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] api.on(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+      if (hasRegisterHook) {
+        try {
+          (api as any).registerHook(eventName, makeProbeHandler(eventName, 'api.registerHook'), { name: 'dkg-probe-' + eventName });
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] api.registerHook(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+    }
+
+    if (hasGlobalHookMap) {
+      const hookKey = Symbol.for('openclaw.internalHookHandlers');
+      const hookMap = (globalThis as any)[hookKey] as Map<string, Array<() => void>> | undefined;
+      for (const eventName of internalEvents) {
+        try {
+          if (hookMap) {
+            if (!hookMap.has(eventName)) {
+              hookMap.set(eventName, []);
+            }
+            hookMap.get(eventName)!.push(makeProbeHandler(eventName, 'globalThis'));
+          }
+        } catch (err: any) {
+          api.logger.debug?.(
+            '[dkg-probe] globalThis-hook-map insertion for ' + eventName + ' threw: ' + (err?.message ?? 'unknown error'),
+          );
+        }
+      }
+    }
+
+    api.logger.debug?.('[dkg-probe] Probe handlers registered for all mechanisms and events');
+  }
+
   // ── Assertion lifecycle handlers ────────────────────────────────────────
 
   private async handleAssertionCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
@@ -1931,6 +2158,50 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+/**
+ * Extract user-visible text from a message's `content` field. Handles
+ * both plain string and multi-modal array forms. Filters to text parts
+ * only — image/tool-use parts contribute nothing to the recall query.
+ */
+function extractUserTextFromContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((p: any) => p?.type === 'text' && typeof p?.text === 'string')
+      .map((p: any) => p.text)
+      .join(' ')
+      .trim();
+  }
+  return '';
+}
+
+/**
+ * Format the top-N memory hits as a `<recalled-memory>` block for the
+ * W3 auto-recall handler to return via `appendSystemContext`. The tag
+ * shape is load-bearing for `ChatTurnWriter.stripRecalledMemory` —
+ * keep in sync.
+ *
+ * Snippet and layer text is user/agent-authored, so both are HTML-entity
+ * escaped before interpolation. A snippet containing `</recalled-memory>`
+ * would otherwise terminate the wrapper early (escaping arbitrary content
+ * into the prompt and bypassing the strip regex).
+ */
+function formatRecalledMemoryBlock(
+  hits: ReadonlyArray<{ snippet: string; layer: string; score: number }>,
+): string {
+  const escape = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const lines = [
+    '<recalled-memory>',
+    'The following snippets from your memory are relevant to the current turn:',
+    ...hits.map(
+      (h, i) => `  [${i + 1}] (${escape(h.layer)}, score=${h.score.toFixed(2)}) ${escape(h.snippet)}`,
+    ),
+    '</recalled-memory>',
+  ];
+  return lines.join('\n');
 }
 
 /**

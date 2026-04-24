@@ -47,7 +47,7 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    // 10 new tools (assertion lifecycle + sub-graph management + SWM→VM publish)
+    // 10 new tools from PR #254 (assertion lifecycle + sub-graph management + SWM→VM publish)
     expect(toolNames).toContain('dkg_assertion_create');
     expect(toolNames).toContain('dkg_assertion_write');
     expect(toolNames).toContain('dkg_assertion_promote');
@@ -58,10 +58,13 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
     expect(toolNames).toContain('dkg_shared_memory_publish');
-    // Legacy V9 paranet aliases are removed as of v10-rc (`dkg_list_paranets`, `dkg_paranet_create`).
+    // Legacy V9 paranet aliases are removed as of v10-rc.
     expect(toolNames).not.toContain('dkg_list_paranets');
     expect(toolNames).not.toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(21);
+    // memory_search added by this feature branch (W2 — agent-callable recall button).
+    expect(toolNames).toContain('memory_search');
+    // 13 originals (incl. paranets) - 2 retired paranets + 10 assertion/subgraph/publish + 1 memory_search = 22
+    expect(registeredTools.length).toBe(22);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {

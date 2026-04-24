@@ -33,7 +33,7 @@ All three use the same network and protocol; CLI, OpenClaw, and ElizaOS nodes ca
 curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: YOUR_UNIQUE_IDEMPOTENCY_KEY" \
-  --data-raw '{"mode": "v9_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
+  --data-raw '{"mode": "v10_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
 ```
 
 See the [full faucet reference](./TESTNET_FAUCET.md) for rate limits, idempotency keys, and error handling.

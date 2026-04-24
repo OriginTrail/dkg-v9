@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createCatchupRunner } from '../src/catchup-runner.js';
 import { webcrypto } from 'node:crypto';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 if (!(globalThis as any).crypto) {
   (globalThis as any).crypto = webcrypto;
@@ -95,5 +96,110 @@ describe('catchup runner worker loader', () => {
     expect(result.dataSynced).toBe(5);
     expect(result.deniedPeers).toBe(1);
     expect(result.denied).toBe(false);
+  });
+
+  it('detects sync capability from getPeerProtocols for worker catchup', async () => {
+    const fakeAgent = {
+      eventBus: { emit() {} },
+      node: { libp2p: { getConnections: () => [{ remotePeer: { toString: () => 'peer-a' } }] } },
+      isPrivateContextGraph: async () => false,
+      resolvePreferredSyncPeerId: async () => undefined,
+      ensurePeerConnected: async () => undefined,
+      primeCatchupConnections: async () => undefined,
+      selectCatchupPeers: () => [{ toString: () => 'peer-a' }],
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      waitForSyncProtocol: async () => false,
+      syncFromPeerDetailed: async () => ({
+        insertedTriples: 1,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 1,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 1,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      }),
+      syncSharedMemoryFromPeerDetailed: async () => ({
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      }),
+      refreshMetaSyncedFlags: async () => undefined,
+    } as any;
+
+    const runner = createCatchupRunner(fakeAgent);
+    const result = await runner.run({ contextGraphId: 'demo-cg', includeSharedMemory: false });
+    await runner.close();
+
+    expect(result.syncCapablePeers).toBe(1);
+    expect(result.dataSynced).toBe(1);
+  });
+
+  it('retries getPeerProtocols before declaring peer non-sync-capable', async () => {
+    let calls = 0;
+    const fakeAgent = {
+      eventBus: { emit() {} },
+      node: { libp2p: { getConnections: () => [{ remotePeer: { toString: () => 'peer-a' } }] } },
+      isPrivateContextGraph: async () => false,
+      resolvePreferredSyncPeerId: async () => undefined,
+      ensurePeerConnected: async () => undefined,
+      primeCatchupConnections: async () => undefined,
+      selectCatchupPeers: () => [{ toString: () => 'peer-a' }],
+      getPeerProtocols: async () => {
+        calls += 1;
+        return calls < 3 ? [] : [PROTOCOL_SYNC];
+      },
+      waitForSyncProtocol: async () => false,
+      syncFromPeerDetailed: async () => ({
+        insertedTriples: 1,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 1,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 1,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      }),
+      syncSharedMemoryFromPeerDetailed: async () => ({
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      }),
+      refreshMetaSyncedFlags: async () => undefined,
+    } as any;
+
+    const runner = createCatchupRunner(fakeAgent);
+    const result = await runner.run({ contextGraphId: 'demo-cg', includeSharedMemory: false });
+    await runner.close();
+
+    expect(calls).toBe(3);
+    expect(result.syncCapablePeers).toBe(1);
+    expect(result.dataSynced).toBe(1);
   });
 });

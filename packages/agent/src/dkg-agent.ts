@@ -746,7 +746,6 @@ export class DKGAgent {
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
       sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
-      systemParanets: SYSTEM_PARANETS,
       store: this.store,
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),

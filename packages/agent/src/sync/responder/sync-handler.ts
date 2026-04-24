@@ -1,4 +1,4 @@
-import { createOperationContext, DKG_ONTOLOGY, MemoryLayer, type OperationContext, type SYSTEM_PARANETS as SystemParanetsType } from '@origintrail-official/dkg-core';
+import { createOperationContext, DKG_ONTOLOGY, MemoryLayer, type OperationContext } from '@origintrail-official/dkg-core';
 import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
@@ -9,7 +9,6 @@ interface RegisterSyncHandlerParams {
   syncDeniedResponse: string;
   syncPageSize: number;
   sharedMemoryTtlMs: number;
-  systemParanets: typeof SystemParanetsType;
   store: TripleStore;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
@@ -25,7 +24,6 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     syncDeniedResponse,
     syncPageSize,
     sharedMemoryTtlMs,
-    systemParanets,
     store,
     parseSyncRequest,
     authorizeSyncRequest,

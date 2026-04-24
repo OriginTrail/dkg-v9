@@ -1071,6 +1071,108 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, args) => this.handleContextGraphCreate(args),
       },
       {
+        name: 'dkg_context_graph_invite',
+        description:
+          'Invite a peer to a context graph using their peer ID. For "share this project with my friend" ' +
+          'requests, this is the primary user-facing deliverable because it returns a ready-to-share invite code ' +
+          'that the friend can paste into Join. Use this when you have a peer ID but not the friend\'s agent ' +
+          'address, or alongside `dkg_participant_add` when you have both identifiers for a private project.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            peer_id: { type: 'string', description: 'Target peer ID (12D3KooW...).' },
+          },
+          required: ['context_graph_id', 'peer_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleContextGraphInvite(args),
+      },
+      {
+        name: 'dkg_participant_add',
+        description:
+          'Add an agent address to a curated/private context graph allowlist. Use this when you know the ' +
+          'friend\'s DKG agent address. For "share with my friend" requests on private projects, prefer ' +
+          'returning an invite code too when you also have their peer ID, because allowlisting alone is not the ' +
+          'full UI join flow.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Friend\'s DKG agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantAdd(args),
+      },
+      {
+        name: 'dkg_participant_remove',
+        description:
+          'Remove an agent address from a curated/private context graph allowlist.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Agent address to remove (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantRemove(args),
+      },
+      {
+        name: 'dkg_participant_list',
+        description:
+          'List the allowed agent addresses for a context graph.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantList(args),
+      },
+      {
+        name: 'dkg_join_request_list',
+        description:
+          'List pending join requests for a context graph so the curator can review them.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestList(args),
+      },
+      {
+        name: 'dkg_join_request_approve',
+        description:
+          'Approve a pending join request for the given agent address.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Requesting agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestApprove(args),
+      },
+      {
+        name: 'dkg_join_request_reject',
+        description:
+          'Reject a pending join request for the given agent address.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Requesting agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestReject(args),
+      },
+      {
         name: 'dkg_subscribe',
         description:
           'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
@@ -1681,6 +1783,100 @@ export class DkgNodePlugin {
     }
   }
 
+  private async handleContextGraphInvite(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const peerId = typeof args.peer_id === 'string' ? args.peer_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!peerId) return this.error('"peer_id" is required.');
+      const [result, status] = await Promise.all([
+        this.client.inviteToContextGraph(contextGraphId, peerId),
+        this.client.getFullStatus().catch(() => null),
+      ]);
+      const multiaddrs = Array.isArray(status?.multiaddrs)
+        ? status.multiaddrs.filter((value): value is string => typeof value === 'string')
+        : [];
+      const curatorMultiaddr = pickShareableMultiaddr(multiaddrs);
+      const inviteCode = curatorMultiaddr ? `${contextGraphId}\n${curatorMultiaddr}` : contextGraphId;
+      return this.json({
+        ...result,
+        peerId,
+        curatorMultiaddr,
+        inviteCode,
+      });
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantAdd(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.addParticipant(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantRemove(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.removeParticipant(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      return this.json(await this.client.listParticipants(contextGraphId));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      return this.json(await this.client.listJoinRequests(contextGraphId));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestApprove(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.approveJoinRequest(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestReject(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.rejectJoinRequest(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
@@ -1934,6 +2130,37 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+function pickShareableMultiaddr(addrs: string[]): string | null {
+  if (addrs.length === 0) return null;
+  const ranked = [...addrs].sort((a, b) => scoreMultiaddr(b) - scoreMultiaddr(a));
+  return ranked[0] ?? null;
+}
+
+function scoreMultiaddr(addr: string): number {
+  if (addr.includes('/p2p-circuit/')) return 100;
+  const ipv4 = addr.match(/\/ip4\/([^/]+)/)?.[1];
+  if (!ipv4) return 50;
+  if (isLoopbackIPv4(ipv4)) return 0;
+  if (isPrivateIPv4(ipv4)) return 10;
+  return 80;
+}
+
+function isLoopbackIPv4(ip: string): boolean {
+  return ip.startsWith('127.');
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  if (ip.startsWith('10.')) return true;
+  if (ip.startsWith('192.168.')) return true;
+  if (ip.startsWith('169.254.')) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m) {
+    const second = Number.parseInt(m[1]!, 10);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
 }
 
 /**

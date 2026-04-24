@@ -60,6 +60,9 @@ function buildDkgMemoryPromptSections(): string[] {
   return [
     'DKG memory rules:',
     '- To inspect whether a project has data, check all three layers explicitly: `working-memory`, `shared-working-memory`, and `verified-memory`.',
+    '- If the user asks to share a private project with a friend, prefer the full join UX: generate an invite code first, then add the friend to the allowlist when you have their agent address.',
+    '- If you have both a peer ID and an agent address for a private-project share, do both automatically: return the invite code and add the participant.',
+    '- If you only have an agent address, explain that allowlisting is not the full UI join flow and ask for the peer ID if the user wants a paste-into-Join invite code.',
     '- For `working-memory`, prefer the injected `current_agent_address` from the turn context when present.',
     '- If `current_agent_address` is absent, use the local node\'s default `agent_address` fallback.',
     '- Do not assume a libp2p peer ID is the correct WM identity unless the tool or graph naming proves it.',

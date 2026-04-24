@@ -99,10 +99,14 @@ Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:
 Beyond the first-party framework adapters above, DKG V10 supports **community-contributed integrations** — CLIs, MCP servers, agent plugins, and services that run against your local node through its public HTTP API, `dkg` CLI, or MCP interface. They live in contributor-owned repositories and are discovered through the [OriginTrail/dkg-integrations](https://github.com/OriginTrail/dkg-integrations) registry.
 
 ```bash
-dkg integration list                 # browse the registry
-dkg integration info <slug>          # inspect a single integration
-dkg integration install <slug>       # install (with publish-time provenance verification for CLI-kind installs)
+dkg integration list                              # list verified + featured tiers (default)
+dkg integration list --tier community             # include community-tier (contributor-submitted) entries
+dkg integration info <slug>                       # inspect a single entry
+dkg integration install <slug>                    # install — automates `cli` and `mcp` install kinds
+dkg integration install <slug> --allow-community  # required to install a community-tier entry
 ```
+
+By design, `list` shows only verified and featured tiers and `install` refuses community-tier entries unless you opt in — community submissions haven't been peer-reviewed by the OriginTrail core team, so discovering and installing them is an explicit choice. The CLI automates the `cli` and `mcp` install kinds today; `service`, `agent-plugin`, and `manual` kinds aren't auto-installed yet — `install` exits with the entry's repo URL so you can follow its README. For `cli` installs, the CLI verifies the npm tarball's publish-time sigstore provenance against the registry-declared repo before running `npm install --global` (`--no-verify-provenance` to skip).
 
 **Building one:** fork the minimal reference template at [OriginTrail/dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) — ~150 lines, zero dependencies, demonstrates the full Working Memory write → read round trip. Submission rules (schema, security checks, trust tiers) are in the registry's [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md).
 
@@ -173,9 +177,9 @@ dkg auth status                          # show whether auth is enabled
 dkg openclaw setup                       # install & configure the OpenClaw adapter
 
 # Community integrations (registry: OriginTrail/dkg-integrations)
-dkg integration list                     # browse registry entries
+dkg integration list [--tier community]  # default tier filter is `verified`+
 dkg integration info <slug>              # show details for one entry
-dkg integration install <slug>           # install (CLI-kind installs verify npm provenance)
+dkg integration install <slug>           # install cli/mcp kind; --allow-community for community-tier entries
 
 # Update / rollback
 dkg update [--check] [--allow-prerelease]  # update node software

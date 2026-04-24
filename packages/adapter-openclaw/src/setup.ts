@@ -5,13 +5,16 @@
  *  1. Discover OpenClaw workspace
  *  2. Discover agent name
  *  3. Write ~/.dkg/config.json with testnet defaults
- *  4. Start the DKG daemon
- *  5. Read wallets and fund the first three via the testnet faucet
+ *  4. Preflight ~/.openclaw/openclaw.json (exists / parseable / writable /
+ *     not wrong-slot-wired) so deterministic setup errors fail fast
+ *     before daemon start and the faucet call burn resources
+ *  5. Start the DKG daemon
+ *  6. Read wallets and fund the first three via the testnet faucet
  *     (skippable with `--no-fund`; non-fatal on failure)
- *  6. Copy the canonical DKG node skill into the OpenClaw workspace
- *  7. Merge adapter plugin into ~/.openclaw/openclaw.json (including
+ *  7. Copy the canonical DKG node skill into the OpenClaw workspace
+ *  8. Merge adapter plugin into ~/.openclaw/openclaw.json (including
  *     plugins.entries.adapter-openclaw.config with feature flags)
- *  8. Verify setup
+ *  9. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
@@ -473,7 +476,7 @@ export function writeDkgConfig(
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Start DKG daemon
+// Step 5: Start DKG daemon
 // ---------------------------------------------------------------------------
 
 export async function startDaemon(apiPort: number): Promise<void> {
@@ -541,7 +544,7 @@ function isProcessRunning(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Read wallets and fund via testnet faucet
+// Step 6: Read wallets and fund via testnet faucet
 // ---------------------------------------------------------------------------
 
 /**
@@ -634,10 +637,153 @@ export async function readWalletsWithRetry(
 }
 
 // ---------------------------------------------------------------------------
-// Step 7: Merge adapter into openclaw.json
+// Step 4 (preflight) + Step 8: Merge adapter into openclaw.json
 // ---------------------------------------------------------------------------
 
 const ADAPTER_PLUGIN_ID = 'adapter-openclaw';
+
+/**
+ * Result of `preflightOpenClawConfig` — the pure, staged validation of
+ * `openclaw.json` that Step 8 (merge) relies on. Surfacing the parsed
+ * config + migration pointer here lets the caller reuse them without
+ * re-reading the file.
+ */
+export interface OpenClawPreflightResult {
+  /**
+   * Absolute path to the `openclaw.json` the subsequent merge step will
+   * write to. Resolves the `--workspace`-override case (where
+   * `discoverWorkspace` returns an empty configPath) to the default
+   * `~/.openclaw/openclaw.json`, matching `mergeOpenClawConfig`'s own
+   * resolution.
+   */
+  effectiveConfigPath: string;
+  /**
+   * The parsed JSON of the file at `effectiveConfigPath`. Reused by the
+   * caller for migration-pointer discovery and any downstream inspection
+   * so we don't re-parse the file twice.
+   */
+  rawExisting: any;
+  /**
+   * If a prior install wrote `plugins.entries.adapter-openclaw.config.installedWorkspace`
+   * and this run is targeting a different workspace, the migration-cleanup
+   * step later in `runSetup` retires the prior install's SKILL.md. Empty
+   * string means "no migration cleanup required".
+   */
+  priorInstalledForMigration: string;
+}
+
+/**
+ * Validate `openclaw.json` before any destructive setup step runs. This
+ * is the Codex PR #234 R6-2 + R8-2 preflight lifted out of `runSetup` so
+ * it can run earlier (before `startDaemon` + the faucet call) — catching
+ * a deterministic misconfiguration (missing file, invalid JSON, non-
+ * writable, wrong-slot-wired) before the user's 3-calls-per-8h faucet
+ * allowance is spent on a setup that was always going to fail at merge.
+ *
+ * Pure staged checks:
+ *   1. `openclaw.json` exists at the effective config path.
+ *   2. The file parses as JSON.
+ *   3. The file is writable.
+ *   4. The containing directory is writable (R11-3 — `mergeOpenClawConfig`
+ *      writes `openclaw.json.bak.<ts>` as a sibling of the config, so a
+ *      file-writable-but-dir-readonly arrangement would fail mid-merge).
+ *   5. `plugins.slots.contextEngine !== ADAPTER_PLUGIN_ID` (R8-2 — the
+ *      adapter declares `kind: "memory"`; mis-wiring would let step 8
+ *      write SKILL.md to disk before throwing).
+ *
+ * Also captures the migration pointer (`entry.config.installedWorkspace`)
+ * for the post-merge cleanup step. A missing pointer means no migration
+ * cleanup is required; we decline to fall back to `resolveWorkspaceDirFromConfig`
+ * here (R11-2 — no destructive best-guess on pre-launch configs).
+ *
+ * Throws with actionable messages matching the in-body preflight's error
+ * text. Callers are responsible for swallowing/abortng as appropriate —
+ * in the `runSetup` happy path these errors should propagate so the user
+ * sees them immediately on the command line.
+ */
+export function preflightOpenClawConfig(openclawConfigPath: string): OpenClawPreflightResult {
+  // `discoverWorkspace` returns configPath: '' when `--workspace` was used,
+  // so resolve the effective path the same way `mergeOpenClawConfig` does
+  // at setup.ts:524 — default to `~/.openclaw/openclaw.json` when empty.
+  const effectiveConfigPath = openclawConfigPath && openclawConfigPath.trim()
+    ? openclawConfigPath
+    : join(openclawDir(), 'openclaw.json');
+
+  if (!existsSync(effectiveConfigPath)) {
+    throw new Error(
+      `openclaw.json not found at ${effectiveConfigPath} — ` +
+      `install OpenClaw first`,
+    );
+  }
+
+  let rawExisting: any;
+  try {
+    rawExisting = JSON.parse(readFileSync(effectiveConfigPath, 'utf-8'));
+  } catch (err: any) {
+    throw new Error(
+      `openclaw.json at ${effectiveConfigPath} is not valid JSON: ${err?.message ?? err}`,
+    );
+  }
+
+  try {
+    accessSync(effectiveConfigPath, fsConstants.W_OK);
+  } catch (err: any) {
+    throw new Error(
+      `openclaw.json at ${effectiveConfigPath} is not writable: ${err?.message ?? err}`,
+    );
+  }
+
+  // R11-3: `mergeOpenClawConfig` creates `openclaw.json.bak.<ts>` as a
+  // sibling of the config file. A writable config file inside a read-only
+  // directory would pass the file-level check above and then fail at
+  // backup creation AFTER merge has already written SKILL.md — the exact
+  // orphan scenario R6-2 was designed to prevent. Check the directory
+  // too.
+  const configDir = dirname(effectiveConfigPath);
+  try {
+    accessSync(configDir, fsConstants.W_OK);
+  } catch (err: any) {
+    throw new Error(
+      `openclaw.json directory ${configDir} is not writable (backup file creation would fail): ${err?.message ?? err}`,
+    );
+  }
+
+  // R8-2: pre-validate the wrong-slot guard `mergeOpenClawConfig` runs
+  // later. A misconfigured `plugins.slots.contextEngine === "adapter-openclaw"`
+  // would let the install-skill step write SKILL.md to disk before merge
+  // threw. Running the same check here fails fast with no disk mutation.
+  // Note: unpreventable failure modes (disk-full on write, backup rename
+  // failure, abort between install-skill and merge) remain covered by
+  // the canary ordering + `openclaw-entry.mjs` sync-on-load self-heal —
+  // the worst case is a retry where the migration cleans up any orphan.
+  if (rawExisting?.plugins?.slots?.contextEngine === ADAPTER_PLUGIN_ID) {
+    throw new Error(
+      `Refusing to install: plugins.slots.contextEngine is set to "${ADAPTER_PLUGIN_ID}" ` +
+      `but the adapter declares kind: "memory". Clear plugins.slots.contextEngine first.`,
+    );
+  }
+
+  // Migration discovery: only trust the explicit
+  // `entry.config.installedWorkspace` pointer written by a prior merge.
+  // No legacy fallback via `resolveWorkspaceDirFromConfig` — pre-launch,
+  // pre-R2 configs don't exist at scale, and the config-derived workspace
+  // isn't guaranteed to be where an earlier `--workspace`-overridden
+  // install actually put SKILL.md. A missing pointer simply means no
+  // migration cleanup runs (R11-2 decline of destructive best-guess).
+  let priorInstalledForMigration = '';
+  const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
+  if (existingEntry && typeof existingEntry === 'object') {
+    const installedFromEntryConfig = typeof existingEntry.config?.installedWorkspace === 'string'
+      && existingEntry.config.installedWorkspace.trim()
+      ? existingEntry.config.installedWorkspace.trim()
+      : undefined;
+    if (installedFromEntryConfig) {
+      priorInstalledForMigration = installedFromEntryConfig;
+    }
+  }
+
+  return { effectiveConfigPath, rawExisting, priorInstalledForMigration };
+}
 
 /**
  * Shared predicate between merge and unmerge so the unmerge only removes
@@ -1272,7 +1418,7 @@ export function verifyUnmergeInvariants(configPath: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
+// Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function installCanonicalNodeSkill(
@@ -1289,7 +1435,7 @@ export function installCanonicalNodeSkill(
 /**
  * Symmetric counterpart to {@link installCanonicalNodeSkill}: removes the
  * adapter-owned `$WORKSPACE_DIR/skills/dkg-node/SKILL.md` doc installed by
- * step 6 of setup. Called from the daemon-side disconnect path so the agent-
+ * step 7 of setup. Called from the daemon-side disconnect path so the agent-
  * facing skill is retired alongside the openclaw.json entry.
  *
  * Idempotent: a missing file is a no-op. After removing the file we also try
@@ -1338,7 +1484,7 @@ export function verifySkillRemoved(installedWorkspace: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Step 8: Verify
+// Step 9: Verify
 // ---------------------------------------------------------------------------
 
 export async function verifySetup(
@@ -1531,7 +1677,23 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
 
-  // Step 4: Start daemon
+  // Step 4: Preflight ~/.openclaw/openclaw.json BEFORE the daemon spins up
+  // or the faucet is called.
+  //
+  // The preflight validates that openclaw.json exists, parses, is writable,
+  // and isn't wrong-slot-wired (R6-2 + R8-2 from Codex PR #234). Running it
+  // here — rather than inline inside Step 8 (merge) — means a deterministic
+  // setup misconfiguration (missing openclaw.json, invalid JSON, etc.)
+  // throws BEFORE startDaemon and the faucet call, so a user running
+  // against a broken openclaw.json doesn't burn a slot of the 3-calls-per-8h
+  // IP-level faucet budget on a setup that was always going to fail at
+  // merge. The result is cached and reused by Step 8 below — no duplicate
+  // reads or parses. `dryRun` short-circuits so dry-run stays a pure
+  // no-op with no filesystem access beyond the workspace probe.
+  throwIfAborted();
+  const preflight = !dryRun ? preflightOpenClawConfig(openclawConfigPath) : null;
+
+  // Step 5: Start daemon
   throwIfAborted();
   if (shouldStart && !dryRun) {
     await startDaemon(effectivePort);
@@ -1541,7 +1703,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('Skipping daemon start (--no-start)');
   }
 
-  // Step 5: Read wallets and fund via testnet faucet.
+  // Step 6: Read wallets and fund via testnet faucet.
   // Delegates to the shared `requestFaucetFunding` in `@origintrail-official/dkg-core`,
   // which is the same implementation the `dkg init` CLI path uses. The
   // faucet URL and mode come from `network.faucet.*`; a missing
@@ -1608,109 +1770,30 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     channel: { enabled: true },
   };
 
-  // Codex PR #234 R3-3 / R4-2 / R5-2 / R5-3 / R6-2: workspace migration and
-  // preflight. If a prior install targeted a different workspace (e.g.
+  // Codex PR #234 R3-3 / R4-2 / R5-2 / R5-3: workspace migration narrative.
+  // If a prior install targeted a different workspace (e.g.
   // `dkg openclaw setup --workspace /dir-a` then `--workspace /dir-b`),
-  // step 7b below retires the old SKILL.md — but only AFTER the new install
+  // step 8b below retires the old SKILL.md — but only AFTER the new install
   // has fully landed (install-new → merge → cleanup-old). Canary-deploy
   // ordering: if install-new throws, openclaw.json still points at the
   // OLD workspace, which IS the real install, so a retry sees OLD as the
   // prior and migrates normally (R5-3).
   //
-  // R6-2 + R8-2 preflight: before step 6 writes SKILL.md to disk, validate
-  // that openclaw.json is usable by `mergeOpenClawConfig` at step 7 —
-  // exists, parses as JSON, is writable, and doesn't have the adapter
-  // mis-wired into `plugins.slots.contextEngine` (wrong-slot guard). If any
-  // check fails we throw BEFORE `installCanonicalNodeSkill` runs, so step
-  // 7's failure on a deterministic, statically-checkable condition can
-  // never leave an orphaned SKILL.md on disk. The parsed config is reused
-  // for migration discovery.
-  //
-  // `discoverWorkspace` returns configPath: '' when `--workspace` was used,
-  // so resolve the effective path the same way `mergeOpenClawConfig` does at
-  // setup.ts:524 — default to `~/.openclaw/openclaw.json` when empty.
-  const effectiveConfigPathForMigration = openclawConfigPath && openclawConfigPath.trim()
-    ? openclawConfigPath
-    : join(openclawDir(), 'openclaw.json');
-  let priorInstalledForMigration = '';
-  if (!dryRun) {
-    if (!existsSync(effectiveConfigPathForMigration)) {
-      throw new Error(
-        `openclaw.json not found at ${effectiveConfigPathForMigration} — ` +
-        `install OpenClaw first`,
-      );
-    }
-    let rawExisting: any;
-    try {
-      rawExisting = JSON.parse(readFileSync(effectiveConfigPathForMigration, 'utf-8'));
-    } catch (err: any) {
-      throw new Error(
-        `openclaw.json at ${effectiveConfigPathForMigration} is not valid JSON: ${err?.message ?? err}`,
-      );
-    }
-    try {
-      accessSync(effectiveConfigPathForMigration, fsConstants.W_OK);
-    } catch (err: any) {
-      throw new Error(
-        `openclaw.json at ${effectiveConfigPathForMigration} is not writable: ${err?.message ?? err}`,
-      );
-    }
-    // R11-3: `mergeOpenClawConfig` creates `openclaw.json.bak.<ts>` as a
-    // sibling of the config file. A writable config file inside a read-only
-    // directory would pass the file-level check above and then fail at
-    // backup creation AFTER step 6 has already written SKILL.md — the exact
-    // orphan scenario R6-2 was designed to prevent. Check the directory
-    // too.
-    const configDir = dirname(effectiveConfigPathForMigration);
-    try {
-      accessSync(configDir, fsConstants.W_OK);
-    } catch (err: any) {
-      throw new Error(
-        `openclaw.json directory ${configDir} is not writable (backup file creation would fail): ${err?.message ?? err}`,
-      );
-    }
+  // R6-2 + R8-2 preflight already ran at Step 4 (before daemon start and
+  // the faucet call). The cached result is reused here for migration
+  // discovery so we don't re-read or re-parse openclaw.json. Failure
+  // modes like disk-full on write or backup rename remain covered by the
+  // canary ordering + `openclaw-entry.mjs` sync-on-load self-heal — the
+  // worst case is a retry where step 8b's migration cleans up any orphan.
+  const priorInstalledForMigration = preflight?.priorInstalledForMigration ?? '';
 
-    // R8-2: also pre-validate the wrong-slot guard `mergeOpenClawConfig`
-    // runs at setup.ts:646. Without this, a misconfigured
-    // `plugins.slots.contextEngine === "adapter-openclaw"` would let step 6
-    // write SKILL.md to disk before step 7 threw. Running the same check
-    // against `rawExisting` here fails fast with no disk mutation. Note:
-    // unpreventable failure modes (disk-full on write, backup rename
-    // failure, abort between step 6 and 7) remain covered by the canary
-    // ordering + `openclaw-entry.mjs` sync-on-load self-heal — the worst
-    // case is a retry where step 7b's migration cleans up any orphan.
-    if (rawExisting?.plugins?.slots?.contextEngine === ADAPTER_PLUGIN_ID) {
-      throw new Error(
-        `Refusing to install: plugins.slots.contextEngine is set to "${ADAPTER_PLUGIN_ID}" ` +
-        `but the adapter declares kind: "memory". Clear plugins.slots.contextEngine first.`,
-      );
-    }
-
-    // Migration discovery: only trust the explicit `entry.config.installedWorkspace`
-    // pointer written by a prior merge. No legacy fallback via
-    // `resolveWorkspaceDirFromConfig` here — pre-launch, pre-R2 configs don't
-    // exist at scale, and the config-derived workspace isn't guaranteed to
-    // be where an earlier `--workspace`-overridden install actually put
-    // SKILL.md. A missing pointer simply means no migration cleanup runs
-    // (R11-2 decline of destructive best-guess).
-    const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
-    if (existingEntry && typeof existingEntry === 'object') {
-      const installedFromEntryConfig = typeof existingEntry.config?.installedWorkspace === 'string'
-        && existingEntry.config.installedWorkspace.trim()
-        ? existingEntry.config.installedWorkspace.trim()
-        : undefined;
-      if (installedFromEntryConfig) {
-        priorInstalledForMigration = installedFromEntryConfig;
-      }
-    }
-  }
-
-  // Step 6: Install the canonical DKG node skill into the OpenClaw workspace
+  // Step 7: Install the canonical DKG node skill into the OpenClaw workspace
   // FIRST (canary). If this throws, openclaw.json is untouched and still
   // points at whatever the prior install was — user keeps a working install.
-  // Preflight above guarantees step 7 won't then fail on an easily-detectable
-  // config-level problem (missing / invalid-JSON / non-writable), so the
-  // install→merge sequence is robust against the Codex R6-2 failure modes.
+  // Step 4's preflight already guarantees step 8 won't then fail on an
+  // easily-detectable config-level problem (missing / invalid-JSON /
+  // non-writable), so the install→merge sequence is robust against the
+  // Codex R6-2 failure modes.
   throwIfAborted();
   if (!dryRun) {
     installCanonicalNodeSkill(workspaceDir);
@@ -1718,7 +1801,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
   }
 
-  // Step 7: Merge adapter wiring into openclaw.json. Flips `entry.config.installedWorkspace`
+  // Step 8: Merge adapter wiring into openclaw.json. Flips `entry.config.installedWorkspace`
   // to the new workspace — safe now that the new SKILL.md is on disk (R5-3).
   throwIfAborted();
   if (!dryRun) {
@@ -1729,7 +1812,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 7b: Workspace-migration cleanup — runs AFTER install-new + merge.
+  // Step 8b: Workspace-migration cleanup — runs AFTER install-new + merge.
   // Strictly-additive install sequence (R4-2): if any earlier step throws,
   // the prior install's SKILL.md is still on disk, which is strictly better
   // than leaving the user with no install at all. A failure here still
@@ -1780,7 +1863,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // after config changes, but manual restart remains the safe fallback.
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
-  // Step 8: Verify
+  // Step 9: Verify
   throwIfAborted();
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });

@@ -2767,6 +2767,128 @@ describe('runSetup openclaw.json preflight (R6-2 + R8-2)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Preflight runs BEFORE daemon + faucet (C10 extraction)
+//
+// With the preflight moved to new Step 4 (between writeDkgConfig and
+// startDaemon), deterministic openclaw.json misconfigurations must throw
+// BEFORE the faucet gets called. This matters because faucet calls count
+// against the 3-calls-per-8h IP-level rate limit regardless of outcome
+// — so a user with a broken openclaw.json shouldn't burn a slot on a
+// setup that was always going to fail at merge.
+// ---------------------------------------------------------------------------
+
+describe('runSetup preflight runs before faucet (C10)', () => {
+  beforeEach(() => {
+    vi.mocked(requestFaucetFunding).mockReset();
+    vi.mocked(requestFaucetFunding).mockResolvedValue({
+      success: true,
+      funded: ['0.01 ETH', '1000 TRAC'],
+    });
+  });
+
+  it('does NOT call the faucet when openclaw.json is missing', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    // Pre-seed wallets.json so Step 6 would succeed if it ever ran.
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    // Intentionally no openclaw.json — preflight must throw before faucet.
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/openclaw\.json not found/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when openclaw.json is invalid JSON', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(join(openclawHome, 'openclaw.json'), '{ not valid json ,,,\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/not valid JSON/i);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when plugins.slots.contextEngine is wrong-slot-wired (R8-2)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: {},
+          slots: { contextEngine: 'adapter-openclaw' }, // misconfigured
+        },
+      }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/plugins\.slots\.contextEngine/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // readWalletsWithRetry — retry accounting (C4a extraction)
 // ---------------------------------------------------------------------------
 

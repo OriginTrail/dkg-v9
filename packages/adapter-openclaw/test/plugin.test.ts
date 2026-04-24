@@ -1155,7 +1155,12 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('persists gatewayUrl on first registration when gateway routing is available', async () => {
+  // Issue #272: when the gateway hosts the channel routes via registerHttpRoute,
+  // the channel plugin skips the standalone bridge bind (avoiding EADDRINUSE on
+  // port 9201). The connect call upfront marks `runtime.ready: true` because
+  // the gateway already owns the live transport — there is no follow-up PUT
+  // to flip status, since status was never `connecting` in this path.
+  it('persists gatewayUrl via the connect call when gateway routes are active (no follow-up PUT)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1207,12 +1212,86 @@ describe('DkgNodePlugin', () => {
         metadata: {
           transportMode: 'gateway+bridge',
         },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      });
+      expect(readyCall).toBeUndefined();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Bridge-mode (fallback) path — older gateways or runtimes where
+  // api.registerHttpRoute is not available. The standalone bridge bind still
+  // happens, status transitions connecting → ready via the PUT update fired
+  // after channelPlugin.start() resolves.
+  it('persists gatewayUrl on first registration in bridge mode (fallback when gateway routes unavailable)', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {
+          gateway: {
+            port: 19789,
+          },
+        },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        // No registerHttpRoute — fallback to standalone bridge mode.
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      // Allow the fetch promise chain (connect → start → updateLocalAgent) to
+      // settle. The standalone bridge bind on port 0 completes within a tick;
+      // the follow-up PUT lands shortly after.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+        metadata: {
+          transportMode: 'bridge',
+        },
+        runtime: {
+          status: 'connecting',
+          ready: false,
+          lastError: null,
+        },
       });
       expect(readyCall).toBeTruthy();
       expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:19789',
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
         },
       });
     } finally {

@@ -2,15 +2,16 @@
  * Non-interactive setup script for the DKG OpenClaw adapter.
  *
  * Handles the entire DKG node + adapter setup end-to-end:
- *  1. Discover OpenClaw workspace and agent name
- *  2. Write ~/.dkg/config.json with testnet defaults
- *  3. Start the DKG daemon
- *  4. Read wallets and fund the first three via the testnet faucet
+ *  1. Discover OpenClaw workspace
+ *  2. Discover agent name
+ *  3. Write ~/.dkg/config.json with testnet defaults
+ *  4. Start the DKG daemon
+ *  5. Read wallets and fund the first three via the testnet faucet
  *     (skippable with `--no-fund`; non-fatal on failure)
- *  5. Copy the canonical DKG node skill into the OpenClaw workspace
- *  6. Merge adapter plugin into ~/.openclaw/openclaw.json (including
+ *  6. Copy the canonical DKG node skill into the OpenClaw workspace
+ *  7. Merge adapter plugin into ~/.openclaw/openclaw.json (including
  *     plugins.entries.adapter-openclaw.config with feature flags)
- *  7. Verify setup
+ *  8. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */

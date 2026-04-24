@@ -1674,9 +1674,9 @@ openclawCmd
   .option('--no-fund', 'Skip wallet funding via testnet faucet')
   .option('--fund', 'Fund wallets via testnet faucet (default)')
   .action(async (opts, command) => {
-    // Dynamic import + process.exit plumbing stay here; the deprecation-flag
-    // bookkeeping and the actual `runSetup` call live in `openclawSetupAction`
-    // so they can be unit-tested without spawning the built CLI.
+    // Dynamic import + process.exit plumbing stay here; the actual `runSetup`
+    // call lives in `openclawSetupAction` so it can be unit-tested without
+    // spawning the built CLI.
     let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
       ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));

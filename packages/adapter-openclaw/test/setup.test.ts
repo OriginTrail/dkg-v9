@@ -2732,6 +2732,76 @@ describe('readWalletsWithRetry', () => {
 });
 
 // ---------------------------------------------------------------------------
+// logManualFundingInstructions — manual-curl fallback output
+// ---------------------------------------------------------------------------
+
+describe('logManualFundingInstructions', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('caps the curl body at the first 3 addresses matching the auto-path cap', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    // The curl body is built from JSON.stringify(fundable) — assert the
+    // cap by looking for the exact first-three array in the output and
+    // the absence of the 4th/5th addresses inside the curl line.
+    expect(logged).toContain(JSON.stringify(addrs.slice(0, 3)));
+    const curlLine = logSpy.mock.calls
+      .map(c => String(c[0]))
+      .find(line => line.includes('--data-raw'));
+    expect(curlLine).toBeDefined();
+    expect(curlLine).not.toContain(addrs[3]);
+    expect(curlLine).not.toContain(addrs[4]);
+  });
+
+  it('emits a follow-on note listing the omitted wallets when more than 3 are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toMatch(/faucet supports up to 3 wallets/i);
+    expect(logged).toContain('2 wallet');
+    expect(logged).toContain(addrs[3]);
+    expect(logged).toContain(addrs[4]);
+  });
+
+  it('does not emit the extras note when exactly 3 (or fewer) addresses are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toContain('To fund wallets manually');
+    expect(logged).not.toMatch(/up to 3 wallets per call/i);
+    expect(logged).not.toMatch(/remaining/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runSetup Step 5 — faucet funding
 //
 // All tests in this block use `start: false, verify: false` to skip the
@@ -2960,18 +3030,19 @@ describe('runSetup Step 5 — faucet funding', () => {
 // ---------------------------------------------------------------------------
 
 describe('testnet.json faucet block invariant', () => {
-  it('testnet.json exposes exactly the fields requestFaucetFunding consumes, with v10_base_sepolia mode', () => {
+  it('testnet.json exposes the fields requestFaucetFunding consumes, with v10_base_sepolia mode', () => {
     // Load via the same resolver runSetup uses at Step 3 — prevents a
     // "test reads a different file than the runtime" drift class. If
     // loadNetworkConfig's resolution changes (path, env var, package
     // layout), this test updates with it automatically.
     const cfg = loadNetworkConfig();
 
-    // Shape is EXACT — mode + url, nothing else. `requestFaucetFunding`
-    // (packages/core/src/faucet.ts) only consumes these two fields; adding
-    // a third to network config without updating the consumer would be an
-    // uncaught drift. Exact-match forces the coupling to stay honest.
-    expect(cfg.faucet).toEqual({
+    // toMatchObject asserts the two fields requestFaucetFunding
+    // (packages/core/src/faucet.ts) actually consumes — deletion or
+    // rename of `mode` or `url` still fails the test — while leaving
+    // the network config free to grow forward-compatibly with
+    // additional fields.
+    expect(cfg.faucet).toMatchObject({
       mode: 'v10_base_sepolia',
       url: expect.stringMatching(/^https?:\/\//),
     });

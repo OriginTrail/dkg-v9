@@ -552,13 +552,27 @@ export function readWallets(): string[] {
  * Print a ready-to-paste `curl` block for manual faucet funding. Called
  * only on faucet failure; the caller is expected to continue (funding is
  * best-effort / non-fatal).
+ *
+ * Addresses are capped at the first 3 to match `requestFaucetFunding`'s
+ * server-side cap (`packages/core/src/faucet.ts`). Including more wallets
+ * in the body would be rejected by the faucet. When the caller passes >3
+ * addresses, the extras are listed in a follow-on note so the operator
+ * knows which wallets still need funding (via a separate request or a
+ * re-run after cooldown).
  */
 export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
+  const fundable = addresses.slice(0, 3);
+  const extras = addresses.slice(3);
   console.log('\nTo fund wallets manually, run:');
   console.log(`  curl -X POST "${faucetUrl}" \\`);
   console.log(`    -H "Content-Type: application/json" \\`);
   console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
-  console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(addresses)}}'`);
+  console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(fundable)}}'`);
+  if (extras.length > 0) {
+    console.log(`\nNote: faucet supports up to 3 wallets per call; the command above funds the first 3.`);
+    console.log(`Fund the remaining ${extras.length} wallet(s) with a separate request:`);
+    console.log(`  ${extras.join(', ')}`);
+  }
   console.log('');
 }
 

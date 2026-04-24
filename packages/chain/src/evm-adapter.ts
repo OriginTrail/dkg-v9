@@ -26,7 +26,6 @@ import type {
   V10PublishDirectParams,
   V10UpdateKCParams,
   ConvictionAccountInfo,
-  FairSwapPurchaseInfo,
   PermanentPublishParams,
 } from './chain-adapter.js';
 
@@ -130,7 +129,6 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
-  fairSwapJudge?: Contract;
 }
 
 /**
@@ -271,12 +269,6 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
-    }
-
-    try {
-      this.contracts.fairSwapJudge = await this.resolveContract('FairSwapJudge');
-    } catch {
-      // FairSwapJudge not deployed — fair swap operations unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -1872,109 +1864,6 @@ export class EVMChainAdapter implements ChainAdapter {
   async getContract(name: string): Promise<Contract> {
     await this.init();
     return this.resolveContract(name);
-  }
-
-  // ===== FairSwap =====
-
-  async initiatePurchase(
-    seller: string, kcId: bigint, kaId: bigint, price: bigint,
-  ): Promise<{ purchaseId: bigint } & TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    if (this.contracts.token && price > 0n) {
-      const fsjAddr = await this.contracts.fairSwapJudge.getAddress();
-      const allowance: bigint = await this.contracts.token.allowance(this.signer.address, fsjAddr);
-      if (allowance < price) {
-        await (await this.contracts.token.approve(fsjAddr, ethers.MaxUint256)).wait();
-      }
-    }
-
-    const tx = await this.contracts.fairSwapJudge.initiatePurchase(seller, kcId, kaId, price);
-    const receipt = await tx.wait();
-
-    let purchaseId = 0n;
-    for (const log of receipt.logs) {
-      try {
-        const parsed = this.contracts.fairSwapJudge.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === 'PurchaseInitiated') {
-          purchaseId = BigInt(parsed.args.purchaseId);
-          break;
-        }
-      } catch { /* not this contract */ }
-    }
-
-    return { purchaseId, hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async fulfillPurchase(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    const tx = await this.contracts.fairSwapJudge.fulfillPurchase(
-      purchaseId, ethers.hexlify(encryptedDataRoot), ethers.hexlify(keyCommitment),
-    );
-    const receipt = await tx.wait();
-    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    const tx = await this.contracts.fairSwapJudge.revealKey(purchaseId, ethers.hexlify(key));
-    const receipt = await tx.wait();
-    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async claimPayment(purchaseId: bigint): Promise<TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    const tx = await this.contracts.fairSwapJudge.claimPayment(purchaseId);
-    const receipt = await tx.wait();
-    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async claimRefund(purchaseId: bigint): Promise<TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    const tx = await this.contracts.fairSwapJudge.claimRefund(purchaseId);
-    const receipt = await tx.wait();
-    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async disputeDelivery(purchaseId: bigint, proof: Uint8Array): Promise<TxResult> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) throw new Error('FairSwapJudge contract not deployed.');
-
-    const tx = await this.contracts.fairSwapJudge.disputeDelivery(purchaseId, proof);
-    const receipt = await tx.wait();
-    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: receipt.status === 1 };
-  }
-
-  async getFairSwapPurchase(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null> {
-    await this.init();
-    if (!this.contracts.fairSwapJudge) return null;
-
-    try {
-      const [buyer, seller, kcId, kaId, price, state] =
-        await this.contracts.fairSwapJudge.getPurchase(purchaseId);
-      if (buyer === ethers.ZeroAddress) return null;
-      return {
-        purchaseId,
-        buyer,
-        seller,
-        kcId: BigInt(kcId),
-        kaId: BigInt(kaId),
-        price: BigInt(price),
-        state: Number(state),
-      };
-    } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return null;
-      throw err;
-    }
   }
 
   // ===== Permanent Publishing =====

@@ -9,12 +9,12 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * keyed scaffolding replaced by the NFT-keyed `claim()` + D6
  * `migrationEpoch` flow.
  *
- * This script STILL deploys + registers `DelegatorsInfo` because:
- *   1. The `MigratorV6*` / `MigratorV8*` one-shot migrator contracts under
- *      `contracts/migrations/` still import the type and write to it.
- *      Fresh chain bring-ups need those migrators wired.
- *   2. Test fixtures that replay the full V8→V10 journey need the slot
- *      populated to replay V8-era flows faithfully.
+ * This script STILL deploys + registers `DelegatorsInfo` because test
+ * fixtures that replay the full V8→V10 journey need the slot populated
+ * to replay V8-era flows faithfully. The one-shot V6/V8 reward-period
+ * migrators that used to write to this slot were removed from V10.0
+ * scope — they were already executed on V8 testnet and are not needed
+ * for a V10 chain bring-up.
  *
  * The live V10 cutover on a running chain removes the `DelegatorsInfo`
  * Hub slot via `Hub.removeContractByAddress` in script 998. No V10

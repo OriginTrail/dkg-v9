@@ -126,18 +126,6 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
-// ----- FairSwap types -----
-
-export interface FairSwapPurchaseInfo {
-  purchaseId: bigint;
-  buyer: string;
-  seller: string;
-  kcId: bigint;
-  kaId: bigint;
-  price: bigint;
-  state: number; // 0=None, 1=Initiated, 2=Fulfilled, 3=KeyRevealed, 4=Completed, 5=Disputed, 6=Refunded, 7=Expired
-}
-
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 export interface CreateOnChainContextGraphParams {
@@ -322,15 +310,6 @@ export interface ChainAdapter {
   extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
-
-  // FairSwap (Private Knowledge Exchange)
-  initiatePurchase?(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult>;
-  fulfillPurchase?(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult>;
-  revealKey?(purchaseId: bigint, key: Uint8Array): Promise<TxResult>;
-  disputeDelivery?(purchaseId: bigint, proof: Uint8Array): Promise<TxResult>;
-  claimPayment?(purchaseId: bigint): Promise<TxResult>;
-  claimRefund?(purchaseId: bigint): Promise<TxResult>;
-  getFairSwapPurchase?(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null>;
 
   // Permanent Publishing
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;

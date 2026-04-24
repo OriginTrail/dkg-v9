@@ -1498,21 +1498,35 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     }
   }
   let effectivePort = apiPort;
+  // The post-merge `name` wins over the freshly-discovered `agentName` for
+  // downstream use (notably the faucet `callerId` / `Idempotency-Key`), so
+  // that a later IDENTITY.md edit — which changes what `discoverAgentName`
+  // returns — doesn't drift the faucet identity away from the node's
+  // actual persisted identity. `writeDkgConfig` already enforces first-wins
+  // on `name` unless `--name` was passed; this line makes the faucet caller
+  // agree with whatever that enforcement produces. Starts as the pre-merge
+  // value so the dry-run / skipped-writeDkgConfig path still has something
+  // sensible to pass.
+  let effectiveAgentName = agentName;
   if (!dryRun && network) {
     writeDkgConfig(agentName, network, apiPort, {
       nameExplicit: options.name != null,
       portExplicit: options.port != null,
     });
-    // Read back the effective port from the merged config so downstream steps
-    // (daemon start, workspace config, verify) use the correct port even when
-    // an existing config had a different apiPort that was preserved.
+    // Read back the effective port AND effective name from the merged
+    // config so downstream steps (daemon start, workspace config, verify,
+    // faucet funding) use the persisted values even when an existing config
+    // had a different apiPort or name that was preserved.
     try {
       const merged = JSON.parse(readFileSync(join(dkgDir(), 'config.json'), 'utf-8'));
       const mergedPort = Number(merged.apiPort);
       if (Number.isInteger(mergedPort) && mergedPort >= 1 && mergedPort <= 65535) {
         effectivePort = mergedPort;
       }
-    } catch { /* use apiPort */ }
+      if (typeof merged.name === 'string' && merged.name.trim()) {
+        effectiveAgentName = merged.name.trim();
+      }
+    } catch { /* use pre-merge values */ }
   } else if (network) {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
@@ -1554,7 +1568,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
       if (walletAddresses.length > 0) {
         log('Funding wallets via testnet faucet...');
         try {
-          const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, agentName);
+          const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, effectiveAgentName);
           if (result.success) {
             log(`Funded: ${result.funded.join(', ')}`);
           } else {

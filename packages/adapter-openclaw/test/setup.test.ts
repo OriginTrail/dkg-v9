@@ -3106,6 +3106,111 @@ describe('runSetup Step 5 — faucet funding', () => {
       env.restore();
     }
   });
+
+  // ---- C9: effective-name drift protection -----------------------------
+  //
+  // The faucet's callerId and Idempotency-Key are derived from the
+  // `agentName` argument. `writeDkgConfig` uses first-wins semantics on
+  // `name` (existing value wins unless --name was passed), so on re-runs
+  // the name the node actually persists can differ from whatever
+  // `discoverAgentName` returned in-memory this run (specifically when
+  // IDENTITY.md has changed between runs). runSetup must thread the
+  // post-writeDkgConfig effective name through to the faucet so the
+  // caller identity matches what's persisted on disk.
+
+  it('faucet receives the persisted config.json name when IDENTITY.md changes between re-runs', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Simulate "run 1 already happened": pre-seed ~/.dkg/config.json
+      // with an older persisted name.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-run1' }),
+      );
+      // "Run 2" has a different IDENTITY.md name — writeDkgConfig's
+      // first-wins keeps the persisted name, so the faucet MUST use
+      // "persisted-run1", not "changed-run2".
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: changed-run2\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-run1');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('faucet receives the discovered IDENTITY.md name on first run (no pre-existing config.json)', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No pre-existing config.json — writeDkgConfig will persist the
+      // discovered IDENTITY.md name, and the faucet should receive it.
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: first-run-name\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('first-run-name');
+      // Sanity: writeDkgConfig actually persisted the first-run name.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('first-run-name');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('explicit options.name override wins over both persisted and discovered names', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Persisted name from a prior run AND a conflicting IDENTITY.md —
+      // --name should beat both.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'stale-persisted' }),
+      );
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: stale-identity\n');
+
+      await runSetup({
+        workspace: env.workspace,
+        start: false,
+        verify: false,
+        name: 'explicit-override',
+      });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('explicit-override');
+      // writeDkgConfig's `nameExplicit` override path must have flipped
+      // the persisted file to the explicit value too — otherwise the
+      // on-disk and in-memory identities would disagree after this run.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('explicit-override');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('C8 regression guard: persisted name still wins over random fallback when IDENTITY.md is absent', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No IDENTITY.md, but a persisted name exists. Pre-C8 behavior was
+      // to roll a new random `openclaw-agent-XXXXX` each call; C8 made
+      // discoverAgentName honor the persisted value; C9 must not have
+      // regressed that.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-no-identity' }),
+      );
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-no-identity');
+    } finally {
+      env.restore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@
 // stable PATH entry and idempotent re-installs.
 
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { dkgDir } from '../config.js';
 import type { InstallCli, IntegrationEntry } from './schema.js';
 
 export interface InstallCliOptions {
@@ -76,7 +78,7 @@ function buildPostInstructions(entry: IntegrationEntry): string[] {
     lines.push(`Required environment:`);
     for (const name of env) {
       if (name === 'DKG_AUTH_TOKEN') {
-        lines.push(`  ${name}  — pull from \`dkg auth show\` or ~/.dkg/auth.token`);
+        lines.push(`  ${name}  — pull from \`dkg auth show\` or ${join(dkgDir(), 'auth.token')}`);
       } else if (name === 'DKG_API_URL') {
         lines.push(`  ${name}    — default http://127.0.0.1:9200`);
       } else {

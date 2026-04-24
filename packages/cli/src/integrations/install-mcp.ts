@@ -15,6 +15,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { dkgDir } from '../config.js';
 import type { InstallMcp, IntegrationEntry } from './schema.js';
 
 export interface InstallMcpOptions {
@@ -39,10 +40,12 @@ function assertMcp(spec: IntegrationEntry['install']): asserts spec is InstallMc
 
 // Best-effort token read from the standard daemon-written path. Matches the
 // format produced by `dkg auth rotate` (a leading comment line + the token).
+// Resolves the path via dkgDir() so DKG_HOME and the monorepo's .dkg-dev
+// fallback are respected — matches where the rest of the CLI writes auth.
 // If we can't find one, we emit a placeholder and let the user fill it in.
 async function readLocalToken(): Promise<string | undefined> {
   try {
-    const raw = await readFile(join(homedir(), '.dkg', 'auth.token'), 'utf8');
+    const raw = await readFile(join(dkgDir(), 'auth.token'), 'utf8');
     for (const line of raw.split(/\r?\n/)) {
       const t = line.trim();
       if (t && !t.startsWith('#')) return t;

@@ -99,14 +99,28 @@ export function registerIntegrationCommands(program: Command): void {
           process.exit(3);
         }
 
-        console.log(`Installing ${entry.name} (${entry.slug}) [${entry.trustTier}]`);
-        console.log(`  repo:    ${entry.repo}`);
-        console.log(`  pinned:  ${entry.commit.slice(0, 12)}`);
+        const verb = opts.dryRun ? 'Would install' : 'Installing';
+        console.log(`${verb} ${entry.name} (${entry.slug}) [${entry.trustTier}]`);
+        console.log(`  repo:          ${entry.repo}`);
+        // The commit is the registry-review target, audited when the entry was
+        // merged (see security-checks.mjs in dkg-integrations). It is NOT an
+        // install-time enforcement — cli installs pull the pinned package@version
+        // from npm, and mcp installs launch the pinned args via npx. Bind-
+        // between-tarball-and-commit is provided by npm provenance at publish
+        // time; the registry CI refuses to merge entries whose pinned npm
+        // version lacks an attestation. See `npm view <pkg>@<version> dist`
+        // for the publish-time signature metadata.
+        console.log(`  review commit: ${entry.commit.slice(0, 12)}  (registry-audited; not enforced at install time)`);
         console.log('');
 
         switch (entry.install.kind) {
           case 'cli': {
             const result = await installCli({ entry, dryRun: opts.dryRun });
+            if (opts.dryRun) {
+              console.log('');
+              console.log(`Dry-run: no changes made. Re-run without --dry-run to install.`);
+              break;
+            }
             console.log('');
             console.log(`Installed ${entry.install.package}@${entry.install.version}.`);
             console.log(`Run \`${result.binary} --help\` to get started.`);
@@ -114,6 +128,11 @@ export function registerIntegrationCommands(program: Command): void {
               console.log('');
               for (const line of result.postInstructions) console.log(line);
             }
+            console.log('');
+            console.log(
+              `Verify publish-time provenance (ties the tarball to a Git commit):\n` +
+                `  npm view ${entry.install.package}@${entry.install.version} dist`,
+            );
             break;
           }
           case 'mcp': {
@@ -156,7 +175,7 @@ function printEntryHuman(e: IntegrationEntry): void {
   console.log(`  slug:         ${e.slug}`);
   console.log(`  description:  ${e.description}`);
   console.log(`  repo:         ${e.repo}`);
-  console.log(`  commit:       ${e.commit}`);
+  console.log(`  review commit: ${e.commit}  (audited at registry merge; install pulls from npm)`);
   console.log(`  license:      ${e.license}`);
   console.log(`  memory:       ${e.memoryLayers.join(', ')}`);
   console.log(`  primitives:   ${e.v10PrimitivesUsed.join(', ')}`);

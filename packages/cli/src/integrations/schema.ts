@@ -98,15 +98,102 @@ export interface IntegrationEntry {
   [extras: string]: any;
 }
 
+// Validates the full shape the CLI consumes from a registry entry. The list /
+// info / install paths dereference nested fields like security.writeAuthority,
+// maintainer.github, memoryLayers, and install-kind-specific args; a loose
+// check here would just move the failure site to a confusing later throw. If
+// the registry ever adds new fields, they ride through on `[extras]: any` —
+// but the fields the CLI reads today must be present and the right shape.
 export function isIntegrationEntry(value: unknown): value is IntegrationEntry {
   if (!value || typeof value !== 'object') return false;
   const o = value as Record<string, unknown>;
-  return (
-    typeof o.slug === 'string' &&
-    typeof o.name === 'string' &&
-    typeof o.trustTier === 'string' &&
-    typeof o.install === 'object' &&
-    o.install !== null &&
-    typeof (o.install as Record<string, unknown>).kind === 'string'
-  );
+
+  // Required scalar fields.
+  if (typeof o.slug !== 'string') return false;
+  if (typeof o.name !== 'string') return false;
+  if (typeof o.description !== 'string') return false;
+  if (typeof o.repo !== 'string') return false;
+  if (typeof o.commit !== 'string') return false;
+  if (typeof o.license !== 'string') return false;
+
+  // Maintainer: must have a GitHub handle (used in `info` output + UI).
+  if (!isPlainObject(o.maintainer)) return false;
+  if (typeof (o.maintainer as Record<string, unknown>).github !== 'string') return false;
+
+  // Memory layers / primitives / interfaces: we render them and, for layers,
+  // filter for display. Must be string arrays with known values where we care.
+  if (!isStringArray(o.memoryLayers)) return false;
+  for (const m of o.memoryLayers as unknown[]) {
+    if (m !== 'WM' && m !== 'SWM' && m !== 'VM') return false;
+  }
+  if (!isStringArray(o.v10PrimitivesUsed)) return false;
+  if (!isStringArray(o.publicInterfacesUsed)) return false;
+  for (const p of o.publicInterfacesUsed as unknown[]) {
+    if (p !== 'http-api' && p !== 'cli' && p !== 'mcp') return false;
+  }
+
+  // Trust tier: direct input to the `--allow-community` gate.
+  if (o.trustTier !== 'community' && o.trustTier !== 'verified' && o.trustTier !== 'featured') {
+    return false;
+  }
+
+  // Security declaration: `info` always prints it; must be an object.
+  if (!isPlainObject(o.security)) return false;
+  const sec = o.security as Record<string, unknown>;
+  if (sec.networkEgress !== undefined && !isStringArray(sec.networkEgress)) return false;
+  if (sec.writeAuthority !== undefined && !isStringArray(sec.writeAuthority)) return false;
+  if (sec.credentialsHandled !== undefined && !isStringArray(sec.credentialsHandled)) return false;
+  if (sec.notes !== undefined && typeof sec.notes !== 'string') return false;
+
+  // Install spec: dispatcher and kind-specific fields the installers read.
+  if (!isValidInstallSpec(o.install)) return false;
+
+  return true;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function isStringArray(v: unknown): boolean {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string');
+}
+
+function isValidInstallSpec(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  const kind = v.kind;
+  switch (kind) {
+    case 'cli':
+      return (
+        typeof v.package === 'string' &&
+        typeof v.version === 'string' &&
+        typeof v.binary === 'string' &&
+        (v.envRequired === undefined || isStringArray(v.envRequired)) &&
+        (v.usageHint === undefined || typeof v.usageHint === 'string')
+      );
+    case 'mcp':
+      return (
+        typeof v.command === 'string' &&
+        isStringArray(v.args) &&
+        (v.env === undefined || isStringRecord(v.env)) &&
+        (v.clientCompatibility === undefined || isStringArray(v.clientCompatibility))
+      );
+    case 'service':
+      return v.runtime === 'docker' || v.runtime === 'npm-global';
+    case 'agent-plugin':
+      return (
+        typeof v.framework === 'string' &&
+        typeof v.package === 'string' &&
+        typeof v.version === 'string'
+      );
+    case 'manual':
+      return isStringArray(v.steps);
+    default:
+      return false;
+  }
+}
+
+function isStringRecord(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  return Object.values(v).every((x) => typeof x === 'string');
 }

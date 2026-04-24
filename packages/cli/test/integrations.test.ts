@@ -53,12 +53,57 @@ describe('isIntegrationEntry', () => {
     expect(isIntegrationEntry(baseEntry)).toBe(true);
   });
 
+  it('accepts a well-formed mcp entry', () => {
+    expect(isIntegrationEntry(mcpEntry)).toBe(true);
+  });
+
   it('rejects null, non-objects, and entries missing required keys', () => {
     expect(isIntegrationEntry(null)).toBe(false);
     expect(isIntegrationEntry('string')).toBe(false);
     expect(isIntegrationEntry({})).toBe(false);
     expect(isIntegrationEntry({ slug: 'x', name: 'y', trustTier: 'featured' })).toBe(false);
     expect(isIntegrationEntry({ ...baseEntry, install: { notKind: true } })).toBe(false);
+  });
+
+  it('rejects entries with a missing maintainer.github handle', () => {
+    const bad = { ...baseEntry, maintainer: {} as { github: string } };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects entries with an unknown memory layer', () => {
+    const bad = { ...baseEntry, memoryLayers: ['WM', 'BOGUS'] as unknown as typeof baseEntry.memoryLayers };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects entries with a non-array v10PrimitivesUsed', () => {
+    const bad = { ...baseEntry, v10PrimitivesUsed: 'ContextGraph' as unknown as string[] };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects entries whose security block is malformed', () => {
+    const bad = { ...baseEntry, security: { networkEgress: 'github.com' } as unknown as typeof baseEntry.security };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects an unknown trustTier', () => {
+    const bad = { ...baseEntry, trustTier: 'rogue' as unknown as typeof baseEntry.trustTier };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects a cli install without package/version/binary', () => {
+    const bad = {
+      ...baseEntry,
+      install: { kind: 'cli', package: 'foo' } as unknown as typeof baseEntry.install,
+    };
+    expect(isIntegrationEntry(bad)).toBe(false);
+  });
+
+  it('rejects an mcp install without args array', () => {
+    const bad = {
+      ...baseEntry,
+      install: { kind: 'mcp', command: 'npx', args: 'not-an-array' } as unknown as typeof baseEntry.install,
+    };
+    expect(isIntegrationEntry(bad)).toBe(false);
   });
 });
 
@@ -144,6 +189,17 @@ describe('fetchEntry', () => {
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ not: 'an entry' }), { status: 200 })) as unknown as typeof fetch;
     await expect(fetchEntry('dkg-hello-world', resolveRegistryConfig({}))).rejects.toThrow(/does not match the expected shape/);
   });
+
+  it('rejects payloads whose declared slug disagrees with the filename', async () => {
+    // Registry entry file is dkg-hello-world.json but internal slug says something else —
+    // probably a copy/rename artifact. Installing it would silently swap packages.
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ ...baseEntry, slug: 'something-else' }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    await expect(fetchEntry('dkg-hello-world', resolveRegistryConfig({}))).rejects.toThrow(
+      /declares slug "something-else"/,
+    );
+  });
 });
 
 // ── installCli (dry-run) ──────────────────────────────────────────────────
@@ -169,16 +225,25 @@ describe('installCli', () => {
 
 describe('installMcp', () => {
   let tmpHome: string;
+  let tmpDkgHome: string;
   const originalHome = process.env.HOME;
+  const originalDkgHome = process.env.DKG_HOME;
 
   beforeEach(async () => {
     tmpHome = await mkdtemp(join(tmpdir(), 'dkg-cli-mcp-'));
+    tmpDkgHome = join(tmpHome, '.dkg');
     process.env.HOME = tmpHome;
+    // Pin DKG_HOME so dkgDir() resolves deterministically inside the monorepo —
+    // otherwise the .dkg-dev fallback kicks in and the token-file test becomes
+    // order-sensitive depending on the developer's real home layout.
+    process.env.DKG_HOME = tmpDkgHome;
   });
 
   afterEach(async () => {
     if (originalHome) process.env.HOME = originalHome;
     else delete process.env.HOME;
+    if (originalDkgHome) process.env.DKG_HOME = originalDkgHome;
+    else delete process.env.DKG_HOME;
     await rm(tmpHome, { recursive: true, force: true });
   });
 
@@ -194,10 +259,10 @@ describe('installMcp', () => {
     expect(logs.some((l) => l.includes('mcpServers'))).toBe(true);
   });
 
-  it('substitutes the real token when ~/.dkg/auth.token is present', async () => {
-    await mkdir(join(tmpHome, '.dkg'), { recursive: true });
+  it('substitutes the real token when <DKG_HOME>/auth.token is present', async () => {
+    await mkdir(tmpDkgHome, { recursive: true });
     await writeFile(
-      join(tmpHome, '.dkg', 'auth.token'),
+      join(tmpDkgHome, 'auth.token'),
       '# DKG node API token — treat this like a password\nreal-token-xyz\n',
       'utf8',
     );
@@ -205,5 +270,17 @@ describe('installMcp', () => {
     const parsed = JSON.parse(res.mcpJson);
     expect(parsed.mcpServers['cursor-mcp-dkg'].env.DKG_AUTH_TOKEN).toBe('real-token-xyz');
     expect(res.token).toBe('real-token-xyz');
+  });
+
+  it('honors DKG_HOME when resolving the auth token', async () => {
+    const altHome = await mkdtemp(join(tmpdir(), 'dkg-cli-mcp-alt-'));
+    try {
+      process.env.DKG_HOME = altHome;
+      await writeFile(join(altHome, 'auth.token'), 'alt-token\n', 'utf8');
+      const res = await installMcp({ entry: mcpEntry, apiUrl: 'http://127.0.0.1:9200', logger: () => {} });
+      expect(res.token).toBe('alt-token');
+    } finally {
+      await rm(altHome, { recursive: true, force: true });
+    }
   });
 });

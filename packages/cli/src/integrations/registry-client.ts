@@ -76,6 +76,15 @@ export async function fetchEntry(slug: string, cfg: RegistryConfig): Promise<Int
         `The CLI may be out of date; check your dkg-integrations schema version.`,
     );
   }
+  // Guard against a registry file being a copy/rename artifact from another entry:
+  // `dkg integration install foo` must never return an entry that declares a different
+  // slug (and therefore a different npm package / install surface).
+  if (body.slug !== slug) {
+    throw new Error(
+      `Registry entry at "${slug}.json" declares slug "${body.slug}". ` +
+        `Refusing to install: filename and declared slug must match.`,
+    );
+  }
   return body;
 }
 
